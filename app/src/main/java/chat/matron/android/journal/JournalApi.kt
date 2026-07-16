@@ -20,6 +20,16 @@ data class LoginResponse(val token: String, val deviceID: Long, val userID: Long
 
 data class SnapshotResponse(val conversations: List<ConvoSummaryDTO>, val seq: Long)
 
+/// The narrow slice of [JournalApi] the sync engine depends on: the WebSocket
+/// URL and the cold-start / refresh snapshot fetch. Extracted as an interface
+/// so engine tests can supply a scriptable fake (with request gating) instead
+/// of standing up a real HTTP server — the Apple original stubs `URLProtocol`
+/// globally, which has no clean Kotlin analogue. [JournalApi] implements it.
+interface SnapshotSource {
+    val wsUrl: String
+    suspend fun snapshot(): SnapshotResponse
+}
+
 /// Server-side conversation summary (shape of /snapshot rows). Also the input to
 /// store upserts.
 data class ConvoSummaryDTO(
@@ -77,7 +87,7 @@ class JournalApi(
     private val baseUrl: HttpUrl,
     private val client: OkHttpClient = OkHttpClient(),
     token: String? = null,
-) {
+) : SnapshotSource {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -96,7 +106,7 @@ class JournalApi(
     private val basePath: String = baseUrl.encodedPath.trimEnd('/')
 
     /// The WebSocket URL for `/ws`, preserving any path prefix.
-    val wsUrl: String
+    override val wsUrl: String
         get() {
             val scheme = if (baseUrl.scheme == "http") "ws" else "wss"
             val portPart = if (baseUrl.port == HttpUrl.defaultPort(baseUrl.scheme)) "" else ":${baseUrl.port}"
@@ -120,7 +130,7 @@ class JournalApi(
         return LoginResponse(token, deviceID, userID)
     }
 
-    suspend fun snapshot(): SnapshotResponse {
+    override suspend fun snapshot(): SnapshotResponse {
         val obj = request(path = "/snapshot")
         val conversations = (obj.arrayOrNull("conversations")?.objects() ?: emptyList()).mapNotNull { c ->
             val id = c.stringOrNull("id") ?: return@mapNotNull null
