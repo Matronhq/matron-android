@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Simple "M" glyph placeholder until brand art is ported -->
+    <path
+        android:fillColor="#B9A6F2"
+        android:pathData="M30,74 L30,36 L38,36 L54,58 L70,36 L78,36 L78,74 L70,74 L70,49 L54,70 L38,49 L38,74 Z" />
+</vector>
