@@ -3,6 +3,7 @@ package chat.matron.android.journal
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.SessionStatusUpdate
 import chat.matron.android.models.SyncConnectionState
+import chat.matron.android.sync.SyncService
 import java.time.Instant
 import java.util.UUID
 import kotlin.coroutines.cancellation.CancellationException
@@ -81,7 +82,7 @@ class JournalSyncEngine(
     private val backoffBaseSeconds: Double = 1.0,
     dispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val watchdogInterval: Duration = 20.seconds,
-) {
+) : SyncService {
     private val scope = CoroutineScope(dispatcher + SupervisorJob())
     private val lock = Any()
 
@@ -119,6 +120,14 @@ class JournalSyncEngine(
     private class SnapshotRequiredExit : Exception()
 
     // MARK: Lifecycle
+    //
+    // [SyncService] conformance. The engine keeps its own `beginSync`/`endSync`
+    // names (called directly by engine tests and the composition root);
+    // `start`/`stop` delegate so the service protocol layers on cleanly.
+
+    override suspend fun start() = beginSync()
+
+    override suspend fun stop() = endSync()
 
     fun beginSync() {
         synchronized(lock) {
@@ -161,9 +170,9 @@ class JournalSyncEngine(
         }
     }
 
-    fun isRunning(): Boolean = synchronized(lock) { runJob != null }
+    override fun isRunning(): Boolean = synchronized(lock) { runJob != null }
 
-    suspend fun waitUntilReady() {
+    override suspend fun waitUntilReady() {
         suspendCancellableCoroutine<Unit> { cont ->
             synchronized(lock) {
                 when {
@@ -257,7 +266,7 @@ class JournalSyncEngine(
 
     // MARK: Streams
 
-    val stateStream: StateFlow<SyncConnectionState> get() = _state.asStateFlow()
+    override val stateStream: StateFlow<SyncConnectionState> get() = _state.asStateFlow()
 
     fun ephemerals(convoID: String): Flow<EphemeralUpdate> = callbackFlow {
         val id = UUID.randomUUID()
@@ -292,7 +301,7 @@ class JournalSyncEngine(
 
     /// Emits the id of a conversation created live (first-ever frame while
     /// `.running`). A reconnect backlog does NOT replay through here.
-    fun newConversations(): Flow<String> = callbackFlow {
+    override fun newConversations(): Flow<String> = callbackFlow {
         val id = UUID.randomUUID()
         synchronized(lock) { newConvoListeners[id] = { c -> trySend(c) } }
         awaitClose { synchronized(lock) { newConvoListeners.remove(id) } }

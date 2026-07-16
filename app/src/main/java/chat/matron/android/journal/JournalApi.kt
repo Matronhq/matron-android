@@ -105,6 +105,11 @@ class JournalApi(
     /// a server hosted under a subpath working.
     private val basePath: String = baseUrl.encodedPath.trimEnd('/')
 
+    /// The server's base URL. Used by media-URL construction (the timeline
+    /// mapper builds `serverURL/media/<blobRef>`) and blob-ref extraction (the
+    /// media service). Apple exposes the same `serverURL`.
+    val serverURL: HttpUrl get() = baseUrl
+
     /// The WebSocket URL for `/ws`, preserving any path prefix.
     override val wsUrl: String
         get() {
