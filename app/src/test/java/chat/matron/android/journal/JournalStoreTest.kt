@@ -66,6 +66,22 @@ class JournalStoreTest {
     }
 
     @Test
+    fun promptEventSnippetIsQuestionMarkPrefixed() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(ev(1, type = "prompt", payload = buildJsonObject { put("question", "Deploy now?") }))
+        assertEquals("? Deploy now?", store.conversations().first().snippet)
+    }
+
+    @Test
+    fun permissionRequestEventSnippetIsPermissionPrefixed() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(
+            ev(1, type = "permission_request", payload = buildJsonObject { put("description", "run rm -rf tmp/") })
+        )
+        assertEquals("permission: run rm -rf tmp/", store.conversations().first().snippet)
+    }
+
+    @Test
     fun ensureConversationCreatesPlaceholderOnce() = runBlocking {
         val store = makeStore()
         store.ensureConversation("c-new", "New chat")

@@ -354,6 +354,112 @@ class JournalSyncEngineTest {
         engine.endSync()
     }
 
+    // MARK: Reconnect seams
+
+    @Test
+    fun onNetworkAvailableMidBackoffCancelsSleepAndRetriesImmediately() = runBlocking {
+        val connector = FakeConnector(emptyList())
+        connector.connectError = JournalConnectionError.SocketClosed
+        val store = seededStore()
+        // A large base backoff means the natural sleep would take seconds; if
+        // onNetworkAvailable's nudge() didn't cancel it, connectCount would
+        // still be 1 well inside the short waitUntil below.
+        val engine = makeEngine(store, connector, backoffBaseSeconds = 5.0)
+        engine.beginSync()
+        waitUntil { connector.connectCount >= 1 }
+        val before = connector.connectCount
+        delay(50) // let the run loop settle into its backoff sleep
+        engine.onNetworkAvailable()
+        waitUntil(timeoutMs = 500) { connector.connectCount > before }
+        assertTrue("expected an immediate retry, not a multi-second backoff", connector.connectCount > before)
+        engine.endSync()
+    }
+
+    @Test
+    fun onNetworkAvailableWithLiveSocketReconnectsWithoutOfflineDetour() = runBlocking {
+        val first = FakeWebSocketConnection()
+        first.serve(helloOK(0))
+        val second = FakeWebSocketConnection()
+        second.serve(helloOK(0))
+        val store = seededStore()
+        val connector = FakeConnector(listOf(first, second))
+        val engine = makeEngine(store, connector)
+        engine.beginSync()
+        engine.waitUntilReady()
+
+        val probe = FlowProbe(this, engine.stateStream)
+        assertEquals(SyncConnectionState.Running, probe.next()) // current value replayed on subscribe
+
+        engine.onNetworkAvailable()
+        assertEquals(SyncConnectionState.Connecting, probe.next())
+        assertEquals(SyncConnectionState.Running, probe.next())
+
+        assertTrue("first socket must have been closed by the path-change reconnect", first.isClosed)
+        assertEquals(2, connector.connectCount)
+        probe.cancel()
+        engine.endSync()
+    }
+
+    @Test
+    fun viewingReplaysOnReconnect() = runBlocking {
+        val first = FakeWebSocketConnection()
+        first.serve(helloOK(0))
+        val second = FakeWebSocketConnection()
+        second.serve(helloOK(0))
+        val store = seededStore()
+        val connector = FakeConnector(listOf(first, second))
+        val engine = makeEngine(store, connector)
+        engine.beginSync()
+        engine.waitUntilReady()
+
+        engine.setViewing("c1")
+        waitUntil { first.sent.any { parseJsonObjectOrNull(it)?.stringOrNull("op") == "viewing" } }
+
+        first.closeFromServer()
+        waitUntil { connector.connectCount >= 2 }
+        waitUntil { second.sent.any { parseJsonObjectOrNull(it)?.stringOrNull("op") == "viewing" } }
+
+        val viewingFrame = second.sent.mapNotNull { parseJsonObjectOrNull(it) }
+            .first { it.stringOrNull("op") == "viewing" }
+        assertEquals("c1", viewingFrame.stringOrNull("convo_id"))
+        engine.endSync()
+    }
+
+    @Test
+    fun ackSentOnConnectWhenCursorPositive() = runBlocking {
+        val first = FakeWebSocketConnection()
+        first.serve(helloOK(2)); first.serve(journalLine(1)); first.serve(journalLine(2))
+        val second = FakeWebSocketConnection()
+        second.serve(helloOK(4)); second.serve(journalLine(3)); second.serve(journalLine(4))
+        val store = seededStore()
+        val connector = FakeConnector(listOf(first, second))
+        val engine = makeEngine(store, connector)
+        engine.beginSync()
+        engine.waitUntilReady()
+        // The first connect happens at cursor 0, so no ack is expected there.
+        assertTrue(first.sent.mapNotNull { parseJsonObjectOrNull(it) }.none { it.stringOrNull("op") == "ack" })
+
+        first.closeFromServer()
+        waitUntil { store.cursor() >= 4 }
+        val ackFrame = second.sent.mapNotNull { parseJsonObjectOrNull(it) }.firstOrNull { it.stringOrNull("op") == "ack" }
+        assertEquals(2L, ackFrame?.longOrNull("cursor"))
+        engine.endSync()
+    }
+
+    @Test
+    fun ackSentEveryFiftyAppliedFrames() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(60))
+        for (seq in 1L..60L) socket.serve(journalLine(seq))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        waitUntil(timeoutMs = 5000) { store.cursor() >= 60 }
+        val acks = socket.sent.mapNotNull { parseJsonObjectOrNull(it) }.filter { it.stringOrNull("op") == "ack" }
+        assertTrue("expected an ack at the 50-applied-frames mark", acks.any { it.longOrNull("cursor") == 50L })
+        engine.endSync()
+    }
+
     // MARK: Agent RPC
 
     private suspend fun runningEngine(): Pair<JournalSyncEngine, FakeWebSocketConnection> {

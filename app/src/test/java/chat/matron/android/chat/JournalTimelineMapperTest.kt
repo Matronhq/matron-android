@@ -6,6 +6,8 @@ import chat.matron.android.journal.JournalEvent
 import java.time.Instant
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -210,6 +212,73 @@ class JournalTimelineMapperTest {
         val kind = item.kind as TimelineItem.Kind.AskUser
         assertEquals(AskUserEvent.ReplyChannel.TEXT_REPLY, kind.event.replyChannel)
         assertEquals(AskUserEvent.InputKind.Text, kind.event.kind)
+    }
+
+    @Test fun permissionRequestWithStringOptionsUsesThemVerbatim() {
+        val item = map(ev(13, "permission_request", payload = buildJsonObject {
+            put("description", "Allow network access?")
+            putJsonArray("options") { add(JsonPrimitive("Allow")); add(JsonPrimitive("Deny once")) }
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.AskUser
+        assertEquals("13", kind.eventID)
+        assertEquals("Allow network access?", kind.event.prompt)
+        assertEquals(AskUserEvent.ReplyChannel.CHOICE_REPLY, kind.event.replyChannel)
+        val choice = kind.event.kind as AskUserEvent.InputKind.Choice
+        assertEquals(listOf("Allow", "Deny once"), choice.options.map { it.label })
+        assertEquals(listOf("Allow", "Deny once"), choice.options.map { it.value })
+        assertFalse(choice.allowOther)
+    }
+
+    @Test fun permissionRequestWithoutOptionsFallsBackToAllowDeny() {
+        val item = map(ev(14, "permission_request", payload = buildJsonObject {
+            put("description", "Run this command?")
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.AskUser
+        val choice = kind.event.kind as AskUserEvent.InputKind.Choice
+        assertEquals(listOf("Allow", "Deny"), choice.options.map { it.label })
+        assertFalse(choice.allowOther)
+    }
+
+    @Test fun permissionRequestWithNonStringOptionsFallsBackToAllowDeny() {
+        val item = map(ev(15, "permission_request", payload = buildJsonObject {
+            put("description", "Run this command?")
+            putJsonArray("options") {
+                addJsonObject { put("id", "y"); put("label", "Yes") }
+                addJsonObject { put("id", "n"); put("label", "No") }
+            }
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.AskUser
+        val choice = kind.event.kind as AskUserEvent.InputKind.Choice
+        assertEquals(listOf("Allow", "Deny"), choice.options.map { it.label })
+    }
+
+    @Test fun permissionRequestWithMixedOptionsFallsBackToAllowDeny() {
+        val item = map(ev(16, "permission_request", payload = buildJsonObject {
+            put("description", "Run this command?")
+            putJsonArray("options") { add(JsonPrimitive("Allow")); add(JsonPrimitive(1)) }
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.AskUser
+        val choice = kind.event.kind as AskUserEvent.InputKind.Choice
+        assertEquals(listOf("Allow", "Deny"), choice.options.map { it.label })
+    }
+
+    @Test fun permissionRequestMissingDescriptionUsesDefaultPrompt() {
+        val item = map(ev(17, "permission_request", payload = buildJsonObject { }))!!
+        val kind = item.kind as TimelineItem.Kind.AskUser
+        assertEquals("Permission request", kind.event.prompt)
+    }
+
+    @Test fun permissionRequestAllowOtherIsAlwaysFalse() {
+        // Even with a rich options array (which for `prompt` would leave
+        // allowOther to the payload's `allows_free_text`), permission_request
+        // never exposes a free-text escape hatch — options are the only path.
+        val item = map(ev(18, "permission_request", payload = buildJsonObject {
+            put("description", "Overwrite file?")
+            putJsonArray("options") { add(JsonPrimitive("Yes")); add(JsonPrimitive("No")) }
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.AskUser
+        val choice = kind.event.kind as AskUserEvent.InputKind.Choice
+        assertFalse(choice.allowOther)
     }
 
     @Test fun promptReplyWithChoiceHidesAsAnswer() {
