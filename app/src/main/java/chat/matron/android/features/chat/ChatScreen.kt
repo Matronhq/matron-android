@@ -221,6 +221,18 @@ fun TimelineList(
     // A user scroll away from the bottom drops follow-tail; returning re-arms it.
     LaunchedEffect(atBottom) { followTail = atBottom }
 
+    // Your own outgoing message always returns you to the bottom, even if
+    // follow-tail was disarmed when you sent it (matron-apple ChatView.swift
+    // ~530: `if lastRenderableItemIsOwn, !isFollowingTail { isFollowingTail =
+    // true }`). Keyed on the tail id itself, not rows.size — streaming growth
+    // and backward pagination don't change the newest item's identity, so
+    // they can't trigger this, only a genuinely new tail row can.
+    LaunchedEffect(lastRenderableItemID) {
+        if (lastRenderableItemID != null && chatVM.lastRenderableItemIsOwn) {
+            followTail = true
+        }
+    }
+
     // Keep the tail pinned while following: a new tail id, a row-count change, or
     // the jump button re-arming scrolls to the true last item. Index 0 is the
     // always-present "paginating" item, so row i sits at index i + 1; the
