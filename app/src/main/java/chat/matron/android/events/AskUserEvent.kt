@@ -46,9 +46,10 @@ data class AskUserEvent(
     data class Option(
         val id: String,
         val label: String,
-        /// The string sent back when this option is chosen. For `ask_user`
-        /// options this equals `label`; for buttons it's the wire `value`, which
-        /// can differ from the label.
+        /// The string sent back when this option is chosen. Every production
+        /// journal path builds options via the two-arg constructor, so this
+        /// always equals `label` today; it stays a separate field so a wire
+        /// value distinct from the display label remains representable.
         val value: String,
     ) {
         constructor(id: String, label: String) : this(id, label, label)
