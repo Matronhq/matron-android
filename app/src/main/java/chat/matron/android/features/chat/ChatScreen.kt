@@ -32,10 +32,12 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.chat.TimelineItem
@@ -54,6 +56,7 @@ import chat.matron.android.viewmodels.ComposerViewModel
 import chat.matron.android.viewmodels.SubChatStripViewModel
 import chat.matron.android.viewmodels.TimelineRow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 
 /**
  * Full chat screen. Ports Features/Chat/ChatView.swift: the timeline (windowed
@@ -192,6 +195,18 @@ fun TimelineList(
     val lastRenderableItemID by chatVM.lastRenderableItemID.collectAsStateWithLifecycle()
     val children by stripVM.children.collectAsStateWithLifecycle()
 
+    // Tap on a file attachment: download → cache dir → hand to the system
+    // (iOS: writeTempFile → QuickLook). Lives here rather than at the call
+    // sites so the read-only SubChatView gets the behaviour too.
+    val context = LocalContext.current
+    val fileTapScope = rememberCoroutineScope()
+    val onTapFile: (String, String) -> Unit = { url, filename ->
+        fileTapScope.launch {
+            chatVM.writeTempFile(url, filename, context.cacheDir)
+                ?.let { openAttachment(context, it) }
+        }
+    }
+
     val listState = rememberLazyListState()
     val atBottom by remember {
         derivedStateOf {
@@ -249,6 +264,7 @@ fun TimelineList(
                         children = children,
                         onOpenChild = onOpenChild,
                         onPreviewImage = onPreviewImage,
+                        onTapFile = onTapFile,
                         onShowSource = onShowSource,
                     )
                 }
@@ -276,6 +292,7 @@ private fun TimelineRowView(
     children: List<chat.matron.android.chat.SubChatSummary>,
     onOpenChild: (String) -> Unit,
     onPreviewImage: (Any) -> Unit,
+    onTapFile: (url: String, filename: String) -> Unit,
     onShowSource: (TimelineItem) -> Unit,
 ) {
     when (row) {
@@ -297,7 +314,7 @@ private fun TimelineRowView(
                     resolveImage = { url -> chatVM.image(url) },
                     onRetry = { id -> chatVM.retrySend(id) },
                     onTapImage = { model -> onPreviewImage(model) },
-                    onTapFile = { _, _ -> /* file preview/share not ported (no VM bytes accessor) */ },
+                    onTapFile = onTapFile,
                     askViewModel = { id -> chatVM.askViewModel(id) },
                     isPromptAnswered = { id -> chatVM.isPromptAnswered(id) },
                     answerSummary = { id -> chatVM.answerSummary(id) },

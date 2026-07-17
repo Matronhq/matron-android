@@ -6,6 +6,7 @@ import chat.matron.android.chat.TimelineItem
 import chat.matron.android.events.AskUserEvent
 import chat.matron.android.models.SessionStatus
 import chat.matron.android.models.SessionStatusUpdate
+import java.io.File
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -399,6 +400,87 @@ class ChatViewModelTest {
         for (url in urls) vm.image(url)
         waitUntil(5000) { vm.failedRequestCount >= limit }
         assertEquals(limit, vm.failedRequestCount)
+    }
+
+    // MARK: - writeTempFile
+
+    @Test
+    fun writeTempFile_writesFetchedBytes_underAttachmentsDir() = vmTest { scope ->
+        val media = FakeMediaService()
+        val url = "mxc://example/report"
+        media.stubData[url] = byteArrayOf(9, 8, 7)
+        val vm = makeVM(scope, media = media)
+        val root = java.nio.file.Files.createTempDirectory("write-temp-file").toFile()
+        try {
+            val file = vm.writeTempFile(url, "report.pdf", root)
+            assertNotNull(file)
+            assertEquals("report.pdf", file!!.name)
+            assertEquals(File(root, "matron-attachments"), file.parentFile)
+            assertTrue(byteArrayOf(9, 8, 7).contentEquals(file.readBytes()))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun writeTempFile_returnsNull_whenFetchFails() = vmTest { scope ->
+        val vm = makeVM(scope)
+        val root = java.nio.file.Files.createTempDirectory("write-temp-file").toFile()
+        try {
+            assertNull(vm.writeTempFile("mxc://example/missing", "report.pdf", root))
+            // Nothing written on the failure path — not even the subdir.
+            assertFalse(File(root, "matron-attachments").exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun writeTempFile_traversalFilename_staysInsideAttachmentsDir() = vmTest { scope ->
+        val media = FakeMediaService()
+        val url = "mxc://example/evil"
+        media.stubData[url] = byteArrayOf(1)
+        val vm = makeVM(scope, media = media)
+        val root = java.nio.file.Files.createTempDirectory("write-temp-file").toFile()
+        try {
+            val file = vm.writeTempFile(url, "../../escape.txt", root)
+            assertNotNull(file)
+            assertEquals(File(root, "matron-attachments"), file!!.parentFile)
+            assertEquals("escape.txt", file.name)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    // MARK: - sanitisedAttachmentFilename (ported Swift contract)
+
+    @Test
+    fun sanitisedFilename_plainName_isPreserved() {
+        assertEquals("report.pdf", ChatViewModel.sanitisedAttachmentFilename("report.pdf"))
+    }
+
+    @Test
+    fun sanitisedFilename_dropsDirectoryTree() {
+        assertEquals(
+            "authorized_keys",
+            ChatViewModel.sanitisedAttachmentFilename("../../.ssh/authorized_keys"),
+        )
+        assertEquals("notes.txt", ChatViewModel.sanitisedAttachmentFilename("C:\\Users\\x\\notes.txt"))
+    }
+
+    @Test
+    fun sanitisedFilename_replacesColons() {
+        assertEquals("a_b.txt", ChatViewModel.sanitisedAttachmentFilename("a:b.txt"))
+    }
+
+    @Test
+    fun sanitisedFilename_degenerateInputs_fallBackToNonEmptyName() {
+        for (raw in listOf("", "/", "..", ".", "a/..", "   ")) {
+            val name = ChatViewModel.sanitisedAttachmentFilename(raw)
+            assertTrue("'$raw' should map to a safe non-empty name", name.isNotBlank())
+            assertFalse(name.contains('/'))
+            assertFalse(name == "." || name == "..")
+        }
     }
 
     // MARK: - first snapshot / rows / stop / error

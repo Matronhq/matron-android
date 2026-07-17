@@ -6,18 +6,22 @@ import chat.matron.android.chat.TimelineService
 import chat.matron.android.events.AskUserEvent
 import chat.matron.android.models.SessionStatus
 import chat.matron.android.storage.LRUCache
+import java.io.File
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /// Rendering unit for the chat timeline: `items` interleaved with `.separator`
 /// rows at calendar-day boundaries. Ported from matron-apple's `TimelineRow`.
@@ -47,9 +51,10 @@ data class AskUserPromptContext(val id: String, val event: AskUserEvent)
 /// answered-prompt persistence uses an injected [KeyValueStore] (Swift's
 /// `UserDefaults`); [image] resolves raw bytes (the SwiftUI `Image` decode/cache
 /// is UI-stage); date bucketing uses an injectable [zone] (Swift's `Calendar`).
-/// `writeTempFile`/`sanitisedAttachmentFilename` (attachment preview/share) are
-/// UI-stage and not ported. Diagnostic logging (os.Logger / MatronFileLog) is
-/// dropped — behaviour is unaffected.
+/// [writeTempFile] takes the destination root as a parameter (the UI passes the
+/// app cache dir) where Swift reached for `FileManager.temporaryDirectory`, so
+/// this layer stays Android-free. Diagnostic logging (os.Logger / MatronFileLog)
+/// is dropped — behaviour is unaffected.
 class ChatViewModel(
     val roomID: String,
     private val timeline: TimelineService,
@@ -454,6 +459,25 @@ class ChatViewModel(
     /// Non-fetching read of the resolved-media cache for a single URL.
     fun resolvedImage(url: String): ByteArray? = resolvedImages[url]
 
+    /// Downloads a file attachment and writes it to
+    /// `<directory>/matron-attachments/<sanitised filename>`, returning the
+    /// written file or `null` on fetch/write failure. The temp filename
+    /// preserves the original [filename] so the downstream open/share UI shows
+    /// a sensible label instead of a UUID. Files written here are *not*
+    /// cleaned up — the OS reaps the cache dir under storage pressure and the
+    /// size cost is bounded by attachments the user has actively opened.
+    suspend fun writeTempFile(url: String, filename: String, directory: File): File? {
+        val bytes = media.image(url) ?: return null
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val dir = File(directory, "matron-attachments").apply { mkdirs() }
+                val dest = File(dir, sanitisedAttachmentFilename(filename))
+                dest.writeBytes(bytes)
+                dest
+            }.getOrNull()
+        }
+    }
+
     val resolvedImageCount: Int get() = resolvedImages.count
     val failedRequestCount: Int get() = failedRequests.count
 
@@ -596,6 +620,25 @@ class ChatViewModel(
             visibleIDs.firstOrNull { !it.startsWith("sep:") }?.let { return it }
             for (row in preExtendRows) if (row is TimelineRow.Message) return row.item.id
             return null
+        }
+
+        /// Strip path-traversal and directory-separator components from an
+        /// event-attached filename — it arrives from event metadata, which is
+        /// attacker-controllable, so a malicious sender must not be able to
+        /// craft `../../foo` to escape the attachments dir. Keeps the basename
+        /// for human-friendly open/share labels; inputs that reduce to an
+        /// empty or `.`/`..`-only string fall back to a UUID so the write
+        /// always lands inside the attachments dir. Test seam: `internal` so
+        /// tests can assert the contract without hitting disk.
+        internal fun sanitisedAttachmentFilename(raw: String): String {
+            // Basename drops any directory tree the sender embedded; handle
+            // both separator styles (Windows-style senders send `\`).
+            val trimmed = raw.substringAfterLast('/').substringAfterLast('\\')
+            val stripped = trimmed.replace(":", "_").trim()
+            if (stripped.isEmpty() || stripped == "." || stripped == "..") {
+                return UUID.randomUUID().toString()
+            }
+            return stripped
         }
     }
 }
