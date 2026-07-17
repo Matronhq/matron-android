@@ -41,6 +41,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 
@@ -75,6 +76,12 @@ class AppDependencies(
     private val sessionStoreFactory: (Context) -> SessionStore = { EncryptedPrefsSessionStore.create(it) },
     private val journalDatabaseFactory: (Context, File) -> MatronDatabase = { c, f -> MatronDatabase.open(c, f) },
     private val searchDatabaseFactory: (Context, File) -> SearchDatabase = { c, f -> SearchDatabase.open(c, f) },
+    /**
+     * Background scope for startup sweeps and sign-out teardown. Injectable so
+     * tests can pump teardown jobs on a paused dispatcher and pin down the
+     * signOut/awaitPendingTeardown interleavings deterministically.
+     */
+    private val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) {
 
     /** One shared OkHttp client (keepalive pings) for REST + WebSocket. */
@@ -103,9 +110,6 @@ class AppDependencies(
 
     private val appSupport: File = StoragePaths.appSupport(context)
     private val journalDirectory: File = File(appSupport, "journal-store").apply { mkdirs() }
-
-    /** Background scope for startup sweeps and sign-out teardown. */
-    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * One journal stack per signed-in session: the API client, the local Room
@@ -313,8 +317,37 @@ class AppDependencies(
      * one's endSync/wipe.
      */
     suspend fun awaitPendingTeardown() {
-        teardownJob?.join()
-        teardownJob = null
+        while (true) {
+            val job = teardownJob ?: return
+            job.join()
+            // A signOut() that ran while we were joining chained a newer job onto
+            // the field; loop so this caller waits for that one too. The field is
+            // deliberately never cleared here — nulling it after the join could
+            // drop a just-chained teardown, letting a later sign-in skip its wipe
+            // (bugbot "Teardown await drops newer job").
+            if (teardownJob === job) return
+        }
+    }
+
+    /**
+     * Removes every on-disk journal mirror plus the shared search index. Fresh
+     * interactive sign-in calls this (after [awaitPendingTeardown], before the
+     * first core opens): if the process died between `signOut()`'s synchronous
+     * `clearSession()` and its background wipe, the previous user's mirror and
+     * index survive on disk (bugbot "Sign-out leaves local mirror"). A fresh
+     * login resyncs from a server snapshot, so the clean slate costs nothing.
+     * Session restore must NOT call this — a restored session keeps its mirror.
+     */
+    suspend fun wipeLocalDataForFreshLogin() {
+        withContext(Dispatchers.IO) {
+            journalDirectory.listFiles()?.forEach { file ->
+                if (!file.deleteRecursively()) {
+                    MatronDebug.breadcrumb("freshLogin: could not delete ${file.name}")
+                }
+            }
+        }
+        runCatching { search?.wipe() }
+            .onFailure { MatronDebug.breadcrumb("freshLogin: search.wipe failed: $it") }
     }
 
     // MARK: - Test seams (mirror AppDependenciesTests.swift)
