@@ -347,9 +347,7 @@ class ChatViewModel(
         statusTask?.cancel()
         statusTask = scope.launch {
             timeline.sessionStatus().collect { update ->
-                val merged = _sessionStatus.value ?: SessionStatus()
-                merged.apply(update)
-                _sessionStatus.value = merged
+                _sessionStatus.value = (_sessionStatus.value ?: SessionStatus()).merged(update)
             }
         }
 

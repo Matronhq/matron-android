@@ -15,6 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
@@ -830,6 +831,38 @@ class ChatViewModelTest {
         waitUntil { vm.sessionStatus.value?.model != null }
         assertEquals("claude-fable-5", vm.sessionStatus.value?.model)
         assertEquals(10, vm.sessionStatus.value?.context?.pct)
+    }
+
+    @Test
+    fun sessionStatusFlow_emitsSeparatelyForEachFrame() = vmTest { scope ->
+        val fake = FakeTimelineService()
+        fake.snapshotsToEmit = listOf(emptyList())
+        val vm = makeVM(scope, fake)
+        vm.start().join()
+        waitUntil { fake.sessionStatusFlow.subscriptionCount.value > 0 }
+
+        // A real collector (Compose's collectAsState, notably) only sees a
+        // status update when the StateFlow actually emits — reading .value
+        // directly would hide an in-place mutation bug, since the mutated
+        // object's fields would already reflect the new frame. Collecting is
+        // the only way to observe that a *second* distinct emission happened.
+        val emissions = mutableListOf<SessionStatus?>()
+        val collector = scope.launch { vm.sessionStatus.collect { emissions.add(it) } }
+        waitUntil { emissions.isNotEmpty() } // initial null
+
+        fake.emitStatus(
+            SessionStatusUpdate("!r:s", null, SessionStatus.Context(100_000, 1_000_000, 10), null, null, null),
+        )
+        waitUntil { emissions.size >= 2 }
+
+        fake.emitStatus(SessionStatusUpdate("!r:s", "claude-fable-5", null, null, null, null))
+        waitUntil { emissions.size >= 3 }
+
+        assertEquals(3, emissions.size)
+        assertEquals("claude-fable-5", emissions[2]?.model)
+        assertEquals(10, emissions[2]?.context?.pct)
+
+        collector.cancel()
     }
 
     @Test

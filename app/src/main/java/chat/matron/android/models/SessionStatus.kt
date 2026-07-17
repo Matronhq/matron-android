@@ -8,15 +8,15 @@ import java.time.Instant
 /// what it doesn't know, and absent parts mean "unchanged", so the held value
 /// merges updates rather than replacing wholesale.
 data class SessionStatus(
-    var model: String? = null,
-    var context: Context? = null,
-    var limits: List<Limit>? = null,
+    val model: String? = null,
+    val context: Context? = null,
+    val limits: List<Limit>? = null,
     /// Logged-in account email on the bridge's machine. Absent when the bridge
     /// can't read it — e.g. API-key accounts.
-    var email: String? = null,
+    val email: String? = null,
     /// For a subagent child conversation, the `tool_use_id` of the parent's
     /// spawning Task call. `null` for normal conversations.
-    var taskRef: String? = null,
+    val taskRef: String? = null,
 ) {
     /// Context-window gauge — an estimate computed by the bridge from the last
     /// request's usage block, not /context's exact accounting.
@@ -34,20 +34,23 @@ data class SessionStatus(
     )
 
     /// Merge an update: each part replaces the held value only when the frame
-    /// carries it (absent = unchanged, per the status protocol).
-    fun apply(update: SessionStatusUpdate) {
-        update.model?.let { model = it }
-        update.context?.let { context = it }
-        update.limits?.let { limits = it }
-        update.email?.let { email = it }
-        update.taskRef?.let { taskRef = it }
-    }
+    /// carries it (absent = unchanged, per the status protocol). Returns a new
+    /// instance — StateFlow conflates by equality, so mutating in place would
+    /// mean an object always equals its (mutated) former self and the flow
+    /// would never re-emit.
+    fun merged(update: SessionStatusUpdate): SessionStatus = SessionStatus(
+        model = update.model ?: model,
+        context = update.context ?: context,
+        limits = update.limits ?: limits,
+        email = update.email ?: email,
+        taskRef = update.taskRef ?: taskRef,
+    )
 }
 
 /// One decoded `status` ephemeral frame.
 ///
 /// No parameter defaults, deliberately: every constructor names every field, so
-/// merge sites (SessionStatus.apply, the sync engine's replay cache) can't
+/// merge sites (SessionStatus.merged, the sync engine's replay cache) can't
 /// silently drop a newly added one.
 data class SessionStatusUpdate(
     val convoID: String,
