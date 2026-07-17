@@ -142,7 +142,7 @@ class WireModelsTest {
         assertEquals("hi", send.objectOrNull("payload")?.stringOrNull("body"))
         assertEquals("L1", send.stringOrNull("local_id"))
 
-        val media = encodedObject(ClientOp.SendMedia("c1", "image", "b9", "cat.png", "image/png", 42, null, "L2"))
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42, null, "L2"))
         assertEquals("send", media.stringOrNull("op"))
         assertEquals("image", media.stringOrNull("type"))
         assertEquals("b9", media.stringOrNull("blob_ref"))
@@ -172,14 +172,14 @@ class WireModelsTest {
 
     @Test
     fun encodeSendMediaCarriesCaptionInsideThePayload() {
-        val media = encodedObject(ClientOp.SendMedia("c1", "image", "b9", "cat.png", "image/png", 42,
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42,
             "what breed is this?", "L2"))
         assertEquals("what breed is this?", media.objectOrNull("payload")?.stringOrNull("caption"))
     }
 
     @Test
     fun encodeSendMediaTreatsEmptyCaptionAsAbsent() {
-        val media = encodedObject(ClientOp.SendMedia("c1", "image", "b9", "cat.png", "image/png", 42, "", "L2"))
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42, "", "L2"))
         assertNull(media.objectOrNull("payload")?.stringOrNull("caption"))
     }
 
@@ -293,5 +293,26 @@ class WireModelsTest {
         val broken = ClientOp.AgentRequest("r2", 9, "recent_folders", "junk")
         val brokenObj = encodedObject(broken)
         assertEquals(true, brokenObj.objectOrNull("params")?.isEmpty())
+    }
+
+    @Test
+    fun encodeSendMediaFileKindUsesFileWireString() {
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.FILE, "b9", "report.pdf", "application/pdf",
+            42, null, "L2"))
+        assertEquals("file", media.stringOrNull("type"))
+    }
+
+    @Test
+    fun sessionStateWireRoundTrip() {
+        assertEquals(SessionState.Running, SessionState.fromWire("running"))
+        assertEquals(SessionState.Done, SessionState.fromWire("done"))
+        assertEquals("running", SessionState.Running.wire)
+        assertEquals("done", SessionState.Done.wire)
+
+        // Unknown wire values must round-trip unchanged rather than being
+        // coerced or dropped.
+        val other = SessionState.fromWire("waiting")
+        assertEquals(SessionState.Other("waiting"), other)
+        assertEquals("waiting", other.wire)
     }
 }

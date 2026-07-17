@@ -2,6 +2,7 @@ package chat.matron.android.chat
 
 import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.JournalSyncEngine
+import chat.matron.android.journal.SessionState
 import chat.matron.android.journal.db.ConversationEntity
 import chat.matron.android.models.BotIdentity
 import java.time.Instant
@@ -18,9 +19,6 @@ import kotlinx.coroutines.flow.map
 sealed class JournalChatError(message: String) : Exception(message) {
     data object CreationNotSupported : JournalChatError(
         "Creating conversations from the app needs server support (convo_create) — coming soon."
-    )
-    data object MediaNotSupported : JournalChatError(
-        "Attachments need the server's /media endpoint — coming soon."
     )
     data class InvalidPromptReference(val id: String) : JournalChatError(
         "Can't answer this prompt — its reference (\"$id\") isn't a journal row."
@@ -79,7 +77,7 @@ class JournalChatService(
         fun childSummary(record: ConversationEntity): SubChatSummary = SubChatSummary(
             id = record.id,
             title = record.title.ifEmpty { record.id },
-            isRunning = record.sessionState == "running",
+            isRunning = SessionState.fromWire(record.sessionState) == SessionState.Running,
         )
     }
 }

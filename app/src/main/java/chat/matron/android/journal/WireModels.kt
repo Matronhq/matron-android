@@ -291,6 +291,12 @@ sealed interface ServerFrame {
     }
 }
 
+/// The two `send`-op media wire kinds — decided by `StagedAttachment.isImage`,
+/// nothing else is valid here.
+enum class MediaKind(val wire: String) {
+    FILE("file"), IMAGE("image"),
+}
+
 /// Client → server operations.
 sealed interface ClientOp {
     data class Hello(val token: String, val cursor: Long?) : ClientOp
@@ -300,7 +306,7 @@ sealed interface ClientOp {
     /// this attachment left with, omitted from the payload when null/empty.
     data class SendMedia(
         val convoID: String,
-        val type: String,
+        val type: MediaKind,
         val blobRef: String,
         val name: String,
         val contentType: String,
@@ -343,7 +349,7 @@ sealed interface ClientOp {
             is SendMedia -> buildJsonObject {
                 put("op", "send")
                 put("convo_id", convoID)
-                put("type", type)
+                put("type", type.wire)
                 put("blob_ref", blobRef)
                 put("payload", buildJsonObject {
                     put("blob_ref", blobRef)

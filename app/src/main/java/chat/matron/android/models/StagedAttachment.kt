@@ -10,7 +10,14 @@ import java.util.UUID
 /// Attachments are staged (copied into a scratch directory) at attach time so
 /// they leave with the composer text that explains them, as one turn, and so an
 /// unreadable source fails while the user is still looking at the picker.
-data class StagedAttachment(
+///
+/// Construction is factory-only ([stage]) so [deleteStagedCopy]'s
+/// `parentFile?.deleteRecursively()` is always scoped to a UUID staging
+/// directory this type created — never a caller-supplied path. `copy()` is
+/// kept equally private ([ConsistentCopyVisibility]) so it can't be used to
+/// route around the factory.
+@ConsistentCopyVisibility
+data class StagedAttachment private constructor(
     val id: String,
     /// Location of OUR copy, inside the staging directory. Deleted when the
     /// attachment is removed, sent, or discarded.

@@ -9,6 +9,7 @@ import chat.matron.android.journal.JournalEventType
 import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.JournalSyncEngine
 import chat.matron.android.journal.JournalSyncError
+import chat.matron.android.journal.MediaKind
 import chat.matron.android.journal.ToolStreamUpdate
 import chat.matron.android.journal.stringOrNull
 import chat.matron.android.models.SessionStatusUpdate
@@ -427,13 +428,13 @@ class JournalTimelineService(
     }
 
     override suspend fun sendImage(data: ByteArray, filename: String, mimeType: String, caption: String?) =
-        sendMedia(data, filename, mimeType, type = "image", caption = caption)
+        sendMedia(data, filename, mimeType, type = MediaKind.IMAGE, caption = caption)
 
     override suspend fun sendFile(data: ByteArray, filename: String, mimeType: String, caption: String?) =
-        sendMedia(data, filename, mimeType, type = "file", caption = caption)
+        sendMedia(data, filename, mimeType, type = MediaKind.FILE, caption = caption)
 
     private suspend fun sendMedia(
-        data: ByteArray, filename: String, mimeType: String, type: String, caption: String?,
+        data: ByteArray, filename: String, mimeType: String, type: MediaKind, caption: String?,
     ) {
         val blobRef = api.uploadMedia(data, mimeType)
         engine.sendOp(

@@ -103,7 +103,7 @@ class JournalStore(
             eventDao.insertReplace(EventEntity.from(event))
 
             var convo = conversationDao.byId(event.convoID) ?: ConversationEntity(
-                id = event.convoID, title = "", sessionState = "running", lastSeq = 0,
+                id = event.convoID, title = "", sessionState = SessionState.RUNNING, lastSeq = 0,
                 snippet = "", createdAt = event.ts.toEpochMilli(), lastActivityTS = null,
                 muted = false, hidden = false, readUpToSeq = 0, unreadCount = 0, parentConvoID = null,
             )
@@ -218,7 +218,7 @@ class JournalStore(
             if (conversationDao.byId(id) != null) return@withTransaction
             conversationDao.upsert(
                 ConversationEntity(
-                    id = id, title = title, sessionState = "running", lastSeq = 0,
+                    id = id, title = title, sessionState = SessionState.RUNNING, lastSeq = 0,
                     snippet = "", createdAt = now, lastActivityTS = now, muted = false,
                     hidden = false, readUpToSeq = 0, unreadCount = 0, parentConvoID = null,
                 )

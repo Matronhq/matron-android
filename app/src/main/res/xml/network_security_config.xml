@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     Cleartext (http/ws) is permitted ONLY for the localhost-ish dev hosts
+     ServerURLValidator.normalize's http carve-out allows (the Docker dev
+     harness listens on http://localhost:6167 — see auth/ServerURLValidator.kt
+     ~34-41). This is enforced at the socket layer, so it covers both plain
+     HTTP and the ws:// journal connection to those hosts equally. Every other
+     host — including a bare IP typed by the user, or an emulator's host-
+     loopback alias — is HTTPS/WSS-only.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">::1</domain>
+    </domain-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

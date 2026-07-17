@@ -142,7 +142,7 @@ class JournalApi(
             ConvoSummaryDTO(
                 id = id,
                 title = c.stringOrNull("title") ?: "",
-                sessionState = c.stringOrNull("session_state") ?: "running",
+                sessionState = c.stringOrNull("session_state") ?: SessionState.RUNNING,
                 lastSeq = c.longOrNull("last_seq") ?: 0,
                 snippet = c.stringOrNull("snippet") ?: "",
                 createdAt = c.longOrNull("created_at") ?: 0,
