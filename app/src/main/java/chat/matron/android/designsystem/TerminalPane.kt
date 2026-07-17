@@ -12,6 +12,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.AnnotatedString
@@ -26,9 +27,14 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun TerminalPane(output: AnnotatedString, expanded: Boolean, modifier: Modifier = Modifier) {
     val scrollState = rememberScrollState()
-    // Sticky tail: follow the newest output as it streams in.
-    LaunchedEffect(output) {
-        scrollState.scrollTo(scrollState.maxValue)
+    // Sticky tail: follow the newest output as it streams in. Driven off
+    // maxValue post-layout (not the `output` param) so a just-enlarged Text
+    // has already remeasured by the time we scroll — reading maxValue keyed
+    // on `output` raced the remeasure and left the pane a chunk behind.
+    LaunchedEffect(Unit) {
+        snapshotFlow { scrollState.maxValue }.collect { max ->
+            scrollState.scrollTo(max)
+        }
     }
     SelectionContainer {
         Text(

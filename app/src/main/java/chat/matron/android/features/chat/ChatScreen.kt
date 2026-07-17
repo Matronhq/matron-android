@@ -219,12 +219,16 @@ fun TimelineList(
     var paginating by remember { mutableStateOf(false) }
 
     // A user scroll away from the bottom drops follow-tail; returning re-arms it.
-    LaunchedEffect(atBottom) { if (atBottom) followTail = true }
+    LaunchedEffect(atBottom) { followTail = atBottom }
 
-    // Keep the tail pinned while following: a new tail id scrolls to bottom.
-    LaunchedEffect(lastRenderableItemID, rows.size) {
+    // Keep the tail pinned while following: a new tail id, a row-count change, or
+    // the jump button re-arming scrolls to the true last item. Index 0 is the
+    // always-present "paginating" item, so row i sits at index i + 1; the
+    // optional activity footer sits one further past the last row.
+    LaunchedEffect(followTail, lastRenderableItemID, rows.size, activityLabel) {
         if (followTail && rows.isNotEmpty()) {
-            listState.scrollToItem((rows.size - 1).coerceAtLeast(0))
+            val lastIndex = rows.size + if (activityLabel != null) 1 else 0
+            listState.scrollToItem(lastIndex)
         }
     }
 
