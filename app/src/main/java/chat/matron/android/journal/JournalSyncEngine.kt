@@ -32,7 +32,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 
 /// Lifecycle-level errors surfaced by the engine.
 sealed class JournalSyncError : Exception() {
@@ -394,13 +393,11 @@ class JournalSyncEngine(
 
     private fun resumeRPC(response: RPCResponse) {
         val pending = synchronized(lock) { rpcPending.remove(response.requestID) } ?: return
-        if (response.ok) {
-            pending.continuation.resumeWith(Result.success(RPCReply.Ok(response.result ?: JsonNull)))
-        } else {
-            pending.continuation.resumeWith(
-                Result.success(RPCReply.Failure(response.errorCode ?: "unknown", response.errorDetail))
-            )
+        val reply = when (val outcome = response.outcome) {
+            is RPCResponse.Outcome.Success -> RPCReply.Ok(outcome.result)
+            is RPCResponse.Outcome.Failure -> RPCReply.Failure(outcome.code ?: "unknown", outcome.detail)
         }
+        pending.continuation.resumeWith(Result.success(reply))
     }
 
     private fun failRPC(requestID: String, code: String, detail: String?) {
@@ -642,14 +639,7 @@ class JournalSyncEngine(
 
     private fun indexForSearch(event: JournalEvent) {
         val search = this.search ?: return
-        val payload = event.payload
-        val body = when (event.type) {
-            JournalEventType.TEXT -> payload.stringOrNull("body")
-            JournalEventType.TOOL_OUTPUT -> payload.stringOrNull("snippet")
-            // Mirror the timeline mapper's precedence (diff, then snippet).
-            JournalEventType.DIFF -> payload.stringOrNull("diff") ?: payload.stringOrNull("snippet")
-            else -> null
-        }
+        val body = event.previewText()
         if (body.isNullOrEmpty()) return
         scope.launch {
             runCatching {

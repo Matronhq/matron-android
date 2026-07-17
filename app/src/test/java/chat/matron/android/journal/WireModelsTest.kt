@@ -44,8 +44,7 @@ class WireModelsTest {
         assertTrue(ephemeral is ServerFrame.Ephemeral)
         val update = (ephemeral as ServerFrame.Ephemeral).update
         assertEquals("m7", update.messageRef)
-        assertEquals("progress 3", update.replaceText)
-        assertNull(update.textDelta)
+        assertEquals(EphemeralUpdate.Change.Replace("progress 3"), update.change)
     }
 
     @Test
@@ -243,20 +242,19 @@ class WireModelsTest {
                 as ServerFrame.RpcResponse
         assertEquals("r1", ok.response.requestID)
         assertEquals(9L, ok.response.agentDeviceID)
-        assertTrue(ok.response.ok)
-        assertEquals("c-new", (ok.response.result as JsonObject).stringOrNull("convo_id"))
-        assertNull(ok.response.errorCode)
+        val okOutcome = ok.response.outcome as RPCResponse.Outcome.Success
+        assertEquals("c-new", (okOutcome.result as JsonObject).stringOrNull("convo_id"))
 
         val fail = ServerFrame.decode("""{"kind":"rpc","response":{"request_id":"r2","agent_device_id":9,"ok":false,"error":{"code":"bad_workdir","detail":"/nope"}}}""")
                 as ServerFrame.RpcResponse
-        assertFalse(fail.response.ok)
-        assertEquals("bad_workdir", fail.response.errorCode)
-        assertEquals("/nope", fail.response.errorDetail)
-        assertNull(fail.response.result)
+        val failOutcome = fail.response.outcome as RPCResponse.Outcome.Failure
+        assertEquals("bad_workdir", failOutcome.code)
+        assertEquals("/nope", failOutcome.detail)
 
         val bare = ServerFrame.decode("""{"kind":"rpc","response":{"request_id":"r3","agent_device_id":9,"ok":false}}""")
                 as ServerFrame.RpcResponse
-        assertNull(bare.response.errorCode)
+        val bareOutcome = bare.response.outcome as RPCResponse.Outcome.Failure
+        assertNull(bareOutcome.code)
 
         assertNull(ServerFrame.decode("""{"kind":"rpc","request":{"request_id":"r1","from_device_id":7,"method":"start","params":null}}"""))
         assertNull(ServerFrame.decode("""{"kind":"rpc","response":{"agent_device_id":9,"ok":true}}"""))

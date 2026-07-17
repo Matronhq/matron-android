@@ -8,6 +8,7 @@ import chat.matron.android.journal.ActivityUpdate
 import chat.matron.android.journal.JournalEvent
 import chat.matron.android.journal.JournalEventType
 import chat.matron.android.journal.arrayOrNull
+import chat.matron.android.journal.body
 import chat.matron.android.journal.boolOrNull
 import chat.matron.android.journal.intOrNull
 import chat.matron.android.journal.longOrNull
@@ -44,7 +45,7 @@ object JournalTimelineMapper {
             JournalEventType.SESSION_STATUS, JournalEventType.CONVO_META -> return null
 
             JournalEventType.TEXT ->
-                TimelineItem.Kind.Text(payload.stringOrNull("body") ?: "", null)
+                TimelineItem.Kind.Text(event.body() ?: "", null)
 
             JournalEventType.TOOL_OUTPUT -> {
                 // A tool_output carrying a viewer_url is a live command-output

@@ -132,7 +132,7 @@ class JournalSyncEngineTest {
         val probe = FlowProbe(this, engine.ephemerals("c1"))
         delay(50)
         socket.serve("""{"kind":"ephemeral","convo_id":"c1","message_ref":"m1","replace_text":"working…"}""")
-        assertEquals("working…", probe.next().replaceText)
+        assertEquals(EphemeralUpdate.Change.Replace("working…"), probe.next().change)
         probe.cancel()
         engine.endSync()
     }

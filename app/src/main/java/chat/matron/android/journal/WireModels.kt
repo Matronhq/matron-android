@@ -3,6 +3,7 @@ package chat.matron.android.journal
 import chat.matron.android.models.SessionStatus
 import chat.matron.android.models.SessionStatusUpdate
 import java.time.Instant
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -68,14 +69,38 @@ data class JournalEvent(
     }
 }
 
+/// Payload-key accessors. The wire key names ("body"/"snippet"/"diff") live
+/// here so every reader agrees on them and precedence lives in one place.
+fun JournalEvent.body(): String? = payload.stringOrNull("body")
+fun JournalEvent.snippet(): String? = payload.stringOrNull("snippet")
+fun JournalEvent.diff(): String? = payload.stringOrNull("diff")
+
+/// Text fed to the full-text search index and backward-pagination indexer:
+/// TEXT→body, TOOL_OUTPUT→snippet, DIFF→diff-then-snippet; nothing else indexes.
+fun JournalEvent.previewText(): String? = when (type) {
+    JournalEventType.TEXT -> body()
+    JournalEventType.TOOL_OUTPUT -> snippet()
+    JournalEventType.DIFF -> diff() ?: snippet()
+    else -> null
+}
+
 /// A streaming-output update. Never persisted; lost updates are harmless (the
-/// finalize journal row supersedes them).
+/// finalize journal row supersedes them). [Change] captures the delta-vs-replace
+/// union the wire encodes, so an update always means exactly one operation.
 data class EphemeralUpdate(
     val convoID: String,
     val messageRef: String,
-    val textDelta: String?,
-    val replaceText: String?,
-)
+    val change: Change,
+) {
+    sealed interface Change {
+        /// Append `text` to the accumulated bubble (a `text` frame). Empty when
+        /// the frame carried neither key — a harmless no-op append.
+        data class Delta(val text: String) : Change
+        /// Replace the bubble's whole text (a `replace_text` frame; wins over a
+        /// coincident `text`).
+        data class Replace(val text: String) : Change
+    }
+}
 
 /// A transient activity indicator (typing / tool-use). `Idle` clears whatever
 /// indicator is showing. Never persisted; delivered only while `viewing`.
@@ -123,16 +148,26 @@ data class ToolStreamUpdate(
     }
 }
 
-/// An agent's answer to an `agent_request`. `result` keeps the raw JSON of the
-/// method-specific result — the caller decodes its shape.
+/// An agent's answer to an `agent_request`. [decodeRpc] builds the [Outcome]
+/// union so consumers branch on success/failure instead of re-correlating the
+/// old `ok`/`result`/`errorCode` nullables.
 data class RPCResponse(
     val requestID: String,
+    /// Which agent device answered. Some frames omit `agent_device_id`;
+    /// matron-apple's decoder likewise defaults it to 0 (a correlation id no
+    /// consumer reads), so we keep the 0 fallback for wire parity.
     val agentDeviceID: Long,
-    val ok: Boolean,
-    val result: kotlinx.serialization.json.JsonElement?,
-    val errorCode: String?,
-    val errorDetail: String?,
-)
+    val outcome: Outcome,
+) {
+    sealed interface Outcome {
+        /// `result` keeps the raw JSON of the method-specific result (JsonNull
+        /// when the server sent no `result`) — the caller decodes its shape.
+        data class Success(val result: JsonElement) : Outcome
+        /// `code` is null when the server omitted the `error` object; the caller
+        /// substitutes a default label when reporting the failure.
+        data class Failure(val code: String?, val detail: String?) : Outcome
+    }
+}
 
 /// Server → client frames. Unknown `kind`s decode to null (skip); unknown
 /// control ops decode to [UnknownControl] so the protocol can grow.
@@ -248,12 +283,15 @@ sealed interface ServerFrame {
                 ))
             }
             val ref = obj.stringOrNull("message_ref") ?: return null
-            return Ephemeral(EphemeralUpdate(
-                convoID = convoID,
-                messageRef = ref,
-                textDelta = obj.stringOrNull("text"),
-                replaceText = obj.stringOrNull("replace_text"),
-            ))
+            // `replace_text` wins over `text`; a frame with neither key becomes a
+            // no-op empty delta (the old both-null → append-"" behavior).
+            val replace = obj.stringOrNull("replace_text")
+            val change = if (replace != null) {
+                EphemeralUpdate.Change.Replace(replace)
+            } else {
+                EphemeralUpdate.Change.Delta(obj.stringOrNull("text") ?: "")
+            }
+            return Ephemeral(EphemeralUpdate(convoID, ref, change))
         }
 
         private fun decodeRpc(obj: JsonObject): ServerFrame? {
@@ -262,15 +300,16 @@ sealed interface ServerFrame {
             val response = obj.objectOrNull("response") ?: return null
             val requestID = response.stringOrNull("request_id") ?: return null
             val ok = response.boolOrNull("ok") ?: return null
-            val result = if (ok) response["result"] else null
-            val error = response.objectOrNull("error")
+            val outcome: RPCResponse.Outcome = if (ok) {
+                RPCResponse.Outcome.Success(response["result"] ?: JsonNull)
+            } else {
+                val error = response.objectOrNull("error")
+                RPCResponse.Outcome.Failure(error?.stringOrNull("code"), error?.stringOrNull("detail"))
+            }
             return RpcResponse(RPCResponse(
                 requestID = requestID,
                 agentDeviceID = response.longOrNull("agent_device_id") ?: 0,
-                ok = ok,
-                result = result,
-                errorCode = error?.stringOrNull("code"),
-                errorDetail = error?.stringOrNull("detail"),
+                outcome = outcome,
             ))
         }
 

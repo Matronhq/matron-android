@@ -3,6 +3,7 @@ package chat.matron.android.chat
 import chat.matron.android.journal.ActivityUpdate
 import chat.matron.android.journal.ClientOp
 import chat.matron.android.journal.EphemeralUpdate
+import chat.matron.android.journal.body
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalEvent
 import chat.matron.android.journal.JournalEventType
@@ -10,6 +11,7 @@ import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.JournalSyncEngine
 import chat.matron.android.journal.JournalSyncError
 import chat.matron.android.journal.MediaKind
+import chat.matron.android.journal.previewText
 import chat.matron.android.journal.ToolStreamUpdate
 import chat.matron.android.journal.stringOrNull
 import chat.matron.android.models.SessionStatusUpdate
@@ -218,7 +220,10 @@ class JournalTimelineService(
 
         fun applyEphemeral(update: EphemeralUpdate) = synchronized(lock) {
             val current = streaming[update.messageRef]?.text ?: ""
-            val text = update.replaceText ?: (current + (update.textDelta ?: ""))
+            val text = when (val change = update.change) {
+                is EphemeralUpdate.Change.Replace -> change.text
+                is EphemeralUpdate.Change.Delta -> current + change.text
+            }
             streaming[update.messageRef] = Streaming(text, Instant.now())
             Unit
         }
@@ -243,7 +248,7 @@ class JournalTimelineService(
                 // Finalize de-dup fallback: an agent text row whose body equals a
                 // live overlay's accumulated text IS that stream's finalized form.
                 if (event.sender != ownSender && event.type == JournalEventType.TEXT) {
-                    val body = event.payload.stringOrNull("body")
+                    val body = event.body()
                     if (body != null) {
                         streaming.entries.filter { it.value.text == body }.map { it.key }
                             .forEach { streaming.remove(it) }
@@ -253,7 +258,7 @@ class JournalTimelineService(
                 // an echo; prefer a pending echo so a delivered copy's ack can't
                 // retire an undelivered one.
                 if (event.seq > newSeqFloor && event.sender == ownSender && event.type == JournalEventType.TEXT) {
-                    val body = event.payload.stringOrNull("body")
+                    val body = event.body()
                     if (body != null) {
                         val index = echoesList.indexOfFirst { it.body == body && !it.failed }
                             .takeIf { it >= 0 }
@@ -453,14 +458,7 @@ class JournalTimelineService(
         store.insertHistory(newOnes)
         search?.let { s ->
             for (event in newOnes) {
-                val body: String? = when (event.type) {
-                    JournalEventType.TEXT -> event.payload.stringOrNull("body")
-                    JournalEventType.TOOL_OUTPUT -> event.payload.stringOrNull("snippet")
-                    // diff → snippet precedence mirrors the mapper + live indexer.
-                    JournalEventType.DIFF ->
-                        event.payload.stringOrNull("diff") ?: event.payload.stringOrNull("snippet")
-                    else -> null
-                }
+                val body = event.previewText()
                 if (!body.isNullOrEmpty()) {
                     runCatching { s.index(event.convoID, event.seq.toString(), event.sender, event.ts, body) }
                 }

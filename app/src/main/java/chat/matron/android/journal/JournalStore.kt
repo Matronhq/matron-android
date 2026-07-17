@@ -146,7 +146,7 @@ class JournalStore(
                     )
                 }
                 event.type in JournalEventType.MESSAGE_TYPES -> {
-                    convo = convo.copy(snippet = snippet(event.type, payload))
+                    convo = convo.copy(snippet = snippet(event))
                     if (event.sender != ownSender && event.seq > convo.readUpToSeq) {
                         convo = convo.copy(unreadCount = convo.unreadCount + 1)
                     }
@@ -313,12 +313,12 @@ class JournalStore(
     }
 
     /// Mirrors the server's snippetOf (matron-journal src/journal.js).
-    private fun snippet(type: String, payload: JsonObject): String = when (type) {
-        JournalEventType.TEXT -> (payload.stringOrNull("body") ?: "").take(120)
-        JournalEventType.PROMPT -> "? " + (payload.stringOrNull("question") ?: "").take(110)
+    private fun snippet(event: JournalEvent): String = when (event.type) {
+        JournalEventType.TEXT -> (event.body() ?: "").take(120)
+        JournalEventType.PROMPT -> "? " + (event.payload.stringOrNull("question") ?: "").take(110)
         JournalEventType.PERMISSION_REQUEST ->
-            "permission: " + (payload.stringOrNull("description") ?: "").take(100)
-        else -> payload.stringOrNull("snippet")?.take(120) ?: "[$type]"
+            "permission: " + (event.payload.stringOrNull("description") ?: "").take(100)
+        else -> event.snippet()?.take(120) ?: "[${event.type}]"
     }
 
     private companion object {
