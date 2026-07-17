@@ -24,10 +24,21 @@ interface ConversationDao {
     fun parentConvoIDFlow(id: String): Flow<String?>
 
     /// Chat-list query: visible, top-level (no parent), newest first.
-    @Query("SELECT * FROM conversation WHERE hidden = 0 AND parent_convo_id IS NULL ORDER BY last_seq DESC")
+    /// Ordered by `last_activity_ts` (bumped only for MESSAGE_TYPES, see
+    /// JournalStore.applyJournal) rather than `last_seq` (bumped for every
+    /// frame incl. read_marker/session_status) so a bookkeeping frame from
+    /// another device can't float a stale chat to the top. `last_seq` is only
+    /// a tiebreak (e.g. rows sharing a null last_activity_ts).
+    @Query(
+        "SELECT * FROM conversation WHERE hidden = 0 AND parent_convo_id IS NULL " +
+            "ORDER BY last_activity_ts DESC, last_seq DESC"
+    )
     suspend fun visibleTopLevel(): List<ConversationEntity>
 
-    @Query("SELECT * FROM conversation WHERE hidden = 0 AND parent_convo_id IS NULL ORDER BY last_seq DESC")
+    @Query(
+        "SELECT * FROM conversation WHERE hidden = 0 AND parent_convo_id IS NULL " +
+            "ORDER BY last_activity_ts DESC, last_seq DESC"
+    )
     fun visibleTopLevelFlow(): Flow<List<ConversationEntity>>
 
     @Query("SELECT * FROM conversation WHERE parent_convo_id = :parentConvoID ORDER BY created_at ASC, id ASC")

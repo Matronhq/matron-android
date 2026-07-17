@@ -234,6 +234,29 @@ class JournalStoreTest {
     }
 
     @Test
+    fun chatListOrdersByLastActivityNotBookkeepingSeq() = runBlocking {
+        val store = makeStore()
+        // b is the older conversation by real activity...
+        store.applyJournal(ev(1, convo = "b", type = "text"))
+        // ...a is the newer one.
+        store.applyJournal(ev(2, convo = "a", type = "text"))
+        // Bookkeeping frames land on b afterwards, bumping its last_seq past
+        // a's without touching its last_activity_ts.
+        store.applyJournal(ev(3, convo = "b", sender = "user:dan", type = "read_marker",
+            payload = buildJsonObject { put("convo_id", "b"); put("up_to_seq", 1) }))
+        store.applyJournal(ev(4, convo = "b", type = "session_status",
+            payload = buildJsonObject { put("state", "waiting") }))
+
+        val convos = store.conversations()
+        assertEquals(4L, convos.first { it.id == "b" }.lastSeq)
+        assertTrue(
+            "convo with newer real activity (a) must sort first despite b's higher last_seq " +
+                "from bookkeeping frames",
+            convos.first().id == "a",
+        )
+    }
+
+    @Test
     fun insertHistoryRecountsUnread() = runBlocking {
         val store = makeStore()
         store.applyJournal(ev(1))
