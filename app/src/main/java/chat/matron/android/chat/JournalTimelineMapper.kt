@@ -81,6 +81,10 @@ object JournalTimelineMapper {
                             optionValues.map { AskUserEvent.Option(it, it) },
                             allowOther = false,
                         ),
+                        // The journal protocol carries no expiry on
+                        // permission_request/prompt payloads — always null here
+                        // (same as AskUserEvent.swift; expiry is a legacy
+                        // Matrix-era field the downstream VMs still honor).
                         expiresAt = null,
                         replyChannel = AskUserEvent.ReplyChannel.CHOICE_REPLY,
                     ),
@@ -207,6 +211,8 @@ object JournalTimelineMapper {
         return AskUserEvent(
             prompt = question,
             kind = kind,
+            // No expiry field exists in the journal protocol's prompt payload —
+            // see the permission_request mapping above.
             expiresAt = null,
             replyChannel = if (options.isEmpty()) AskUserEvent.ReplyChannel.TEXT_REPLY
             else AskUserEvent.ReplyChannel.CHOICE_REPLY,

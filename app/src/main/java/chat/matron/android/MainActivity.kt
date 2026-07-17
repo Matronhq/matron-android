@@ -89,9 +89,12 @@ private fun MatronApp(deps: AppDependencies) {
                     val vm = remember { SignInViewModel(auth = deps.auth, deviceDisplayName = "Matron Android") }
                     SignInScreen(viewModel = vm, onSignedIn = { s ->
                         // Gate on any in-flight sign-out teardown before publishing
-                        // the new session (mirrors iOS awaitPendingTeardown).
+                        // the new session (mirrors iOS awaitPendingTeardown), then
+                        // clear any mirror files a crashed teardown left behind —
+                        // a fresh login resyncs from a server snapshot anyway.
                         scope.launch {
                             deps.awaitPendingTeardown()
+                            deps.wipeLocalDataForFreshLogin()
                             session = s
                         }
                     })
