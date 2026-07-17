@@ -8,6 +8,27 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
+/// Lets a test hold a send suspended mid-flight and release it on demand, so
+/// "what does the composer look like DURING the round-trip" is deterministic.
+/// Ported from the Swift `SendGate` actor; [CompletableDeferred] replaces the
+/// `CheckedContinuation`.
+class SendGate {
+    private val startedSignal = kotlinx.coroutines.CompletableDeferred<Unit>()
+    private val openSignal = kotlinx.coroutines.CompletableDeferred<Unit>()
+
+    val started: Boolean get() = startedSignal.isCompleted
+
+    fun markStarted() {
+        if (!startedSignal.isCompleted) startedSignal.complete(Unit)
+    }
+
+    suspend fun await() = openSignal.await()
+
+    fun open() {
+        if (!openSignal.isCompleted) openSignal.complete(Unit)
+    }
+}
+
 /// Test double for [TimelineService], ported from matron-apple's
 /// `FakeTimelineService`. Reused by the view-model stage.
 class FakeTimelineService : TimelineService {
@@ -15,6 +36,19 @@ class FakeTimelineService : TimelineService {
 
     var snapshotsToEmit: List<List<TimelineItem>> = emptyList()
     var streamError: Throwable? = null
+    /// Artificial latency on a send, so a concurrent second call can observe the
+    /// first still in flight (used by AskUserSheet's double-submit guard tests).
+    var sendDelayNanos: Long = 0
+    /// One-shot error thrown by the next send (text or button or media);
+    /// consumed so a subsequent retry succeeds.
+    var nextSendError: Throwable? = null
+    /// When set, holds a send suspended mid-flight until the test opens the
+    /// gate — the deterministic "what does the composer look like DURING the
+    /// round-trip" window (ComposerViewModel's optimistic-clear/restore races).
+    var sendGate: SendGate? = null
+    /// When set, media sends succeed this many times and every one after throws
+    /// — pins a partial batch (first photo lands, second doesn't).
+    var failSendsAfter: Int? = null
     val sentText = mutableListOf<String>()
     val sentInReplyTo = mutableListOf<String?>()
     val sentButtonResponses = mutableListOf<Pair<List<String>, String>>()
@@ -29,20 +63,37 @@ class FakeTimelineService : TimelineService {
     }
 
     override suspend fun sendText(body: String, inReplyTo: String?) {
+        if (sendDelayNanos > 0) kotlinx.coroutines.delay(sendDelayNanos / 1_000_000)
+        sendGate?.let { it.markStarted(); it.await() }
+        nextSendError?.let { nextSendError = null; throw it }
         sentText.add(body)
         sentInReplyTo.add(inReplyTo)
     }
 
     override suspend fun sendButtonResponse(selectedValues: List<String>, inReplyTo: String) {
+        if (sendDelayNanos > 0) kotlinx.coroutines.delay(sendDelayNanos / 1_000_000)
+        sendGate?.let { it.markStarted(); it.await() }
+        nextSendError?.let { nextSendError = null; throw it }
         sentButtonResponses.add(selectedValues to inReplyTo)
     }
 
     override suspend fun sendImage(data: ByteArray, filename: String, mimeType: String, caption: String?) {
+        sendGate?.let { it.markStarted(); it.await() }
+        nextSendError?.let { nextSendError = null; throw it }
+        failIfPastMediaLimit()
         sentImages.add(SentMedia(filename, mimeType, data.size, caption))
     }
 
     override suspend fun sendFile(data: ByteArray, filename: String, mimeType: String, caption: String?) {
+        sendGate?.let { it.markStarted(); it.await() }
+        nextSendError?.let { nextSendError = null; throw it }
+        failIfPastMediaLimit()
         sentFiles.add(SentMedia(filename, mimeType, data.size, caption))
+    }
+
+    private fun failIfPastMediaLimit() {
+        val limit = failSendsAfter ?: return
+        if (sentImages.size + sentFiles.size >= limit) throw RuntimeException("test media send failure")
     }
 
     override suspend fun paginateBackward(requestSize: Int): Boolean {
@@ -52,6 +103,19 @@ class FakeTimelineService : TimelineService {
 
     override suspend fun markAsRead() {
         markReadCalls++
+    }
+
+    /// Per-convo session-status stream tests drive via [emitStatus]. Ported from
+    /// the Swift fake's `statusContinuation`/`statusPair`.
+    val sessionStatusFlow =
+        kotlinx.coroutines.flow.MutableSharedFlow<chat.matron.android.models.SessionStatusUpdate>(
+            extraBufferCapacity = 64,
+        )
+
+    override fun sessionStatus() = sessionStatusFlow
+
+    fun emitStatus(update: chat.matron.android.models.SessionStatusUpdate) {
+        sessionStatusFlow.tryEmit(update)
     }
 }
 
