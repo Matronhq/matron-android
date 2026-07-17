@@ -103,7 +103,7 @@ class AskUserEventTest {
             mode = "pick_one",
             buttonsJson = """[{"id":"a","label":"Send now","value":"interrupt"},{"id":"b","label":"Cancel message 1","value":"cancel:0"}]"""))!!
         assertEquals("Proceed?", evt.prompt)
-        assertEquals(AskUserEvent.ReplyChannel.BUTTON_RESPONSE, evt.replyChannel)
+        assertEquals(AskUserEvent.ReplyChannel.CHOICE_REPLY, evt.replyChannel)
         assertNull(evt.expiresAt)
         val kind = evt.kind as AskUserEvent.InputKind.Choice
         assertFalse(kind.allowOther)

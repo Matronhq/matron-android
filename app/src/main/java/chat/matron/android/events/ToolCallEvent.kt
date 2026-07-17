@@ -65,20 +65,22 @@ data class ToolCallEvent(
     }
 
     /// The Bash-tool command string: present when `argsJSON` is a JSON object
-    /// carrying a string under `"command"`, `null` otherwise.
-    val commandString: String?
-        get() = argsObject(argsJSON)?.stringOrNull("command")
+    /// carrying a string under `"command"`, `null` otherwise. Computed once at
+    /// construction (not a `get()`) — card renderers read this on every
+    /// recomposition, and re-parsing `argsJSON` each time would be wasted work.
+    val commandString: String? = argsObject(argsJSON)?.stringOrNull("command")
 
     /// One-line argument summary for the collapsed card header. Prefers the
     /// human-readable form (Bash `command`, or a single `key: value` string),
     /// else the raw JSON; collapsed to one line and truncated to 80 chars.
-    /// Nullary tools (`argsJSON == "{}"`) summarise to "".
-    val argSummary: String
-        get() {
-            if (argsJSON == "{}") return ""
-            val oneLine = summaryCandidate(argsJSON).replace("\n", " ")
-            return if (oneLine.length > 80) oneLine.take(77) + "…" else oneLine
-        }
+    /// Nullary tools (`argsJSON == "{}"`) summarise to "". Computed once at
+    /// construction, same rationale as [commandString].
+    val argSummary: String = if (argsJSON == "{}") {
+        ""
+    } else {
+        val oneLine = summaryCandidate(argsJSON).replace("\n", " ")
+        if (oneLine.length > 80) oneLine.take(77) + "…" else oneLine
+    }
 
     companion object {
         /// Parse a `chat.matron.tool_call` content object. Returns `null` if any

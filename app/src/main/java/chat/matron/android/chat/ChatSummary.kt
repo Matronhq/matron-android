@@ -53,7 +53,10 @@ enum class ChatRecencyGroup(val label: String) {
             val day = date.atZone(zone).toLocalDate()
             if (day == nowDay) return TODAY
             if (day == nowDay.minusDays(1)) return YESTERDAY
-            val sevenDaysAgo = now.minus(java.time.Duration.ofDays(7))
+            // Zone-aware day subtraction (matches matron-apple's
+            // `calendar.date(byAdding: .day, value: -7, to: now)`), not a flat
+            // 168-hour `Duration` — the two diverge across a DST transition.
+            val sevenDaysAgo = now.atZone(zone).minusDays(7).toInstant()
             return if (!date.isBefore(sevenDaysAgo)) LAST_SEVEN_DAYS else EARLIER
         }
     }

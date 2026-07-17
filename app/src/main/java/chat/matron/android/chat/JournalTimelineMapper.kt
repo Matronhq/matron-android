@@ -81,7 +81,7 @@ object JournalTimelineMapper {
                             allowOther = false,
                         ),
                         expiresAt = null,
-                        replyChannel = AskUserEvent.ReplyChannel.BUTTON_RESPONSE,
+                        replyChannel = AskUserEvent.ReplyChannel.CHOICE_REPLY,
                     ),
                 )
             }
@@ -208,7 +208,7 @@ object JournalTimelineMapper {
             kind = kind,
             expiresAt = null,
             replyChannel = if (options.isEmpty()) AskUserEvent.ReplyChannel.TEXT_REPLY
-            else AskUserEvent.ReplyChannel.BUTTON_RESPONSE,
+            else AskUserEvent.ReplyChannel.CHOICE_REPLY,
         )
     }
 

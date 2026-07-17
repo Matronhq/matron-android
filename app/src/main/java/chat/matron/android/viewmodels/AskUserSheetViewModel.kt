@@ -10,10 +10,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /// Drives the ask-user sheet for one prompt. Ported from matron-apple's
-/// `AskUserSheetViewModel`. The send path answers on the wire protocol the
-/// prompt arrived on ([AskUserEvent.replyChannel]): a plain text reply targeting
-/// the prompt for `ask_user` events, or a `button_response` for the bridge's
-/// live buttons protocol.
+/// `AskUserSheetViewModel`. Every answer goes out as a journal `prompt_reply`
+/// op; the send path picks which field it lands in
+/// ([AskUserEvent.replyChannel]): free text via `text=` for text-kind prompts,
+/// or the picked option's wire value(s) via `choice=` for choice/multi-choice
+/// prompts.
 class AskUserSheetViewModel(
     val event: AskUserEvent,
     /// The event ID of the prompt — the reply's correlation target.
@@ -39,7 +40,9 @@ class AskUserSheetViewModel(
     private var hasSent = false
 
     /// True once [AskUserEvent.expiresAt] has passed. UI uses this to disable
-    /// Send; [awaitExpiry] auto-dismisses at the same moment.
+    /// Send; [awaitExpiry] fires at the same moment so the caller can re-render
+    /// into the expired state — it does not dismiss the sheet itself, so the
+    /// card stays visible (now Send-disabled) until the view layer closes it.
     val isExpired: Boolean
         get() {
             val expiresAt = event.expiresAt ?: return false
@@ -59,7 +62,7 @@ class AskUserSheetViewModel(
                     if (body.isEmpty()) return
                     timeline.sendText(body, promptEventID)
                 }
-                AskUserEvent.ReplyChannel.BUTTON_RESPONSE -> {
+                AskUserEvent.ReplyChannel.CHOICE_REPLY -> {
                     val values = selectedValues()
                     if (values.isEmpty()) return
                     timeline.sendButtonResponse(values, promptEventID)
@@ -114,9 +117,9 @@ class AskUserSheetViewModel(
         }
     }
 
-    /// Wire `value`s for the button-response channel, in option order. The
-    /// buttons protocol only produces choice/multiChoice kinds; the rest return
-    /// empty (send then refuses), defensive only.
+    /// Wire `value`s for the `choice=` reply channel, in option order. Only
+    /// choice/multiChoice kinds use this channel; the rest return empty (send
+    /// then refuses), defensive only.
     private fun selectedValues(): List<String> = when (val kind = event.kind) {
         is AskUserEvent.InputKind.Choice -> kind.options.filter { selectedChoiceIDs.contains(it.id) }.map { it.value }
         is AskUserEvent.InputKind.MultiChoice -> kind.options.filter { selectedChoiceIDs.contains(it.id) }.map { it.value }

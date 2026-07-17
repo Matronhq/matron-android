@@ -530,7 +530,7 @@ class ChatViewModel(
 
     /// The most recent still-unanswered, unexpired ask-user prompt, or `null`.
     /// A prompt counts answered when it's in [answeredPromptIDs], or the timeline
-    /// holds our own `button_response`/reply targeting it.
+    /// holds our own `prompt_reply` targeting it.
     fun pendingAsk(): AskUserPromptContext? {
         persistVisibleAnswers()
         val answeredInTimeline = collectOwnAnswers()

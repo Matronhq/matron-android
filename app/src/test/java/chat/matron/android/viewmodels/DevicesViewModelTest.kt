@@ -104,11 +104,9 @@ class DevicesViewModelTest {
     fun displayHelpers_lastSeenNeverAndLag() {
         val never = device(1, kind = "agent", lastSeenAt = null)
         assertEquals("Never", never.lastSeenText())
-        assertEquals("terminal", never.symbolName)
         assertEquals("Up to date", never.lagText)
         val behind = device(2, kind = "client", lag = 123, lastSeenAt = 1_784_500_000_000)
         assertEquals("123 events behind", behind.lagText)
-        assertEquals("laptopcomputer", behind.symbolName)
         assertNotEquals("Never", behind.lastSeenText())
         assertEquals("1 event behind", device(3, lag = 1).lagText)
     }

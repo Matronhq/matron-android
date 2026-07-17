@@ -16,8 +16,8 @@ interface TimelineService {
     /// numeric journal seq the send becomes a `prompt_reply` targeting it.
     suspend fun sendText(body: String, inReplyTo: String?)
 
-    /// Sends a `button_response` answer to a buttons prompt. [inReplyTo] is the
-    /// prompt's journal seq.
+    /// Sends a `prompt_reply` with `choice=` — the answer to a choice/multi-choice
+    /// prompt. [inReplyTo] is the prompt's journal seq.
     suspend fun sendButtonResponse(selectedValues: List<String>, inReplyTo: String)
 
     /// Sends an image attachment. [caption] rides on the event itself.

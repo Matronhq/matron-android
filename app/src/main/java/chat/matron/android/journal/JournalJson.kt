@@ -17,7 +17,9 @@ val MatronJson: Json = Json {
     encodeDefaults = false
 }
 
-/// Pretty-printing variant used only by the "View source" DTO dump.
+/// Pretty-printing variant used by the "View source" DTO dump and by
+/// [chat.matron.android.events.ToolCallEvent]'s sorted-key JSON rendering of
+/// tool-call args/results.
 val MatronJsonPretty: Json = Json {
     ignoreUnknownKeys = true
     encodeDefaults = false

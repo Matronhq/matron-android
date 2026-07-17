@@ -199,7 +199,7 @@ class JournalTimelineMapperTest {
         val kind = item.kind as TimelineItem.Kind.AskUser
         assertEquals("3", kind.eventID)
         assertEquals("Deploy?", kind.event.prompt)
-        assertEquals(AskUserEvent.ReplyChannel.BUTTON_RESPONSE, kind.event.replyChannel)
+        assertEquals(AskUserEvent.ReplyChannel.CHOICE_REPLY, kind.event.replyChannel)
         val choice = kind.event.kind as AskUserEvent.InputKind.Choice
         assertEquals(listOf("Yes", "No"), choice.options.map { it.label })
         assertTrue(choice.allowOther)

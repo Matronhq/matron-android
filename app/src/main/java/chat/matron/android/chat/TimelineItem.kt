@@ -18,12 +18,17 @@ data class TimelineItem(
     /// `true` if the local user sent this event.
     val isOwn: Boolean,
     val sendState: TimelineSendState = TimelineSendState.Sent,
-    /// Event ID this message replies to, if any. Lets the view mark an
-    /// `ask_user` prompt answered when a reply targeting it appears — including
-    /// replies from the user's other devices.
+    /// Event ID this message replies to, if any. Lets the view mark an ask-user
+    /// prompt answered when a reply targeting it appears — including replies
+    /// from the user's other devices.
     val inReplyToEventID: String? = null,
 ) {
     sealed interface Kind {
+        // Invariant: every `eventID` field below always equals the enclosing
+        // TimelineItem's `id` (both are `event.seq.toString()` from the same
+        // mapping call — see JournalTimelineMapper.timelineItem). Duplicated
+        // deliberately so card/view code holding just the Kind can still
+        // correlate against store events without threading the parent id through.
         data class Text(val body: String, val formattedHTML: String?) : Kind
         data class Image(val url: String?, val caption: String?, val sizeBytes: Long?) : Kind
         data class File(
@@ -33,21 +38,26 @@ data class TimelineItem(
             val sizeBytes: Long?,
         ) : Kind
         /// Member joins, name changes — a state event rendered as a small inline
-        /// notice.
+        /// notice. Currently unproduced: no journal event type maps to this kind
+        /// (kept — TimelineItemView, ChatViewModel, and TimelineItemPrettyJson
+        /// all branch on it — so a future state-notice event can light up without
+        /// another sealed-`when` sweep).
         data class StateChange(val text: String) : Kind
-        /// `chat.matron.tool_call` event. `eventID` is kept on the case so
-        /// updates can be correlated against an in-flight running tool call.
+        /// Journal `tool_output` event (rendered as a static card unless it
+        /// carries a `viewer_url`, in which case the mapper produces [LiveOutput]
+        /// instead). `eventID` is kept on the case so updates can be correlated
+        /// against an in-flight running tool call.
         data class ToolCall(val eventID: String, val event: ToolCallEvent) : Kind
         /// Journal `diff` event — a file-edit snippet.
         data class Diff(val eventID: String, val event: DiffEvent) : Kind
         /// A live command-output announcement (journal `tool_output` with a
         /// `viewer_url`).
         data class LiveOutput(val eventID: String, val event: LiveOutputEvent) : Kind
-        /// `chat.matron.ask_user` event. `eventID` is used by the reply path so
-        /// the bot can correlate the answer.
+        /// Journal `prompt` or `permission_request` event. `eventID` is used by
+        /// the reply path so the bot can correlate the answer.
         data class AskUser(val eventID: String, val event: AskUserEvent) : Kind
-        /// A `chat.matron.button_response` answer to a buttons prompt. NOT
-        /// rendered — kept in the snapshot so the view can mark the prompt
+        /// A journal `prompt_reply` event answering a prompt with a `choice`.
+        /// NOT rendered — kept in the snapshot so the view can mark the prompt
         /// answered across devices.
         data class AskUserAnswer(
             val promptEventID: String,

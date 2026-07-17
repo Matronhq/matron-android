@@ -147,7 +147,7 @@ class AskUserSheetViewModelTest {
                 "Queued messages",
                 AskUserEvent.InputKind.Choice(opts, false),
                 null,
-                AskUserEvent.ReplyChannel.BUTTON_RESPONSE,
+                AskUserEvent.ReplyChannel.CHOICE_REPLY,
             ),
             fake,
         )
@@ -168,7 +168,7 @@ class AskUserSheetViewModelTest {
                 "?",
                 AskUserEvent.InputKind.Choice(opts, false),
                 null,
-                AskUserEvent.ReplyChannel.BUTTON_RESPONSE,
+                AskUserEvent.ReplyChannel.CHOICE_REPLY,
             ),
             fake,
         )

@@ -54,9 +54,10 @@ sealed class RPCRequestError : Exception() {
     data object Offline : RPCRequestError()
 }
 
-/// Optional sink for full-text search indexing of applied journal events.
-/// Search itself is out of scope for this port; the seam is kept so the
-/// index-on-apply behavior can light up when a search backend lands.
+/// Sink for full-text search indexing of applied journal events. Optional
+/// (`null` when the local search DB failed to open — [chat.matron.android.AppDependencies]
+/// degrades to "search disabled" rather than failing to launch); when present,
+/// [chat.matron.android.search.SearchServiceLive] indexes every applied event on the fly.
 interface SearchIndexer {
     suspend fun index(roomID: String, eventID: String, sender: String, timestamp: Instant, body: String)
 }

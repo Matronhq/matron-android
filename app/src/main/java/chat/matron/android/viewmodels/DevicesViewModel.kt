@@ -99,10 +99,9 @@ class DevicesViewModel(
 }
 
 /// Display helpers shared by the device rows. Ported from the Swift `DeviceDTO`
-/// extension; the SF Symbol names are kept verbatim (the UI stage maps them).
+/// extension (which also carries an SF Symbol name per device kind — the
+/// Android UI has no equivalent, so that helper wasn't ported).
 val DeviceDTO.isClient: Boolean get() = kind == "client"
-
-val DeviceDTO.symbolName: String get() = if (isClient) "laptopcomputer" else "terminal"
 
 /// `lag` is the user's head seq minus this device's cursor.
 val DeviceDTO.lagText: String

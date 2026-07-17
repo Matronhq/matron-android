@@ -9,17 +9,18 @@ import chat.matron.android.journal.stringOrNull
 import java.time.Instant
 import kotlinx.serialization.json.JsonObject
 
-/// Decoded form of a structured bot question, from either of the two wire
-/// protocols:
+/// Decoded form of a structured bot question. In production this is built
+/// directly from a journal `prompt` or `permission_request` event's payload by
+/// [chat.matron.android.chat.JournalTimelineMapper] (`askUserEvent` /
+/// the `permission_request` branch) — [parse] and [parseButtons] below decode a
+/// different, Matrix-era wire shape (`chat.matron.ask_user` custom events and
+/// `chat.matron.buttons` content keys) that this journal client never receives;
+/// they're unreachable from production and exercised only by `AskUserEventTest`.
 ///
-/// - `chat.matron.ask_user` custom events via [parse] — the forward-looking
-///   contract for the bridge.
-/// - `chat.matron.buttons` content keys on ordinary messages via
-///   [parseButtons] — the protocol the bridge emits today.
-///
-/// [replyChannel] records which protocol the prompt arrived on so the reply
-/// path can answer in kind. [expiresAt] is optional (indefinitely-valid prompts
-/// omit it; the buttons protocol has no expiry field — always null there).
+/// Every reply — regardless of [kind] — goes out as a journal `prompt_reply` op.
+/// [replyChannel] records which field the answer must be sent in: `choice=` for
+/// a picked option's value, `text=` for free text. [expiresAt] is optional
+/// (indefinitely-valid prompts omit it).
 data class AskUserEvent(
     val prompt: String,
     val kind: InputKind,
@@ -33,12 +34,13 @@ data class AskUserEvent(
         data class MultiChoice(val options: List<Option>, val allowOther: kotlin.Boolean) : InputKind
     }
 
-    /// How the user's answer must be sent back so the bot can correlate it.
+    /// Which field of the journal `prompt_reply` op the answer must be sent in.
     enum class ReplyChannel {
-        /// Ordinary text reply pointing at the prompt event (`ask_user`).
+        /// `prompt_reply { text: "<free text>" }`.
         TEXT_REPLY,
-        /// `chat.matron.button_response: { selected_values }` (Matron X buttons).
-        BUTTON_RESPONSE,
+        /// `prompt_reply { choice: "<option value>" }` (or comma-joined values
+        /// for a multi-choice answer).
+        CHOICE_REPLY,
     }
 
     data class Option(
@@ -53,8 +55,12 @@ data class AskUserEvent(
     }
 
     companion object {
-        /// Parse a `chat.matron.ask_user` content object. Returns `null` if
-        /// `prompt` / `input.kind` are missing or `kind` is unknown.
+        /// Parse a `chat.matron.ask_user` content object — a Matrix-era shape
+        /// this journal client never receives (production builds [AskUserEvent]
+        /// straight from journal `prompt` payloads instead; see the class doc).
+        /// Dead in production; kept only because `AskUserEventTest` still
+        /// exercises it. Returns `null` if `prompt` / `input.kind` are missing or
+        /// `kind` is unknown.
         fun parse(content: JsonObject): AskUserEvent? {
             val prompt = content.stringOrNull("prompt") ?: return null
             val inputDict = content.objectOrNull("input") ?: return null
@@ -77,10 +83,14 @@ data class AskUserEvent(
             return AskUserEvent(prompt = prompt, kind = kind, expiresAt = expiresAt)
         }
 
-        /// Parse the content of a message carrying a `chat.matron.buttons` key
-        /// (the bridge's live protocol). `mode` must be `pick_one`/`pick_many`,
-        /// `prompt` must be present, and at least one button must parse with all
-        /// three of `id`/`label`/`value` — otherwise `null`.
+        /// Parse the content of a message carrying a `chat.matron.buttons` key —
+        /// another Matrix-era shape this journal client never receives (the
+        /// journal server's `permission_request` event is the live equivalent,
+        /// mapped separately; see the class doc). Dead in production; kept only
+        /// because `AskUserEventTest` still exercises it. `mode` must be
+        /// `pick_one`/`pick_many`, `prompt` must be present, and at least one
+        /// button must parse with all three of `id`/`label`/`value` — otherwise
+        /// `null`.
         fun parseButtons(content: JsonObject): AskUserEvent? {
             val buttonsData = content.objectOrNull(MatronEventType.BUTTONS) ?: return null
             val mode = buttonsData.stringOrNull("mode") ?: return null
@@ -102,7 +112,7 @@ data class AskUserEvent(
                 prompt = prompt,
                 kind = kind,
                 expiresAt = null,
-                replyChannel = ReplyChannel.BUTTON_RESPONSE,
+                replyChannel = ReplyChannel.CHOICE_REPLY,
             )
         }
     }
