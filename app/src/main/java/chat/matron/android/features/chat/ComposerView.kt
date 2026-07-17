@@ -130,6 +130,10 @@ fun ComposerView(viewModel: ComposerViewModel) {
 
     // Restore any per-room draft on first appearance; persist on disappear.
     DisposableEffect(viewModel.roomID) {
+        // ComposerViewModel instances are cached per-room (ChatVMCache) and
+        // reused on revisit, so a `sendError` left undismissed from a prior
+        // visit would otherwise resurface here as if it just happened.
+        viewModel.dismissError()
         if (viewModel.input.isEmpty()) {
             ComposerDraftMemory.retrieve(viewModel.roomID)?.let { draft ->
                 viewModel.input = draft

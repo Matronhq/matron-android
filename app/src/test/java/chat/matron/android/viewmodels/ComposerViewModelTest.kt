@@ -197,6 +197,21 @@ class ComposerViewModelTest {
         assertEquals("boom", vm.sendError.value)
     }
 
+    /// ComposerViewModel instances are cached per-room (ChatVMCache) and
+    /// reused on revisit, so ComposerView's room-keyed DisposableEffect calls
+    /// dismissError() on (re-)entry — this is the model-side half of that
+    /// fix: a stale error from a prior visit must not linger once cleared.
+    @Test
+    fun dismissError_clearsSendError() {
+        val vm = makeVM()
+        vm.reportAttachmentError("boom")
+        assertEquals("boom", vm.sendError.value)
+
+        vm.dismissError()
+
+        assertNull(vm.sendError.value)
+    }
+
     @Test
     fun sendVoiceNote_sendsAudioFileAndDeletesTemp() = runBlocking {
         val tmp = makeTempFile("voice.m4a", "AUDIO")

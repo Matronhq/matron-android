@@ -358,7 +358,9 @@ class ComposerViewModel(
         }
     }
 
-    /// Surfaces attachment-staging errors that occur outside [attachFiles].
+    /// Surfaces a composer-level error that occurs outside [send]/[attachFiles]
+    /// — attachment-staging failures (picker read errors), and mic/voice-note
+    /// failures (permission denied, recorder start failure) reported by the UI.
     fun reportAttachmentError(message: String) {
         _sendError.value = message
     }
