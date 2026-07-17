@@ -28,7 +28,10 @@ interface ConversationDao {
     /// JournalStore.applyJournal) rather than `last_seq` (bumped for every
     /// frame incl. read_marker/session_status) so a bookkeeping frame from
     /// another device can't float a stale chat to the top. `last_seq` is only
-    /// a tiebreak (e.g. rows sharing a null last_activity_ts).
+    /// a tiebreak (e.g. rows sharing a null last_activity_ts). This is a
+    /// deliberate divergence from matron-apple's GRDB query, which orders by
+    /// `last_seq` alone (same latent flaw, left unfixed there) — don't "fix"
+    /// this back to match it during a future parity audit.
     @Query(
         "SELECT * FROM conversation WHERE hidden = 0 AND parent_convo_id IS NULL " +
             "ORDER BY last_activity_ts DESC, last_seq DESC"

@@ -424,6 +424,7 @@ class ChatViewModelTest {
         assertEquals(1, media.requested.size)
 
         // Connectivity returns: the failure cache clears...
+        waitUntil { fake.connectionStateFlow.subscriptionCount.value > 0 }
         fake.emitConnectionState(SyncConnectionState.Running)
         waitUntil { vm.failedRequestCount == 0 }
 

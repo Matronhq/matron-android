@@ -315,7 +315,8 @@ fun TimelineList(
 /**
  * Dismissible banner for [ChatViewModel.attachmentError]: a file-attachment tap
  * that failed to download/write had no user-visible feedback (a dead button) —
- * this surfaces it, matching [ComposerView]'s `ComposerErrorBanner` styling.
+ * this surfaces it, playing the analogous role to [ComposerView]'s
+ * `ComposerErrorBanner` (its own Surface/errorContainer styling, not a copy).
  */
 @Composable
 private fun AttachmentErrorBanner(message: String, onDismiss: () -> Unit, modifier: Modifier = Modifier) {

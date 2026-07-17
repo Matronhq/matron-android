@@ -54,7 +54,7 @@ class AnsiSGRParserTest {
     @Test
     fun nonSGRSequencesAreStripped() {
         // Cursor-up CSI, OSC window title, and a two-byte escape.
-        val out = AnsiSGRParser().append("${esc}[2Aup${esc}]0;titleosc${esc}Mtwo")
+        val out = AnsiSGRParser().append("${esc}[2Aup${esc}]0;title\u0007osc${esc}Mtwo")
         assertEquals("uposctwo", out.text)
     }
 
@@ -147,7 +147,7 @@ class AnsiSGRParserTest {
         val filler = "x".repeat(512 - prefix.length) // total tail length == 512, at the cap.
         val out1 = parser.append(prefix + filler)
         assertEquals("", out1.text)
-        val out2 = parser.append("after")
+        val out2 = parser.append("\u0007after")
         assertEquals("at-cap tail must stay buffered and the BEL still terminates it", "after", out2.text)
     }
 
@@ -158,11 +158,11 @@ class AnsiSGRParserTest {
         val filler = "x".repeat(513 - prefix.length) // total tail length == 513, one over the cap.
         val out1 = parser.append(prefix + filler)
         assertEquals("", out1.text)
-        val out2 = parser.append("after")
+        val out2 = parser.append("\u0007after")
         // Cap exceeded: pendingEscape was dropped rather than buffered, so the
         // next append() sees a fresh chunk and the BEL is no longer consumed as
         // an OSC terminator — it leaks through as an ordinary (control) char.
-        assertEquals("after", out2.text)
+        assertEquals("\u0007after", out2.text)
     }
 
     @Test
@@ -170,7 +170,7 @@ class AnsiSGRParserTest {
         val parser = AnsiSGRParser()
         val out1 = parser.append("${esc}]0;" + "x".repeat(5000))
         assertEquals("", out1.text)
-        val out2 = parser.append("after")
-        assertEquals("after", out2.text)
+        val out2 = parser.append("\u0007after")
+        assertEquals("\u0007after", out2.text)
     }
 }
