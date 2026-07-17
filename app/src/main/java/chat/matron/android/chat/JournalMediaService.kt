@@ -26,7 +26,10 @@ class JournalMediaService(private val api: JournalApi) : MediaService {
             if (parsed.scheme != serverURL.scheme) return null
             if (parsed.host != serverURL.host) return null
             if (parsed.port != serverURL.port) return null
-            val prefix = "/media/"
+            // Honor a server mounted under a subpath: the media prefix is the
+            // server's own path + "/media/", not a bare "/media/" (bugbot
+            // "Subpath media URLs rejected").
+            val prefix = serverURL.encodedPath.trimEnd('/') + "/media/"
             val path = parsed.encodedPath
             if (!path.startsWith(prefix)) return null
             val ref = path.removePrefix(prefix)

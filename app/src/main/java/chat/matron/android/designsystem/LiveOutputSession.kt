@@ -84,6 +84,10 @@ class LiveOutputSession(
         if (phase is Phase.Complete) return
         val socketURL = event.socketURL ?: run { phase = Phase.Disconnected; return }
         if (event.isExpired) { phase = Phase.Expired; return }
+        // A fresh start (re-expanding the card, returning to the room) gets a
+        // fresh retry budget — otherwise three historical failures pin the
+        // session dead forever (bugbot "Live output retries never reset").
+        attempts = 0
         scheduleExpiry(scope)
         runJob = scope.launch { run(socketURL) }
     }

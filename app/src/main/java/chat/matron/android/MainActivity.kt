@@ -188,7 +188,10 @@ private fun SignedInApp(
         composable("search") {
             val searchService = deps.search
             if (searchService == null) {
-                nav.popBackStack()
+                // Navigation is a side effect — never call it straight from
+                // the composable body (bugbot "Search route pops during
+                // composition").
+                LaunchedEffect(Unit) { nav.popBackStack() }
             } else {
                 val searchVM = remember { SearchViewModel(searchService, allChats) }
                 SearchScreen(

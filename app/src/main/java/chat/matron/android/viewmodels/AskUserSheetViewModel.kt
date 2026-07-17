@@ -80,8 +80,14 @@ class AskUserSheetViewModel(
     /// cancelled). No-op for prompts without an expiry.
     suspend fun awaitExpiry(onExpire: () -> Unit) {
         val expiresAt = event.expiresAt ?: return
-        val millis = java.time.Duration.between(Instant.now(), expiresAt).toMillis().coerceAtLeast(0)
-        delay(millis)
+        // Loop rather than a single delay: toMillis() truncates sub-ms
+        // remainder (and delay() can wake early), which could fire onExpire
+        // while isExpired was still false — the sheet dismissed but Send
+        // still enabled for one frame, and a flaky assertion on slow CI.
+        while (Instant.now().isBefore(expiresAt)) {
+            val millis = java.time.Duration.between(Instant.now(), expiresAt).toMillis().coerceAtLeast(1)
+            delay(millis)
+        }
         onExpire()
     }
 

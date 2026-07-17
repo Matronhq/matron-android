@@ -116,6 +116,8 @@ class AppDependencies(
         val db: MatronDatabase,
         val store: JournalStore,
         val engine: JournalSyncEngine,
+        /** Boot-time TTL sweep; teardown joins it before wiping the same DB. */
+        var purgeJob: Job? = null,
     )
 
     private val cores: MutableMap<String, JournalCore> = mutableMapOf()
@@ -181,8 +183,11 @@ class AppDependencies(
         cores[session.userID] = core
         // Boot-time TTL sweep of expired tool-output snippets. Kotlin constructors
         // can't suspend, so the composition root drives it once the store exists —
-        // documented on JournalStore.purgeExpiredToolOutputSnippets.
-        appScope.launch { runCatching { store.purgeExpiredToolOutputSnippets() } }
+        // documented on JournalStore.purgeExpiredToolOutputSnippets. Tracked on
+        // the core so sign-out teardown joins it before wipe()/close() — an
+        // untracked sweep could race the wipe on the same database (bugbot
+        // "Boot purge races sign-out wipe").
+        core.purgeJob = appScope.launch { runCatching { store.purgeExpiredToolOutputSnippets() } }
         return core
     }
 
@@ -257,8 +262,14 @@ class AppDependencies(
      */
     fun signOut() {
         val oldCores = cores.values.toList()
+        // Chain onto any previous teardown: overwriting the job would leave
+        // awaitPendingTeardown() watching only the newest one while an older
+        // wipe/close still runs (bugbot "Sign-out drops prior teardown job").
+        val previous = teardownJob
         teardownJob = appScope.launch {
+            previous?.join()
             for (core in oldCores) {
+                core.purgeJob?.join()
                 withTimeoutOrNull(5_000) { runCatching { core.api.unregisterPush() } }
                 core.engine.endSync()
                 runCatching { core.store.wipe() }
