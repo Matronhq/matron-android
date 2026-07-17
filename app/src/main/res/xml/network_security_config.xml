@@ -12,6 +12,9 @@
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">localhost</domain>
         <domain includeSubdomains="false">127.0.0.1</domain>
+        <!-- No bracketed [::1] entry needed: OkHttp's HttpUrl canonicalizes IPv6
+             literal hosts to the unbracketed form before the cleartext check, even
+             though ServerURLValidator matches both forms. -->
         <domain includeSubdomains="false">::1</domain>
     </domain-config>
     <base-config cleartextTrafficPermitted="false" />
