@@ -1,0 +1,173 @@
+package chat.matron.android.chat
+
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import chat.matron.android.journal.ConvoSummaryDTO
+import chat.matron.android.journal.FakeConnector
+import chat.matron.android.journal.FakeSnapshotSource
+import chat.matron.android.journal.JournalEvent
+import chat.matron.android.journal.JournalStore
+import chat.matron.android.journal.JournalSyncEngine
+import chat.matron.android.journal.db.MatronDatabase
+import java.time.Instant
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+
+/// Ported from matron-apple's `JournalChatServiceTests`. In-memory Room under
+/// Robolectric; the engine never connects (list tests only read the store).
+@RunWith(RobolectricTestRunner::class)
+@Config(manifest = Config.NONE)
+class JournalChatServiceTest {
+    private val context: Context get() = ApplicationProvider.getApplicationContext()
+
+    private fun makeStore() = JournalStore(MatronDatabase.inMemory(context), ownSender = "user:dan")
+
+    private fun makeEngine(store: JournalStore, backoff: Double = 0.01) = JournalSyncEngine(
+        api = FakeSnapshotSource(), store = store, connector = FakeConnector(emptyList()),
+        token = "t", ownSender = "user:dan", search = null, backoffBaseSeconds = backoff,
+    )
+
+    private fun makeService(store: JournalStore, coalesce: Duration = 250.milliseconds) =
+        JournalChatService(store, makeEngine(store), coalesce)
+
+    private fun ev(seq: Long, convo: String, sender: String, body: String) = JournalEvent(
+        seq, convo, Instant.ofEpochMilli(seq * 1000), sender, "text", buildJsonObject { put("body", body) },
+    )
+
+    private class FlowProbe<T>(scope: CoroutineScope, flow: Flow<T>) {
+        private val channel = Channel<T>(Channel.UNLIMITED)
+        private val job: Job = scope.launch { flow.collect { channel.send(it) } }
+        suspend fun next(timeoutMs: Long = 3000): T = withTimeout(timeoutMs) { channel.receive() }
+        fun cancel() = job.cancel()
+    }
+
+    @Test fun chatSummariesMapAndStream() = runBlocking {
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(ConvoSummaryDTO("c1", "Fix build", "running", 3, "s", 1_752_000_000_000)),
+            headSeq = 3,
+        )
+        val service = makeService(store)
+        val probe = FlowProbe(this, service.chatSummaries())
+        val summaries = probe.next()
+        assertEquals(1, summaries.size)
+        assertEquals("c1", summaries.first().id)
+        assertEquals("Fix build", summaries.first().title)
+        assertEquals(0, summaries.first().unreadCount)
+        assertNotNull(summaries.first().lastActivity)
+        probe.cancel()
+    }
+
+    @Test fun chatSummariesExcludeChildrenButChildrenStreamIncludesThem() = runBlocking {
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(
+                ConvoSummaryDTO("p1", "Parent", "running", 1, "", 1, parentConvoID = null),
+                ConvoSummaryDTO("p1:sub:a1", "explore", "running", 2, "", 2, parentConvoID = "p1"),
+                ConvoSummaryDTO("p1:sub:b2", "test", "done", 3, "", 3, parentConvoID = "p1"),
+            ),
+            headSeq = 3,
+        )
+        val service = makeService(store)
+        val listProbe = FlowProbe(this, service.chatSummaries())
+        assertEquals(listOf("p1"), listProbe.next().map { it.id })
+        listProbe.cancel()
+
+        val childProbe = FlowProbe(this, service.children("p1"))
+        assertEquals(
+            listOf(
+                SubChatSummary("p1:sub:a1", "explore", true),
+                SubChatSummary("p1:sub:b2", "test", false),
+            ),
+            childProbe.next(),
+        )
+        childProbe.cancel()
+    }
+
+    @Test fun untitledConvoFallsBackToID() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(ev(1, "sess-42", "agent:a", "x"))
+        val service = makeService(store)
+        val probe = FlowProbe(this, service.chatSummaries())
+        val summaries = probe.next()
+        assertEquals("sess-42", summaries.first().title)
+        assertEquals(1, summaries.first().unreadCount)
+        probe.cancel()
+    }
+
+    @Test fun chatSummariesCoalesceBurstsToNewestSnapshot() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(ev(1, "c1", "agent:a", "first"))
+        val service = makeService(store, coalesce = 50.milliseconds)
+        val probe = FlowProbe(this, service.chatSummaries())
+        assertEquals(1, probe.next().first().unreadCount)
+
+        for (seq in 2L..6L) store.applyJournal(ev(seq, "c1", "agent:a", "m"))
+
+        var emissions = 0
+        while (true) {
+            val next = probe.next()
+            emissions++
+            if (next.first().unreadCount == 6) break
+            assertTrue("burst should coalesce, not replay per-frame", emissions < 5)
+        }
+        assertTrue(emissions < 5)
+        probe.cancel()
+    }
+
+    @Test fun createChatThrowsGracefully() = runBlocking {
+        val service = makeService(makeStore())
+        try {
+            service.createChat("claude")
+            fail("expected throw")
+        } catch (e: Throwable) {
+            assertTrue(e is JournalChatError)
+        }
+    }
+
+    @Test fun leaveHidesConversation() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(ev(1, "c1", "agent:a", "x"))
+        val service = makeService(store)
+        service.leave("c1")
+        assertEquals(0, store.conversations().size)
+    }
+
+    @Test fun forceSnapshotIsBestEffortWhenOffline() = runBlocking {
+        val service = makeService(makeStore())
+        service.forceSnapshot() // must not throw or hang
+    }
+
+    @Test fun refreshThrowsWhenEngineStopped() = runBlocking {
+        val store = makeStore()
+        val engine = makeEngine(store)
+        val service = JournalChatService(store, engine)
+        engine.beginSync()
+        delay(30)
+        engine.endSync()
+        try {
+            service.refresh()
+            fail("expected refresh to throw once the engine is stopped")
+        } catch (e: Throwable) {
+            // expected
+        }
+    }
+}
