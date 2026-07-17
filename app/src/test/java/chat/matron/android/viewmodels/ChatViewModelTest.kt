@@ -510,6 +510,32 @@ class ChatViewModelTest {
     }
 
     @Test
+    fun attachmentError_clearedOnRestart_soACachedVMDoesNotResurfaceAStaleError() = vmTest { scope ->
+        // ChatVMCache keeps one ChatViewModel per room for the whole session; an
+        // undismissed error from a prior visit must not look "fresh" on the next
+        // one (the same bug class Task 3 fixed for ComposerViewModel.sendError).
+        val fake = FakeTimelineService()
+        fake.snapshotsToEmit = listOf(emptyList())
+        val vm = makeVM(scope, fake)
+        val root = java.nio.file.Files.createTempDirectory("write-temp-file").toFile()
+        try {
+            vm.start().join()
+            vm.writeTempFile("mxc://example/missing", "report.pdf", root)
+            assertNotNull(vm.attachmentError.value)
+
+            // Simulate leaving and re-entering the room: ChatLifecycle calls
+            // start() again on the same cached VM instance.
+            vm.stop()
+            fake.snapshotsToEmit = listOf(emptyList())
+            vm.start().join()
+
+            assertNull(vm.attachmentError.value)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun writeTempFile_traversalFilename_staysInsideAttachmentsDir() = vmTest { scope ->
         val media = FakeMediaService()
         val url = "mxc://example/evil"

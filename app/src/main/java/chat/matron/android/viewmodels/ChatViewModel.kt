@@ -325,6 +325,15 @@ class ChatViewModel(
         emptyDebounceTask?.cancel()
         emptyDebounceTask = null
         _sessionStatus.value = null
+        // A VM is cached per-room (ChatVMCache) and outlives a single visit, so
+        // an undismissed attachment error from a prior visit must not resurface
+        // as "fresh" on re-entry (the same stale-state bug Task 3 fixed for
+        // ComposerViewModel.sendError).
+        // A VM is cached per-room (ChatVMCache) and outlives a single visit, so
+        // an undismissed attachment error from a prior visit must not resurface
+        // as "fresh" on re-entry (the same stale-state bug Task 3 fixed for
+        // ComposerViewModel.sendError).
+        _attachmentError.value = null
 
         val firstSignal = CompletableDeferred<Unit>()
         fun fireOnce() {
@@ -367,6 +376,10 @@ class ChatViewModel(
         // A prior failed image fetch only means "unreachable then" — once the
         // sync connection comes back up, give it another chance rather than
         // negative-caching it for the rest of the VM's (session-long) lifetime.
+        // Eventually consistent, not live: clearing the cache doesn't retry any
+        // already-composed row itself, it just lets the *next* image(url) call
+        // (recomposition, scroll recycle, re-open) fetch again instead of
+        // short-circuiting to the stale negative result.
         connectionTask?.cancel()
         connectionTask = scope.launch {
             timeline.connectionState().collect { state ->
@@ -465,7 +478,10 @@ class ChatViewModel(
 
     /// Returns cached bytes for a media URL, or `null` and kicks off a fetch.
     /// Idempotent: repeat calls coalesce to one in-flight request; URLs that
-    /// fetch to `null` are remembered so it doesn't loop.
+    /// fetch to `null` are remembered so it doesn't loop — until connectivity
+    /// returns (see the `connectionTask` in [start]), and even then only
+    /// eventually: the clear doesn't retry in place, it just lets the next call
+    /// to [image] for that URL fetch again instead of short-circuiting.
     fun image(url: String): ByteArray? {
         resolvedImages[url]?.let { return it }
         if (failedRequests.contains(url)) return null
