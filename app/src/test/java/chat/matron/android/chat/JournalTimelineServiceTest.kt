@@ -488,6 +488,27 @@ class JournalTimelineServiceTest {
         assertEquals(listOf("fresh-fail"), overlay.echoes.map { it.localID })
     }
 
+    // Bugbot "Echo cleared by history replay": with the baseline seeded to the
+    // persisted high-water at room open, the FIRST reconcile's history rows
+    // cannot retire a fresh echo whose body matches an old own message…
+    @Test fun seededBaselineKeepsEchoThroughFirstReconcile() = runBlocking {
+        val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
+        overlay.seedBaseline(5)
+        overlay.addEcho("fresh", "dup")
+        overlay.reconcile(listOf(ev(5, sender = "user:dan", payload = body("dup"))), "user:dan")
+        assertEquals(listOf("fresh"), overlay.echoes.map { it.localID })
+    }
+
+    // …while a row APPENDED after open (seq above the baseline) still retires
+    // its echo, even when it arrives in the very first reconcile.
+    @Test fun seededBaselineStillRetiresEchoOnNewRow() = runBlocking {
+        val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
+        overlay.seedBaseline(5)
+        overlay.addEcho("fresh", "dup")
+        overlay.reconcile(listOf(ev(6, sender = "user:dan", payload = body("dup"))), "user:dan")
+        assertTrue(overlay.echoes.isEmpty())
+    }
+
     // MARK: (g) stalled overlay self-prunes via the periodic sweep
 
     @Test fun stalledOverlaySelfPrunesViaPeriodicSweep() = runBlocking {

@@ -567,6 +567,12 @@ class JournalSyncEngine(
         store.applyColdSnapshot(snapshot.conversations, snapshot.seq)
     }
 
+    /// Production liveness rides OkHttp's protocol-level `pingInterval`
+    /// (see OkHttpWebSocketConnector.defaultClient): missing pongs fail the
+    /// socket, `receiveText` throws, and the run loop reconnects. This
+    /// watchdog is the app-level backstop for transports whose `ping()` does
+    /// a real round-trip (the test fake; a future non-OkHttp transport) —
+    /// on OkHttp `ping()` is a no-op and never trips it.
     private fun launchWatchdog(connection: JournalConnection): Job = scope.launch {
         var misses = 0
         while (isActive) {

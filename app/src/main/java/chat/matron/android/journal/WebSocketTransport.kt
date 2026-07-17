@@ -34,11 +34,23 @@ interface WebSocketConnection {
 }
 
 /// OkHttp-backed [WebSocketConnecting]. `pingInterval` on the client drives
-/// protocol-level keepalive.
+/// protocol-level keepalive: OkHttp sends a ping every interval and fails the
+/// socket (receive path throws → engine reconnects) when a pong doesn't come
+/// back. Without it a half-open connection could sit "connected" forever while
+/// receiving nothing — the exact wedge class this protocol exists to kill —
+/// so the default client enables it; callers supplying their own client must
+/// do the same.
 class OkHttpWebSocketConnector(
-    private val client: OkHttpClient = OkHttpClient(),
+    private val client: OkHttpClient = defaultClient(),
     private val tokenHeader: String? = null,
 ) : WebSocketConnecting {
+
+    companion object {
+        /// 20s matches the server's own ping cadence (protocol spec §6).
+        fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
+            .pingInterval(20, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+    }
     override suspend fun connect(url: String): WebSocketConnection {
         val builder = Request.Builder().url(url)
         tokenHeader?.let { builder.header("Authorization", "Bearer $it") }

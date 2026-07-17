@@ -92,6 +92,20 @@ class JournalTimelineService(
         private val retiredToolRefs = mutableListOf<String>()
         private val resyncRequested = mutableMapOf<String, Instant>()
         private var lastReconciledSeq: Long = 0
+
+        /// Seq high-water of rows already persisted when the room opened.
+        /// Rows at or below it are history, not arrivals — they can never
+        /// retire an echo, even on the very first reconcile (bugbot "Echo
+        /// cleared by history replay": an old own message whose body matches
+        /// an in-flight echo must not swallow its "sending" row). Set once by
+        /// the service before the store subscription starts; the direct-use
+        /// tests leave it at 0, preserving retire-on-first-reconcile there.
+        private var baselineSeq: Long = 0
+        private var baselineSeeded = false
+
+        fun seedBaseline(seq: Long) = synchronized(lock) {
+            if (!baselineSeeded) { baselineSeq = seq; baselineSeeded = true }
+        }
         private val changeContinuations = mutableMapOf<UUID, () -> Unit>()
 
         // MARK: Reads (return snapshots for the items() emit)
@@ -215,7 +229,7 @@ class JournalTimelineService(
         /// High-water mark of seqs already walked. Echo retirement must only
         /// react to rows ARRIVING, not to the full list re-walked on every emit.
         fun reconcile(events: List<JournalEvent>, ownSender: String) = synchronized(lock) {
-            val newSeqFloor = lastReconciledSeq
+            val newSeqFloor = maxOf(lastReconciledSeq, baselineSeq)
             for (event in events) {
                 val ref = event.payload.stringOrNull("message_ref")
                 if (ref != null) {
@@ -338,6 +352,9 @@ class JournalTimelineService(
         // what to draw, so the first paint isn't held hostage to a round trip.
         val viewingJob = launch { engine.setViewing(convoID) }
         val storeJob = launch {
+            // Baseline BEFORE the first flow emission: persisted rows are
+            // history and must never retire echoes (see seedBaseline).
+            overlay.seedBaseline(runCatching { store.maxSeq(convoID) }.getOrNull() ?: 0L)
             store.eventsFlow(convoID).collect { events ->
                 overlay.setEvents(events)
                 signal()
