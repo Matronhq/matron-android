@@ -256,8 +256,13 @@ private fun ChatRoute(
     onOpenChild: (String) -> Unit,
     onSwitchTo: (String) -> Unit,
 ) {
+    // Observed, not one-shot: the mirror can learn parent_convo_id AFTER this
+    // route composes (convo_meta or a snapshot upsert), and the route must
+    // switch to the read-only sub-chat presentation when it does (bugbot
+    // "Sub-chat parent never refreshes"). Linkage is immutable once set, so
+    // emissions only ever go null → parent.
     val lookup by produceState<ParentLookup?>(initialValue = null, convoID) {
-        value = ParentLookup(deps.parentConvoID(session, convoID))
+        deps.parentConvoIDFlow(session, convoID).collect { value = ParentLookup(it) }
     }
     val resolved = lookup
     if (resolved == null) {

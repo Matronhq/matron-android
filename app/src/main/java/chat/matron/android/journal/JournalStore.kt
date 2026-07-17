@@ -7,6 +7,7 @@ import chat.matron.android.journal.db.MatronDatabase
 import chat.matron.android.journal.db.MetaEntity
 import kotlin.math.max
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -189,6 +190,12 @@ class JournalStore(
         conversationDao.children(parentConvoID)
 
     suspend fun parentConvoID(convoID: String): String? = conversationDao.parentConvoID(convoID)
+
+    /// Live parent linkage: emits again when convo_meta / a snapshot upsert
+    /// teaches the mirror that [convoID] is a subagent child. Immutable once
+    /// set, so consumers only ever see null → parent, never a repoint.
+    fun parentConvoIDFlow(convoID: String): Flow<String?> =
+        conversationDao.parentConvoIDFlow(convoID).distinctUntilChanged()
 
     suspend fun events(convoID: String): List<JournalEvent> =
         eventDao.forConversation(convoID).map { it.toJournalEvent() }

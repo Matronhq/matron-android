@@ -252,6 +252,15 @@ class AppDependencies(
         runCatching { core(session).store.parentConvoID(convoID) }.getOrNull()
 
     /**
+     * Live parent linkage for the nav router: re-emits when the mirror learns
+     * a child's `parent_convo_id` (convo_meta / snapshot upsert) so a subagent
+     * chat opened before the field landed still switches to the read-only
+     * sub-chat presentation.
+     */
+    fun parentConvoIDFlow(session: UserSession, convoID: String): kotlinx.coroutines.flow.Flow<String?> =
+        core(session).store.parentConvoIDFlow(convoID)
+
+    /**
      * Sign-out path. Ends every session's sync engine, wipes and closes its local
      * mirror, clears every per-session/per-room cache, wipes the search index, and
      * drops the persisted auth session. Runs as one sequenced teardown job — push

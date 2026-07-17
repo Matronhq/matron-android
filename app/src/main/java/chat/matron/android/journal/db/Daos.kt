@@ -20,6 +20,9 @@ interface ConversationDao {
     @Query("SELECT parent_convo_id FROM conversation WHERE id = :id")
     suspend fun parentConvoID(id: String): String?
 
+    @Query("SELECT parent_convo_id FROM conversation WHERE id = :id")
+    fun parentConvoIDFlow(id: String): Flow<String?>
+
     /// Chat-list query: visible, top-level (no parent), newest first.
     @Query("SELECT * FROM conversation WHERE hidden = 0 AND parent_convo_id IS NULL ORDER BY last_seq DESC")
     suspend fun visibleTopLevel(): List<ConversationEntity>
