@@ -513,6 +513,46 @@ class JournalSyncEngineTest {
         engine.endSync()
     }
 
+    /// Records the first index() call as in-flight, then blocks on [release] so a
+    /// test can wedge a detached search-index write open across an endSync().
+    private class GatedSearchIndexer : SearchIndexer {
+        val started = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val completed = java.util.concurrent.atomic.AtomicInteger(0)
+        override suspend fun index(
+            roomID: String, eventID: String, sender: String, timestamp: java.time.Instant, body: String,
+        ) {
+            started.complete(Unit)
+            release.await()
+            completed.incrementAndGet()
+        }
+    }
+
+    @Test
+    fun endSyncCancelsInFlightSearchIndexingAndStopsWrites() = runBlocking {
+        val indexer = GatedSearchIndexer()
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(1)); socket.serve(journalLine(1))
+        val store = seededStore()
+        val engine = JournalSyncEngine(
+            api = FakeSnapshotSource(), store = store, connector = FakeConnector(listOf(socket)),
+            token = "t", ownSender = "user:dan", search = indexer, backoffBaseSeconds = 0.01,
+        )
+        engine.beginSync()
+        // A detached search.index() is now wedged mid-write inside the engine scope.
+        withTimeout(2000) { indexer.started.await() }
+        val cursorAtEndSync = store.cursor()
+
+        engine.endSync()
+
+        // Post-endSync the detached writer must be cancelled: releasing its gate
+        // must not let a straggling write land (which would survive a signOut wipe).
+        indexer.release.complete(Unit)
+        delay(50)
+        assertEquals(0, indexer.completed.get())
+        assertEquals(cursorAtEndSync, store.cursor())
+    }
+
     @Test
     fun endSyncFailsReadyWaitersInsteadOfHanging() = runBlocking {
         val connector = FakeConnector(emptyList())

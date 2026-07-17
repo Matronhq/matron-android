@@ -3,6 +3,7 @@ package chat.matron.android.auth
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.MatronJson
+import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.UserSession
 import chat.matron.android.storage.SessionStore
 import kotlinx.serialization.encodeToString
@@ -68,7 +69,9 @@ class JournalAuthService(
 
     override suspend fun restoreSession(): UserSession? {
         val json = sessionStore.get(sessionKey) ?: return null
-        return runCatching { MatronJson.decodeFromString<UserSession>(json) }.getOrNull()
+        return runCatching { MatronJson.decodeFromString<UserSession>(json) }
+            .onFailure { MatronDebug.breadcrumb("restoreSession: corrupt persisted session — signing out: $it") }
+            .getOrNull()
     }
 
     override fun persist(session: UserSession) {

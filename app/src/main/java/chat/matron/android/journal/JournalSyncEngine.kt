@@ -7,6 +7,7 @@ import chat.matron.android.sync.SyncService
 import java.time.Instant
 import java.util.UUID
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.coroutines.coroutineContext
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.random.Random
@@ -19,6 +20,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -163,6 +165,17 @@ class JournalSyncEngine(
         conn?.close()
         waiters.forEach { it.resumeWith(Result.failure(JournalSyncError.Offline)) }
         rpc.forEach { it.continuation.resumeWith(Result.failure(RPCRequestError.Offline)) }
+        // Cancel-and-join every child still live in the engine scope — the run
+        // loop plus all detached launches (search indexer, refreshSummaries, RPC
+        // resend/deadline timers). Cancel alone (as before) let a straggler write
+        // land after we returned, so signOut()'s wipe()/close() could be overtaken
+        // and resurrect data for the next sign-in (same per-user DB file). Failing
+        // waiters/RPCs above already happened, so this join can't reintroduce the
+        // hang `endSyncFailsReadyWaitersInsteadOfHanging` guards. Skip the caller's
+        // own job so endSync stays deadlock-free if invoked from within engine work.
+        val self = coroutineContext[Job]
+        scope.coroutineContext[Job]?.children?.filter { it !== self }?.toList()
+            ?.forEach { it.cancelAndJoin() }
         // Don't clobber a terminal offline reason (e.g. auth revocation) set
         // before endSync() was called.
         if (_state.value !is SyncConnectionState.Offline) {

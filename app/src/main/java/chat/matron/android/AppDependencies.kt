@@ -15,6 +15,7 @@ import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.JournalSyncEngine
 import chat.matron.android.journal.OkHttpWebSocketConnector
 import chat.matron.android.journal.db.MatronDatabase
+import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.UserSession
 import chat.matron.android.push.JournalPushService
 import chat.matron.android.push.PushService
@@ -279,12 +280,18 @@ class AppDependencies(
             previous?.join()
             for (core in oldCores) {
                 core.purgeJob?.join()
-                withTimeoutOrNull(5_000) { runCatching { core.api.unregisterPush() } }
+                withTimeoutOrNull(5_000) {
+                    runCatching { core.api.unregisterPush() }
+                        .onFailure { MatronDebug.breadcrumb("signOut: unregisterPush failed: $it") }
+                }
                 core.engine.endSync()
                 runCatching { core.store.wipe() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: store.wipe failed: $it") }
                 runCatching { core.db.close() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: db.close failed: $it") }
             }
             runCatching { search?.wipe() }
+                .onFailure { MatronDebug.breadcrumb("signOut: search.wipe failed: $it") }
         }
         cores.clear()
         mediaServices.clear()

@@ -40,6 +40,7 @@ import chat.matron.android.features.onboarding.SignInScreen
 import chat.matron.android.features.search.SearchScreen
 import chat.matron.android.features.settings.DeviceSettingsScreen
 import chat.matron.android.features.settings.DevicesScreen
+import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.UserSession
 import chat.matron.android.viewmodels.ChatListViewModel
@@ -76,7 +77,9 @@ private fun MatronApp(deps: AppDependencies) {
             var session by remember { mutableStateOf<UserSession?>(null) }
 
             LaunchedEffect(Unit) {
-                session = runCatching { deps.auth.restoreSession() }.getOrNull()
+                session = runCatching { deps.auth.restoreSession() }
+                    .onFailure { MatronDebug.breadcrumb("restoreSession threw — starting signed out: $it") }
+                    .getOrNull()
                 bootstrapped = true
             }
 
