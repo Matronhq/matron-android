@@ -280,9 +280,12 @@ class AppDependencies(
             previous?.join()
             for (core in oldCores) {
                 core.purgeJob?.join()
-                withTimeoutOrNull(5_000) {
-                    runCatching { core.api.unregisterPush() }
-                        .onFailure { MatronDebug.breadcrumb("signOut: unregisterPush failed: $it") }
+                val pushResult = withTimeoutOrNull(5_000) { runCatching { core.api.unregisterPush() } }
+                when {
+                    pushResult == null ->
+                        MatronDebug.breadcrumb("signOut: unregisterPush timed out after 5s")
+                    pushResult.isFailure ->
+                        MatronDebug.breadcrumb("signOut: unregisterPush failed: ${pushResult.exceptionOrNull()}")
                 }
                 core.engine.endSync()
                 runCatching { core.store.wipe() }

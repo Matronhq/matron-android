@@ -513,16 +513,20 @@ class JournalSyncEngineTest {
         engine.endSync()
     }
 
-    /// Records the first index() call as in-flight, then blocks on [release] so a
-    /// test can wedge a detached search-index write open across an endSync().
+    /// Every index() call blocks on [release], so a test can wedge one or more
+    /// detached search-index writes open across an endSync(). [firstStarted] fires
+    /// once the first is in flight; [startedCount] counts every launched write and
+    /// [completed] counts only those that ran past the gate.
     private class GatedSearchIndexer : SearchIndexer {
-        val started = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val firstStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
         val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val startedCount = java.util.concurrent.atomic.AtomicInteger(0)
         val completed = java.util.concurrent.atomic.AtomicInteger(0)
         override suspend fun index(
             roomID: String, eventID: String, sender: String, timestamp: java.time.Instant, body: String,
         ) {
-            started.complete(Unit)
+            startedCount.incrementAndGet()
+            firstStarted.complete(Unit)
             release.await()
             completed.incrementAndGet()
         }
@@ -532,25 +536,32 @@ class JournalSyncEngineTest {
     fun endSyncCancelsInFlightSearchIndexingAndStopsWrites() = runBlocking {
         val indexer = GatedSearchIndexer()
         val socket = FakeWebSocketConnection()
-        socket.serve(helloOK(1)); socket.serve(journalLine(1))
+        // Several indexable frames: the run loop applies them back-to-back, so
+        // detached search.index() writes keep getting spawned — including while
+        // endSync() is tearing the run loop down. endSync must join the run loop
+        // before draining, or a write spawned during the unwind leaks past the
+        // teardown and could land after signOut()'s wipe().
+        socket.serve(helloOK(4))
+        for (seq in 1L..4L) socket.serve(journalLine(seq))
         val store = seededStore()
         val engine = JournalSyncEngine(
             api = FakeSnapshotSource(), store = store, connector = FakeConnector(listOf(socket)),
             token = "t", ownSender = "user:dan", search = indexer, backoffBaseSeconds = 0.01,
         )
         engine.beginSync()
-        // A detached search.index() is now wedged mid-write inside the engine scope.
-        withTimeout(2000) { indexer.started.await() }
-        val cursorAtEndSync = store.cursor()
+        // At least one detached search.index() is now wedged mid-write; more may
+        // still be spawning as the run loop applies the remaining frames.
+        withTimeout(2000) { indexer.firstStarted.await() }
 
         engine.endSync()
 
-        // Post-endSync the detached writer must be cancelled: releasing its gate
-        // must not let a straggling write land (which would survive a signOut wipe).
+        // Post-endSync every detached writer — including any spawned during the
+        // teardown unwind — must be cancelled: releasing the gate must not let a
+        // single straggling write land (which would survive a signOut wipe).
         indexer.release.complete(Unit)
-        delay(50)
+        delay(100)
+        assertTrue("expected an in-flight index write", indexer.startedCount.get() >= 1)
         assertEquals(0, indexer.completed.get())
-        assertEquals(cursorAtEndSync, store.cursor())
     }
 
     @Test

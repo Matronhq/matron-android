@@ -159,23 +159,32 @@ class JournalSyncEngine(
             waiters = readyWaiters.toList(); readyWaiters.clear()
             rpc = rpcPending.values.toList(); rpcPending.clear()
         }
-        job?.cancel()
         backoff?.cancel()
         refresh?.cancel()
         conn?.close()
         waiters.forEach { it.resumeWith(Result.failure(JournalSyncError.Offline)) }
         rpc.forEach { it.continuation.resumeWith(Result.failure(RPCRequestError.Offline)) }
-        // Cancel-and-join every child still live in the engine scope — the run
-        // loop plus all detached launches (search indexer, refreshSummaries, RPC
-        // resend/deadline timers). Cancel alone (as before) let a straggler write
-        // land after we returned, so signOut()'s wipe()/close() could be overtaken
-        // and resurrect data for the next sign-in (same per-user DB file). Failing
-        // waiters/RPCs above already happened, so this join can't reintroduce the
-        // hang `endSyncFailsReadyWaitersInsteadOfHanging` guards. Skip the caller's
-        // own job so endSync stays deadlock-free if invoked from within engine work.
+        // Kill the run loop FIRST and wait for it to fully die. Everything that
+        // spawns into the engine scope (indexForSearch, refreshJob, RPC resends)
+        // originates from the run loop, so once it's gone nothing new can appear.
+        // A one-shot children snapshot (the earlier approach) raced the loop's
+        // cancellation unwind: between cancel() and the next suspension it could
+        // run one more handleFrame/reconnect step and launch a fresh detached
+        // writer AFTER the snapshot — a straggler that could still land a write
+        // after signOut()'s wipe(). Joining the run loop closes that spawn source,
+        // then we drain any remaining detached children, looping until the scope
+        // is quiescent so a child spawned during another's unwind can't slip
+        // through. Waiters/RPCs are already failed above, so this join can't
+        // reintroduce the hang `endSyncFailsReadyWaitersInsteadOfHanging` guards;
+        // `self` is excluded so endSync is deadlock-free from within engine work.
         val self = coroutineContext[Job]
-        scope.coroutineContext[Job]?.children?.filter { it !== self }?.toList()
-            ?.forEach { it.cancelAndJoin() }
+        if (job !== self) job?.cancelAndJoin()
+        while (true) {
+            val remaining = scope.coroutineContext[Job]?.children
+                ?.filter { it !== self }?.toList().orEmpty()
+            if (remaining.isEmpty()) break
+            remaining.forEach { it.cancelAndJoin() }
+        }
         // Don't clobber a terminal offline reason (e.g. auth revocation) set
         // before endSync() was called.
         if (_state.value !is SyncConnectionState.Offline) {
