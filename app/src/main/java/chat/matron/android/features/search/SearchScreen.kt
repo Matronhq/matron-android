@@ -54,6 +54,7 @@ fun SearchScreen(
     val scope = rememberCoroutineScope()
     val messageHits by viewModel.messageHits.collectAsStateWithLifecycle()
     val isSearching by viewModel.isSearching.collectAsStateWithLifecycle()
+    val searchFailed by viewModel.searchFailed.collectAsStateWithLifecycle()
 
     var query by remember { mutableStateOf(viewModel.query) }
 
@@ -125,7 +126,8 @@ fun SearchScreen(
                         HintRow("Search across chat titles, bots, and messages.")
                     }
                 } else if (chatHits.isEmpty() && messageHits.isEmpty() && !isSearching) {
-                    item { HintRow(viewModel.emptyResultsMessage) }
+                    val hint = if (searchFailed) "Search failed. Try again." else viewModel.emptyResultsMessage
+                    item { HintRow(hint) }
                 }
             }
         }

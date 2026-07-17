@@ -12,6 +12,7 @@ import chat.matron.android.journal.JournalSyncError
 import chat.matron.android.journal.ToolStreamUpdate
 import chat.matron.android.journal.stringOrNull
 import chat.matron.android.models.SessionStatusUpdate
+import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.TimelineSendState
 import chat.matron.android.models.UserSession
 import chat.matron.android.search.SearchService
@@ -468,6 +469,8 @@ class JournalTimelineService(
     }
 
     override fun sessionStatus(): Flow<SessionStatusUpdate> = engine.sessionStatus(convoID)
+
+    override fun connectionState(): Flow<SyncConnectionState> = engine.stateStream
 
     override suspend fun markAsRead() {
         val maxSeq = store.maxSeq(convoID) ?: return

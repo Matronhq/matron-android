@@ -1,6 +1,7 @@
 package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.ChatSummary
+import chat.matron.android.models.MatronDebug
 import chat.matron.android.search.SearchHit
 import chat.matron.android.search.SearchService
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -22,6 +23,12 @@ class SearchViewModel(
 
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
+
+    /// True when the most recent [search] call failed (index corruption, DB
+    /// error) rather than genuinely finding nothing — lets the UI distinguish
+    /// "No results." from "Search failed" instead of rendering both the same.
+    private val _searchFailed = MutableStateFlow(false)
+    val searchFailed: StateFlow<Boolean> = _searchFailed.asStateFlow()
 
     private val _allChats = MutableStateFlow(allChats)
     val allChats: StateFlow<List<ChatSummary>> = _allChats.asStateFlow()
@@ -56,11 +63,15 @@ class SearchViewModel(
         val trimmed = query.trim()
         if (trimmed.isEmpty()) {
             _messageHits.value = emptyList()
+            _searchFailed.value = false
             return
         }
         _isSearching.value = true
         try {
-            _messageHits.value = runCatching { search.query(trimmed, limit = 100) }.getOrDefault(emptyList())
+            val result = runCatching { search.query(trimmed, limit = 100) }
+            result.onFailure { MatronDebug.breadcrumb("SearchViewModel: search failed for query \"$trimmed\": $it") }
+            _searchFailed.value = result.isFailure
+            _messageHits.value = result.getOrDefault(emptyList())
         } finally {
             _isSearching.value = false
         }

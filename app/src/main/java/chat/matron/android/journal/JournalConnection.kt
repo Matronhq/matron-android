@@ -1,5 +1,6 @@
 package chat.matron.android.journal
 
+import chat.matron.android.models.MatronDebug
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.TimeoutCancellationException
@@ -18,7 +19,14 @@ class JournalConnection internal constructor(private val socket: WebSocketConnec
     fun frames(): Flow<ServerFrame> = flow {
         while (true) {
             val text = socket.receiveText()
-            ServerFrame.decode(text)?.let { emit(it) }
+            val frame = ServerFrame.decode(text)
+            if (frame == null) {
+                // The cursor still acks past this frame once its containing
+                // batch applies — leave a trace of what was silently dropped.
+                MatronDebug.breadcrumb("JournalConnection: undecodable frame, dropped: ${text.take(200)}")
+            } else {
+                emit(frame)
+            }
         }
     }.onCompletion { socket.close() }
 

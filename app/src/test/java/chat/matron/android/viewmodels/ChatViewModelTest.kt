@@ -6,6 +6,7 @@ import chat.matron.android.chat.TimelineItem
 import chat.matron.android.events.AskUserEvent
 import chat.matron.android.models.SessionStatus
 import chat.matron.android.models.SessionStatusUpdate
+import chat.matron.android.models.SyncConnectionState
 import java.io.File
 import java.time.Instant
 import java.time.LocalDateTime
@@ -403,6 +404,36 @@ class ChatViewModelTest {
         assertEquals(limit, vm.failedRequestCount)
     }
 
+    @Test
+    fun imageRequest_isRetried_afterConnectivityRestored() = vmTest { scope ->
+        val fake = FakeTimelineService()
+        fake.snapshotsToEmit = listOf(emptyList())
+        val media = FakeMediaService()
+        val url = "mxc://example/retry-me"
+        val vm = makeVM(scope, fake, media)
+        vm.start().join()
+
+        // First attempt fails (no stub yet) and negative-caches the URL.
+        assertNull(vm.image(url))
+        waitUntil { media.requested.size >= 1 }
+        assertEquals(1, vm.failedRequestCount)
+
+        // Repeat taps don't re-fetch while negative-cached.
+        assertNull(vm.image(url))
+        delay(50)
+        assertEquals(1, media.requested.size)
+
+        // Connectivity returns: the failure cache clears...
+        fake.emitConnectionState(SyncConnectionState.Running)
+        waitUntil { vm.failedRequestCount == 0 }
+
+        // ...so the next tap re-fetches, and this time it succeeds.
+        media.stubData[url] = byteArrayOf(4, 5, 6)
+        assertNull(vm.image(url))
+        waitUntil { vm.resolvedImage(url) != null }
+        assertEquals(2, media.requested.size)
+    }
+
     // MARK: - writeTempFile
 
     @Test
@@ -431,6 +462,48 @@ class ChatViewModelTest {
             assertNull(vm.writeTempFile("mxc://example/missing", "report.pdf", root))
             // Nothing written on the failure path — not even the subdir.
             assertFalse(File(root, "matron-attachments").exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun writeTempFile_failure_surfacesAttachmentError() = vmTest { scope ->
+        val vm = makeVM(scope)
+        val root = java.nio.file.Files.createTempDirectory("write-temp-file").toFile()
+        try {
+            assertNull(vm.attachmentError.value)
+            assertNull(vm.writeTempFile("mxc://example/missing", "report.pdf", root))
+            assertNotNull(vm.attachmentError.value)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun writeTempFile_success_doesNotSetAttachmentError() = vmTest { scope ->
+        val media = FakeMediaService()
+        val url = "mxc://example/report"
+        media.stubData[url] = byteArrayOf(1)
+        val vm = makeVM(scope, media = media)
+        val root = java.nio.file.Files.createTempDirectory("write-temp-file").toFile()
+        try {
+            assertNotNull(vm.writeTempFile(url, "report.pdf", root))
+            assertNull(vm.attachmentError.value)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun dismissAttachmentError_clearsIt() = vmTest { scope ->
+        val vm = makeVM(scope)
+        val root = java.nio.file.Files.createTempDirectory("write-temp-file").toFile()
+        try {
+            vm.writeTempFile("mxc://example/missing", "report.pdf", root)
+            assertNotNull(vm.attachmentError.value)
+            vm.dismissAttachmentError()
+            assertNull(vm.attachmentError.value)
         } finally {
             root.deleteRecursively()
         }

@@ -1,6 +1,7 @@
 package chat.matron.android.chat
 
 import chat.matron.android.models.SessionStatusUpdate
+import chat.matron.android.models.SyncConnectionState
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 
@@ -34,6 +35,11 @@ interface TimelineService {
     /// Per-convo stream of session-status updates. Default: an empty stream, so
     /// fakes without a status source need no override.
     fun sessionStatus(): Flow<SessionStatusUpdate> = emptyFlow()
+
+    /// The underlying sync engine's connection state. Default: an empty stream,
+    /// so fakes without a connectivity source need no override. Lets a VM cheaply
+    /// observe connectivity without a new dependency of its own.
+    fun connectionState(): Flow<SyncConnectionState> = emptyFlow()
 
     /// Plain send with no reply relation.
     suspend fun sendText(body: String) = sendText(body, null)

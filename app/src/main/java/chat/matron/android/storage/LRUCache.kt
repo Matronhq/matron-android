@@ -32,6 +32,10 @@ class LRUCache<K, V>(private val limit: Int) {
     /// Non-promoting read.
     operator fun get(key: K): V? = map[key]
 
+    /// Drops every entry. Used to reset a negative cache once its reason for
+    /// being negative (e.g. no connectivity) no longer holds.
+    fun clear() = map.clear()
+
     /// Insert/update ([value] non-null) promotes the key to MRU and evicts the
     /// LRU if over capacity; `null` removes the key.
     operator fun set(key: K, value: V?) {

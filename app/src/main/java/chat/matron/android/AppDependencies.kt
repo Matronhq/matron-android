@@ -139,7 +139,7 @@ class AppDependencies(
 
         search = runCatching {
             SearchServiceLive(searchDatabaseFactory(context, StoragePaths.searchDb(appSupport)))
-        }.getOrNull()
+        }.onFailure { MatronDebug.breadcrumb("AppDependencies: search DB open failed: $it") }.getOrNull()
 
         val prefs = context.getSharedPreferences("matron-kv", Context.MODE_PRIVATE)
         answeredPromptStore = SharedPreferencesKeyValueStore(prefs)
@@ -188,7 +188,10 @@ class AppDependencies(
         // the core so sign-out teardown joins it before wipe()/close() — an
         // untracked sweep could race the wipe on the same database (bugbot
         // "Boot purge races sign-out wipe").
-        core.purgeJob = appScope.launch { runCatching { store.purgeExpiredToolOutputSnippets() } }
+        core.purgeJob = appScope.launch {
+            runCatching { store.purgeExpiredToolOutputSnippets() }
+                .onFailure { MatronDebug.breadcrumb("AppDependencies: boot purge failed: $it") }
+        }
         return core
     }
 

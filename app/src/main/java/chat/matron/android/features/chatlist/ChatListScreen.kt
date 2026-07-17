@@ -44,6 +44,7 @@ import chat.matron.android.chat.ChatSummary
 import chat.matron.android.designsystem.RelativeMinuteTimeView
 import chat.matron.android.designsystem.SyncBannerState
 import chat.matron.android.designsystem.UnreadBadge
+import chat.matron.android.models.MatronDebug
 import chat.matron.android.viewmodels.ChatListViewModel
 import kotlinx.coroutines.launch
 
@@ -126,8 +127,18 @@ fun ChatListScreen(
                             ChatRow(
                                 summary = summary,
                                 onOpen = { onOpenChat(summary.id) },
-                                onMute = { scope.launch { runCatching { chat.mute(summary.id) } } },
-                                onLeave = { scope.launch { runCatching { chat.leave(summary.id) } } },
+                                onMute = {
+                                    scope.launch {
+                                        runCatching { chat.mute(summary.id) }
+                                            .onFailure { MatronDebug.breadcrumb("ChatListScreen: mute failed for ${summary.id}: $it") }
+                                    }
+                                },
+                                onLeave = {
+                                    scope.launch {
+                                        runCatching { chat.leave(summary.id) }
+                                            .onFailure { MatronDebug.breadcrumb("ChatListScreen: leave failed for ${summary.id}: $it") }
+                                    }
+                                },
                             )
                         }
                     }

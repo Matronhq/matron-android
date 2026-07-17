@@ -575,6 +575,7 @@ class JournalSyncEngine(
                     lastSessionStatus.clear()
                 }
                 runCatching { store.wipe() }
+                    .onFailure { MatronDebug.breadcrumb("snapshot_required: store.wipe failed: $it") }
                 throw SnapshotRequiredExit()
             }
             is ServerFrame.HelloOK, is ServerFrame.UnknownControl -> Unit // post-hello control frames are advisory

@@ -4,7 +4,9 @@ import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineItem
 import chat.matron.android.chat.TimelineService
 import chat.matron.android.events.AskUserEvent
+import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.SessionStatus
+import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.storage.LRUCache
 import java.io.File
 import java.time.Instant
@@ -70,6 +72,16 @@ class ChatViewModel(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    /// Set when [writeTempFile] fails (media fetch or disk write) so the file-tap
+    /// affordance isn't a silent dead button. Dismissible; not auto-cleared by
+    /// timeline activity like [error] is.
+    private val _attachmentError = MutableStateFlow<String?>(null)
+    val attachmentError: StateFlow<String?> = _attachmentError.asStateFlow()
+
+    fun dismissAttachmentError() {
+        _attachmentError.value = null
+    }
+
     private val _sessionStatus = MutableStateFlow<SessionStatus?>(null)
     val sessionStatus: StateFlow<SessionStatus?> = _sessionStatus.asStateFlow()
 
@@ -134,6 +146,7 @@ class ChatViewModel(
     private var isResuming = false
     private var observationTask: Job? = null
     private var statusTask: Job? = null
+    private var connectionTask: Job? = null
     private var emptyDebounceTask: Job? = null
     private var resumeTask: Job? = null
     private var historyRefillTask: Job? = null
@@ -351,6 +364,16 @@ class ChatViewModel(
             }
         }
 
+        // A prior failed image fetch only means "unreachable then" — once the
+        // sync connection comes back up, give it another chance rather than
+        // negative-caching it for the rest of the VM's (session-long) lifetime.
+        connectionTask?.cancel()
+        connectionTask = scope.launch {
+            timeline.connectionState().collect { state ->
+                if (state is SyncConnectionState.Running) failedRequests.clear()
+            }
+        }
+
         firstSignal.await()
         return task
     }
@@ -366,6 +389,8 @@ class ChatViewModel(
         observationTask = null
         statusTask?.cancel()
         statusTask = null
+        connectionTask?.cancel()
+        connectionTask = null
         emptyDebounceTask?.cancel()
         emptyDebounceTask = null
         resumeTask?.cancel()
@@ -459,21 +484,31 @@ class ChatViewModel(
 
     /// Downloads a file attachment and writes it to
     /// `<directory>/matron-attachments/<sanitised filename>`, returning the
-    /// written file or `null` on fetch/write failure. The temp filename
-    /// preserves the original [filename] so the downstream open/share UI shows
-    /// a sensible label instead of a UUID. Files written here are *not*
-    /// cleaned up — the OS reaps the cache dir under storage pressure and the
-    /// size cost is bounded by attachments the user has actively opened.
+    /// written file or `null` on fetch/write failure — either failure also
+    /// breadcrumbs and sets [attachmentError] so the file-tap affordance isn't a
+    /// silent dead button. The temp filename preserves the original [filename]
+    /// so the downstream open/share UI shows a sensible label instead of a UUID.
+    /// Files written here are *not* cleaned up — the OS reaps the cache dir under
+    /// storage pressure and the size cost is bounded by attachments the user has
+    /// actively opened.
     suspend fun writeTempFile(url: String, filename: String, directory: File): File? {
-        val bytes = media.image(url) ?: return null
-        return withContext(Dispatchers.IO) {
+        val bytes = media.image(url)
+        if (bytes == null) {
+            MatronDebug.breadcrumb("writeTempFile: media fetch failed for $url")
+            _attachmentError.value = "Couldn't open \"$filename\" — check your connection and try again."
+            return null
+        }
+        val written = withContext(Dispatchers.IO) {
             runCatching {
                 val dir = File(directory, "matron-attachments").apply { mkdirs() }
                 val dest = File(dir, sanitisedAttachmentFilename(filename))
                 dest.writeBytes(bytes)
                 dest
-            }.getOrNull()
+            }.onFailure { MatronDebug.breadcrumb("writeTempFile: disk write failed for $filename: $it") }
+                .getOrNull()
         }
+        if (written == null) _attachmentError.value = "Couldn't open \"$filename\"."
+        return written
     }
 
     val resolvedImageCount: Int get() = resolvedImages.count

@@ -63,4 +63,27 @@ class SearchViewModelTest {
         vm.search()
         assertEquals("No results.", vm.emptyResultsMessage)
     }
+
+    @Test
+    fun search_indexFailure_setsSearchFailed_ratherThanEmptyResults() = runBlocking {
+        val fakeSearch = FakeSearchService(queryError = RuntimeException("index corrupt"))
+        val vm = SearchViewModel(fakeSearch, emptyList())
+        vm.query = "anything"
+        vm.search()
+        assertEquals(0, vm.messageHits.value.size)
+        assertEquals(true, vm.searchFailed.value)
+    }
+
+    @Test
+    fun search_success_clearsPriorSearchFailed() = runBlocking {
+        val fakeSearch = FakeSearchService(queryError = RuntimeException("index corrupt"))
+        val vm = SearchViewModel(fakeSearch, emptyList())
+        vm.query = "anything"
+        vm.search()
+        assertEquals(true, vm.searchFailed.value)
+
+        fakeSearch.queryError = null
+        vm.search()
+        assertEquals(false, vm.searchFailed.value)
+    }
 }

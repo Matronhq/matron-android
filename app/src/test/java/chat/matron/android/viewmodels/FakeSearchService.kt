@@ -6,7 +6,7 @@ import java.time.Instant
 
 /// Fake [SearchService] for view-model tests, ported from matron-apple's
 /// `FakeSearchService`. Returns [hits] from [query]; everything else is inert.
-class FakeSearchService(var hits: List<SearchHit> = emptyList()) : SearchService {
+class FakeSearchService(var hits: List<SearchHit> = emptyList(), var queryError: Throwable? = null) : SearchService {
     override suspend fun index(
         roomID: String,
         eventID: String,
@@ -17,7 +17,10 @@ class FakeSearchService(var hits: List<SearchHit> = emptyList()) : SearchService
     }
 
     override suspend fun remove(eventID: String) {}
-    override suspend fun query(text: String, limit: Int): List<SearchHit> = hits
+    override suspend fun query(text: String, limit: Int): List<SearchHit> {
+        queryError?.let { throw it }
+        return hits
+    }
     override suspend fun wipe() {}
     override suspend fun recordBackfillProgress(
         roomID: String,

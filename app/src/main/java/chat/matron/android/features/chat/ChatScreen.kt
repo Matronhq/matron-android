@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -194,6 +195,7 @@ fun TimelineList(
     val settledEmpty by chatVM.settledEmpty.collectAsStateWithLifecycle()
     val lastRenderableItemID by chatVM.lastRenderableItemID.collectAsStateWithLifecycle()
     val children by stripVM.children.collectAsStateWithLifecycle()
+    val attachmentError by chatVM.attachmentError.collectAsStateWithLifecycle()
 
     // Tap on a file attachment: download → cache dir → hand to the system
     // (iOS: writeTempFile → QuickLook). Lives here rather than at the call
@@ -297,6 +299,47 @@ fun TimelineList(
                     .align(Alignment.BottomEnd)
                     .padding(16.dp),
             )
+        }
+
+        attachmentError?.let { message ->
+            AttachmentErrorBanner(
+                message = message,
+                onDismiss = { chatVM.dismissAttachmentError() },
+                modifier = Modifier.align(Alignment.TopCenter),
+            )
+        }
+    }
+}
+
+/**
+ * Dismissible banner for [ChatViewModel.attachmentError]: a file-attachment tap
+ * that failed to download/write had no user-visible feedback (a dead button) —
+ * this surfaces it, matching [ComposerView]'s `ComposerErrorBanner` styling.
+ */
+@Composable
+private fun AttachmentErrorBanner(message: String, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+    androidx.compose.material3.Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.errorContainer,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                message,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onDismiss) {
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = "Dismiss error",
+                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
         }
     }
 }

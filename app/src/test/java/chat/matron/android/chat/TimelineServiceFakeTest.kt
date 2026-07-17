@@ -117,6 +117,19 @@ class FakeTimelineService : TimelineService {
     fun emitStatus(update: chat.matron.android.models.SessionStatusUpdate) {
         sessionStatusFlow.tryEmit(update)
     }
+
+    /// Connectivity stream tests drive via [emitConnectionState], mirroring
+    /// [sessionStatusFlow].
+    val connectionStateFlow =
+        kotlinx.coroutines.flow.MutableSharedFlow<chat.matron.android.models.SyncConnectionState>(
+            extraBufferCapacity = 64,
+        )
+
+    override fun connectionState() = connectionStateFlow
+
+    fun emitConnectionState(state: chat.matron.android.models.SyncConnectionState) {
+        connectionStateFlow.tryEmit(state)
+    }
 }
 
 class TimelineServiceFakeTest {
