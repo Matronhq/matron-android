@@ -327,11 +327,7 @@ class ChatViewModel(
         _sessionStatus.value = null
         // A VM is cached per-room (ChatVMCache) and outlives a single visit, so
         // an undismissed attachment error from a prior visit must not resurface
-        // as "fresh" on re-entry (the same stale-state bug Task 3 fixed for
-        // ComposerViewModel.sendError).
-        // A VM is cached per-room (ChatVMCache) and outlives a single visit, so
-        // an undismissed attachment error from a prior visit must not resurface
-        // as "fresh" on re-entry (the same stale-state bug Task 3 fixed for
+        // as "fresh" on re-entry (same stale-state hazard as
         // ComposerViewModel.sendError).
         _attachmentError.value = null
 
