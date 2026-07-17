@@ -57,8 +57,9 @@ class JournalConnectionTest {
                 }
             }
             fail("stream must throw when the socket dies")
-        } catch (e: Throwable) {
-            // expected
+        } catch (e: JournalConnectionError.SocketClosed) {
+            // expected — FakeWebSocketConnection.closeFromServer() fails the
+            // pending receiveText() with this specific error.
         }
         assertEquals(listOf(1L, 2L), received)
     }
