@@ -30,6 +30,27 @@ The app keeps a local Room (SQLite) mirror of the journal and renders entirely f
 ./gradlew :app:testDebugUnitTest
 ```
 
+## Integration tests (real server)
+
+`chat.matron.android.integration.JournalServerTests` is a wire-compatibility
+suite that boots a real `matron-journal` Node server as a subprocess (fresh temp
+SQLite DB + free port per test) and drives the actual `JournalApi` +
+`JournalSyncEngine` + `JournalStore` against it over real OkHttp sockets. It
+covers sign-in/snapshot/live round-trip, cursor resume across an engine restart,
+and a 200-event chaos-reconnect convergence test.
+
+```bash
+./gradlew :app:testDebugUnitTest --tests 'chat.matron.android.integration.*'
+```
+
+It runs in the normal unit-test source set under Robolectric. The harness locates
+the checkout via `MATRON_JOURNAL_PATH` (default `~/Dev/matron-journal`) and node
+via `MATRON_NODE_PATH`, then `PATH`, then `zsh -i -c 'command -v node'` (so nvm
+installs are found), then common install paths. When the checkout, `node`, or
+`node_modules` are missing the suite auto-**skips** (JUnit `Assume`), so CI stays
+green without a checkout; a real startup failure fails the test rather than
+skipping. Prerequisite once: `cd ~/Dev/matron-journal && npm install`.
+
 ## License
 
 AGPL-3.0 with commercial licensing available by arrangement. See `LICENSE` and `NOTICE`.
