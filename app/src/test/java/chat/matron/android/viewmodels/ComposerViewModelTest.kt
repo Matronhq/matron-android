@@ -215,7 +215,7 @@ class ComposerViewModelTest {
     }
 
     @Test
-    fun sendVoiceNote_recordsError_andStillDeletesTemp_whenSendFails() = runBlocking {
+    fun sendVoiceNote_recordsError_andKeepsTheFileForRetry_whenSendFails() = runBlocking {
         val tmp = makeTempFile("voice.m4a", "AUDIO")
         val fake = FakeTimelineService()
         fake.nextSendError = RuntimeException("boom")
@@ -224,7 +224,7 @@ class ComposerViewModelTest {
         vm.sendVoiceNote(tmp, 1.seconds)
 
         assertEquals("boom", vm.sendError.value)
-        assertFalse(tmp.exists())
+        assertTrue(tmp.exists())
     }
 
     @Test

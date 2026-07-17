@@ -83,8 +83,12 @@ fun ComposerView(viewModel: ComposerViewModel) {
 
     val isSending by viewModel.isSending.collectAsStateWithLifecycle()
     val staged by viewModel.stagedAttachments.collectAsStateWithLifecycle()
+    val sendError by viewModel.sendError.collectAsStateWithLifecycle()
 
-    var text by remember { mutableStateOf(viewModel.input) }
+    // Keyed to the room: without this, swapping the VM at the same call site
+    // (navigating to a different room) leaves the previous room's typed text
+    // sitting in the field until something else happens to overwrite it.
+    var text by remember(viewModel.roomID) { mutableStateOf(viewModel.input) }
     fun syncFromVm() { text = viewModel.input }
 
     // --- Attachment picking -------------------------------------------------
@@ -148,6 +152,10 @@ fun ComposerView(viewModel: ComposerViewModel) {
             )
         }
 
+        sendError?.let { message ->
+            ComposerErrorBanner(message = message, onDismiss = { viewModel.dismissError() })
+        }
+
         if (recorderState is VoiceRecorder.State.Recording) {
             RecordingBar(
                 onCancel = { recorder.cancel() },
@@ -192,7 +200,17 @@ fun ComposerView(viewModel: ComposerViewModel) {
 
                 val canSend = viewModel.canSend
                 if (!canSend && ComposerViewModel.MEDIA_AVAILABLE) {
-                    IconButton(onClick = { scope.launch { recorder.start() } }) {
+                    IconButton(
+                        onClick = {
+                            scope.launch {
+                                try {
+                                    recorder.start()
+                                } catch (error: VoiceRecorder.RecorderError) {
+                                    viewModel.reportAttachmentError(voiceRecorderErrorMessage(error))
+                                }
+                            }
+                        },
+                    ) {
                         Icon(Icons.Default.Mic, contentDescription = "Record voice note")
                     }
                 } else {
@@ -242,6 +260,34 @@ private fun RecordingBar(onCancel: () -> Unit, onSend: () -> Unit) {
             Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send voice note", tint = MaterialTheme.colorScheme.primary)
         }
     }
+}
+
+/**
+ * Dismissible inline banner for [ComposerViewModel.sendError]: send /
+ * attachment / voice-note failures the view model records but has no
+ * `matron-apple` presentation to mirror (its composer records `sendError`
+ * but no shell renders it either — this is the Android-side fix).
+ */
+@Composable
+private fun ComposerErrorBanner(message: String, onDismiss: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
+        IconButton(onClick = onDismiss) {
+            Icon(Icons.Default.Close, contentDescription = "Dismiss error", tint = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
+/** User-facing copy for a [VoiceRecorder.RecorderError] thrown by [VoiceRecorder.start]. */
+private fun voiceRecorderErrorMessage(error: VoiceRecorder.RecorderError): String = when (error) {
+    VoiceRecorder.RecorderError.PermissionDenied -> "Microphone access is needed to record a voice note."
+    VoiceRecorder.RecorderError.RecordFailed -> "Couldn't start recording."
+    VoiceRecorder.RecorderError.AlreadyRecording -> "Already recording."
 }
 
 /**

@@ -27,8 +27,14 @@ class MediaRecorderAudioRecording(private val file: File) : AudioRecording {
         true
     }.getOrDefault(false)
 
-    override fun stop() {
-        runCatching { recorder.stop() }
+    override fun stop(): Boolean {
+        // MediaRecorder.stop() throws RuntimeException when the session
+        // captured no valid data (e.g. stopped a moment after start()) —
+        // that must not silently succeed, or a corrupt/empty m4a gets
+        // uploaded. release() runs regardless so the recorder is never
+        // leaked either way.
+        val stopped = runCatching { recorder.stop() }.isSuccess
         runCatching { recorder.release() }
+        return stopped
     }
 }

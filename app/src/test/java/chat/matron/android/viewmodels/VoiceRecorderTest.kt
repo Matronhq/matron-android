@@ -16,7 +16,10 @@ import org.junit.Test
 /// stubbable permission suspend fn (no microphone, no permission dialog).
 class VoiceRecorderTest {
 
-    private class FakeAudioRecorder(var recordReturn: Boolean = true) : AudioRecording {
+    private class FakeAudioRecorder(
+        var recordReturn: Boolean = true,
+        var stopReturn: Boolean = true,
+    ) : AudioRecording {
         var recordCalls = 0
             private set
         var stopCalls = 0
@@ -27,8 +30,9 @@ class VoiceRecorderTest {
             return recordReturn
         }
 
-        override fun stop() {
+        override fun stop(): Boolean {
             stopCalls++
+            return stopReturn
         }
     }
 
@@ -99,6 +103,22 @@ class VoiceRecorderTest {
     fun stop_whenIdle_returnsNull() {
         val rec = makeRecorder()
         assertNull(rec.stop())
+    }
+
+    @Test
+    fun stop_whenRecorderStopFails_returnsNullAndDeletesTheFile() = runBlocking {
+        val dir = tempDir()
+        val fake = FakeAudioRecorder(stopReturn = false)
+        val rec = VoiceRecorder(
+            requestPermission = { true },
+            makeRecorder = { fake },
+            tempDirectory = dir,
+        )
+        rec.start()
+        val result = rec.stop()
+        assertNull(result)
+        assertEquals(VoiceRecorder.State.Finished, rec.state.value)
+        assertTrue(dir.listFiles()?.isEmpty() ?: true)
     }
 
     @Test

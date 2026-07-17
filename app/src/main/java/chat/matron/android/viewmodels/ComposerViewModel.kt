@@ -341,23 +341,32 @@ class ComposerViewModel(
     }
 
     /// Sends a recorded voice note (a temp `.m4a`) as a `file` attachment with an
-    /// `audio/*` content type. The temp file is deleted afterwards whether or not
-    /// the send succeeds; [duration] is informational.
+    /// `audio/*` content type. [duration] is informational. On success the temp
+    /// file is deleted. On failure the file is deliberately left in place —
+    /// deleting a recording nobody could recover is permanent data loss with
+    /// nothing to show for it; the caller still has the [File] handle and can
+    /// retry the same send.
     suspend fun sendVoiceNote(file: File, duration: Duration) {
         try {
             timeline.sendFile(file.readBytes(), "voice-note.m4a", "audio/mp4", null)
             _sendError.value = null
+            runCatching { file.delete() }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
             _sendError.value = error.message ?: error.toString()
         }
-        runCatching { file.delete() }
     }
 
     /// Surfaces attachment-staging errors that occur outside [attachFiles].
     fun reportAttachmentError(message: String) {
         _sendError.value = message
+    }
+
+    /// Clears a shown [sendError] — the composer's dismissible error banner's
+    /// close action.
+    fun dismissError() {
+        _sendError.value = null
     }
 
     companion object {

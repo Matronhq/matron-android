@@ -102,18 +102,25 @@ class VoiceRecorder(
     }
 
     /// Stops recording and hands back the finished file plus its elapsed
-    /// duration. Returns `null` (a no-op) when not currently recording.
+    /// duration. Returns `null` (a no-op) when not currently recording, or
+    /// when the recorder rejects the stop (too-short a tap yields no
+    /// captured data — [AudioRecording.stop] returns `false` — in which case
+    /// the unusable temp file is deleted rather than handed on to be sent).
     fun stop(): VoiceNote? {
         if (_state.value !is State.Recording) return null
         val activeRecorder = recorder ?: return null
         val file = fileURL ?: return null
         val started = startedAt ?: return null
-        activeRecorder.stop()
+        val succeeded = activeRecorder.stop()
         val duration = java.time.Duration.between(started, Instant.now()).toKotlinDuration()
         recorder = null
         fileURL = null
         startedAt = null
         _state.value = State.Finished
+        if (!succeeded) {
+            file.delete()
+            return null
+        }
         return VoiceNote(file, duration)
     }
 
@@ -136,6 +143,9 @@ interface AudioRecording {
     /// Begins capture. Returns `false` if the recorder refused to start.
     fun record(): Boolean
 
-    /// Stops capture and releases resources.
-    fun stop()
+    /// Stops capture and releases resources. Returns `false` if the recorder
+    /// rejected the stop (e.g. `MediaRecorder.stop()` throws when a recording
+    /// captured no data — too-short a tap), meaning the output file is not a
+    /// valid recording and must not be sent.
+    fun stop(): Boolean
 }
