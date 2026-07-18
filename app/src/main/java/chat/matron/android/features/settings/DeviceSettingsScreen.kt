@@ -41,6 +41,7 @@ fun DeviceSettingsScreen(
     appearance: MatronAppearance,
     onAppearanceChange: (MatronAppearance) -> Unit,
     onManageDevices: () -> Unit,
+    onLinkDevice: (() -> Unit)? = null,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -76,6 +77,18 @@ fun DeviceSettingsScreen(
                     ) {
                         Text("Manage Devices", modifier = Modifier.weight(1f))
                         Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+                    }
+                    if (onLinkDevice != null) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(onClick = onLinkDevice)
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Link a Device", modifier = Modifier.weight(1f))
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+                        }
                     }
                 }
             }

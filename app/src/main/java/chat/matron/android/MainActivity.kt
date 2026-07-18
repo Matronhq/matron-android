@@ -38,12 +38,14 @@ import chat.matron.android.features.chatlist.NewChatSheet
 import chat.matron.android.features.chatlist.currentSummary
 import chat.matron.android.features.onboarding.SignInScreen
 import chat.matron.android.features.search.SearchScreen
+import chat.matron.android.features.settings.DeviceLinkScreen
 import chat.matron.android.features.settings.DeviceSettingsScreen
 import chat.matron.android.features.settings.DevicesScreen
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.UserSession
 import chat.matron.android.viewmodels.ChatListViewModel
+import chat.matron.android.viewmodels.LinkSignInViewModel
 import chat.matron.android.viewmodels.SearchViewModel
 import chat.matron.android.viewmodels.SignInViewModel
 import kotlinx.coroutines.launch
@@ -87,7 +89,10 @@ private fun MatronApp(deps: AppDependencies) {
                 !bootstrapped -> LoadingScreen()
                 session == null -> {
                     val vm = remember { SignInViewModel(auth = deps.auth, deviceDisplayName = "Matron Android") }
-                    SignInScreen(viewModel = vm, onSignedIn = { s ->
+                    val linkVm = remember {
+                        LinkSignInViewModel(auth = deps.auth, deviceDisplayName = "Matron Android", scope = scope)
+                    }
+                    SignInScreen(viewModel = vm, linkViewModel = linkVm, onSignedIn = { s ->
                         // Gate on any in-flight sign-out teardown before publishing
                         // the new session (mirrors iOS awaitPendingTeardown), then
                         // clear any mirror files a crashed teardown left behind —
@@ -217,6 +222,7 @@ private fun SignedInApp(
                 appearance = appearance,
                 onAppearanceChange = onAppearanceChange,
                 onManageDevices = { nav.navigate("devices") },
+                onLinkDevice = { nav.navigate("link-device") },
                 onBack = { nav.popBackStack() },
             )
         }
@@ -225,6 +231,14 @@ private fun SignedInApp(
             DevicesScreen(
                 api = deps.devicesService(session),
                 onSelfRevoked = onSignOut,
+                onBack = { nav.popBackStack() },
+            )
+        }
+
+        composable("link-device") {
+            DeviceLinkScreen(
+                api = deps.deviceLinkService(session),
+                serverURL = session.homeserverURL,
                 onBack = { nav.popBackStack() },
             )
         }
