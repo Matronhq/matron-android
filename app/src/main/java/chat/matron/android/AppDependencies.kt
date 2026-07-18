@@ -29,8 +29,10 @@ import chat.matron.android.storage.StoragePaths
 import chat.matron.android.storage.TimelineCacheKey
 import chat.matron.android.sync.SyncService
 import chat.matron.android.viewmodels.AgentRPCProviding
+import chat.matron.android.viewmodels.DeviceLinking
 import chat.matron.android.viewmodels.DevicesProviding
 import chat.matron.android.viewmodels.JournalAgentRPCService
+import chat.matron.android.viewmodels.JournalDeviceLinkService
 import chat.matron.android.viewmodels.JournalDevicesService
 import chat.matron.android.viewmodels.KeyValueStore
 import chat.matron.android.viewmodels.RecentStartFolders
@@ -215,6 +217,10 @@ class AppDependencies(
     /** Devices/pairing surface (Settings → Manage Devices). */
     fun devicesService(session: UserSession): DevicesProviding =
         JournalDevicesService(core(session).api)
+
+    /** Show-QR surface (Settings → Link a Device). */
+    fun deviceLinkService(session: UserSession): DeviceLinking =
+        JournalDeviceLinkService(core(session).api)
 
     /** New Chat surface: agent roster + recent-folders / start RPCs. */
     fun agentRPCService(session: UserSession): AgentRPCProviding {
