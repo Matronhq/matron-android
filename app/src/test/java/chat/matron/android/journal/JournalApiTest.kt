@@ -268,4 +268,68 @@ class JournalApiTest {
         assertEquals("ws://localhost:8787/ws",
             JournalApi("http://localhost:8787").wsUrl)
     }
+
+    @Test
+    fun linkStartParsesResponseAndSendsBearer() = runBlocking {
+        server.enqueue(json(200, """{"link_code":"KTNM-3VQ8","expires_in":120}"""))
+        val started = api(token = "tok").linkStart()
+        assertEquals(LinkStart("KTNM-3VQ8", 120), started)
+        val request = server.takeRequest()
+        assertEquals("/link/start", request.path)
+        assertEquals("Bearer tok", request.getHeader("Authorization"))
+    }
+
+    @Test
+    fun linkStatusWaitingAndClaimed() = runBlocking {
+        server.enqueue(json(200, """{"status":"waiting","expires_in":90}"""))
+        assertEquals(LinkStatus.Waiting(90), api(token = "tok").linkStatus())
+        server.enqueue(json(200,
+            """{"status":"claimed","device_name":"Pixel 9","requester_ip":"198.51.100.7","expires_in":55}"""))
+        assertEquals(LinkStatus.Claimed("Pixel 9", "198.51.100.7", 55), api(token = "tok").linkStatus())
+    }
+
+    @Test
+    fun linkApproveAndDenySendCode() = runBlocking {
+        server.enqueue(json(200, """{"status":"approved"}"""))
+        api(token = "tok").linkApprove("KTNM-3VQ8")
+        assertTrue(server.takeRequest().body.readUtf8().contains(""""link_code":"KTNM-3VQ8""""))
+        server.enqueue(json(200, """{"status":"denied"}"""))
+        api(token = "tok").linkDeny("KTNM-3VQ8")
+        assertTrue(server.takeRequest().body.readUtf8().contains(""""link_code":"KTNM-3VQ8""""))
+    }
+
+    @Test
+    fun linkClaimSendsBodyUnauthenticatedAndParses() = runBlocking {
+        server.enqueue(json(200, """{"status":"claimed","claim_token":"aa11","expires_in":60}"""))
+        // token set but must NOT be sent: claim is the unauthenticated side
+        val claim = api(token = "tok").linkClaim("KTNM-3VQ8", "Matron Android")
+        assertEquals(LinkClaim("aa11", 60), claim)
+        val request = server.takeRequest()
+        assertNull(request.getHeader("Authorization"))
+        val body = request.body.readUtf8()
+        assertTrue(body.contains(""""link_code":"KTNM-3VQ8""""))
+        assertTrue(body.contains(""""device_name":"Matron Android""""))
+    }
+
+    @Test
+    fun linkPollPendingDeniedApproved() = runBlocking {
+        server.enqueue(json(200, """{"status":"pending"}"""))
+        assertEquals(LinkPollResult.Pending, api().linkPoll("aa11"))
+        server.enqueue(json(200, """{"status":"denied"}"""))
+        assertEquals(LinkPollResult.Denied, api().linkPoll("aa11"))
+        server.enqueue(json(200,
+            """{"status":"approved","token":"bb22","device_id":42,"user_id":7,"username":"dan"}"""))
+        assertEquals(LinkPollResult.Approved(LinkApproval("bb22", 42, 7, "dan")), api().linkPoll("aa11"))
+    }
+
+    @Test
+    fun linkPollApprovedWithoutUsernameIsMalformed() = runBlocking {
+        // username is load-bearing (it becomes UserSession.userID) — a server
+        // that omits it must fail loudly, not sign in with a garbage identity.
+        server.enqueue(json(200, """{"status":"approved","token":"bb22","device_id":42,"user_id":7}"""))
+        try {
+            api().linkPoll("aa11"); fail("expected throw")
+        } catch (e: JournalApiError.Transport) { /* expected */ }
+        Unit
+    }
 }

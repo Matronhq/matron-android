@@ -66,6 +66,35 @@ data class DeviceDTO(
 /// `POST /pair/preview` — who is asking to join, shown before approve.
 data class PairPreview(val requesterIP: String, val expiresIn: Int)
 
+/// `POST /link/start` — a fresh device-link session for QR sign-in. `code`
+/// is the display form (`XXXX-XXXX`), rendered under the QR and embedded in
+/// the payload verbatim.
+data class LinkStart(val code: String, val expiresIn: Int)
+
+/// `POST /link/status` — what the show side's poll sees. `Claimed` carries
+/// the claimant-supplied name and the IP the server saw — both go on screen
+/// before the user may approve (anti-phish, like [PairPreview]).
+sealed interface LinkStatus {
+    data class Waiting(val expiresIn: Int) : LinkStatus
+    data class Claimed(val deviceName: String, val requesterIP: String, val expiresIn: Int) : LinkStatus
+}
+
+/// `POST /link/claim` — the claimant's secret poll credential.
+data class LinkClaim(val claimToken: String, val expiresIn: Int)
+
+/// The identity minted at the approved `link/poll`. `username` exists because
+/// the app stores the typed username as `UserSession.userID` and a link
+/// claimant never types one.
+data class LinkApproval(val token: String, val deviceID: Long, val userID: Long, val username: String)
+
+/// `POST /link/poll` — pending until the starter acts; `Denied` and
+/// `Approved` each arrive at most once (the server deletes the session).
+sealed interface LinkPollResult {
+    data object Pending : LinkPollResult
+    data object Denied : LinkPollResult
+    data class Approved(val approval: LinkApproval) : LinkPollResult
+}
+
 /// Errors surfaced by the REST client. Exceptions so they throw through the
 /// suspend surface the way the Swift `throws` do.
 sealed class JournalApiError(message: String? = null) : Exception(message) {
@@ -75,7 +104,9 @@ sealed class JournalApiError(message: String? = null) : Exception(message) {
     data object Unauthenticated : JournalApiError()
     data object Forbidden : JournalApiError()
     data object NotFound : JournalApiError()
-    /// 409 — currently only `POST /pair/approve`: the code was already approved.
+    /// 409 — exactly-once semantics: `pair/approve` (already approved),
+    /// `link/claim` (code already claimed), `link/approve` (nothing to
+    /// approve yet, or already resolved).
     data object Conflict : JournalApiError()
     data class Http(val status: Int, val serverMessage: String) : JournalApiError()
     data class Transport(val detail: String) : JournalApiError()
@@ -225,6 +256,85 @@ class JournalApi(
             put("pair_code", code)
             put("agent_name", agentName)
         })
+    }
+
+    // MARK: Device link (QR sign-in)
+
+    /// Starts (or replaces) this device's link session. `NotFound` means the
+    /// server predates /link/* — callers surface "doesn't support device
+    /// linking yet".
+    suspend fun linkStart(): LinkStart {
+        val obj = request(path = "/link/start", method = "POST", jsonBody = buildJsonObject { })
+        val code = obj.stringOrNull("link_code")
+        val expiresIn = obj.intOrNull("expires_in")
+        if (code == null || expiresIn == null) throw JournalApiError.Transport("malformed link start response")
+        return LinkStart(code, expiresIn)
+    }
+
+    /// This device's active session state. `NotFound` = no active session
+    /// (expired or resolved) — the show side regenerates on it.
+    suspend fun linkStatus(): LinkStatus {
+        val obj = request(path = "/link/status", method = "POST", jsonBody = buildJsonObject { })
+        val expiresIn = obj.intOrNull("expires_in") ?: 0
+        return when (obj.stringOrNull("status")) {
+            "waiting" -> LinkStatus.Waiting(expiresIn)
+            "claimed" -> {
+                val name = obj.stringOrNull("device_name")
+                val ip = obj.stringOrNull("requester_ip")
+                if (name == null || ip == null) throw JournalApiError.Transport("malformed link status response")
+                LinkStatus.Claimed(name, ip, expiresIn)
+            }
+            else -> throw JournalApiError.Transport("malformed link status response")
+        }
+    }
+
+    /// Approves this device's claimed session. `Conflict` = nothing claimed
+    /// yet or already resolved; `NotFound` = expired/gone.
+    suspend fun linkApprove(code: String) {
+        request(path = "/link/approve", method = "POST",
+            jsonBody = buildJsonObject { put("link_code", code) })
+    }
+
+    suspend fun linkDeny(code: String) {
+        request(path = "/link/deny", method = "POST",
+            jsonBody = buildJsonObject { put("link_code", code) })
+    }
+
+    /// Claimant side: claims a scanned/typed code. Unauthenticated — this API
+    /// instance points at the *target* server and has no token yet.
+    /// `Conflict` = code already used; `NotFound` = unknown/expired.
+    suspend fun linkClaim(code: String, deviceName: String): LinkClaim {
+        val obj = request(path = "/link/claim", method = "POST", authenticated = false,
+            jsonBody = buildJsonObject {
+                put("link_code", code)
+                put("device_name", deviceName)
+            })
+        val token = obj.stringOrNull("claim_token")
+        val expiresIn = obj.intOrNull("expires_in")
+        if (token == null || expiresIn == null) throw JournalApiError.Transport("malformed link claim response")
+        return LinkClaim(token, expiresIn)
+    }
+
+    /// Claimant poll loop body. `NotFound` after a successful claim means the
+    /// session expired (or was replaced) — surface "Sign-in expired".
+    suspend fun linkPoll(claimToken: String): LinkPollResult {
+        val obj = request(path = "/link/poll", method = "POST", authenticated = false,
+            jsonBody = buildJsonObject { put("claim_token", claimToken) })
+        return when (obj.stringOrNull("status")) {
+            "pending" -> LinkPollResult.Pending
+            "denied" -> LinkPollResult.Denied
+            "approved" -> {
+                val token = obj.stringOrNull("token")
+                val deviceID = obj.longOrNull("device_id")
+                val userID = obj.longOrNull("user_id")
+                val username = obj.stringOrNull("username")
+                if (token == null || deviceID == null || userID == null || username == null) {
+                    throw JournalApiError.Transport("malformed link poll response")
+                }
+                LinkPollResult.Approved(LinkApproval(token, deviceID, userID, username))
+            }
+            else -> throw JournalApiError.Transport("malformed link poll response")
+        }
     }
 
     /// Registers this device for pushes (client devices only).
