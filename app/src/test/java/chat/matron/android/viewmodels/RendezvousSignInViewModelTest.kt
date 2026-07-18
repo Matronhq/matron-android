@@ -160,6 +160,51 @@ class RendezvousSignInViewModelTest {
     }
 
     @Test
+    fun offer_whoseSubmitManualEarlyReturns_becomesError() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val relay = FakeRelay()
+            relay.pollScript = mutableListOf(
+                // Empty server URL trips submitManual's `raw.isEmpty()` guard,
+                // which returns without ever calling claim() — the link VM is
+                // left parked in Idle with nothing to drive it forward.
+                Result.success(RendezvousPollResult.Offered("", "2345-6789")),
+            )
+            val (vm, link) = makeVMs(relay, FakeLinkClaimer(), scope, FakeAuthService())
+            vm.start()
+            waitUntil {
+                vm.state.value == RendezvousSignInViewModel.State.Error(
+                    "Couldn't connect to that computer's session — try again.",
+                )
+            }
+            assertEquals(LinkSignInViewModel.State.Idle, link.state.value)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun offer_whoseClaimFails_becomesError() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val relay = FakeRelay()
+            relay.pollScript = mutableListOf(
+                Result.success(RendezvousPollResult.Offered("https://chat.example.com", "2345-6789")),
+            )
+            val claimer = FakeLinkClaimer()
+            claimer.claimResult = Result.failure(RuntimeException("boom"))
+            val (vm, link) = makeVMs(relay, claimer, scope, FakeAuthService())
+            vm.start()
+            waitUntil {
+                vm.state.value == RendezvousSignInViewModel.State.Error(
+                    "Couldn't connect to that computer's session — try again.",
+                )
+            }
+            assertTrue(link.state.value is LinkSignInViewModel.State.Error)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
     fun stop_duringInFlightPoll_dropsTheLateOffer() = runBlocking {
         val scope = CoroutineScope(coroutineContext + Job())
         try {

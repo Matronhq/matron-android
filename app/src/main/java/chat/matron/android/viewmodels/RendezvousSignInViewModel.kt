@@ -108,6 +108,31 @@ class RendezvousSignInViewModel(
                         link.serverURL = result.server
                         link.codeInput = result.code
                         link.submitManual()
+                        if (gen != generation || !isActive) return@launch
+                        // submitManual() can return without ever starting a
+                        // claim (its own early-return guards: empty/invalid
+                        // server URL or code, or a claim already in
+                        // progress), and the link VM's claim/poll can also
+                        // land in its own Error phase. Either way the link VM
+                        // is parked in Idle/Error with nothing left to drive
+                        // it forward, so this VM must not sit in Connecting
+                        // forever — surface a retryable error instead. The
+                        // progressing phases (Claiming, WaitingForApproval,
+                        // SignedIn) mean the claim is under way; the link
+                        // VM's own state drives the UI from here.
+                        when (link.state.value) {
+                            is LinkSignInViewModel.State.Claiming,
+                            is LinkSignInViewModel.State.WaitingForApproval,
+                            is LinkSignInViewModel.State.SignedIn,
+                            -> Unit
+                            is LinkSignInViewModel.State.Idle,
+                            is LinkSignInViewModel.State.Error,
+                            -> {
+                                _state.value = State.Error(
+                                    "Couldn't connect to that computer's session — try again.",
+                                )
+                            }
+                        }
                         return@launch
                     }
                 }
