@@ -272,6 +272,8 @@ fun TimelineList(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(vertical = 8.dp),
+                // Matches ChatView.swift's `VStack(spacing: 8)` between rows.
+                verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
             ) {
                 item(key = "paginating") {
                     if (paginating) PaginatingHeader()
