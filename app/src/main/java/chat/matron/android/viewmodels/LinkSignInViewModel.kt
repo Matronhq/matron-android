@@ -127,7 +127,12 @@ class LinkSignInViewModel(
     }
 
     private suspend fun claim(server: String, code: String) {
-        if (_state.value is State.Claiming || _state.value is State.WaitingForApproval) return
+        // SignedIn is terminal: a second scan/submit while navigation is in
+        // flight must not start another claim over the persisted session.
+        if (_state.value is State.Claiming ||
+            _state.value is State.WaitingForApproval ||
+            _state.value is State.SignedIn
+        ) return
         _state.value = State.Claiming
         val gen = generation
         val api = apiFactory(server)

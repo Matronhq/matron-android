@@ -271,6 +271,31 @@ class LinkSignInViewModelTest {
         Unit
     }
 
+    // SignedIn is terminal (bugbot, mirrors matron-apple's claim guard): a
+    // second scan or manual submit after approval must not start another
+    // claim or disturb the signed-in state while navigation is in flight.
+    @Test
+    fun claim_afterSignedIn_isIgnored() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeLinkClaimer()
+            fake.pollScript = mutableListOf(
+                Result.success(LinkPollResult.Approved(LinkApproval("tok99", 42, 7, "dan"))),
+            )
+            val auth = FakeAuthService()
+            val vm = makeVM(fake, scope, auth)
+            vm.handleScanned(scannedURI)
+            waitUntil { vm.state.value is LinkSignInViewModel.State.SignedIn }
+            val signedIn = vm.state.value
+
+            vm.handleScanned(scannedURI)
+            assertEquals(signedIn, vm.state.value)
+            assertEquals(listOf("KTNM-3VQ8"), fake.claimedCodes) // no second claim
+            assertEquals(1, auth.persistedSessions.size)
+        } finally { scope.cancel() }
+        Unit
+    }
+
     // Regression for the poll-side twin of the claim race (bugbot, mirrors
     // matron-apple's poll-loop fix): cancel() landing while a linkPoll that
     // already has an Approved response is in flight must not let the resumed
