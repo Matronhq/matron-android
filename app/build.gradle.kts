@@ -75,6 +75,11 @@ dependencies {
     // uses the Play-services code scanner instead (no camera permission).
     implementation(libs.zxing.core)
 
+    // Sign-in QR scanning via the Play-services code scanner: Google-provided
+    // capture UI, NO CAMERA permission and no manifest change. Degrades to the
+    // manual link-code path when Play services is unavailable.
+    implementation(libs.play.services.code.scanner)
+
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)

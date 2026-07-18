@@ -45,6 +45,7 @@ import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.UserSession
 import chat.matron.android.viewmodels.ChatListViewModel
+import chat.matron.android.viewmodels.LinkSignInViewModel
 import chat.matron.android.viewmodels.SearchViewModel
 import chat.matron.android.viewmodels.SignInViewModel
 import kotlinx.coroutines.launch
@@ -88,7 +89,10 @@ private fun MatronApp(deps: AppDependencies) {
                 !bootstrapped -> LoadingScreen()
                 session == null -> {
                     val vm = remember { SignInViewModel(auth = deps.auth, deviceDisplayName = "Matron Android") }
-                    SignInScreen(viewModel = vm, onSignedIn = { s ->
+                    val linkVm = remember {
+                        LinkSignInViewModel(auth = deps.auth, deviceDisplayName = "Matron Android", scope = scope)
+                    }
+                    SignInScreen(viewModel = vm, linkViewModel = linkVm, onSignedIn = { s ->
                         // Gate on any in-flight sign-out teardown before publishing
                         // the new session (mirrors iOS awaitPendingTeardown), then
                         // clear any mirror files a crashed teardown left behind —
