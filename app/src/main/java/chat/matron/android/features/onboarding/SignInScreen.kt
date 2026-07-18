@@ -20,6 +20,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -84,6 +85,11 @@ fun SignInScreen(
     LaunchedEffect(linkState) {
         (linkState as? LinkSignInViewModel.State.SignedIn)?.let { onSignedIn(it.session) }
     }
+
+    // The claimant poll must not outlive this screen: a late approval landing
+    // after the screen (and its VM's poll loop) is gone could persist a stale
+    // UserSession over one established in the meantime (e.g. password sign-in).
+    DisposableEffect(Unit) { onDispose { linkViewModel.cancel() } }
 
     val busy = state is SignInViewModel.State.Busy
     val errorMessage = (state as? SignInViewModel.State.Error)?.message
@@ -175,6 +181,7 @@ fun SignInScreen(
                 Text("From another device", style = MaterialTheme.typography.labelLarge)
                 Button(
                     onClick = {
+                        scannerUnavailable = false
                         val options = GmsBarcodeScannerOptions.Builder()
                             .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
                             .build()
