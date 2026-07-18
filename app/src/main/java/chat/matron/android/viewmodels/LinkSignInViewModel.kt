@@ -154,10 +154,17 @@ class LinkSignInViewModel(
         }
         if (gen != generation) return // cancel() landed while this call was in flight
         _state.value = State.WaitingForApproval
-        startPolling(api, server, claim.claimToken)
+        startPolling(api, server, claim.claimToken, gen)
     }
 
-    private fun startPolling(api: LinkClaiming, server: String, claimToken: String) {
+    // `gen` is the claim's generation snapshot. `pollTask?.cancel()` kills the
+    // loop at its next *cancellable* suspension, but a `linkPoll` response the
+    // transport has already delivered resumes the loop body on the cancelled
+    // job and runs straight through to `persist`/state writes with no further
+    // suspension point — so, mirroring the claim path (and matron-apple's
+    // poll loops), every branch re-checks `gen`/`isActive` after the await
+    // before touching `_state` or persisting.
+    private fun startPolling(api: LinkClaiming, server: String, claimToken: String, gen: Long) {
         pollTask?.cancel()
         pollTask = scope.launch {
             var interval = pollInterval
@@ -165,7 +172,9 @@ class LinkSignInViewModel(
                 delay(interval)
                 if (!isActive) return@launch
                 try {
-                    when (val result = api.linkPoll(claimToken)) {
+                    val result = api.linkPoll(claimToken)
+                    if (gen != generation || !isActive) return@launch // stale: cancel() landed mid-poll
+                    when (result) {
                         is LinkPollResult.Pending -> interval = pollInterval
                         is LinkPollResult.Denied -> {
                             _state.value = State.Error("Sign-in was denied on the other device.")
@@ -190,6 +199,7 @@ class LinkSignInViewModel(
                         }
                     }
                 } catch (e: JournalApiError.NotFound) {
+                    if (gen != generation) return@launch
                     _state.value = State.Error("Sign-in expired. Scan again.")
                     return@launch
                 } catch (cancel: kotlinx.coroutines.CancellationException) {

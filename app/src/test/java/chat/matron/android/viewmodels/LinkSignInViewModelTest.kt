@@ -9,10 +9,12 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -48,8 +50,25 @@ class FakeLinkClaimer : LinkClaiming {
         }
         return claimResult.getOrThrow()
     }
+    /// Poll-side twin of [gateClaim]: parks the next `linkPoll()` call at
+    /// [pollGateReached] until [releasePoll]. The park is `NonCancellable` on
+    /// purpose — it models a response that the transport has already
+    /// delivered, so `pollTask?.cancel()` cannot reach it and only the
+    /// view model's post-await generation guard can stop the resumed code.
+    var gatePoll = false
+    val pollGateReached = CompletableDeferred<Unit>()
+    private val pollRelease = CompletableDeferred<Unit>()
+
+    fun releasePoll() {
+        pollRelease.complete(Unit)
+    }
+
     override suspend fun linkPoll(claimToken: String): LinkPollResult {
         pollCount += 1
+        if (gatePoll) {
+            pollGateReached.complete(Unit)
+            withContext(NonCancellable) { pollRelease.await() }
+        }
         return (if (pollScript.size > 1) pollScript.removeAt(0) else pollScript[0]).getOrThrow()
     }
 }
@@ -249,6 +268,37 @@ class LinkSignInViewModelTest {
             scope.cancel()
             callerScope.cancel()
         }
+        Unit
+    }
+
+    // Regression for the poll-side twin of the claim race (bugbot, mirrors
+    // matron-apple's poll-loop fix): cancel() landing while a linkPoll that
+    // already has an Approved response is in flight must not let the resumed
+    // loop body persist the session or flip state to SignedIn.
+    @Test
+    fun cancel_duringInFlightPoll_dropsLateApproval() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeLinkClaimer()
+            fake.gatePoll = true
+            fake.pollScript = mutableListOf(
+                Result.success(LinkPollResult.Approved(LinkApproval("tok99", 42, 7, "dan"))),
+            )
+            val auth = FakeAuthService()
+            val vm = makeVM(fake, scope, auth)
+            vm.handleScanned(scannedURI)
+            fake.pollGateReached.await()
+            assertEquals(LinkSignInViewModel.State.WaitingForApproval, vm.state.value)
+
+            vm.cancel()
+            assertEquals(LinkSignInViewModel.State.Idle, vm.state.value)
+
+            fake.releasePoll()
+            // Give the resumed (stale) poll body a chance to misbehave.
+            delay(50)
+            assertEquals(LinkSignInViewModel.State.Idle, vm.state.value)
+            assertTrue(auth.persistedSessions.isEmpty())
+        } finally { scope.cancel() }
         Unit
     }
 
