@@ -327,7 +327,18 @@ fun SignInScreen(
                 (linkState as? LinkSignInViewModel.State.Error)?.let {
                     Text(it.message, color = MaterialTheme.colorScheme.error)
                     if (qrTab == 1) {
-                        TextButton(onClick = { scope.launch { rendezvousViewModel.start() } }) {
+                        TextButton(onClick = {
+                            // linkState stays in Error until reset — and the
+                            // Show-tab guard above suppresses all rendezvous
+                            // UI while it's Error — so restarting the
+                            // rendezvous VM alone would mint a fresh QR that
+                            // never renders. cancel() is the link VM's
+                            // idiomatic reset back to Idle (used identically
+                            // by the Cancel button above); do that first so
+                            // the guard lifts, then start the new QR.
+                            linkViewModel.cancel()
+                            scope.launch { rendezvousViewModel.start() }
+                        }) {
                             Text("Show a new code")
                         }
                     }
