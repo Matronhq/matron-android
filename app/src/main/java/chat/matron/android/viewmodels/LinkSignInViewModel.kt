@@ -70,6 +70,28 @@ class LinkSignInViewModel(
 
     private var pollTask: Job? = null
 
+    // Monotonic generation guard against an orphaned claim resuming after
+    // cancel(). Mirrors DeviceLinkViewModel's fix (matron-apple's
+    // LinkSignInViewModel just gained the equivalent).
+    //
+    // `claim()` (called from `handleScanned`/`submitManual`) is a *suspend*
+    // function driven by whatever coroutine the caller runs it on — it is NOT
+    // tracked by `pollTask`. `cancel()` cancelling `pollTask` therefore
+    // cannot reach a `claim()` call that's still suspended on `linkClaim`'s
+    // network hop when `cancel()` lands. Without this guard, that stale call
+    // resumes after `cancel()`, mutates `state` back to `WaitingForApproval`,
+    // and spawns a fresh poll loop — in the VM's injected (activity-level)
+    // scope — that can later persist a cancelled link session over the
+    // active one.
+    //
+    // `claim()` captures the live generation right after entering `Claiming`;
+    // `cancel()` bumps it. Every path after the one suspension point
+    // (`api.linkClaim`) re-checks the captured value against the live
+    // counter and abandons silently — no `_state` write, no `startPolling` —
+    // on a mismatch. The `CancellationException` rethrow stays first and
+    // unguarded.
+    private var generation = 0L
+
     suspend fun handleScanned(payload: String) {
         val parsed = try {
             LinkURI.parse(payload)
@@ -98,6 +120,7 @@ class LinkSignInViewModel(
     /// Back out: stop polling and return to the sign-in form. The show side
     /// still sees `claimed` and can deny or let the code expire.
     fun cancel() {
+        generation++
         pollTask?.cancel()
         pollTask = null
         _state.value = State.Idle
@@ -106,24 +129,30 @@ class LinkSignInViewModel(
     private suspend fun claim(server: String, code: String) {
         if (_state.value is State.Claiming || _state.value is State.WaitingForApproval) return
         _state.value = State.Claiming
+        val gen = generation
         val api = apiFactory(server)
         val claim = try {
             api.linkClaim(code, deviceDisplayName)
         } catch (e: JournalApiError.Conflict) {
+            if (gen != generation) return // cancel() landed while this call was in flight
             _state.value = State.Error("This code was already used. Generate a new one on your signed-in device.")
             return
         } catch (e: JournalApiError.NotFound) {
+            if (gen != generation) return
             _state.value = State.Error("Code not recognized or expired. Show a fresh QR code and try again.")
             return
         } catch (e: JournalApiError.RateLimited) {
+            if (gen != generation) return
             _state.value = State.Error("Too many attempts — try again in a minute.")
             return
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
         } catch (e: Throwable) {
+            if (gen != generation) return
             _state.value = State.Error("Couldn't reach the server — try again.")
             return
         }
+        if (gen != generation) return // cancel() landed while this call was in flight
         _state.value = State.WaitingForApproval
         startPolling(api, server, claim.claimToken)
     }

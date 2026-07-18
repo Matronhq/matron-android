@@ -6,10 +6,12 @@ import chat.matron.android.journal.LinkApproval
 import chat.matron.android.journal.LinkClaim
 import chat.matron.android.journal.LinkPollResult
 import kotlin.time.Duration.Companion.milliseconds
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -23,9 +25,27 @@ class FakeLinkClaimer : LinkClaiming {
     val claimedDeviceNames = mutableListOf<String>()
     var pollCount = 0
 
+    /// Generation-guard test hook (mirrors `FakeDeviceLinker.gateLinkStart` in
+    /// `DeviceLinkViewModelTest.kt`): when [gateClaim] is set, the next
+    /// `linkClaim()` call records the attempt, signals [claimGateReached],
+    /// then blocks until [releaseClaim] is called — lets a test park a claim
+    /// call mid-network-hop to exercise `LinkSignInViewModel`'s
+    /// cancel-during-in-flight-claim guard.
+    var gateClaim = false
+    val claimGateReached = CompletableDeferred<Unit>()
+    private val claimRelease = CompletableDeferred<Unit>()
+
+    fun releaseClaim() {
+        claimRelease.complete(Unit)
+    }
+
     override suspend fun linkClaim(code: String, deviceName: String): LinkClaim {
         claimedCodes.add(code)
         claimedDeviceNames.add(deviceName)
+        if (gateClaim) {
+            claimGateReached.complete(Unit)
+            claimRelease.await()
+        }
         return claimResult.getOrThrow()
     }
     override suspend fun linkPoll(claimToken: String): LinkPollResult {
@@ -190,6 +210,45 @@ class LinkSignInViewModelTest {
             waitUntil { vm.state.value is LinkSignInViewModel.State.SignedIn }
             assertTrue(vm.state.value is LinkSignInViewModel.State.SignedIn) // one dropped poll never kills the flow
         } finally { scope.cancel() }
+        Unit
+    }
+
+    // Regression for the cancellation race mirrored from matron-apple's
+    // LinkSignInViewModel fix: cancel() landing while linkClaim() is still
+    // in flight must not let the resumed success path flip to
+    // WaitingForApproval or spawn an orphan poll loop. The claim coroutine is
+    // launched on a caller-provided scope (mirroring SignInScreen's
+    // screen-local rememberCoroutineScope, distinct from the VM's injected
+    // `scope` used only for polling) so cancel() cannot reach it directly —
+    // only the generation guard can.
+    @Test
+    fun cancel_duringInFlightClaim_abandonsClaimSilently() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        val callerScope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeLinkClaimer()
+            fake.gateClaim = true
+            val auth = FakeAuthService()
+            val vm = makeVM(fake, scope, auth)
+            val claimJob = callerScope.launch { vm.handleScanned(scannedURI) }
+            fake.claimGateReached.await()
+            assertEquals(LinkSignInViewModel.State.Claiming, vm.state.value)
+
+            vm.cancel()
+            assertEquals(LinkSignInViewModel.State.Idle, vm.state.value)
+
+            fake.releaseClaim()
+            claimJob.join()
+
+            // Give any wrongly-spawned poll loop a chance to run.
+            delay(50)
+            assertEquals(LinkSignInViewModel.State.Idle, vm.state.value)
+            assertEquals(0, fake.pollCount)
+            assertTrue(auth.persistedSessions.isEmpty())
+        } finally {
+            scope.cancel()
+            callerScope.cancel()
+        }
         Unit
     }
 
