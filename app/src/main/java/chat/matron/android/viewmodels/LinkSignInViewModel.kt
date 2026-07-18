@@ -199,7 +199,7 @@ class LinkSignInViewModel(
                         }
                     }
                 } catch (e: JournalApiError.NotFound) {
-                    if (gen != generation) return@launch
+                    if (gen != generation || !isActive) return@launch
                     _state.value = State.Error("Sign-in expired. Scan again.")
                     return@launch
                 } catch (cancel: kotlinx.coroutines.CancellationException) {
