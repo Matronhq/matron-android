@@ -253,6 +253,7 @@ private fun SignedInApp(
             DeviceLinkScreen(
                 api = deps.deviceLinkService(session),
                 serverURL = session.homeserverURL,
+                relay = RelayApi(client = deps.sharedClient),
                 onBack = { nav.popBackStack() },
             )
         }
