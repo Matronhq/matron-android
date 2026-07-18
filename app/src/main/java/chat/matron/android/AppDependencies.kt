@@ -86,8 +86,12 @@ class AppDependencies(
     private val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) {
 
-    /** One shared OkHttp client (keepalive pings) for REST + WebSocket. */
-    private val sharedClient: OkHttpClient = OkHttpWebSocketConnector.defaultClient()
+    /**
+     * One shared OkHttp client (keepalive pings) for REST + WebSocket. Visible
+     * (not private) so the sign-in stage can hand it to [chat.matron.android.journal.RelayApi]
+     * for the rendezvous relay, which is unauthenticated and predates a session.
+     */
+    val sharedClient: OkHttpClient = OkHttpWebSocketConnector.defaultClient()
 
     val auth: AuthService
 
