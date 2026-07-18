@@ -228,4 +228,52 @@ class RendezvousSignInViewModelTest {
         } finally { scope.cancel() }
         Unit
     }
+
+    // --- Wave 2 (mirrors matron-apple e2241e6): defer relay offers while a
+    // link claim is already in flight ---
+    //
+    // An offer arriving while the user's own scan/typed claim is mid-flight
+    // on the shared link VM must not hijack it: overwriting serverURL/
+    // codeInput would destroy what the user entered, and pinning this VM's
+    // Connecting host line over a wait that belongs to a different claim is
+    // a spec §4 transparency violation. The relay's poll is a repeatable
+    // read, so the deferred offer must still be picked up once the link VM
+    // comes back to rest (Idle/Error).
+    @Test
+    fun offerWhileManualClaimInFlight_isDeferredUntilClaimResolves() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val relay = FakeRelay()
+            relay.pollScript = mutableListOf(
+                Result.success(RendezvousPollResult.Offered("https://relay-offered.example.com", "9999-8888")),
+            )
+            val claimer = FakeLinkClaimer()
+            claimer.pollScript = mutableListOf(Result.success(LinkPollResult.Pending))
+            val auth = FakeAuthService()
+            val (vm, link) = makeVMs(relay, claimer, scope, auth)
+
+            // Put the link VM into WaitingForApproval on the user's own typed
+            // claim before the relay ever offers anything.
+            link.serverURL = "https://typed.example.com"
+            link.codeInput = "1111-2222"
+            link.submitManual()
+            assertEquals(LinkSignInViewModel.State.WaitingForApproval, link.state.value)
+
+            vm.start()
+            delay(50) // let the (sticky-Offered) rendezvous poll loop spin a few times
+            assertTrue(vm.state.value !is RendezvousSignInViewModel.State.Connecting)
+            assertEquals("https://typed.example.com", link.serverURL)
+            assertEquals("1111-2222", link.codeInput)
+
+            // The manual claim resolves (denied) — the link VM comes back to
+            // rest, so the deferred offer must now be picked up.
+            claimer.pollScript = mutableListOf(Result.success(LinkPollResult.Denied))
+            waitUntil {
+                link.state.value == LinkSignInViewModel.State.Error("Sign-in was denied on the other device.")
+            }
+            waitUntil { link.serverURL == "https://relay-offered.example.com" }
+            assertEquals("9999-8888", link.codeInput)
+        } finally { scope.cancel() }
+        Unit
+    }
 }

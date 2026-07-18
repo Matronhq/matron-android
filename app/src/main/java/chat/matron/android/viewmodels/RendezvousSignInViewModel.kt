@@ -102,6 +102,26 @@ class RendezvousSignInViewModel(
                 when (result) {
                     is RendezvousPollResult.Waiting -> delay(pollInterval)
                     is RendezvousPollResult.Offered -> {
+                        // A scan/typed claim may already be in flight on the shared link
+                        // VM. Hijacking it here would overwrite the user's entered
+                        // server/code and pin this VM's Connecting host line over a wait
+                        // that belongs to a different claim (spec §4 transparency). The
+                        // relay's poll is a repeatable read — the offer survives until the
+                        // rendezvous TTL — so defer: keep polling and pick the offer up if
+                        // the link VM comes back to rest (SignedIn never resumes; the
+                        // screen is closing and a live session must not be replaced).
+                        when (link.state.value) {
+                            is LinkSignInViewModel.State.Claiming,
+                            is LinkSignInViewModel.State.WaitingForApproval,
+                            is LinkSignInViewModel.State.SignedIn,
+                            -> {
+                                delay(pollInterval)
+                                continue
+                            }
+                            is LinkSignInViewModel.State.Idle,
+                            is LinkSignInViewModel.State.Error,
+                            -> Unit
+                        }
                         _state.value = State.Connecting(
                             result.server.toHttpUrlOrNull()?.host ?: result.server,
                         )
