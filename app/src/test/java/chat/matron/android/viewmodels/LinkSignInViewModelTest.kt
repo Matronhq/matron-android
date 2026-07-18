@@ -343,4 +343,38 @@ class LinkSignInViewModelTest {
         } finally { scope.cancel() }
         Unit
     }
+
+    // Wave 3 (bugbot threads 3608922052 / 3609007784): a CancellationException
+    // landing mid-claim (e.g. the rendezvous VM's stop() cancelling the poll
+    // job that was driving submitManual) rethrows without touching _state —
+    // correct coroutine etiquette — but State.Claiming was already published
+    // at entry and nothing else ever clears it, wedging claim()'s entry guard
+    // against every future scan/typed submit for the VM's lifetime.
+    @Test
+    fun cancelledCallerJob_duringInFlightClaim_resetsClaimingToIdle() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeLinkClaimer()
+            fake.gateClaim = true // cancellable gate: claimRelease.await() is NOT wrapped in NonCancellable
+            val vm = makeVM(fake, scope)
+            vm.serverURL = "https://chat.example.com"
+            vm.codeInput = "2345-6789"
+
+            val job = scope.launch { vm.submitManual() }
+            fake.claimGateReached.await()
+            assertEquals(LinkSignInViewModel.State.Claiming, vm.state.value)
+
+            job.cancel()
+            job.join()
+            assertEquals(LinkSignInViewModel.State.Idle, vm.state.value)
+
+            // The entry guard must no longer be wedged: a subsequent submit
+            // actually starts a new claim (claimer call count increments)
+            // instead of being silently rejected by the stuck-Claiming guard.
+            fake.gateClaim = false
+            vm.submitManual()
+            assertEquals(2, fake.claimedCodes.size)
+        } finally { scope.cancel() }
+        Unit
+    }
 }

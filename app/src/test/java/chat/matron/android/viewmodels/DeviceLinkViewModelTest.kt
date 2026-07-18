@@ -3,6 +3,10 @@ package chat.matron.android.viewmodels
 import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.LinkStart
 import chat.matron.android.journal.LinkStatus
+import chat.matron.android.journal.RelayError
+import chat.matron.android.journal.RelayRendezvousing
+import chat.matron.android.journal.Rendezvous
+import chat.matron.android.journal.RendezvousPollResult
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -15,6 +19,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /// Scriptable show-side fake: `statusScript` is consumed one result per poll;
@@ -79,6 +84,38 @@ class FakeDeviceLinker : DeviceLinking {
     override suspend fun linkDeny(code: String) {
         deniedCodes.add(code)
         denyResult.getOrThrow()
+    }
+}
+
+private const val RLINK_RID = "23456789BCDFGHJKMNPQRSTVWX"
+private const val RLINK_PAYLOAD = "matron://rlink?v=1&rid=23456789BCDFGHJKMNPQRSTVWX"
+
+private class FakeRelayOffer : RelayRendezvousing {
+    var offerResult: Result<Unit> = Result.success(Unit)
+    val offers = mutableListOf<Triple<String, String, String>>()
+
+    /// Gate-the-offer test hook, same shape as [FakeDeviceLinker.gateStatus]:
+    /// parks the next `offerRendezvous()` call at [offerGateReached] until
+    /// [releaseOffer] — lets a test drive a status poll while the offer is
+    /// still in flight. `NonCancellable` on purpose, mirroring the status
+    /// gate: models a call already committed to the wire.
+    var gateOffer = false
+    val offerGateReached = CompletableDeferred<Unit>()
+    private val offerRelease = CompletableDeferred<Unit>()
+
+    fun releaseOffer() {
+        offerRelease.complete(Unit)
+    }
+
+    override suspend fun createRendezvous(): Rendezvous = error("unused")
+    override suspend fun pollRendezvous(rid: String, secret: String): RendezvousPollResult = error("unused")
+    override suspend fun offerRendezvous(rid: String, server: String, code: String) {
+        offers.add(Triple(rid, server, code))
+        if (gateOffer) {
+            offerGateReached.complete(Unit)
+            withContext(NonCancellable) { offerRelease.await() }
+        }
+        offerResult.getOrThrow()
     }
 }
 
@@ -314,6 +351,247 @@ class DeviceLinkViewModelTest {
             val statusCountAfterResume = fake.statusCount
             delay(50) // an orphaned poll loop would have polled status by now
             assertEquals(statusCountAfterResume, fake.statusCount) // none spawned
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    // --- Task 4: offerScanned (signed-in Scan side) ---
+
+    @Test
+    fun offerScanned_sendsTheLiveSessionCodeAndServer() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDeviceLinker().apply {
+                startResults = mutableListOf(Result.success(LinkStart("2345-6789", 120)))
+            }
+            val relay = FakeRelayOffer()
+            val vm = DeviceLinkViewModel(
+                api = fake, serverURL = "https://chat.example.com", relay = relay, scope = scope,
+                pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+            )
+            vm.start()
+            waitUntil { vm.phase.value is DeviceLinkViewModel.Phase.Showing }
+            val startCountBefore = fake.startCount
+            vm.offerScanned(RLINK_PAYLOAD)
+            assertEquals(listOf(Triple(RLINK_RID, "https://chat.example.com", "2345-6789")), relay.offers)
+            assertEquals("Sent — approve the request when it appears.", vm.noticeMessage.value)
+            // Regression (apple review finding): offerScanned must never call
+            // linkStart again — a second linkStart REPLACES the live session
+            // whose code was just offered to the relay.
+            assertEquals(startCountBefore, fake.startCount)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun offerScanned_parseFailures_neverTouchTheRelay() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDeviceLinker()
+            val relay = FakeRelayOffer()
+            val vm = DeviceLinkViewModel(
+                api = fake, serverURL = "https://chat.example.com", relay = relay, scope = scope,
+                pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+            )
+            vm.start()
+            waitUntil { vm.phase.value is DeviceLinkViewModel.Phase.Showing }
+            vm.offerScanned("matron://rlink?v=9&rid=$RLINK_RID")
+            assertEquals("This QR code needs a newer version of Matron.", vm.noticeMessage.value)
+            vm.offerScanned("https://not-matron.example.com")
+            assertEquals("Not a Matron link code.", vm.noticeMessage.value)
+            assertTrue(relay.offers.isEmpty())
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun offerScanned_relayOutcomes_mapToNotices() = runBlocking {
+        val cases = listOf(
+            Result.failure<Unit>(RelayError.Conflict()) to "That code was already used by another device.",
+            Result.failure<Unit>(RelayError.NotFound()) to "That code expired — ask the computer to show a fresh one.",
+            Result.failure<Unit>(RelayError.Transport("down")) to "Couldn't reach the Matron relay — try again.",
+        )
+        for ((result, notice) in cases) {
+            val scope = CoroutineScope(coroutineContext + Job())
+            try {
+                val fake = FakeDeviceLinker()
+                val relay = FakeRelayOffer().apply { offerResult = result }
+                val vm = DeviceLinkViewModel(
+                    api = fake, serverURL = "https://chat.example.com", relay = relay, scope = scope,
+                    pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+                )
+                vm.start()
+                waitUntil { vm.phase.value is DeviceLinkViewModel.Phase.Showing }
+                vm.offerScanned(RLINK_PAYLOAD)
+                assertEquals(notice, vm.noticeMessage.value)
+            } finally { scope.cancel() }
+        }
+        Unit
+    }
+
+    @Test
+    fun offerScanned_withoutALiveCode_asksToRetry() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDeviceLinker()
+            val relay = FakeRelayOffer()
+            val vm = DeviceLinkViewModel(
+                api = fake, serverURL = "https://chat.example.com", relay = relay, scope = scope,
+                pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+            )
+            vm.offerScanned(RLINK_PAYLOAD) // start() never called — no Showing phase yet
+            assertTrue(relay.offers.isEmpty())
+            assertEquals("Still fetching a link code — try scanning again in a moment.", vm.noticeMessage.value)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    // --- Controller amendment B: terminal-state notice copy ---
+    //
+    // The brief's non-Showing guard used one notice for every non-Showing
+    // phase. A scan landing while the show side is Claimed/Approved/Denied
+    // is a different situation from "still loading" — there IS a session,
+    // it's just already past the point where offering a fresh scan makes
+    // sense, so it gets its own copy telling the user to finish it first.
+    @Test
+    fun offerScanned_duringTerminalPhase_saysFinishTheSessionFirst() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDeviceLinker()
+            fake.statusScript = mutableListOf(Result.success(LinkStatus.Claimed("Pixel 9", "198.51.100.7", 90)))
+            val relay = FakeRelayOffer()
+            val vm = DeviceLinkViewModel(
+                api = fake, serverURL = "https://chat.example.com", relay = relay, scope = scope,
+                pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+            )
+            vm.start()
+            waitUntil { vm.phase.value is DeviceLinkViewModel.Phase.Claimed }
+            vm.offerScanned(RLINK_PAYLOAD)
+            assertEquals(
+                "A link session is already in progress — finish it before linking another device.",
+                vm.noticeMessage.value,
+            )
+            assertTrue(relay.offers.isEmpty())
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun offerScanned_whileLoading_stillUsesTheFetchingNotice() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDeviceLinker()
+            fake.gateLinkStart = true // parks start() in Loading, never reaches Showing
+            val relay = FakeRelayOffer()
+            val vm = DeviceLinkViewModel(
+                api = fake, serverURL = "https://chat.example.com", relay = relay, scope = scope,
+                pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+            )
+            val startJob = scope.launch { vm.start() }
+            fake.linkStartGateReached.await()
+            assertEquals(DeviceLinkViewModel.Phase.Loading, vm.phase.value)
+            vm.offerScanned(RLINK_PAYLOAD)
+            assertEquals("Still fetching a link code — try scanning again in a moment.", vm.noticeMessage.value)
+            assertTrue(relay.offers.isEmpty())
+            fake.releaseLinkStart()
+            startJob.join()
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    // --- Controller amendment A: inhibit the status poll while the offer is
+    // in flight ---
+    //
+    // approve()/deny() already guard the poll loop with `isSubmitting` while
+    // their own network call is in flight, so a `linkStatus` response that
+    // was already on the wire when the tap landed can't regenerate the
+    // session out from under a terminal phase. offerScanned must get the
+    // exact same protection around `offerRendezvous` — a NotFound that
+    // resolves mid-offer must not regenerate the session whose code was
+    // just handed to the relay.
+    @Test
+    fun offerScanned_duringInFlightStatusPoll_inhibitsRegenerationUntilOfferResolves() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDeviceLinker().apply {
+                startResults = mutableListOf(
+                    Result.success(LinkStart("2345-6789", 120)),
+                    Result.success(LinkStart("WXYZ-2345", 120)),
+                )
+                statusScript = mutableListOf(
+                    Result.failure(JournalApiError.NotFound),
+                    Result.failure(JournalApiError.NotFound),
+                    Result.success(LinkStatus.Waiting(100)),
+                )
+            }
+            val relay = FakeRelayOffer().apply { gateOffer = true }
+            val vm = DeviceLinkViewModel(
+                api = fake, serverURL = "https://chat.example.com", relay = relay, scope = scope,
+                pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+            )
+            vm.start()
+            waitUntil { vm.phase.value is DeviceLinkViewModel.Phase.Showing }
+
+            fake.gateStatus = true
+            fake.statusGateReached.await() // a status poll is now parked mid-network-hop
+
+            val offerJob = scope.launch { vm.offerScanned(RLINK_PAYLOAD) }
+            relay.offerGateReached.await() // offer is now in flight — isSubmitting is true
+
+            fake.releaseStatus() // the parked poll resumes with NotFound while isSubmitting is true
+            delay(50) // give the resumed (stale) poll body a chance to misbehave
+            assertEquals(1, fake.startCount) // no regeneration triggered
+            assertEquals(DeviceLinkViewModel.Phase.Showing("2345-6789"), vm.phase.value)
+
+            relay.releaseOffer()
+            offerJob.join()
+            assertEquals("Sent — approve the request when it appears.", vm.noticeMessage.value)
+
+            // The offer has resolved and isSubmitting has cleared — the poll loop
+            // must still be alive to notice the (still-404ing) session and
+            // regenerate. Pre-fix, the `_isSubmitting` disjunct in the NotFound
+            // handler RETURNS instead of skipping, permanently killing the loop when
+            // the parked NotFound above resolved.
+            waitUntil { vm.phase.value == DeviceLinkViewModel.Phase.Showing("WXYZ-2345") }
+            assertEquals(DeviceLinkViewModel.Phase.Showing("WXYZ-2345"), vm.phase.value)
+            assertEquals(2, fake.startCount)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    // --- Controller amendment B: reentrancy guard at offerScanned entry ---
+    //
+    // A double-fired scan callback (camera decode racing a fast tap, etc.)
+    // must not stack a second offer on the one still in flight. Mirrors the
+    // apple sibling: the reentrant call must return as a no-op before ever
+    // reaching the relay.
+    @Test
+    fun offerScanned_reentrantCallWhileOfferInFlight_isANoOp() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDeviceLinker()
+            val relay = FakeRelayOffer().apply { gateOffer = true }
+            val vm = DeviceLinkViewModel(
+                api = fake, serverURL = "https://chat.example.com", relay = relay, scope = scope,
+                pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+            )
+            vm.start()
+            waitUntil { vm.phase.value is DeviceLinkViewModel.Phase.Showing }
+
+            val firstJob = scope.launch { vm.offerScanned(RLINK_PAYLOAD) }
+            relay.offerGateReached.await() // first offer is now in flight — isSubmitting is true
+            assertEquals(1, relay.offers.size)
+
+            // The reentrant call must return immediately as a no-op rather than
+            // parking on the relay's (single-release) gate a second time — wrap
+            // in a timeout so a regression fails the test instead of hanging it.
+            kotlinx.coroutines.withTimeout(2_000) { vm.offerScanned(RLINK_PAYLOAD) }
+            assertEquals(1, relay.offers.size) // the reentrant call never reached the relay
+
+            relay.releaseOffer()
+            firstJob.join()
+            assertEquals(1, relay.offers.size)
+            assertEquals("Sent — approve the request when it appears.", vm.noticeMessage.value)
         } finally { scope.cancel() }
         Unit
     }

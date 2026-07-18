@@ -5,6 +5,9 @@ import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.LinkStart
 import chat.matron.android.journal.LinkStatus
 import chat.matron.android.journal.LinkURI
+import chat.matron.android.journal.RelayError
+import chat.matron.android.journal.RelayRendezvousing
+import chat.matron.android.journal.RendezvousURI
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
@@ -45,6 +48,7 @@ class JournalDeviceLinkService(private val api: JournalApi) : DeviceLinking {
 class DeviceLinkViewModel(
     private val api: DeviceLinking,
     private val serverURL: String,
+    private val relay: RelayRendezvousing? = null,
     private val scope: CoroutineScope,
     private val pollInterval: Duration = 2.seconds,
     private val errorPollInterval: Duration = 5.seconds,
@@ -162,6 +166,72 @@ class DeviceLinkViewModel(
         }
     }
 
+    /// Settings → Link a Device → Scan tab: the signed-in phone scanned a
+    /// signed-out device's `matron://rlink` QR. Offers THIS VM's live link
+    /// session to the relay — start() already minted a session when the
+    /// screen opened, and link/start replaces a starter's session, so
+    /// minting another here would kill the code being offered. After a
+    /// successful offer the desktop claims within seconds and the existing
+    /// status poll flips to Claimed → the normal approve card.
+    ///
+    /// Controller amendment: guards the offerRendezvous suspension with the
+    /// same `_isSubmitting` flag approve()/deny() use — the status poll loop
+    /// already skips starting a new poll and discards an in-flight NotFound
+    /// response while `_isSubmitting` is true, so a status expiry landing
+    /// mid-offer can't regenerate the session out from under the code that
+    /// was just handed to the relay.
+    suspend fun offerScanned(payload: String) {
+        val relay = relay ?: return
+        // A double-fired scan callback must not stack a second offer on the one
+        // still in flight.
+        if (_isSubmitting.value) return
+        val gen = generation
+        val rid = try {
+            RendezvousURI.parse(payload)
+        } catch (e: RendezvousURI.ParseError.UnsupportedVersion) {
+            _noticeMessage.value = "This QR code needs a newer version of Matron."
+            return
+        } catch (e: RendezvousURI.ParseError) {
+            _noticeMessage.value = "Not a Matron link code."
+            return
+        }
+        val showing = _phase.value as? Phase.Showing
+        if (showing == null) {
+            // Controller amendment: terminal phases (a claim already in
+            // progress or already resolved) get their own copy — there IS a
+            // session, it's just past the point where offering a fresh scan
+            // makes sense — distinct from the "still loading" case.
+            _noticeMessage.value = when (_phase.value) {
+                is Phase.Claimed, Phase.Approved, Phase.Denied ->
+                    "A link session is already in progress — finish it before linking another device."
+                else -> "Still fetching a link code — try scanning again in a moment."
+            }
+            return
+        }
+        _isSubmitting.value = true
+        try {
+            relay.offerRendezvous(rid = rid, server = serverURL, code = showing.code)
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (e: RelayError.Conflict) {
+            if (gen != generation) return
+            _noticeMessage.value = "That code was already used by another device."
+            return
+        } catch (e: RelayError.NotFound) {
+            if (gen != generation) return
+            _noticeMessage.value = "That code expired — ask the computer to show a fresh one."
+            return
+        } catch (e: Throwable) {
+            if (gen != generation) return
+            _noticeMessage.value = "Couldn't reach the Matron relay — try again."
+            return
+        } finally {
+            _isSubmitting.value = false
+        }
+        if (gen != generation) return
+        _noticeMessage.value = "Sent — approve the request when it appears."
+    }
+
     /// [gen] is the generation captured by the caller before the one
     /// suspension point below (`api.linkStart()`). If `stop()` bumped
     /// [generation] while this call was in flight, [gen] no longer matches
@@ -213,7 +283,11 @@ class DeviceLinkViewModel(
                 } catch (e: JournalApiError.NotFound) {
                     // Expired (routine): regenerate silently. startSession
                     // spawns a fresh poll task; this one must end.
-                    if (gen != generation || !isActive || _isSubmitting.value) return@launch
+                    if (gen != generation || !isActive) return@launch
+                    // An in-flight offer must not have its session replaced — but the loop
+                    // has to survive to regenerate once the offer clears, or the device
+                    // strands on a dead QR.
+                    if (_isSubmitting.value) continue
                     startSession(gen)
                     return@launch
                 } catch (e: JournalApiError.Unauthenticated) {
