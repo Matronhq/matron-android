@@ -514,8 +514,15 @@ class DeviceLinkViewModelTest {
         val scope = CoroutineScope(coroutineContext + Job())
         try {
             val fake = FakeDeviceLinker().apply {
-                startResults = mutableListOf(Result.success(LinkStart("2345-6789", 120)))
-                statusScript = mutableListOf(Result.failure(JournalApiError.NotFound))
+                startResults = mutableListOf(
+                    Result.success(LinkStart("2345-6789", 120)),
+                    Result.success(LinkStart("WXYZ-2345", 120)),
+                )
+                statusScript = mutableListOf(
+                    Result.failure(JournalApiError.NotFound),
+                    Result.failure(JournalApiError.NotFound),
+                    Result.success(LinkStatus.Waiting(100)),
+                )
             }
             val relay = FakeRelayOffer().apply { gateOffer = true }
             val vm = DeviceLinkViewModel(
@@ -539,7 +546,52 @@ class DeviceLinkViewModelTest {
             relay.releaseOffer()
             offerJob.join()
             assertEquals("Sent — approve the request when it appears.", vm.noticeMessage.value)
-            assertEquals(1, fake.startCount) // still no regeneration once the offer resolves
+
+            // The offer has resolved and isSubmitting has cleared — the poll loop
+            // must still be alive to notice the (still-404ing) session and
+            // regenerate. Pre-fix, the `_isSubmitting` disjunct in the NotFound
+            // handler RETURNS instead of skipping, permanently killing the loop when
+            // the parked NotFound above resolved.
+            waitUntil { vm.phase.value == DeviceLinkViewModel.Phase.Showing("WXYZ-2345") }
+            assertEquals(DeviceLinkViewModel.Phase.Showing("WXYZ-2345"), vm.phase.value)
+            assertEquals(2, fake.startCount)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    // --- Controller amendment B: reentrancy guard at offerScanned entry ---
+    //
+    // A double-fired scan callback (camera decode racing a fast tap, etc.)
+    // must not stack a second offer on the one still in flight. Mirrors the
+    // apple sibling: the reentrant call must return as a no-op before ever
+    // reaching the relay.
+    @Test
+    fun offerScanned_reentrantCallWhileOfferInFlight_isANoOp() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDeviceLinker()
+            val relay = FakeRelayOffer().apply { gateOffer = true }
+            val vm = DeviceLinkViewModel(
+                api = fake, serverURL = "https://chat.example.com", relay = relay, scope = scope,
+                pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+            )
+            vm.start()
+            waitUntil { vm.phase.value is DeviceLinkViewModel.Phase.Showing }
+
+            val firstJob = scope.launch { vm.offerScanned(RLINK_PAYLOAD) }
+            relay.offerGateReached.await() // first offer is now in flight — isSubmitting is true
+            assertEquals(1, relay.offers.size)
+
+            // The reentrant call must return immediately as a no-op rather than
+            // parking on the relay's (single-release) gate a second time — wrap
+            // in a timeout so a regression fails the test instead of hanging it.
+            kotlinx.coroutines.withTimeout(2_000) { vm.offerScanned(RLINK_PAYLOAD) }
+            assertEquals(1, relay.offers.size) // the reentrant call never reached the relay
+
+            relay.releaseOffer()
+            firstJob.join()
+            assertEquals(1, relay.offers.size)
+            assertEquals("Sent — approve the request when it appears.", vm.noticeMessage.value)
         } finally { scope.cancel() }
         Unit
     }

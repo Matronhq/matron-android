@@ -182,6 +182,9 @@ class DeviceLinkViewModel(
     /// was just handed to the relay.
     suspend fun offerScanned(payload: String) {
         val relay = relay ?: return
+        // A double-fired scan callback must not stack a second offer on the one
+        // still in flight.
+        if (_isSubmitting.value) return
         val gen = generation
         val rid = try {
             RendezvousURI.parse(payload)
@@ -280,7 +283,11 @@ class DeviceLinkViewModel(
                 } catch (e: JournalApiError.NotFound) {
                     // Expired (routine): regenerate silently. startSession
                     // spawns a fresh poll task; this one must end.
-                    if (gen != generation || !isActive || _isSubmitting.value) return@launch
+                    if (gen != generation || !isActive) return@launch
+                    // An in-flight offer must not have its session replaced — but the loop
+                    // has to survive to regenerate once the offer clears, or the device
+                    // strands on a dead QR.
+                    if (_isSubmitting.value) continue
                     startSession(gen)
                     return@launch
                 } catch (e: JournalApiError.Unauthenticated) {

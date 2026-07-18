@@ -142,7 +142,14 @@ fun SignInScreen(
                     Text("Waiting for approval on your other device…")
                 }
                 Text(
-                    "Approve the request on your signed-in device to finish.",
+                    // Spec §4 (compromised-relay mitigation): when this wait came from the
+                    // rendezvous handoff, keep the offered server host visible for the
+                    // entire approval wait; manual/scan claims keep the plain copy.
+                    if (rendezvousState is RendezvousSignInViewModel.State.Connecting) {
+                        "Signing in to ${(rendezvousState as RendezvousSignInViewModel.State.Connecting).serverHost} — approve the request on your signed-in device."
+                    } else {
+                        "Approve the request on your signed-in device to finish."
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
