@@ -277,13 +277,19 @@ fun SignInScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                } else {
+                } else if (linkState !is LinkSignInViewModel.State.Error) {
                     // The rendezvous VM's own Showing/Connecting/Error states
                     // drive the QR and the pre-offer connect spinner; once the
                     // offer lands it hands off to linkViewModel (Claiming →
                     // WaitingForApproval → SignedIn/Error) and parks in
                     // Connecting, so both view models' states must be rendered
                     // here for the Show tab to reflect what's actually happening.
+                    //
+                    // Once linkState reaches Error (denial, expiry, persist
+                    // failure — possibly arriving well after the handoff, while
+                    // this was parked in Connecting), that takes precedence: the
+                    // link-error text + "Show a new code" button below is the
+                    // single error surface, so no rendezvous UI renders here.
                     when (val phase = rendezvousState) {
                         is RendezvousSignInViewModel.State.Showing -> {
                             val bitmap = remember(phase.qrPayload) { QRCode.bitmap(phase.qrPayload) }

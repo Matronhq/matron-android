@@ -87,11 +87,11 @@ class AppDependencies(
 ) {
 
     /**
-     * One shared OkHttp client (keepalive pings) for REST + WebSocket. Visible
+     * One shared OkHttp client (keepalive pings) for REST + WebSocket. Internal
      * (not private) so the sign-in stage can hand it to [chat.matron.android.journal.RelayApi]
      * for the rendezvous relay, which is unauthenticated and predates a session.
      */
-    val sharedClient: OkHttpClient = OkHttpWebSocketConnector.defaultClient()
+    internal val sharedClient: OkHttpClient = OkHttpWebSocketConnector.defaultClient()
 
     val auth: AuthService
 
