@@ -94,4 +94,30 @@ class LinkURITest {
             assertEquals("KTNM-3VQ8", parsed.code)
         }
     }
+
+    // --- Controller amendment (parity with matron-apple's RendezvousURI):
+    // scheme/host matching is case-insensitive (RFC 3986 schemes/hosts are
+    // case-insensitive; QR alphanumeric mode is uppercase-only). Query
+    // values stay case-sensitive. ---
+
+    @Test
+    fun parse_acceptsUppercaseScheme() {
+        val parsed = LinkURI.parse("MATRON://LINK?v=1&server=https%3A%2F%2Fchat.example.com&code=KTNM-3VQ8")
+        assertEquals("https://chat.example.com", parsed.serverURL)
+        assertEquals("KTNM-3VQ8", parsed.code)
+    }
+
+    // --- Controller amendment: pins LinkURI's pre-existing duplicate-query-key
+    // behavior. The param map is built with `List<Pair<String, String>>.toMap()`,
+    // whose documented semantics are last-pair-wins (a later `put` for the same
+    // key overwrites the earlier one) — so this is last-wins, not first-wins.
+    // RendezvousURI mirrors this same behavior for in-repo consistency. ---
+
+    @Test
+    fun parse_duplicateVersionKey_lastWins() {
+        try {
+            LinkURI.parse("matron://link?v=1&v=2&server=https%3A%2F%2Fx.example&code=KTNM-3VQ8")
+            fail("expected UnsupportedVersion (last v= wins)")
+        } catch (e: LinkURI.ParseError.UnsupportedVersion) { /* expected */ }
+    }
 }

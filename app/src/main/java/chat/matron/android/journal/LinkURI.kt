@@ -10,6 +10,13 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 ///
 /// Parsed by hand (scheme/host prefix + query split) rather than
 /// `android.net.Uri` so plain JVM unit tests cover it without Robolectric.
+///
+/// Controller amendment (parity with matron-apple's LinkURI): scheme/host
+/// matching is case-insensitive — RFC 3986 schemes and hosts are
+/// case-insensitive, and QR alphanumeric mode is uppercase-only, so an
+/// uppercase-scanned `MATRON://LINK?...` must still parse. Query values
+/// (`server`/`code`) stay case-sensitive; [PairingCode] already normalizes
+/// case on the code separately.
 object LinkURI {
     sealed class ParseError : Exception() {
         /// Not ours at all — scanner shows "Not a Matron sign-in code."
@@ -31,8 +38,8 @@ object LinkURI {
     }
 
     fun parse(raw: String): Parsed {
-        if (!raw.startsWith(PREFIX)) throw ParseError.NotALink()
-        val params = raw.removePrefix(PREFIX).split("&").mapNotNull { pair ->
+        if (!raw.startsWith(PREFIX, ignoreCase = true)) throw ParseError.NotALink()
+        val params = raw.substring(PREFIX.length).split("&").mapNotNull { pair ->
             val idx = pair.indexOf('=')
             if (idx <= 0) null
             else pair.substring(0, idx) to runCatching {
