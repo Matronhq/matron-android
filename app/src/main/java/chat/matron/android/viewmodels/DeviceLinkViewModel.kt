@@ -194,7 +194,14 @@ class DeviceLinkViewModel(
                 if (!isActive) return@launch
                 if (_isSubmitting.value) continue // don't race an in-flight tap
                 try {
-                    when (val status = api.linkStatus()) {
+                    val status = api.linkStatus()
+                    // Stale-response guard, same as the claimant poll loop: a
+                    // response already delivered when approve()/deny()/stop()
+                    // landed resumes here on the cancelled job with no further
+                    // suspension point — it must not overwrite the terminal
+                    // Approved/Denied phase.
+                    if (gen != generation || !isActive) return@launch
+                    when (status) {
                         is LinkStatus.Waiting -> Unit // phase already Showing
                         is LinkStatus.Claimed -> {
                             if (_phase.value !is Phase.Claimed) {
@@ -206,7 +213,7 @@ class DeviceLinkViewModel(
                 } catch (e: JournalApiError.NotFound) {
                     // Expired (routine): regenerate silently. startSession
                     // spawns a fresh poll task; this one must end.
-                    if (!isActive || _isSubmitting.value) return@launch
+                    if (gen != generation || !isActive || _isSubmitting.value) return@launch
                     startSession(gen)
                     return@launch
                 } catch (e: JournalApiError.Unauthenticated) {

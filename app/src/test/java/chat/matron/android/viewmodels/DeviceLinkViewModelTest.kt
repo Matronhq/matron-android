@@ -7,10 +7,12 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -49,8 +51,25 @@ class FakeDeviceLinker : DeviceLinking {
         }
         return (if (startResults.size > 1) startResults.removeAt(0) else startResults[0]).getOrThrow()
     }
+    /// Status-side twin of [gateLinkStart]: parks the next `linkStatus()`
+    /// call at [statusGateReached] until [releaseStatus]. The park is
+    /// `NonCancellable` on purpose — it models a response the transport has
+    /// already delivered, so `pollTask?.cancel()` cannot reach it and only
+    /// the poll loop's post-await generation guard can stop the resumed body.
+    var gateStatus = false
+    val statusGateReached = CompletableDeferred<Unit>()
+    private val statusRelease = CompletableDeferred<Unit>()
+
+    fun releaseStatus() {
+        statusRelease.complete(Unit)
+    }
+
     override suspend fun linkStatus(): LinkStatus {
         statusCount += 1
+        if (gateStatus) {
+            statusGateReached.complete(Unit)
+            withContext(NonCancellable) { statusRelease.await() }
+        }
         return (if (statusScript.size > 1) statusScript.removeAt(0) else statusScript[0]).getOrThrow()
     }
     override suspend fun linkApprove(code: String) {
@@ -115,6 +134,35 @@ class DeviceLinkViewModelTest {
             waitUntil { vm.phase.value == DeviceLinkViewModel.Phase.Claimed("Pixel 9", "198.51.100.7") }
             assertEquals(DeviceLinkViewModel.Phase.Claimed("Pixel 9", "198.51.100.7"), vm.phase.value)
             vm.stop()
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    // Regression (bugbot, mirrors matron-apple's poll-loop fix): a linkStatus
+    // response the transport already delivered when approve() lands resumes
+    // the poll body on the cancelled job — it must not write Claimed over the
+    // terminal Approved phase.
+    @Test
+    fun approve_duringInFlightStatusPoll_keepsTerminalPhase() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDeviceLinker()
+            fake.statusScript = mutableListOf(
+                Result.success(LinkStatus.Claimed("Pixel 9", "198.51.100.7", 90)),
+            )
+            val vm = makeVM(fake, scope)
+            vm.start()
+            waitUntil { vm.phase.value is DeviceLinkViewModel.Phase.Claimed }
+
+            fake.gateStatus = true
+            fake.statusGateReached.await() // a poll is now parked mid-network-hop
+            vm.approve()
+            assertEquals(DeviceLinkViewModel.Phase.Approved, vm.phase.value)
+
+            fake.releaseStatus()
+            // Give the resumed (stale) poll body a chance to misbehave.
+            delay(50)
+            assertEquals(DeviceLinkViewModel.Phase.Approved, vm.phase.value)
         } finally { scope.cancel() }
         Unit
     }
