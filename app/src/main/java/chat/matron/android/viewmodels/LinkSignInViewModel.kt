@@ -151,6 +151,16 @@ class LinkSignInViewModel(
             _state.value = State.Error("Too many attempts — try again in a minute.")
             return
         } catch (cancel: kotlinx.coroutines.CancellationException) {
+            // The caller's coroutine died mid-claim (e.g. the rendezvous VM's
+            // stop() cancelled the poll job that was driving submitManual).
+            // The rethrow is mandatory, but Claiming was already published at
+            // entry and no one else will clear it — without this reset the
+            // entry guard rejects every future claim for the VM's lifetime.
+            // cancel() bumps generation and writes Idle itself; the gen check
+            // keeps this from clobbering a newer claim's state.
+            if (gen == generation && _state.value is State.Claiming) {
+                _state.value = State.Idle
+            }
             throw cancel
         } catch (e: Throwable) {
             if (gen != generation) return
