@@ -221,6 +221,21 @@ class ComposerViewModel(
         }
     }
 
+    /// Sends [text] as a plain message through the same timeline path as [send],
+    /// bypassing the composer input and attachment tray. Used by one-tap
+    /// affordances such as the compact-context header. Records [sendError] on
+    /// failure; never mutates [input] or the staged attachments.
+    suspend fun sendCommand(text: String) {
+        try {
+            timeline.sendText(text)
+            _sendError.value = null
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            _sendError.value = error.message ?: error.toString()
+        }
+    }
+
     /// Puts the user's text back after a failed send — unless they've moved on
     /// (a late failure must not overwrite a message typed in the meantime).
     private fun restoreInput(pending: String) {

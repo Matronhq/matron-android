@@ -191,6 +191,34 @@ class ComposerViewModelTest {
     }
 
     @Test
+    fun sendCommand_sendsTextVerbatimThroughTimeline() = runBlocking {
+        val fake = FakeTimelineService()
+        val vm = makeVM(timeline = fake)
+        vm.sendCommand("/compact")
+        assertEquals(listOf("/compact"), fake.sentText)
+        assertNull(vm.sendError.value)
+    }
+
+    @Test
+    fun sendCommand_recordsSendError_whenServiceThrows() = runBlocking {
+        val fake = FakeTimelineService()
+        fake.nextSendError = RuntimeException("boom")
+        val vm = makeVM(timeline = fake)
+        vm.sendCommand("/compact")
+        assertEquals("boom", vm.sendError.value)
+    }
+
+    @Test
+    fun sendCommand_doesNotTouchComposerInput() = runBlocking {
+        val fake = FakeTimelineService()
+        val vm = makeVM(timeline = fake)
+        vm.input = "half-typed draft"
+        vm.sendCommand("/compact")
+        assertEquals("half-typed draft", vm.input)
+        assertEquals(listOf("/compact"), fake.sentText)
+    }
+
+    @Test
     fun reportAttachmentError_recordsSendError() {
         val vm = makeVM()
         vm.reportAttachmentError("boom")
