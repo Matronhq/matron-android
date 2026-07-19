@@ -9,6 +9,7 @@ import java.nio.file.Files
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -215,6 +216,39 @@ class ComposerViewModelTest {
         vm.input = "half-typed draft"
         vm.sendCommand("/compact")
         assertEquals("half-typed draft", vm.input)
+        assertEquals(listOf("/compact"), fake.sentText)
+    }
+
+    @Test
+    fun sendCommand_ignoresConcurrentTap_whileFirstInFlight() = runBlocking {
+        val fake = FakeTimelineService()
+        val gate = SendGate()
+        fake.sendGate = gate
+        val vm = makeVM(timeline = fake)
+        // First tap: parks at the gate mid-send, marking the command in flight.
+        val first = launch { vm.sendCommand("/compact") }
+        yield()
+        // Second tap while the first is still in flight must be ignored.
+        val second = launch { vm.sendCommand("/compact") }
+        yield()
+        gate.open()
+        first.join()
+        second.join()
+        assertEquals(listOf("/compact"), fake.sentText)
+    }
+
+    @Test
+    fun sendCommand_success_doesNotClearExistingSendError() = runBlocking {
+        val fake = FakeTimelineService()
+        val vm = makeVM(timeline = fake)
+        // Seed a composer send() error the way a failed message would.
+        fake.nextSendError = RuntimeException("compose boom")
+        vm.input = "hello"
+        vm.send()
+        assertEquals("compose boom", vm.sendError.value)
+        // A successful banner /compact must not wipe the composer's error.
+        vm.sendCommand("/compact")
+        assertEquals("compose boom", vm.sendError.value)
         assertEquals(listOf("/compact"), fake.sentText)
     }
 

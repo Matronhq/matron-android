@@ -50,7 +50,9 @@ fun CompactContextBanner(
             .clickable(onClick = onCompact)
             .background(MaterialTheme.colorScheme.tertiaryContainer)
             .padding(horizontal = 12.dp, vertical = 8.dp)
-            .semantics { contentDescription = spoken },
+            // Merge the children so TalkBack announces the single spoken label
+            // below, not the inner Text's abbreviated visible token string.
+            .semantics(mergeDescendants = true) { contentDescription = spoken },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(

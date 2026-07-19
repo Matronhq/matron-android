@@ -221,18 +221,26 @@ class ComposerViewModel(
         }
     }
 
+    private var commandInFlight = false
+
     /// Sends [text] as a plain message through the same timeline path as [send],
     /// bypassing the composer input and attachment tray. Used by one-tap
-    /// affordances such as the compact-context header. Records [sendError] on
-    /// failure; never mutates [input] or the staged attachments.
+    /// affordances such as the compact-context header. Records [sendError] only
+    /// on its own failure — a success does NOT clear a pre-existing composer
+    /// error, which belongs to the [send] path. A repeated tap while a command
+    /// is already in flight is ignored, so an impatient double-tap can't queue a
+    /// second bare send. Never mutates [input] or the staged attachments.
     suspend fun sendCommand(text: String) {
+        if (commandInFlight) return
+        commandInFlight = true
         try {
             timeline.sendText(text)
-            _sendError.value = null
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
             _sendError.value = error.message ?: error.toString()
+        } finally {
+            commandInFlight = false
         }
     }
 
