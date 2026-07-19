@@ -254,6 +254,7 @@ private fun SignedInApp(
                 api = deps.deviceLinkService(session),
                 serverURL = session.homeserverURL,
                 relay = RelayApi(client = deps.sharedClient),
+                haptics = deps.haptics,
                 onBack = { nav.popBackStack() },
             )
         }
