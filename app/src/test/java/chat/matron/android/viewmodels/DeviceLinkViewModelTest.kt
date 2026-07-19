@@ -17,6 +17,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -87,12 +89,13 @@ class FakeDeviceLinker : DeviceLinking {
     }
 }
 
+private const val VECTOR_KEY_B64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 private const val RLINK_RID = "23456789BCDFGHJKMNPQRSTVWX"
-private const val RLINK_PAYLOAD = "matron://rlink?v=1&rid=23456789BCDFGHJKMNPQRSTVWX"
+private const val RLINK_PAYLOAD = "matron://rlink?v=2&rid=$RLINK_RID&k=$VECTOR_KEY_B64"
 
 private class FakeRelayOffer : RelayRendezvousing {
     var offerResult: Result<Unit> = Result.success(Unit)
-    val offers = mutableListOf<Triple<String, String, String>>()
+    val offers = mutableListOf<Pair<String, String>>() // (rid, box)
 
     /// Gate-the-offer test hook, same shape as [FakeDeviceLinker.gateStatus]:
     /// parks the next `offerRendezvous()` call at [offerGateReached] until
@@ -109,8 +112,8 @@ private class FakeRelayOffer : RelayRendezvousing {
 
     override suspend fun createRendezvous(): Rendezvous = error("unused")
     override suspend fun pollRendezvous(rid: String, secret: String): RendezvousPollResult = error("unused")
-    override suspend fun offerRendezvous(rid: String, server: String, code: String) {
-        offers.add(Triple(rid, server, code))
+    override suspend fun offerRendezvous(rid: String, box: String) {
+        offers.add(rid to box)
         if (gateOffer) {
             offerGateReached.complete(Unit)
             withContext(NonCancellable) { offerRelease.await() }
@@ -373,7 +376,15 @@ class DeviceLinkViewModelTest {
             waitUntil { vm.phase.value is DeviceLinkViewModel.Phase.Showing }
             val startCountBefore = fake.startCount
             vm.offerScanned(RLINK_PAYLOAD)
-            assertEquals(listOf(Triple(RLINK_RID, "https://chat.example.com", "2345-6789")), relay.offers)
+            val (rid, box) = relay.offers.single()
+            assertEquals(RLINK_RID, rid)
+            val key = chat.matron.android.journal.Base64URL.decode(VECTOR_KEY_B64)!!
+            val plaintext = chat.matron.android.journal.RendezvousCrypto.open(
+                chat.matron.android.journal.Base64URL.decode(box)!!, key,
+            ).decodeToString()
+            val obj = kotlinx.serialization.json.Json.parseToJsonElement(plaintext).jsonObject
+            assertEquals("https://chat.example.com", obj["server"]!!.jsonPrimitive.content)
+            assertEquals("2345-6789", obj["code"]!!.jsonPrimitive.content)
             assertEquals("Sent — approve the request when it appears.", vm.noticeMessage.value)
             // Regression (apple review finding): offerScanned must never call
             // linkStart again — a second linkStart REPLACES the live session
@@ -398,6 +409,8 @@ class DeviceLinkViewModelTest {
             vm.offerScanned("matron://rlink?v=9&rid=$RLINK_RID")
             assertEquals("This QR code needs a newer version of Matron.", vm.noticeMessage.value)
             vm.offerScanned("https://not-matron.example.com")
+            assertEquals("Not a Matron link code.", vm.noticeMessage.value)
+            vm.offerScanned("matron://rlink?v=2&rid=$RLINK_RID") // missing k → Malformed
             assertEquals("Not a Matron link code.", vm.noticeMessage.value)
             assertTrue(relay.offers.isEmpty())
         } finally { scope.cancel() }
