@@ -45,6 +45,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.chat.TimelineItem
 import chat.matron.android.designsystem.ActivityIndicatorRow
 import chat.matron.android.designsystem.AttachmentFullscreenViewer
+import chat.matron.android.designsystem.CompactContextBanner
 import chat.matron.android.designsystem.DateSeparator
 import chat.matron.android.designsystem.DateSeparatorLabel
 import chat.matron.android.designsystem.EmptyChatPlaceholder
@@ -53,6 +54,7 @@ import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.PaginatingHeader
 import chat.matron.android.designsystem.SubtaskLinkCard
 import chat.matron.android.designsystem.TimelineLoadingIndicator
+import chat.matron.android.designsystem.shouldShowCompactHeader
 import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.ComposerViewModel
 import chat.matron.android.viewmodels.SubChatStripViewModel
@@ -81,11 +83,13 @@ fun ChatScreen(
     val children by stripVM.children.collectAsStateWithLifecycle()
     val runningChildren by stripVM.runningChildren.collectAsStateWithLifecycle()
     val activityLabel by chatVM.activityLabel.collectAsStateWithLifecycle()
+    val sessionStatus by chatVM.sessionStatus.collectAsStateWithLifecycle()
 
     var showSessionStatus by remember { mutableStateOf(false) }
     var showSwitcher by remember { mutableStateOf(false) }
     var sourceItem by remember { mutableStateOf<TimelineItem?>(null) }
     var previewModel by remember { mutableStateOf<Any?>(null) }
+    val compactScope = rememberCoroutineScope()
 
     ChatLifecycle(chatVM, stripVM)
 
@@ -121,6 +125,12 @@ fun ChatScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(0.dp),
+                    )
+                }
+                if (shouldShowCompactHeader(sessionStatus?.context)) {
+                    CompactContextBanner(
+                        tokens = sessionStatus!!.context!!.tokens,
+                        onCompact = { compactScope.launch { composerVM.sendCommand("/compact") } },
                     )
                 }
                 RunningSubagentStrip(runningChildren = runningChildren, onOpenChild = onOpenChild)
