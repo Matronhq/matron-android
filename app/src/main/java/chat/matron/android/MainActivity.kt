@@ -92,7 +92,12 @@ private fun MatronApp(deps: AppDependencies) {
                 session == null -> {
                     val vm = remember { SignInViewModel(auth = deps.auth, deviceDisplayName = "Matron Android") }
                     val linkVm = remember {
-                        LinkSignInViewModel(auth = deps.auth, deviceDisplayName = "Matron Android", scope = scope)
+                        LinkSignInViewModel(
+                            auth = deps.auth,
+                            deviceDisplayName = "Matron Android",
+                            scope = scope,
+                            haptics = deps.haptics,
+                        )
                     }
                     val rendezvousVm = remember {
                         RendezvousSignInViewModel(
