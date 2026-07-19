@@ -224,7 +224,11 @@ class ChatViewModel(
         // watched complete. Only edges observed while the chat is open tick.
         if (suppressNextTickEdge) {
             suppressNextTickEdge = false
-        } else if (previousActivityLabel != null && nextActivityLabel == null) {
+        } else if (previousActivityLabel != null && nextActivityLabel == null && _items.value.isNotEmpty()) {
+            // A genuine turn-complete leaves the messages and drops only the
+            // trailing indicator. An empty snapshot instead is a mirror wipe
+            // (resync/reconnect): the indicator vanished with everything else,
+            // no turn finished — don't tick.
             haptics.tick()
         }
         _rowAnchorIDs.value = nextRows.map { row ->

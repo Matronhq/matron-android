@@ -326,6 +326,25 @@ class ChatViewModelTest {
     }
 
     @Test
+    fun tick_doesNotFire_whenTimelineIsWipedMidTurn() = vmTest { scope ->
+        // A mirror wipe (e.g. a resync) replaces a running timeline with an
+        // empty snapshot. The trailing indicator vanishes because everything
+        // did — not because a turn finished — so no tick should fire.
+        val fake = FakeTimelineService()
+        val msg = textItem("1")
+        val activity = TimelineItem(
+            "activity", "agent", Instant.now(),
+            TimelineItem.Kind.ActivityIndicator("thinking…"), isOwn = false,
+        )
+        fake.snapshotsToEmit = listOf(listOf(msg, activity), emptyList())
+        val haptics = FakeHaptics()
+        val vm = makeVM(scope, fake, haptics = haptics)
+        vm.start().join()
+        assertNull(vm.activityLabel.value)
+        assertEquals(0, haptics.tickCount)
+    }
+
+    @Test
     fun scrollMemory_dropsTransientIDs() {
         ChatScrollPositionMemory.resetForTesting()
         ChatScrollPositionMemory.store("!r:s", "echo:ABC")
