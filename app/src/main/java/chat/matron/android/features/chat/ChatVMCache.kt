@@ -41,6 +41,7 @@ class ChatVMCache(
             media = media,
             scope = scope,
             answeredPromptStore = deps.answeredPromptStore,
+            haptics = deps.haptics,
         ) to ComposerViewModel(
             roomID = roomID,
             timeline = timeline,

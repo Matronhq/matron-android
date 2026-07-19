@@ -7,6 +7,7 @@ import chat.matron.android.events.AskUserEvent
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.SessionStatus
 import chat.matron.android.models.SyncConnectionState
+import chat.matron.android.platform.Haptics
 import chat.matron.android.storage.LRUCache
 import java.io.File
 import java.time.Instant
@@ -63,6 +64,7 @@ class ChatViewModel(
     private val media: MediaService,
     private val scope: CoroutineScope,
     private val answeredPromptStore: KeyValueStore,
+    private val haptics: Haptics = Haptics.None,
 ) {
     // MARK: - Published state
 
@@ -204,7 +206,13 @@ class ChatViewModel(
         firstRenderableItemID = first
         _lastRenderableItemID.value = last
         lastRenderableItemIsOwn = lastIsOwn
+        val previousActivityLabel = _activityLabel.value
         _activityLabel.value = nextActivityLabel
+        // Turn complete: the trailing activity indicator went from present
+        // (working) to absent (idle). Fires once on that edge — the initial
+        // snapshot starts from null, so opening an already-idle or still-running
+        // chat never ticks.
+        if (previousActivityLabel != null && nextActivityLabel == null) haptics.tick()
         _rowAnchorIDs.value = nextRows.map { row ->
             if (row is TimelineRow.Message) row.item.id else row.id
         }.toSet()
