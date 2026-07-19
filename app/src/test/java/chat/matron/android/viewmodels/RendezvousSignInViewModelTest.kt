@@ -258,6 +258,39 @@ class RendezvousSignInViewModelTest {
     }
 
     @Test
+    fun offer_whenLinkCarriesStaleError_stillBuzzesForTheNewFailure() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val relay = FakeRelay()
+            // Empty server → this offer's submitManual early-returns WITHOUT the
+            // link VM re-failing, so the link VM is left in whatever Error it
+            // already held.
+            relay.pollScript = mutableListOf(
+                Result.success(RendezvousPollResult.Offered("", "2345-6789")),
+            )
+            val haptics = FakeHaptics()
+            val (vm, link) = makeVMs(relay, FakeLinkClaimer(), scope, FakeAuthService(), haptics)
+            // Seed a STALE link Error from an earlier, unrelated scan (buzz #1).
+            link.serverURL = "not a url"
+            link.codeInput = "2345-6789"
+            link.submitManual()
+            assertTrue(link.state.value is LinkSignInViewModel.State.Error)
+            assertEquals(1, haptics.errorCount)
+            // The offer arrives while that stale Error still sits on the link VM.
+            // Its failure never buzzed, so the rendezvous VM must buzz — the
+            // stale Error's buzz belonged to the earlier attempt, not this one.
+            vm.start()
+            waitUntil {
+                vm.state.value == RendezvousSignInViewModel.State.Error(
+                    "Couldn't connect to that computer's session — try again.",
+                )
+            }
+            assertEquals(2, haptics.errorCount)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
     fun offer_whoseSubmitManualEarlyReturns_buzzesErrorOnce() = runBlocking {
         val scope = CoroutineScope(coroutineContext + Job())
         try {

@@ -70,10 +70,19 @@ class LinkSignInViewModel(
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
 
+    /// Monotonic count of error buzzes this VM has fired. A delegating caller
+    /// (RendezvousSignInViewModel) captures it around its own [submitManual]
+    /// call to tell whether THIS interaction already buzzed — so it can avoid a
+    /// duplicate buzz without being fooled by a stale [State.Error] left from an
+    /// earlier attempt (an end-state check can't distinguish the two).
+    var errorBuzzes: Int = 0
+        private set
+
     /// Enters the Error state and buzzes once. Every genuine failure path routes
     /// through here so the haptic fires exactly on the edge into Error.
     private fun fail(message: String) {
         _state.value = State.Error(message)
+        errorBuzzes++
         haptics.error()
     }
 

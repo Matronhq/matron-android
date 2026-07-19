@@ -138,6 +138,10 @@ class RendezvousSignInViewModel(
                         )
                         link.serverURL = result.server
                         link.codeInput = result.code
+                        // Snapshot the link VM's buzz count so we can tell whether
+                        // THIS submitManual produced an error buzz (vs. leaving a
+                        // stale Error from an earlier attempt untouched).
+                        val linkBuzzesBefore = link.errorBuzzes
                         link.submitManual()
                         if (gen != generation || !isActive) return@launch
                         // submitManual() can return without ever starting a
@@ -157,13 +161,15 @@ class RendezvousSignInViewModel(
                             is LinkSignInViewModel.State.WaitingForApproval,
                             is LinkSignInViewModel.State.SignedIn,
                             -> Unit
-                            // The link VM reached Error via its own fail(), which
-                            // already buzzed — mirror the message but don't
-                            // double-buzz.
-                            is LinkSignInViewModel.State.Error -> fail(message, buzz = false)
-                            // submitManual() early-returned in Idle without ever
-                            // buzzing — this buzz is the only failure feedback.
-                            is LinkSignInViewModel.State.Idle -> fail(message)
+                            // The link VM is parked with nothing driving it — surface
+                            // our own error. Buzz only if submitManual didn't already
+                            // buzz for this attempt: a fresh link Error bumped the
+                            // count (don't double-buzz), while an Idle early-return or
+                            // a stale prior Error left it unchanged (this is the only
+                            // feedback, so buzz).
+                            is LinkSignInViewModel.State.Idle,
+                            is LinkSignInViewModel.State.Error,
+                            -> fail(message, buzz = link.errorBuzzes == linkBuzzesBefore)
                         }
                         return@launch
                     }
