@@ -104,6 +104,7 @@ private fun MatronApp(deps: AppDependencies) {
                             relay = RelayApi(client = deps.sharedClient),
                             link = linkVm,
                             scope = scope,
+                            haptics = deps.haptics,
                         )
                     }
                     SignInScreen(

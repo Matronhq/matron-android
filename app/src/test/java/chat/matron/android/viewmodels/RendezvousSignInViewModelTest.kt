@@ -7,6 +7,7 @@ import chat.matron.android.journal.RelayError
 import chat.matron.android.journal.RelayRendezvousing
 import chat.matron.android.journal.Rendezvous
 import chat.matron.android.journal.RendezvousPollResult
+import chat.matron.android.platform.Haptics
 import kotlin.coroutines.coroutineContext
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CompletableDeferred
@@ -57,15 +58,22 @@ class RendezvousSignInViewModelTest {
         }
     }
 
-    private fun makeVMs(relay: FakeRelay, claimer: FakeLinkClaimer, scope: CoroutineScope, auth: FakeAuthService):
-        Pair<RendezvousSignInViewModel, LinkSignInViewModel> {
+    private fun makeVMs(
+        relay: FakeRelay,
+        claimer: FakeLinkClaimer,
+        scope: CoroutineScope,
+        auth: FakeAuthService,
+        haptics: Haptics = Haptics.None,
+    ): Pair<RendezvousSignInViewModel, LinkSignInViewModel> {
         val link = LinkSignInViewModel(
             auth = auth, deviceDisplayName = "Matron Android", scope = scope,
             apiFactory = { claimer }, pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+            haptics = haptics,
         )
         val vm = RendezvousSignInViewModel(
             relay = relay, link = link, scope = scope,
             pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+            haptics = haptics,
         )
         return vm to link
     }
@@ -134,6 +142,24 @@ class RendezvousSignInViewModelTest {
                 RendezvousSignInViewModel.State.Error("Couldn't reach the Matron relay — check your connection and try again."),
                 vm.state.value,
             )
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun createFailure_buzzesError() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val relay = FakeRelay()
+            relay.createResults = mutableListOf(Result.failure(RelayError.Transport("down")))
+            val haptics = FakeHaptics()
+            val (vm, _) = makeVMs(relay, FakeLinkClaimer(), scope, FakeAuthService(), haptics)
+            vm.start()
+            assertEquals(
+                RendezvousSignInViewModel.State.Error("Couldn't reach the Matron relay — check your connection and try again."),
+                vm.state.value,
+            )
+            assertEquals(1, haptics.errorCount)
         } finally { scope.cancel() }
         Unit
     }

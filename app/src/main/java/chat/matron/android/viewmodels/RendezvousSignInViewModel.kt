@@ -4,6 +4,7 @@ import chat.matron.android.journal.RelayError
 import chat.matron.android.journal.RelayRendezvousing
 import chat.matron.android.journal.RendezvousPollResult
 import chat.matron.android.journal.RendezvousURI
+import chat.matron.android.platform.Haptics
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
@@ -27,6 +28,7 @@ class RendezvousSignInViewModel(
     private val scope: CoroutineScope,
     private val pollInterval: Duration = 2.seconds,
     private val errorPollInterval: Duration = 5.seconds,
+    private val haptics: Haptics = Haptics.None,
 ) {
     sealed interface State {
         data object Idle : State
@@ -42,6 +44,11 @@ class RendezvousSignInViewModel(
 
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state
+
+    private fun fail(message: String) {
+        _state.value = State.Error(message)
+        haptics.error()
+    }
 
     // Same stale-async discipline as LinkSignInViewModel/DeviceLinkViewModel:
     // stop() bumps the generation; every post-suspension branch re-checks it
@@ -72,7 +79,7 @@ class RendezvousSignInViewModel(
             throw cancel
         } catch (e: Throwable) {
             if (gen != generation) return
-            _state.value = State.Error("Couldn't reach the Matron relay — check your connection and try again.")
+            fail("Couldn't reach the Matron relay — check your connection and try again.")
             return
         }
         if (gen != generation) return
@@ -148,9 +155,7 @@ class RendezvousSignInViewModel(
                             is LinkSignInViewModel.State.Idle,
                             is LinkSignInViewModel.State.Error,
                             -> {
-                                _state.value = State.Error(
-                                    "Couldn't connect to that computer's session — try again.",
-                                )
+                                fail("Couldn't connect to that computer's session — try again.")
                             }
                         }
                         return@launch
