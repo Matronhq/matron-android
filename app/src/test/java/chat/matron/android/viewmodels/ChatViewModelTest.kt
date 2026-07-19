@@ -294,6 +294,38 @@ class ChatViewModelTest {
     }
 
     @Test
+    fun tick_doesNotFire_whenTurnCompletesOffScreenOnACachedVM() = vmTest { scope ->
+        // ChatVMCache keeps one ChatViewModel per room for the whole session, and
+        // ChatLifecycle calls start() again on every re-entry. _activityLabel is
+        // never reset by stop()/start(), so a stale "thinking…" baseline from a
+        // prior visit must not be read as a "was running" edge on the first
+        // recompute after re-entry — that edge must only fire for a completion
+        // the user actually watched while the chat was open.
+        val fake = FakeTimelineService()
+        val activity = TimelineItem(
+            "activity", "agent", Instant.now(),
+            TimelineItem.Kind.ActivityIndicator("thinking…"), isOwn = false,
+        )
+        val msg = textItem("1")
+        fake.snapshotsToEmit = listOf(listOf(msg, activity))
+        val haptics = FakeHaptics()
+        val vm = makeVM(scope, fake, haptics = haptics)
+        vm.start().join()
+        assertEquals("thinking…", vm.activityLabel.value)
+        assertEquals(0, haptics.tickCount)
+
+        // Leave the room while the agent is still "running" (label stays
+        // "thinking…" on the cached VM instance), the turn completes off-screen,
+        // then re-enter: the re-open's first snapshot is already idle.
+        vm.stop()
+        fake.snapshotsToEmit = listOf(listOf(msg))
+        vm.start().join()
+
+        assertNull(vm.activityLabel.value)
+        assertEquals(0, haptics.tickCount)
+    }
+
+    @Test
     fun scrollMemory_dropsTransientIDs() {
         ChatScrollPositionMemory.resetForTesting()
         ChatScrollPositionMemory.store("!r:s", "echo:ABC")

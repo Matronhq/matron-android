@@ -111,6 +111,13 @@ class ChatViewModel(
     private val _settledEmpty = MutableStateFlow(false)
     val settledEmpty: StateFlow<Boolean> = _settledEmpty.asStateFlow()
 
+    // Suppresses the turn-complete tick on the first recompute after each
+    // start(): the VM instance is cached and reused across chat re-entries
+    // (ChatVMCache), so _activityLabel survives from a prior visit and its
+    // stale value must not be read as a "was running" baseline. Only edges
+    // observed while the chat is open should tick.
+    private var suppressNextTickEdge = true
+
     // Internal / untested-by-tests derived + control state (UI-thread confined).
     var firstRenderableItemID: String? = null
         private set
@@ -209,10 +216,17 @@ class ChatViewModel(
         val previousActivityLabel = _activityLabel.value
         _activityLabel.value = nextActivityLabel
         // Turn complete: the trailing activity indicator went from present
-        // (working) to absent (idle). Fires once on that edge — the initial
-        // snapshot starts from null, so opening an already-idle or still-running
-        // chat never ticks.
-        if (previousActivityLabel != null && nextActivityLabel == null) haptics.tick()
+        // (working) to absent (idle). Fires once on that edge — but never on
+        // the first recompute after start(), since the VM is cached and reused
+        // across re-entries (ChatVMCache) and _activityLabel is never reset by
+        // stop()/start(); a stale "thinking…" baseline from a prior visit must
+        // not be read as a "was running" edge for a turn the user never
+        // watched complete. Only edges observed while the chat is open tick.
+        if (suppressNextTickEdge) {
+            suppressNextTickEdge = false
+        } else if (previousActivityLabel != null && nextActivityLabel == null) {
+            haptics.tick()
+        }
         _rowAnchorIDs.value = nextRows.map { row ->
             if (row is TimelineRow.Message) row.item.id else row.id
         }.toSet()
@@ -330,6 +344,7 @@ class ChatViewModel(
         observationGeneration += 1
         observationTask?.cancel()
         _settledEmpty.value = false
+        suppressNextTickEdge = true
         emptyDebounceTask?.cancel()
         emptyDebounceTask = null
         _sessionStatus.value = null
