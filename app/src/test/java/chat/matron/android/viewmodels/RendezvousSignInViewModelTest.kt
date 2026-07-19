@@ -231,6 +231,58 @@ class RendezvousSignInViewModelTest {
     }
 
     @Test
+    fun offer_whoseClaimFails_buzzesErrorOnce() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val relay = FakeRelay()
+            relay.pollScript = mutableListOf(
+                Result.success(RendezvousPollResult.Offered("https://chat.example.com", "2345-6789")),
+            )
+            val claimer = FakeLinkClaimer()
+            claimer.claimResult = Result.failure(RuntimeException("boom"))
+            val haptics = FakeHaptics()
+            val (vm, link) = makeVMs(relay, claimer, scope, FakeAuthService(), haptics)
+            vm.start()
+            waitUntil {
+                vm.state.value == RendezvousSignInViewModel.State.Error(
+                    "Couldn't connect to that computer's session — try again.",
+                )
+            }
+            assertTrue(link.state.value is LinkSignInViewModel.State.Error)
+            // The link VM already buzzed on its own edge into Error; the
+            // rendezvous VM surfaces its host-line error WITHOUT a second
+            // near-simultaneous buzz (two would stutter as one ugly buzz).
+            assertEquals(1, haptics.errorCount)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun offer_whoseSubmitManualEarlyReturns_buzzesErrorOnce() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val relay = FakeRelay()
+            // Empty server URL trips submitManual's early return: the link VM
+            // stays Idle and never buzzes, so the rendezvous VM's buzz is the
+            // ONLY error feedback and must still fire exactly once.
+            relay.pollScript = mutableListOf(
+                Result.success(RendezvousPollResult.Offered("", "2345-6789")),
+            )
+            val haptics = FakeHaptics()
+            val (vm, link) = makeVMs(relay, FakeLinkClaimer(), scope, FakeAuthService(), haptics)
+            vm.start()
+            waitUntil {
+                vm.state.value == RendezvousSignInViewModel.State.Error(
+                    "Couldn't connect to that computer's session — try again.",
+                )
+            }
+            assertEquals(LinkSignInViewModel.State.Idle, link.state.value)
+            assertEquals(1, haptics.errorCount)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
     fun stop_duringInFlightPoll_dropsTheLateOffer() = runBlocking {
         val scope = CoroutineScope(coroutineContext + Job())
         try {

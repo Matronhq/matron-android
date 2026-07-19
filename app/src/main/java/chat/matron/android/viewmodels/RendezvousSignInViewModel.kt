@@ -45,9 +45,13 @@ class RendezvousSignInViewModel(
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state
 
-    private fun fail(message: String) {
+    /// Enters the Error state, buzzing once by default. [buzz] is set false only
+    /// when the delegated [link] VM has already entered its own Error and buzzed
+    /// — this VM then mirrors the failure for its host-line UI without a second
+    /// near-simultaneous error buzz.
+    private fun fail(message: String, buzz: Boolean = true) {
         _state.value = State.Error(message)
-        haptics.error()
+        if (buzz) haptics.error()
     }
 
     // Same stale-async discipline as LinkSignInViewModel/DeviceLinkViewModel:
@@ -147,16 +151,19 @@ class RendezvousSignInViewModel(
                         // progressing phases (Claiming, WaitingForApproval,
                         // SignedIn) mean the claim is under way; the link
                         // VM's own state drives the UI from here.
+                        val message = "Couldn't connect to that computer's session — try again."
                         when (link.state.value) {
                             is LinkSignInViewModel.State.Claiming,
                             is LinkSignInViewModel.State.WaitingForApproval,
                             is LinkSignInViewModel.State.SignedIn,
                             -> Unit
-                            is LinkSignInViewModel.State.Idle,
-                            is LinkSignInViewModel.State.Error,
-                            -> {
-                                fail("Couldn't connect to that computer's session — try again.")
-                            }
+                            // The link VM reached Error via its own fail(), which
+                            // already buzzed — mirror the message but don't
+                            // double-buzz.
+                            is LinkSignInViewModel.State.Error -> fail(message, buzz = false)
+                            // submitManual() early-returned in Idle without ever
+                            // buzzing — this buzz is the only failure feedback.
+                            is LinkSignInViewModel.State.Idle -> fail(message)
                         }
                         return@launch
                     }
