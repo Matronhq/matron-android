@@ -29,7 +29,7 @@ data class Rendezvous(val rid: String, val secret: String, val expiresIn: Int)
 
 sealed interface RendezvousPollResult {
     data object Waiting : RendezvousPollResult
-    data class Offered(val server: String, val code: String) : RendezvousPollResult
+    data class Offered(val box: String) : RendezvousPollResult
 }
 
 sealed class RelayError : Exception() {
@@ -41,12 +41,13 @@ sealed class RelayError : Exception() {
 }
 
 /// Talks to the shared relay's rendezvous endpoints. Unauthenticated by
-/// design — the relay carries only {server, code}, never a token, and the
-/// approve tap on the signed-in phone remains the only credential gate.
+/// design — the relay carries only an opaque, app-encrypted offer box, never
+/// a token or a readable {server, code}, and the approve tap on the signed-in
+/// phone remains the only credential gate.
 interface RelayRendezvousing {
     suspend fun createRendezvous(): Rendezvous
     suspend fun pollRendezvous(rid: String, secret: String): RendezvousPollResult
-    suspend fun offerRendezvous(rid: String, server: String, code: String)
+    suspend fun offerRendezvous(rid: String, box: String)
 }
 
 class RelayApi(
@@ -64,8 +65,8 @@ class RelayApi(
         return mapPoll(status, body)
     }
 
-    override suspend fun offerRendezvous(rid: String, server: String, code: String) {
-        val (status, _) = execute(offerRequest(baseUrl, rid, server, code))
+    override suspend fun offerRendezvous(rid: String, box: String) {
+        val (status, _) = execute(offerRequest(baseUrl, rid, box))
         mapOffer(status)
     }
 
@@ -103,10 +104,9 @@ class RelayApi(
             .get()
             .build()
 
-        fun offerRequest(baseUrl: String, rid: String, server: String, code: String): Request {
+        fun offerRequest(baseUrl: String, rid: String, box: String): Request {
             val body = buildJsonObject {
-                put("server", server)
-                put("code", code)
+                put("box", box)
             }
             return Request.Builder()
                 .url(
@@ -133,8 +133,7 @@ class RelayApi(
             mapError(status, success = 200)
             val obj = parseObject(body)
             return RendezvousPollResult.Offered(
-                server = obj.stringField("server") ?: throw RelayError.Transport("malformed relay response"),
-                code = obj.stringField("code") ?: throw RelayError.Transport("malformed relay response"),
+                box = obj.stringField("box") ?: throw RelayError.Transport("malformed relay response"),
             )
         }
 

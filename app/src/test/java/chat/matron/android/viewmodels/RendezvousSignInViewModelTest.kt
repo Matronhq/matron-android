@@ -24,6 +24,11 @@ import org.junit.Test
 private const val RID_1 = "23456789BCDFGHJKMNPQRSTVWX"
 private val RID_2 = "X".repeat(26)
 private val SECRET = "a".repeat(64)
+private val VECTOR_KEY_B64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+private val VECTOR_KEY = chat.matron.android.journal.Base64URL.decode(VECTOR_KEY_B64)!!
+// Decrypts under VECTOR_KEY to {"server":"https://chat.example.com","code":"2345-6789"}.
+private val VECTOR_BOX =
+    "oKGio6SlpqeoqaqrnToPSDe9Z81AX6W7cw6wrUqDdnP61jZC-XZH6w_HEC-xGSrdgwAwUjv5JvIrSLDNcjZwf1rpOAMFFZLM4JJwtKZY9E-Fmmfg"
 
 class RendezvousSignInViewModelTest {
 
@@ -36,7 +41,6 @@ class RendezvousSignInViewModelTest {
         val pollGateReached = CompletableDeferred<Unit>()
         private val pollRelease = CompletableDeferred<Unit>()
         fun releasePoll() { pollRelease.complete(Unit) }
-        var offers = mutableListOf<Triple<String, String, String>>()
 
         override suspend fun createRendezvous(): Rendezvous {
             createCount += 1
@@ -52,9 +56,7 @@ class RendezvousSignInViewModelTest {
             }
             return (if (pollScript.size > 1) pollScript.removeAt(0) else pollScript[0]).getOrThrow()
         }
-        override suspend fun offerRendezvous(rid: String, server: String, code: String) {
-            offers.add(Triple(rid, server, code))
-        }
+        override suspend fun offerRendezvous(rid: String, box: String) { /* unused on the show side */ }
     }
 
     private fun makeVMs(relay: FakeRelay, claimer: FakeLinkClaimer, scope: CoroutineScope, auth: FakeAuthService):
@@ -66,6 +68,7 @@ class RendezvousSignInViewModelTest {
         val vm = RendezvousSignInViewModel(
             relay = relay, link = link, scope = scope,
             pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+            keyProvider = { VECTOR_KEY },
         )
         return vm to link
     }
@@ -77,7 +80,7 @@ class RendezvousSignInViewModelTest {
             val relay = FakeRelay()
             relay.pollScript = mutableListOf(
                 Result.success(RendezvousPollResult.Waiting),
-                Result.success(RendezvousPollResult.Offered("https://chat.example.com", "2345-6789")),
+                Result.success(RendezvousPollResult.Offered(VECTOR_BOX)),
             )
             val claimer = FakeLinkClaimer()
             claimer.pollScript = mutableListOf(
@@ -88,7 +91,7 @@ class RendezvousSignInViewModelTest {
 
             vm.start()
             assertEquals(
-                RendezvousSignInViewModel.State.Showing("matron://rlink?v=1&rid=$RID_1"),
+                RendezvousSignInViewModel.State.Showing("matron://rlink?v=2&rid=$RID_1&k=$VECTOR_KEY_B64"),
                 vm.state.value,
             )
             waitUntil { link.state.value is LinkSignInViewModel.State.SignedIn }
@@ -117,7 +120,10 @@ class RendezvousSignInViewModelTest {
             val (vm, _) = makeVMs(relay, FakeLinkClaimer(), scope, FakeAuthService())
             vm.start()
             waitUntil { relay.createCount == 2 }
-            waitUntil { vm.state.value == RendezvousSignInViewModel.State.Showing("matron://rlink?v=1&rid=$RID_2") }
+            waitUntil {
+                vm.state.value ==
+                    RendezvousSignInViewModel.State.Showing("matron://rlink?v=2&rid=$RID_2&k=$VECTOR_KEY_B64")
+            }
         } finally { scope.cancel() }
         Unit
     }
@@ -152,7 +158,7 @@ class RendezvousSignInViewModelTest {
             vm.start()
             waitUntil { relay.pollCount >= 3 }
             assertEquals(
-                RendezvousSignInViewModel.State.Showing("matron://rlink?v=1&rid=$RID_1"),
+                RendezvousSignInViewModel.State.Showing("matron://rlink?v=2&rid=$RID_1&k=$VECTOR_KEY_B64"),
                 vm.state.value,
             )
         } finally { scope.cancel() }
@@ -160,24 +166,32 @@ class RendezvousSignInViewModelTest {
     }
 
     @Test
-    fun offer_whoseSubmitManualEarlyReturns_becomesError() = runBlocking {
+    fun undecryptableBox_silentlyRegenerates() = runBlocking {
         val scope = CoroutineScope(coroutineContext + Job())
         try {
-            val relay = FakeRelay()
-            relay.pollScript = mutableListOf(
-                // Empty server URL trips submitManual's `raw.isEmpty()` guard,
-                // which returns without ever calling claim() — the link VM is
-                // left parked in Idle with nothing to drive it forward.
-                Result.success(RendezvousPollResult.Offered("", "2345-6789")),
-            )
-            val (vm, link) = makeVMs(relay, FakeLinkClaimer(), scope, FakeAuthService())
-            vm.start()
-            waitUntil {
-                vm.state.value == RendezvousSignInViewModel.State.Error(
-                    "Couldn't connect to that computer's session — try again.",
+            // Build with the two-rid create script the regeneration tests use.
+            val relay = FakeRelay().apply {
+                createResults = mutableListOf(
+                    Result.success(Rendezvous(RID_1, SECRET, 180)),
+                    Result.success(Rendezvous(RID_2, "b".repeat(64), 180)),
+                )
+                // A box this VM's key cannot open → treat exactly like expiry.
+                pollScript = mutableListOf(
+                    Result.success(RendezvousPollResult.Offered("bm90LWEtdmFsaWQtYm94")), // "not-a-valid-box"
+                    Result.success(RendezvousPollResult.Waiting),
                 )
             }
-            assertEquals(LinkSignInViewModel.State.Idle, link.state.value)
+            val (vm, _) = makeVMs(relay, FakeLinkClaimer(), scope, FakeAuthService())
+            vm.start()
+            waitUntil { relay.createCount == 2 }
+            waitUntil {
+                vm.state.value ==
+                    RendezvousSignInViewModel.State.Showing("matron://rlink?v=2&rid=$RID_2&k=$VECTOR_KEY_B64")
+            }
+            assertEquals(
+                RendezvousSignInViewModel.State.Showing("matron://rlink?v=2&rid=$RID_2&k=$VECTOR_KEY_B64"),
+                vm.state.value,
+            )
         } finally { scope.cancel() }
         Unit
     }
@@ -188,7 +202,7 @@ class RendezvousSignInViewModelTest {
         try {
             val relay = FakeRelay()
             relay.pollScript = mutableListOf(
-                Result.success(RendezvousPollResult.Offered("https://chat.example.com", "2345-6789")),
+                Result.success(RendezvousPollResult.Offered(VECTOR_BOX)),
             )
             val claimer = FakeLinkClaimer()
             claimer.claimResult = Result.failure(RuntimeException("boom"))
@@ -211,7 +225,7 @@ class RendezvousSignInViewModelTest {
             val relay = FakeRelay()
             relay.gatePoll = true
             relay.pollScript = mutableListOf(
-                Result.success(RendezvousPollResult.Offered("https://chat.example.com", "2345-6789")),
+                Result.success(RendezvousPollResult.Offered(VECTOR_BOX)),
             )
             val claimer = FakeLinkClaimer()
             val auth = FakeAuthService()
@@ -245,7 +259,7 @@ class RendezvousSignInViewModelTest {
         try {
             val relay = FakeRelay()
             relay.pollScript = mutableListOf(
-                Result.success(RendezvousPollResult.Offered("https://relay-offered.example.com", "9999-8888")),
+                Result.success(RendezvousPollResult.Offered(VECTOR_BOX)),
             )
             val claimer = FakeLinkClaimer()
             claimer.pollScript = mutableListOf(Result.success(LinkPollResult.Pending))
@@ -271,8 +285,8 @@ class RendezvousSignInViewModelTest {
             waitUntil {
                 link.state.value == LinkSignInViewModel.State.Error("Sign-in was denied on the other device.")
             }
-            waitUntil { link.serverURL == "https://relay-offered.example.com" }
-            assertEquals("9999-8888", link.codeInput)
+            waitUntil { link.serverURL == "https://chat.example.com" }
+            assertEquals("2345-6789", link.codeInput)
         } finally { scope.cancel() }
         Unit
     }

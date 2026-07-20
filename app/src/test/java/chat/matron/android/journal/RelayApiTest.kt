@@ -24,13 +24,13 @@ class RelayApiTest {
     fun mapPoll_coversAllStates() {
         assertEquals(RendezvousPollResult.Waiting, RelayApi.mapPoll(204, ""))
         assertEquals(
-            RendezvousPollResult.Offered("https://j.example.com", "2345-6789"),
-            RelayApi.mapPoll(200, """{"server":"https://j.example.com","code":"2345-6789"}"""),
+            RendezvousPollResult.Offered("q4Jc0FZKpQ2opaqueBoxBase64url"),
+            RelayApi.mapPoll(200, """{"box":"q4Jc0FZKpQ2opaqueBoxBase64url"}"""),
         )
         assertFailsWith<RelayError.NotFound> { RelayApi.mapPoll(404, "") }
         assertFailsWith<RelayError.Forbidden> { RelayApi.mapPoll(403, "") }
         assertFailsWith<RelayError.RateLimited> { RelayApi.mapPoll(429, "") }
-        assertFailsWith<RelayError.Transport> { RelayApi.mapPoll(200, """{"server":"https://x"}""") }
+        assertFailsWith<RelayError.Transport> { RelayApi.mapPoll(200, """{"nope":"x"}""") }
     }
 
     @Test
@@ -52,10 +52,10 @@ class RelayApiTest {
         assertEquals("https://push.matron.chat/link/rendezvous/RID23456789BCDFGHJKMNPQRST?secret=SEC", poll.url.toString())
         assertEquals("GET", poll.method)
 
-        val offer = RelayApi.offerRequest("https://push.matron.chat", "RID23456789BCDFGHJKMNPQRST", "https://j.example.com", "2345-6789")
+        val offer = RelayApi.offerRequest("https://push.matron.chat", "RID23456789BCDFGHJKMNPQRST", "q4Jc0opaqueBox")
         assertEquals("https://push.matron.chat/link/rendezvous/RID23456789BCDFGHJKMNPQRST/offer", offer.url.toString())
         assertEquals("POST", offer.method)
         val buffer = okio.Buffer().also { offer.body!!.writeTo(it) }
-        assertEquals("""{"server":"https://j.example.com","code":"2345-6789"}""", buffer.readUtf8())
+        assertEquals("""{"box":"q4Jc0opaqueBox"}""", buffer.readUtf8())
     }
 }

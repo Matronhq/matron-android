@@ -1,7 +1,9 @@
 package chat.matron.android.viewmodels
 
+import chat.matron.android.journal.Base64URL
 import chat.matron.android.journal.RelayError
 import chat.matron.android.journal.RelayRendezvousing
+import chat.matron.android.journal.RendezvousCrypto
 import chat.matron.android.journal.RendezvousPollResult
 import chat.matron.android.journal.RendezvousURI
 import kotlin.time.Duration
@@ -13,20 +15,27 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /// Show-side of the reverse QR flow (spec §2): a signed-out device that
-/// can't scan asks the shared relay for a rendezvous, renders it as a QR,
-/// and polls. When a signed-in phone scans it and posts {server, code},
-/// this VM hands both values to the existing [LinkSignInViewModel] — from
-/// there the flow is byte-for-byte the shipped claim → approve → token
-/// path against the user's own journal. The relay never sees a token.
+/// can't scan generates a single-use offer key, asks the shared relay for a
+/// rendezvous, and renders {rid, key} as a v=2 QR, then polls. When a
+/// signed-in phone scans it and posts an opaque box (server+code sealed under
+/// that key), this VM opens the box locally and hands {server, code} to the
+/// existing [LinkSignInViewModel] — from there the flow is byte-for-byte the
+/// shipped claim → approve → token path against the user's own journal. The
+/// relay only ever holds ciphertext; it never sees the key, a token, or a
+/// readable {server, code} (rendezvous-offer-encryption spec §4.2).
 class RendezvousSignInViewModel(
     private val relay: RelayRendezvousing,
     private val link: LinkSignInViewModel,
     private val scope: CoroutineScope,
     private val pollInterval: Duration = 2.seconds,
     private val errorPollInterval: Duration = 5.seconds,
+    private val keyProvider: () -> ByteArray = { RendezvousCrypto.generateKey() },
 ) {
     sealed interface State {
         data object Idle : State
@@ -76,11 +85,12 @@ class RendezvousSignInViewModel(
             return
         }
         if (gen != generation) return
-        _state.value = State.Showing(RendezvousURI.format(rendezvous.rid))
-        startPolling(rendezvous.rid, rendezvous.secret, gen)
+        val key = keyProvider()
+        _state.value = State.Showing(RendezvousURI.format(rendezvous.rid, key))
+        startPolling(rendezvous.rid, rendezvous.secret, key, gen)
     }
 
-    private fun startPolling(rid: String, secret: String, gen: Long) {
+    private fun startPolling(rid: String, secret: String, key: ByteArray, gen: Long) {
         pollTask = scope.launch {
             while (isActive) {
                 val result = try {
@@ -122,11 +132,19 @@ class RendezvousSignInViewModel(
                             is LinkSignInViewModel.State.Error,
                             -> Unit
                         }
-                        _state.value = State.Connecting(
-                            result.server.toHttpUrlOrNull()?.host ?: result.server,
-                        )
-                        link.serverURL = result.server
-                        link.codeInput = result.code
+                        // Open the box locally with the key we published in the QR. An
+                        // undecryptable/malformed box (someone who knows only the rid — not
+                        // the key — occupied the slot with garbage) is treated exactly like
+                        // an expired rendezvous: regenerate and keep showing.
+                        val offer = openOffer(result.box, key)
+                        if (offer == null) {
+                            createAndShow(gen)
+                            return@launch
+                        }
+                        val (server, code) = offer
+                        _state.value = State.Connecting(server.toHttpUrlOrNull()?.host ?: server)
+                        link.serverURL = server
+                        link.codeInput = code
                         link.submitManual()
                         if (gen != generation || !isActive) return@launch
                         // submitManual() can return without ever starting a
@@ -158,5 +176,21 @@ class RendezvousSignInViewModel(
                 }
             }
         }
+    }
+
+    /// Decrypt and parse a polled offer box. Returns null on any failure
+    /// (base64 decode, auth failure, non-JSON, or missing fields) — the caller
+    /// regenerates. submitManual() re-validates `server` via
+    /// ServerURLValidator on the way into the claim, so no separate URL
+    /// validation is needed here.
+    private fun openOffer(box: String, key: ByteArray): Pair<String, String>? = try {
+        val bytes = Base64URL.decode(box) ?: return null
+        val plaintext = RendezvousCrypto.open(bytes, key)
+        val obj = Json.parseToJsonElement(plaintext.decodeToString()).jsonObject
+        val server = obj["server"]?.jsonPrimitive?.content
+        val code = obj["code"]?.jsonPrimitive?.content
+        if (server == null || code == null) null else server to code
+    } catch (e: Throwable) {
+        null
     }
 }
