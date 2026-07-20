@@ -75,7 +75,10 @@ fun ChatListScreen(
 
     var overflowOpen by remember { mutableStateOf(false) }
 
+    // iOS shows this list plain on systemBackground (white), not on the
+    // timeline cream — the theme's default `background` here reads brown.
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
             TopAppBar(
                 title = { Text("Chats") },
