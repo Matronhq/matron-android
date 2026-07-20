@@ -1,5 +1,6 @@
 package chat.matron.android.viewmodels
 
+import chat.matron.android.journal.Base64URL
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.LinkStart
@@ -7,6 +8,7 @@ import chat.matron.android.journal.LinkStatus
 import chat.matron.android.journal.LinkURI
 import chat.matron.android.journal.RelayError
 import chat.matron.android.journal.RelayRendezvousing
+import chat.matron.android.journal.RendezvousCrypto
 import chat.matron.android.journal.RendezvousURI
 import chat.matron.android.platform.Haptics
 import kotlin.time.Duration
@@ -19,6 +21,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /// The show-QR slice of [JournalApi], extracted so the view model tests
 /// against a fake (same pattern as [DevicesProviding]).
@@ -189,7 +193,7 @@ class DeviceLinkViewModel(
         // still in flight.
         if (_isSubmitting.value) return
         val gen = generation
-        val rid = try {
+        val parsed = try {
             RendezvousURI.parse(payload)
         } catch (e: RendezvousURI.ParseError.UnsupportedVersion) {
             _noticeMessage.value = "This QR code needs a newer version of Matron."
@@ -211,9 +215,17 @@ class DeviceLinkViewModel(
             }
             return
         }
+        // Seal {server, code} under the key from the QR before it ever leaves
+        // this device. The relay — and anyone who only photographed the QR's
+        // rid — sees only opaque ciphertext (rendezvous-offer-encryption spec).
+        val plaintext = buildJsonObject {
+            put("server", serverURL)
+            put("code", showing.code)
+        }.toString().encodeToByteArray()
+        val box = Base64URL.encode(RendezvousCrypto.seal(plaintext, parsed.key))
         _isSubmitting.value = true
         try {
-            relay.offerRendezvous(rid = rid, server = serverURL, code = showing.code)
+            relay.offerRendezvous(rid = parsed.rid, box = box)
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
         } catch (e: RelayError.Conflict) {
