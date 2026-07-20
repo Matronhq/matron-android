@@ -40,6 +40,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import chat.matron.android.designsystem.QRCode
 import chat.matron.android.journal.RelayRendezvousing
+import chat.matron.android.platform.Haptics
 import chat.matron.android.viewmodels.DeviceLinkViewModel
 import chat.matron.android.viewmodels.DeviceLinking
 import com.google.mlkit.vision.barcode.common.Barcode
@@ -58,12 +59,13 @@ fun DeviceLinkScreen(
     api: DeviceLinking,
     serverURL: String,
     relay: RelayRendezvousing,
+    haptics: Haptics,
     onBack: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val viewModel = remember {
-        DeviceLinkViewModel(api = api, serverURL = serverURL, relay = relay, scope = scope)
+        DeviceLinkViewModel(api = api, serverURL = serverURL, relay = relay, scope = scope, haptics = haptics)
     }
     val phase by viewModel.phase.collectAsState()
     val notice by viewModel.noticeMessage.collectAsState()

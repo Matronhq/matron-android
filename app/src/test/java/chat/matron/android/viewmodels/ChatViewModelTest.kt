@@ -7,6 +7,7 @@ import chat.matron.android.events.AskUserEvent
 import chat.matron.android.models.SessionStatus
 import chat.matron.android.models.SessionStatusUpdate
 import chat.matron.android.models.SyncConnectionState
+import chat.matron.android.platform.Haptics
 import java.io.File
 import java.time.Instant
 import java.time.LocalDateTime
@@ -84,7 +85,8 @@ class ChatViewModelTest {
         media: FakeMediaService = FakeMediaService(),
         store: KeyValueStore = InMemoryKeyValueStore(),
         roomID: String = "!r:s",
-    ) = ChatViewModel(roomID, timeline, media, scope, store)
+        haptics: Haptics = Haptics.None,
+    ) = ChatViewModel(roomID, timeline, media, scope, store, haptics)
 
     private suspend fun makeAskVM(
         scope: CoroutineScope,
@@ -247,6 +249,99 @@ class ChatViewModelTest {
         val vm = makeVM(scope, fake)
         vm.start().join()
         assertNull(vm.activityLabel.value)
+    }
+
+    @Test
+    fun tick_firesOnce_whenActivityGoesRunningThenIdle() = vmTest { scope ->
+        val fake = FakeTimelineService()
+        val msg = textItem("1")
+        val activity = TimelineItem(
+            "activity", "agent", Instant.now(),
+            TimelineItem.Kind.ActivityIndicator("thinking…"), isOwn = false,
+        )
+        fake.snapshotsToEmit = listOf(listOf(msg, activity), listOf(msg))
+        val haptics = FakeHaptics()
+        val vm = makeVM(scope, fake, haptics = haptics)
+        vm.start().join()
+        assertNull(vm.activityLabel.value)
+        assertEquals(1, haptics.tickCount)
+    }
+
+    @Test
+    fun tick_doesNotFire_whenChatOpensAlreadyIdle() = vmTest { scope ->
+        val fake = FakeTimelineService()
+        fake.snapshotsToEmit = listOf(listOf(textItem("1")))
+        val haptics = FakeHaptics()
+        val vm = makeVM(scope, fake, haptics = haptics)
+        vm.start().join()
+        assertNull(vm.activityLabel.value)
+        assertEquals(0, haptics.tickCount)
+    }
+
+    @Test
+    fun tick_doesNotFire_onTheInitialRunningSnapshot() = vmTest { scope ->
+        val fake = FakeTimelineService()
+        val activity = TimelineItem(
+            "activity", "agent", Instant.now(),
+            TimelineItem.Kind.ActivityIndicator("thinking…"), isOwn = false,
+        )
+        fake.snapshotsToEmit = listOf(listOf(textItem("1"), activity))
+        val haptics = FakeHaptics()
+        val vm = makeVM(scope, fake, haptics = haptics)
+        vm.start().join()
+        assertEquals("thinking…", vm.activityLabel.value)
+        assertEquals(0, haptics.tickCount)
+    }
+
+    @Test
+    fun tick_doesNotFire_whenTurnCompletesOffScreenOnACachedVM() = vmTest { scope ->
+        // ChatVMCache keeps one ChatViewModel per room for the whole session, and
+        // ChatLifecycle calls start() again on every re-entry. _activityLabel is
+        // never reset by stop()/start(), so a stale "thinking…" baseline from a
+        // prior visit must not be read as a "was running" edge on the first
+        // recompute after re-entry — that edge must only fire for a completion
+        // the user actually watched while the chat was open.
+        val fake = FakeTimelineService()
+        val activity = TimelineItem(
+            "activity", "agent", Instant.now(),
+            TimelineItem.Kind.ActivityIndicator("thinking…"), isOwn = false,
+        )
+        val msg = textItem("1")
+        fake.snapshotsToEmit = listOf(listOf(msg, activity))
+        val haptics = FakeHaptics()
+        val vm = makeVM(scope, fake, haptics = haptics)
+        vm.start().join()
+        assertEquals("thinking…", vm.activityLabel.value)
+        assertEquals(0, haptics.tickCount)
+
+        // Leave the room while the agent is still "running" (label stays
+        // "thinking…" on the cached VM instance), the turn completes off-screen,
+        // then re-enter: the re-open's first snapshot is already idle.
+        vm.stop()
+        fake.snapshotsToEmit = listOf(listOf(msg))
+        vm.start().join()
+
+        assertNull(vm.activityLabel.value)
+        assertEquals(0, haptics.tickCount)
+    }
+
+    @Test
+    fun tick_doesNotFire_whenTimelineIsWipedMidTurn() = vmTest { scope ->
+        // A mirror wipe (e.g. a resync) replaces a running timeline with an
+        // empty snapshot. The trailing indicator vanishes because everything
+        // did — not because a turn finished — so no tick should fire.
+        val fake = FakeTimelineService()
+        val msg = textItem("1")
+        val activity = TimelineItem(
+            "activity", "agent", Instant.now(),
+            TimelineItem.Kind.ActivityIndicator("thinking…"), isOwn = false,
+        )
+        fake.snapshotsToEmit = listOf(listOf(msg, activity), emptyList())
+        val haptics = FakeHaptics()
+        val vm = makeVM(scope, fake, haptics = haptics)
+        vm.start().join()
+        assertNull(vm.activityLabel.value)
+        assertEquals(0, haptics.tickCount)
     }
 
     @Test

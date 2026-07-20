@@ -10,6 +10,7 @@ import chat.matron.android.journal.RelayError
 import chat.matron.android.journal.RelayRendezvousing
 import chat.matron.android.journal.RendezvousCrypto
 import chat.matron.android.journal.RendezvousURI
+import chat.matron.android.platform.Haptics
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
@@ -56,6 +57,7 @@ class DeviceLinkViewModel(
     private val scope: CoroutineScope,
     private val pollInterval: Duration = 2.seconds,
     private val errorPollInterval: Duration = 5.seconds,
+    private val haptics: Haptics = Haptics.None,
 ) {
     sealed interface Phase {
         data object Loading : Phase
@@ -131,6 +133,7 @@ class DeviceLinkViewModel(
             api.linkApprove(code)
             stop()
             _phase.value = Phase.Approved
+            haptics.celebrate()
         } catch (e: JournalApiError.NotFound) {
             _noticeMessage.value = "Code expired — showing a fresh one"
             stop()
@@ -264,6 +267,7 @@ class DeviceLinkViewModel(
         } catch (e: Throwable) {
             if (gen != generation) return
             _phase.value = Phase.Error("Couldn't reach the server — try again.")
+            haptics.error()
         }
     }
 

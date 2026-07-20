@@ -5,6 +5,7 @@ import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.LinkApproval
 import chat.matron.android.journal.LinkClaim
 import chat.matron.android.journal.LinkPollResult
+import chat.matron.android.platform.Haptics
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -76,15 +77,53 @@ class FakeLinkClaimer : LinkClaiming {
 class LinkSignInViewModelTest {
     private val scannedURI = "matron://link?v=1&server=https%3A%2F%2Fchat.example.com&code=KTNM-3VQ8"
 
-    private fun makeVM(fake: FakeLinkClaimer, scope: CoroutineScope, auth: FakeAuthService = FakeAuthService()) =
-        LinkSignInViewModel(
-            auth = auth,
-            deviceDisplayName = "Matron Android",
-            scope = scope,
-            apiFactory = { fake },
-            pollInterval = 1.milliseconds,
-            errorPollInterval = 1.milliseconds,
-        )
+    private fun makeVM(
+        fake: FakeLinkClaimer,
+        scope: CoroutineScope,
+        auth: FakeAuthService = FakeAuthService(),
+        haptics: Haptics = Haptics.None,
+    ) = LinkSignInViewModel(
+        auth = auth,
+        deviceDisplayName = "Matron Android",
+        scope = scope,
+        apiFactory = { fake },
+        pollInterval = 1.milliseconds,
+        errorPollInterval = 1.milliseconds,
+        haptics = haptics,
+    )
+
+    @Test
+    fun signedIn_celebrates() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeLinkClaimer()
+            fake.pollScript = mutableListOf(
+                Result.success(LinkPollResult.Pending),
+                Result.success(LinkPollResult.Approved(LinkApproval("tok99", 42, 7, "dan"))),
+            )
+            val haptics = FakeHaptics()
+            val vm = makeVM(fake, scope, haptics = haptics)
+            vm.handleScanned(scannedURI)
+            waitUntil { vm.state.value is LinkSignInViewModel.State.SignedIn }
+            assertEquals(1, haptics.celebrateCount)
+            assertEquals(0, haptics.errorCount)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun parseError_buzzesError() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val haptics = FakeHaptics()
+            val vm = makeVM(FakeLinkClaimer(), scope, haptics = haptics)
+            vm.handleScanned("https://a-random-website.example/qr")
+            assertEquals(LinkSignInViewModel.State.Error("Not a Matron sign-in code."), vm.state.value)
+            assertEquals(1, haptics.errorCount)
+            assertEquals(0, haptics.celebrateCount)
+        } finally { scope.cancel() }
+        Unit
+    }
 
     @Test
     fun scanned_happyPath_buildsAndPersistsSession() = runBlocking {

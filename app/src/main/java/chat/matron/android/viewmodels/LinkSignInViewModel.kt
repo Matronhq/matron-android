@@ -9,6 +9,7 @@ import chat.matron.android.journal.LinkPollResult
 import chat.matron.android.journal.LinkURI
 import chat.matron.android.journal.PairingCode
 import chat.matron.android.models.UserSession
+import chat.matron.android.platform.Haptics
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
@@ -47,6 +48,7 @@ class LinkSignInViewModel(
     private val apiFactory: (String) -> LinkClaiming = { JournalLinkClaimService(JournalApi(it)) },
     private val pollInterval: Duration = 2.seconds,
     private val errorPollInterval: Duration = 5.seconds,
+    private val haptics: Haptics = Haptics.None,
 ) {
     sealed interface State {
         data object Idle : State
@@ -67,6 +69,22 @@ class LinkSignInViewModel(
 
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
+
+    /// Monotonic count of error buzzes this VM has fired. A delegating caller
+    /// (RendezvousSignInViewModel) captures it around its own [submitManual]
+    /// call to tell whether THIS interaction already buzzed — so it can avoid a
+    /// duplicate buzz without being fooled by a stale [State.Error] left from an
+    /// earlier attempt (an end-state check can't distinguish the two).
+    var errorBuzzes: Int = 0
+        private set
+
+    /// Enters the Error state and buzzes once. Every genuine failure path routes
+    /// through here so the haptic fires exactly on the edge into Error.
+    private fun fail(message: String) {
+        _state.value = State.Error(message)
+        errorBuzzes++
+        haptics.error()
+    }
 
     private var pollTask: Job? = null
 
@@ -96,10 +114,10 @@ class LinkSignInViewModel(
         val parsed = try {
             LinkURI.parse(payload)
         } catch (e: LinkURI.ParseError.UnsupportedVersion) {
-            _state.value = State.Error("This QR code needs a newer version of Matron.")
+            fail("This QR code needs a newer version of Matron.")
             return
         } catch (e: LinkURI.ParseError) {
-            _state.value = State.Error("Not a Matron sign-in code.")
+            fail("Not a Matron sign-in code.")
             return
         }
         claim(server = parsed.serverURL, code = parsed.code)
@@ -111,7 +129,7 @@ class LinkSignInViewModel(
         val url = try {
             ServerURLValidator.normalize(raw)
         } catch (e: ServerURLValidator.ValidationError) {
-            _state.value = State.Error("That doesn't look like a valid server URL.")
+            fail("That doesn't look like a valid server URL.")
             return
         }
         claim(server = url, code = PairingCode.display(codeInput))
@@ -140,15 +158,15 @@ class LinkSignInViewModel(
             api.linkClaim(code, deviceDisplayName)
         } catch (e: JournalApiError.Conflict) {
             if (gen != generation) return // cancel() landed while this call was in flight
-            _state.value = State.Error("This code was already used. Generate a new one on your signed-in device.")
+            fail("This code was already used. Generate a new one on your signed-in device.")
             return
         } catch (e: JournalApiError.NotFound) {
             if (gen != generation) return
-            _state.value = State.Error("Code not recognized or expired. Show a fresh QR code and try again.")
+            fail("Code not recognized or expired. Show a fresh QR code and try again.")
             return
         } catch (e: JournalApiError.RateLimited) {
             if (gen != generation) return
-            _state.value = State.Error("Too many attempts — try again in a minute.")
+            fail("Too many attempts — try again in a minute.")
             return
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             // The caller's coroutine died mid-claim (e.g. the rendezvous VM's
@@ -164,7 +182,7 @@ class LinkSignInViewModel(
             throw cancel
         } catch (e: Throwable) {
             if (gen != generation) return
-            _state.value = State.Error("Couldn't reach the server — try again.")
+            fail("Couldn't reach the server — try again.")
             return
         }
         if (gen != generation) return // cancel() landed while this call was in flight
@@ -192,7 +210,7 @@ class LinkSignInViewModel(
                     when (result) {
                         is LinkPollResult.Pending -> interval = pollInterval
                         is LinkPollResult.Denied -> {
-                            _state.value = State.Error("Sign-in was denied on the other device.")
+                            fail("Sign-in was denied on the other device.")
                             return@launch
                         }
                         is LinkPollResult.Approved -> {
@@ -206,16 +224,17 @@ class LinkSignInViewModel(
                             try {
                                 auth.persist(session)
                             } catch (e: Throwable) {
-                                _state.value = State.Error("Signed in, but couldn't save the session — try again.")
+                                fail("Signed in, but couldn't save the session — try again.")
                                 return@launch
                             }
                             _state.value = State.SignedIn(session)
+                            haptics.celebrate()
                             return@launch
                         }
                     }
                 } catch (e: JournalApiError.NotFound) {
                     if (gen != generation || !isActive) return@launch
-                    _state.value = State.Error("Sign-in expired. Scan again.")
+                    fail("Sign-in expired. Scan again.")
                     return@launch
                 } catch (cancel: kotlinx.coroutines.CancellationException) {
                     throw cancel

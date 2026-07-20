@@ -7,6 +7,7 @@ import chat.matron.android.journal.RelayError
 import chat.matron.android.journal.RelayRendezvousing
 import chat.matron.android.journal.Rendezvous
 import chat.matron.android.journal.RendezvousPollResult
+import chat.matron.android.platform.Haptics
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -123,13 +124,15 @@ private class FakeRelayOffer : RelayRendezvousing {
 }
 
 class DeviceLinkViewModelTest {
-    private fun makeVM(fake: FakeDeviceLinker, scope: CoroutineScope) = DeviceLinkViewModel(
-        api = fake,
-        serverURL = "https://chat.example.com",
-        scope = scope,
-        pollInterval = 1.milliseconds,
-        errorPollInterval = 1.milliseconds,
-    )
+    private fun makeVM(fake: FakeDeviceLinker, scope: CoroutineScope, haptics: Haptics = Haptics.None) =
+        DeviceLinkViewModel(
+            api = fake,
+            serverURL = "https://chat.example.com",
+            scope = scope,
+            haptics = haptics,
+            pollInterval = 1.milliseconds,
+            errorPollInterval = 1.milliseconds,
+        )
 
     @Test
     fun start_showsCodeAndQRPayload() = runBlocking {
@@ -174,6 +177,66 @@ class DeviceLinkViewModelTest {
             waitUntil { vm.phase.value == DeviceLinkViewModel.Phase.Claimed("Pixel 9", "198.51.100.7") }
             assertEquals(DeviceLinkViewModel.Phase.Claimed("Pixel 9", "198.51.100.7"), vm.phase.value)
             vm.stop()
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun approve_celebrates() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDeviceLinker()
+            fake.statusScript = mutableListOf(
+                Result.success(LinkStatus.Waiting(100)),
+                Result.success(LinkStatus.Claimed("Pixel 9", "198.51.100.7", 90)),
+            )
+            val haptics = FakeHaptics()
+            val vm = makeVM(fake, scope, haptics)
+            vm.start()
+            waitUntil { vm.phase.value is DeviceLinkViewModel.Phase.Claimed }
+            vm.approve()
+            assertEquals(DeviceLinkViewModel.Phase.Approved, vm.phase.value)
+            assertEquals(1, haptics.celebrateCount)
+            assertEquals(0, haptics.errorCount)
+            vm.stop()
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun deny_isSilent() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDeviceLinker()
+            fake.statusScript = mutableListOf(
+                Result.success(LinkStatus.Waiting(100)),
+                Result.success(LinkStatus.Claimed("Pixel 9", "198.51.100.7", 90)),
+            )
+            val haptics = FakeHaptics()
+            val vm = makeVM(fake, scope, haptics)
+            vm.start()
+            waitUntil { vm.phase.value is DeviceLinkViewModel.Phase.Claimed }
+            vm.deny()
+            assertEquals(DeviceLinkViewModel.Phase.Denied, vm.phase.value)
+            assertEquals(0, haptics.errorCount)
+            assertEquals(0, haptics.celebrateCount)
+            vm.stop()
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun startFailure_buzzesError() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDeviceLinker()
+            fake.startResults = mutableListOf(Result.failure(RuntimeException("network")))
+            val haptics = FakeHaptics()
+            val vm = makeVM(fake, scope, haptics)
+            vm.start()
+            assertTrue(vm.phase.value is DeviceLinkViewModel.Phase.Error)
+            assertEquals(1, haptics.errorCount)
+            assertEquals(0, haptics.celebrateCount)
         } finally { scope.cancel() }
         Unit
     }

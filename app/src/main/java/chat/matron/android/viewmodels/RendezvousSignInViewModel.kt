@@ -6,6 +6,7 @@ import chat.matron.android.journal.RelayRendezvousing
 import chat.matron.android.journal.RendezvousCrypto
 import chat.matron.android.journal.RendezvousPollResult
 import chat.matron.android.journal.RendezvousURI
+import chat.matron.android.platform.Haptics
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
@@ -35,6 +36,7 @@ class RendezvousSignInViewModel(
     private val scope: CoroutineScope,
     private val pollInterval: Duration = 2.seconds,
     private val errorPollInterval: Duration = 5.seconds,
+    private val haptics: Haptics = Haptics.None,
     private val keyProvider: () -> ByteArray = { RendezvousCrypto.generateKey() },
 ) {
     sealed interface State {
@@ -51,6 +53,15 @@ class RendezvousSignInViewModel(
 
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state
+
+    /// Enters the Error state, buzzing once by default. [buzz] is set false only
+    /// when the delegated [link] VM has already entered its own Error and buzzed
+    /// — this VM then mirrors the failure for its host-line UI without a second
+    /// near-simultaneous error buzz.
+    private fun fail(message: String, buzz: Boolean = true) {
+        _state.value = State.Error(message)
+        if (buzz) haptics.error()
+    }
 
     // Same stale-async discipline as LinkSignInViewModel/DeviceLinkViewModel:
     // stop() bumps the generation; every post-suspension branch re-checks it
@@ -81,7 +92,7 @@ class RendezvousSignInViewModel(
             throw cancel
         } catch (e: Throwable) {
             if (gen != generation) return
-            _state.value = State.Error("Couldn't reach the Matron relay — check your connection and try again.")
+            fail("Couldn't reach the Matron relay — check your connection and try again.")
             return
         }
         if (gen != generation) return
@@ -135,7 +146,8 @@ class RendezvousSignInViewModel(
                         // Open the box locally with the key we published in the QR. An
                         // undecryptable/malformed box (someone who knows only the rid — not
                         // the key — occupied the slot with garbage) is treated exactly like
-                        // an expired rendezvous: regenerate and keep showing.
+                        // an expired rendezvous: regenerate and keep showing — silently, so
+                        // no error buzz for a state the user never sees.
                         val offer = openOffer(result.box, key)
                         if (offer == null) {
                             createAndShow(gen)
@@ -145,6 +157,10 @@ class RendezvousSignInViewModel(
                         _state.value = State.Connecting(server.toHttpUrlOrNull()?.host ?: server)
                         link.serverURL = server
                         link.codeInput = code
+                        // Snapshot the link VM's buzz count so we can tell whether
+                        // THIS submitManual produced an error buzz (vs. leaving a
+                        // stale Error from an earlier attempt untouched).
+                        val linkBuzzesBefore = link.errorBuzzes
                         link.submitManual()
                         if (gen != generation || !isActive) return@launch
                         // submitManual() can return without ever starting a
@@ -158,18 +174,21 @@ class RendezvousSignInViewModel(
                         // progressing phases (Claiming, WaitingForApproval,
                         // SignedIn) mean the claim is under way; the link
                         // VM's own state drives the UI from here.
+                        val message = "Couldn't connect to that computer's session — try again."
                         when (link.state.value) {
                             is LinkSignInViewModel.State.Claiming,
                             is LinkSignInViewModel.State.WaitingForApproval,
                             is LinkSignInViewModel.State.SignedIn,
                             -> Unit
+                            // The link VM is parked with nothing driving it — surface
+                            // our own error. Buzz only if submitManual didn't already
+                            // buzz for this attempt: a fresh link Error bumped the
+                            // count (don't double-buzz), while an Idle early-return or
+                            // a stale prior Error left it unchanged (this is the only
+                            // feedback, so buzz).
                             is LinkSignInViewModel.State.Idle,
                             is LinkSignInViewModel.State.Error,
-                            -> {
-                                _state.value = State.Error(
-                                    "Couldn't connect to that computer's session — try again.",
-                                )
-                            }
+                            -> fail(message, buzz = link.errorBuzzes == linkBuzzesBefore)
                         }
                         return@launch
                     }

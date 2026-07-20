@@ -7,6 +7,7 @@ import chat.matron.android.journal.RelayError
 import chat.matron.android.journal.RelayRendezvousing
 import chat.matron.android.journal.Rendezvous
 import chat.matron.android.journal.RendezvousPollResult
+import chat.matron.android.platform.Haptics
 import kotlin.coroutines.coroutineContext
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CompletableDeferred
@@ -29,6 +30,16 @@ private val VECTOR_KEY = chat.matron.android.journal.Base64URL.decode(VECTOR_KEY
 // Decrypts under VECTOR_KEY to {"server":"https://chat.example.com","code":"2345-6789"}.
 private val VECTOR_BOX =
     "oKGio6SlpqeoqaqrnToPSDe9Z81AX6W7cw6wrUqDdnP61jZC-XZH6w_HEC-xGSrdgwAwUjv5JvIrSLDNcjZwf1rpOAMFFZLM4JJwtKZY9E-Fmmfg"
+
+/// Seals an offer under VECTOR_KEY, the key [makeVMs] publishes in the QR — for
+/// offers the fixed VECTOR_BOX can't express (e.g. a server the claim rejects).
+private fun sealedOffer(server: String, code: String): String =
+    chat.matron.android.journal.Base64URL.encode(
+        chat.matron.android.journal.RendezvousCrypto.seal(
+            """{"server":"$server","code":"$code"}""".toByteArray(),
+            VECTOR_KEY,
+        ),
+    )
 
 class RendezvousSignInViewModelTest {
 
@@ -59,15 +70,22 @@ class RendezvousSignInViewModelTest {
         override suspend fun offerRendezvous(rid: String, box: String) { /* unused on the show side */ }
     }
 
-    private fun makeVMs(relay: FakeRelay, claimer: FakeLinkClaimer, scope: CoroutineScope, auth: FakeAuthService):
-        Pair<RendezvousSignInViewModel, LinkSignInViewModel> {
+    private fun makeVMs(
+        relay: FakeRelay,
+        claimer: FakeLinkClaimer,
+        scope: CoroutineScope,
+        auth: FakeAuthService,
+        haptics: Haptics = Haptics.None,
+    ): Pair<RendezvousSignInViewModel, LinkSignInViewModel> {
         val link = LinkSignInViewModel(
             auth = auth, deviceDisplayName = "Matron Android", scope = scope,
             apiFactory = { claimer }, pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+            haptics = haptics,
         )
         val vm = RendezvousSignInViewModel(
             relay = relay, link = link, scope = scope,
             pollInterval = 1.milliseconds, errorPollInterval = 1.milliseconds,
+            haptics = haptics,
             keyProvider = { VECTOR_KEY },
         )
         return vm to link
@@ -145,6 +163,24 @@ class RendezvousSignInViewModelTest {
     }
 
     @Test
+    fun createFailure_buzzesError() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val relay = FakeRelay()
+            relay.createResults = mutableListOf(Result.failure(RelayError.Transport("down")))
+            val haptics = FakeHaptics()
+            val (vm, _) = makeVMs(relay, FakeLinkClaimer(), scope, FakeAuthService(), haptics)
+            vm.start()
+            assertEquals(
+                RendezvousSignInViewModel.State.Error("Couldn't reach the Matron relay — check your connection and try again."),
+                vm.state.value,
+            )
+            assertEquals(1, haptics.errorCount)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
     fun transientPollFailure_keepsPolling() = runBlocking {
         val scope = CoroutineScope(coroutineContext + Job())
         try {
@@ -181,7 +217,8 @@ class RendezvousSignInViewModelTest {
                     Result.success(RendezvousPollResult.Waiting),
                 )
             }
-            val (vm, _) = makeVMs(relay, FakeLinkClaimer(), scope, FakeAuthService())
+            val haptics = FakeHaptics()
+            val (vm, _) = makeVMs(relay, FakeLinkClaimer(), scope, FakeAuthService(), haptics)
             vm.start()
             waitUntil { relay.createCount == 2 }
             waitUntil {
@@ -192,6 +229,8 @@ class RendezvousSignInViewModelTest {
                 RendezvousSignInViewModel.State.Showing("matron://rlink?v=2&rid=$RID_2&k=$VECTOR_KEY_B64"),
                 vm.state.value,
             )
+            // Silent: the user only ever sees a fresh QR, so nothing to buzz about.
+            assertEquals(0, haptics.errorCount)
         } finally { scope.cancel() }
         Unit
     }
@@ -214,6 +253,91 @@ class RendezvousSignInViewModelTest {
                 )
             }
             assertTrue(link.state.value is LinkSignInViewModel.State.Error)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun offer_whoseClaimFails_buzzesErrorOnce() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val relay = FakeRelay()
+            relay.pollScript = mutableListOf(
+                Result.success(RendezvousPollResult.Offered(VECTOR_BOX)),
+            )
+            val claimer = FakeLinkClaimer()
+            claimer.claimResult = Result.failure(RuntimeException("boom"))
+            val haptics = FakeHaptics()
+            val (vm, link) = makeVMs(relay, claimer, scope, FakeAuthService(), haptics)
+            vm.start()
+            waitUntil {
+                vm.state.value == RendezvousSignInViewModel.State.Error(
+                    "Couldn't connect to that computer's session — try again.",
+                )
+            }
+            assertTrue(link.state.value is LinkSignInViewModel.State.Error)
+            // The link VM already buzzed on its own edge into Error; the
+            // rendezvous VM surfaces its host-line error WITHOUT a second
+            // near-simultaneous buzz (two would stutter as one ugly buzz).
+            assertEquals(1, haptics.errorCount)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun offer_whenLinkCarriesStaleError_stillBuzzesForTheNewFailure() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val relay = FakeRelay()
+            // Empty server → this offer's submitManual early-returns WITHOUT the
+            // link VM re-failing, so the link VM is left in whatever Error it
+            // already held.
+            relay.pollScript = mutableListOf(
+                Result.success(RendezvousPollResult.Offered(sealedOffer("", "2345-6789"))),
+            )
+            val haptics = FakeHaptics()
+            val (vm, link) = makeVMs(relay, FakeLinkClaimer(), scope, FakeAuthService(), haptics)
+            // Seed a STALE link Error from an earlier, unrelated scan (buzz #1).
+            link.serverURL = "not a url"
+            link.codeInput = "2345-6789"
+            link.submitManual()
+            assertTrue(link.state.value is LinkSignInViewModel.State.Error)
+            assertEquals(1, haptics.errorCount)
+            // The offer arrives while that stale Error still sits on the link VM.
+            // Its failure never buzzed, so the rendezvous VM must buzz — the
+            // stale Error's buzz belonged to the earlier attempt, not this one.
+            vm.start()
+            waitUntil {
+                vm.state.value == RendezvousSignInViewModel.State.Error(
+                    "Couldn't connect to that computer's session — try again.",
+                )
+            }
+            assertEquals(2, haptics.errorCount)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun offer_whoseSubmitManualEarlyReturns_buzzesErrorOnce() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val relay = FakeRelay()
+            // Empty server URL trips submitManual's early return: the link VM
+            // stays Idle and never buzzes, so the rendezvous VM's buzz is the
+            // ONLY error feedback and must still fire exactly once.
+            relay.pollScript = mutableListOf(
+                Result.success(RendezvousPollResult.Offered(sealedOffer("", "2345-6789"))),
+            )
+            val haptics = FakeHaptics()
+            val (vm, link) = makeVMs(relay, FakeLinkClaimer(), scope, FakeAuthService(), haptics)
+            vm.start()
+            waitUntil {
+                vm.state.value == RendezvousSignInViewModel.State.Error(
+                    "Couldn't connect to that computer's session — try again.",
+                )
+            }
+            assertEquals(LinkSignInViewModel.State.Idle, link.state.value)
+            assertEquals(1, haptics.errorCount)
         } finally { scope.cancel() }
         Unit
     }

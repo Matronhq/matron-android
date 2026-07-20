@@ -3,6 +3,8 @@ package chat.matron.android
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import chat.matron.android.auth.AuthService
+import chat.matron.android.platform.Haptics
+import chat.matron.android.platform.SystemHaptics
 import chat.matron.android.auth.JournalAuthService
 import chat.matron.android.chat.ChatService
 import chat.matron.android.chat.JournalChatService
@@ -113,6 +115,9 @@ class AppDependencies(
 
     /** Where the composer stages picked/pasted attachment copies. */
     val stagingDirectory: File
+
+    /** Foreground haptics singleton. No-op on devices without a vibrator. */
+    val haptics: Haptics = SystemHaptics(context)
 
     private val appSupport: File = StoragePaths.appSupport(context)
     private val journalDirectory: File = File(appSupport, "journal-store").apply { mkdirs() }

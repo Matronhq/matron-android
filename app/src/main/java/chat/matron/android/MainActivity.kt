@@ -92,13 +92,19 @@ private fun MatronApp(deps: AppDependencies) {
                 session == null -> {
                     val vm = remember { SignInViewModel(auth = deps.auth, deviceDisplayName = "Matron Android") }
                     val linkVm = remember {
-                        LinkSignInViewModel(auth = deps.auth, deviceDisplayName = "Matron Android", scope = scope)
+                        LinkSignInViewModel(
+                            auth = deps.auth,
+                            deviceDisplayName = "Matron Android",
+                            scope = scope,
+                            haptics = deps.haptics,
+                        )
                     }
                     val rendezvousVm = remember {
                         RendezvousSignInViewModel(
                             relay = RelayApi(client = deps.sharedClient),
                             link = linkVm,
                             scope = scope,
+                            haptics = deps.haptics,
                         )
                     }
                     SignInScreen(
@@ -254,6 +260,7 @@ private fun SignedInApp(
                 api = deps.deviceLinkService(session),
                 serverURL = session.homeserverURL,
                 relay = RelayApi(client = deps.sharedClient),
+                haptics = deps.haptics,
                 onBack = { nav.popBackStack() },
             )
         }
