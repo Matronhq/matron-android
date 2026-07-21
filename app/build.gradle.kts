@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -5,6 +7,16 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
 }
+
+// Resolve a signing property from local.properties first, then the environment
+// (so CI can inject secrets without a local.properties file). Returns null when
+// unset, letting release builds proceed unsigned on machines without the keystore.
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+fun signingProp(name: String): String? =
+    (localProps.getProperty(name) ?: System.getenv(name))?.takeIf { it.isNotBlank() }
 
 android {
     namespace = "chat.matron.android"
@@ -18,9 +30,30 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        create("release") {
+            val storeFilePath = signingProp("MATRON_UPLOAD_STORE_FILE")
+            if (storeFilePath != null) {
+                storeFile = rootProject.file(storeFilePath)
+                storePassword = signingProp("MATRON_UPLOAD_STORE_PASSWORD")
+                keyAlias = signingProp("MATRON_UPLOAD_KEY_ALIAS")
+                keyPassword = signingProp("MATRON_UPLOAD_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // Only sign when the keystore is configured; otherwise the build
+            // still produces an (unsigned) artifact instead of failing.
+            signingConfig = signingConfigs.getByName("release")
+                .takeIf { signingProp("MATRON_UPLOAD_STORE_FILE") != null }
         }
     }
 
