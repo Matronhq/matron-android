@@ -10,3 +10,8 @@ captures/
 *.keystore
 *.jks
 .kotlin/
+
+# Local SQLite dev artifacts
+matron.db
+matron.db-shm
+matron.db-wal
