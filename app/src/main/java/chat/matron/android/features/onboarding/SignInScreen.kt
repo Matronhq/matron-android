@@ -265,7 +265,7 @@ fun SignInScreen(
                                 linkViewModel.codeInput = it
                                 linkCode = linkViewModel.codeInput // reflect auto-formatting
                             },
-                            label = { Text("XXXX-XXXX") },
+                            label = { Text("XXXX-XXXX or matron:// link") },
                             singleLine = true,
                             textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
                             modifier = Modifier.fillMaxWidth(),
@@ -275,7 +275,10 @@ fun SignInScreen(
                                 linkViewModel.serverURL = server // shares the form's server field
                                 scope.launch { linkViewModel.submitManual() }
                             },
-                            enabled = server.isNotEmpty() && linkCode.length >= 9,
+                            // A pasted matron:// link names its own server, so
+                            // it doesn't need the form's server field.
+                            enabled = linkViewModel.codeInputIsFullLink ||
+                                (server.isNotEmpty() && linkCode.length >= 9),
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("Sign in with code") }
                         Text(
