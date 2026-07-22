@@ -17,6 +17,8 @@ junit = "4.13.2"
 robolectric = "4.14.1"
 androidxTestCore = "1.6.1"
 androidxTestExtJunit = "1.2.1"
+androidxTestRunner = "1.6.2"
+uiautomator = "2.3.0"
 turbine = "1.2.0"
 mockWebServer = "4.12.0"
 zxing = "3.5.3"
@@ -50,6 +52,8 @@ junit = { module = "junit:junit", version.ref = "junit" }
 robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
 androidx-test-core = { module = "androidx.test:core", version.ref = "androidxTestCore" }
 androidx-test-ext-junit = { module = "androidx.test.ext:junit", version.ref = "androidxTestExtJunit" }
+androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidxTestRunner" }
+androidx-test-uiautomator = { module = "androidx.test.uiautomator:uiautomator", version.ref = "uiautomator" }
 turbine = { module = "app.cash.turbine:turbine", version.ref = "turbine" }
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
 play-services-code-scanner = { module = "com.google.android.gms:play-services-code-scanner", version.ref = "playServicesCodeScanner" }

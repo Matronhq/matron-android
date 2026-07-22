@@ -28,6 +28,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -121,4 +123,10 @@ dependencies {
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.androidx.test.ext.junit)
     testImplementation(libs.turbine)
+
+    // Marketing screenshot rig only (androidTest never runs in CI — see
+    // MarketingScreenshots.kt and tools/screenshots.sh).
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.uiautomator)
 }
