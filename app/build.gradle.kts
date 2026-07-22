@@ -10,13 +10,49 @@ plugins {
 
 // Resolve a signing property from local.properties first, then the environment
 // (so CI can inject secrets without a local.properties file). Returns null when
-// unset, letting release builds proceed unsigned on machines without the keystore.
+// unset or blank — a blank local.properties entry falls through to the env
+// rather than masking it.
 val localProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
 fun signingProp(name: String): String? =
-    (localProps.getProperty(name) ?: System.getenv(name))?.takeIf { it.isNotBlank() }
+    localProps.getProperty(name)?.takeIf { it.isNotBlank() }
+        ?: System.getenv(name)?.takeIf { it.isNotBlank() }
+
+// Sign only when the keystore is actually usable: all four properties present
+// AND the store file exists on disk. Anything less (missing .jks, blank
+// passwords) builds an unsigned release artifact instead of failing — with a
+// warning, so a misconfigured CI secret can't silently ship an unsigned AAB.
+val releaseSigningReady: Boolean = run {
+    val names = listOf(
+        "MATRON_UPLOAD_STORE_FILE",
+        "MATRON_UPLOAD_STORE_PASSWORD",
+        "MATRON_UPLOAD_KEY_ALIAS",
+        "MATRON_UPLOAD_KEY_PASSWORD",
+    )
+    val values = names.associateWith { signingProp(it) }
+    val storeFile = values["MATRON_UPLOAD_STORE_FILE"]
+    when {
+        values.values.all { it == null } -> false // signing simply not configured
+        values.values.any { it == null } -> {
+            logger.warn(
+                "Release signing partially configured — missing ${
+                    values.filterValues { it == null }.keys.joinToString()
+                }; building UNSIGNED release artifacts."
+            )
+            false
+        }
+        !rootProject.file(storeFile!!).exists() -> {
+            logger.warn(
+                "Release signing configured but keystore '$storeFile' not found; " +
+                    "building UNSIGNED release artifacts."
+            )
+            false
+        }
+        else -> true
+    }
+}
 
 android {
     namespace = "chat.matron.android"
@@ -34,9 +70,8 @@ android {
 
     signingConfigs {
         create("release") {
-            val storeFilePath = signingProp("MATRON_UPLOAD_STORE_FILE")
-            if (storeFilePath != null) {
-                storeFile = rootProject.file(storeFilePath)
+            if (releaseSigningReady) {
+                storeFile = rootProject.file(signingProp("MATRON_UPLOAD_STORE_FILE")!!)
                 storePassword = signingProp("MATRON_UPLOAD_STORE_PASSWORD")
                 keyAlias = signingProp("MATRON_UPLOAD_KEY_ALIAS")
                 keyPassword = signingProp("MATRON_UPLOAD_KEY_PASSWORD")
@@ -52,10 +87,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // Only sign when the keystore is configured; otherwise the build
+            // Only sign when the keystore is fully usable; otherwise the build
             // still produces an (unsigned) artifact instead of failing.
             signingConfig = signingConfigs.getByName("release")
-                .takeIf { signingProp("MATRON_UPLOAD_STORE_FILE") != null }
+                .takeIf { releaseSigningReady }
         }
     }
 
