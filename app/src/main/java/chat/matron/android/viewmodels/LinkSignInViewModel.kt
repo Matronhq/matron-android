@@ -37,7 +37,8 @@ class JournalLinkClaimService(private val api: JournalApi) : LinkClaiming {
 /// Signs a NEW device in from a link code — the claimant half of QR
 /// device-link login. Kotlin port of matron-apple's `LinkSignInViewModel`.
 /// Two entry points: [handleScanned] (scanner, full `matron://link` URI) and
-/// [submitManual] (typed server URL + code). Both converge on claim → poll →
+/// [submitManual] (typed server URL + code, or a pasted full `matron://link`
+/// URI, which carries its own server). Both converge on claim → poll →
 /// build the same [UserSession] shape password login builds (`userID` = the
 /// server-returned username) → `auth.persist` → `SignedIn`, which the host
 /// screen forwards to the normal `onSignedIn` path.
@@ -63,9 +64,19 @@ class LinkSignInViewModel(
 
     private var _codeInput: String = ""
     /// Auto-formatted as `XXXX-XXXX` while typing, like PairingViewModel.
+    /// A pasted full `matron://` link is kept verbatim instead — the
+    /// formatter would strip it to alphanumerics beyond recovery.
     var codeInput: String
         get() = _codeInput
-        set(value) { _codeInput = PairingCode.display(value) }
+        set(value) { _codeInput = if (isFullLink(value)) value else PairingCode.display(value) }
+
+    /// True when the code field holds a pasted `matron://` link rather than a
+    /// bare code. The sign-in screen drops its server-field requirement in
+    /// that case, since the link names its own server.
+    val codeInputIsFullLink: Boolean get() = isFullLink(_codeInput)
+
+    private fun isFullLink(raw: String): Boolean =
+        raw.trim().lowercase().startsWith("matron:")
 
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
@@ -124,6 +135,19 @@ class LinkSignInViewModel(
     }
 
     suspend fun submitManual() {
+        if (codeInputIsFullLink) {
+            val parsed = try {
+                LinkURI.parse(_codeInput.trim())
+            } catch (e: LinkURI.ParseError.UnsupportedVersion) {
+                fail("This link needs a newer version of Matron.")
+                return
+            } catch (e: LinkURI.ParseError) {
+                fail("That doesn't look like a Matron sign-in link.")
+                return
+            }
+            claim(server = parsed.serverURL, code = parsed.code)
+            return
+        }
         val raw = serverURL.trim()
         if (raw.isEmpty() || !PairingCode.isPlausible(codeInput)) return
         val url = try {

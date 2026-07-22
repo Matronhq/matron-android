@@ -188,6 +188,81 @@ class LinkSignInViewModelTest {
     }
 
     @Test
+    fun manual_pastedLinkURI_claimsAgainstEmbeddedServer() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeLinkClaimer()
+            fake.pollScript = mutableListOf(
+                Result.success(LinkPollResult.Approved(LinkApproval("tok99", 42, 7, "dan"))),
+            )
+            val vm = makeVM(fake, scope)
+            vm.codeInput = scannedURI
+            // The XXXX-XXXX auto-formatter must not mangle a pasted link.
+            assertEquals(scannedURI, vm.codeInput)
+            assertTrue(vm.codeInputIsFullLink)
+            vm.submitManual() // serverURL field never touched
+            waitUntil { vm.state.value is LinkSignInViewModel.State.SignedIn }
+            assertEquals(listOf("KTNM-3VQ8"), fake.claimedCodes)
+            val session = (vm.state.value as LinkSignInViewModel.State.SignedIn).session
+            assertEquals("https://chat.example.com", session.homeserverURL)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun manual_pastedLinkURI_overridesTypedServer_andSurvivesWhitespace() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeLinkClaimer()
+            fake.pollScript = mutableListOf(
+                Result.success(LinkPollResult.Approved(LinkApproval("tok99", 42, 7, "dan"))),
+            )
+            val vm = makeVM(fake, scope)
+            vm.serverURL = "typed.example.org"
+            vm.codeInput = " $scannedURI\n"
+            assertTrue(vm.codeInputIsFullLink)
+            vm.submitManual()
+            waitUntil { vm.state.value is LinkSignInViewModel.State.SignedIn }
+            val session = (vm.state.value as LinkSignInViewModel.State.SignedIn).session
+            assertEquals("https://chat.example.com", session.homeserverURL)
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun manual_pastedLinkURI_wrongVersion_and_malformed() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val vm = makeVM(FakeLinkClaimer(), scope)
+            vm.codeInput = "matron://link?v=2&server=https%3A%2F%2Fx.example&code=KTNM-3VQ8"
+            vm.submitManual()
+            assertEquals(
+                LinkSignInViewModel.State.Error("This link needs a newer version of Matron."),
+                vm.state.value,
+            )
+            vm.codeInput = "matron://link?v=1&code=KTNM-3VQ8" // no server
+            vm.submitManual()
+            assertEquals(
+                LinkSignInViewModel.State.Error("That doesn't look like a Matron sign-in link."),
+                vm.state.value,
+            )
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
+    fun manual_bareCode_isNotAFullLink() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val vm = makeVM(FakeLinkClaimer(), scope)
+            vm.codeInput = "ktnm3vq8"
+            assertTrue(!vm.codeInputIsFullLink)
+            assertEquals("KTNM-3VQ8", vm.codeInput) // formatter still applies
+        } finally { scope.cancel() }
+        Unit
+    }
+
+    @Test
     fun manual_invalidURL_errors() = runBlocking {
         val scope = CoroutineScope(coroutineContext + Job())
         try {
