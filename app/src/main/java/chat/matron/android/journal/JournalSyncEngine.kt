@@ -1,5 +1,6 @@
 package chat.matron.android.journal
 
+import chat.matron.android.journal.db.OutboxEntity
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.SessionStatusUpdate
 import chat.matron.android.models.SyncConnectionState
@@ -324,11 +325,15 @@ class JournalSyncEngine(
     /// the row to failed (surfacing "Not delivered — tap to retry") instead of
     /// leaving it silently re-flushing on every reconnect forever (bugbot
     /// "Send rejections never mark rows failed"). The frame carries no row id;
-    /// FIFO ordering picks the victim (see [sendOrderThisConnection]). Rows
-    /// already confirmed-deleted (or already failed) are skipped.
+    /// FIFO ordering picks the victim (see [sendOrderThisConnection]) — one
+    /// slot per WRITE, so a retried row legitimately holds two slots. Each
+    /// popped slot is dispatched on its row's state: confirmed-deleted rows
+    /// are skipped (in-order delivery means their op succeeded before this
+    /// error was emitted), already-failed rows ABSORB the rejection (it's the
+    /// duplicate write of the same rejected content — falling through would
+    /// misattribute it to the next in-flight send; bugbot "Retry duplicates
+    /// send rejection FIFO"), and queued rows are flipped to failed.
     private suspend fun handleSendRejected(code: String, detail: String?) {
-        val stillQueued = runCatching { store.outboxPending() }.getOrDefault(emptyList())
-            .map { it.localID }.toSet()
         while (true) {
             val localID = synchronized(lock) {
                 if (sendOrderThisConnection.isEmpty()) null else sendOrderThisConnection.removeAt(0)
@@ -340,11 +345,20 @@ class JournalSyncEngine(
                 MatronDebug.breadcrumb("server rejected media send $localID: $code ${detail ?: ""}")
                 return
             }
-            if (!stillQueued.contains(localID)) continue
-            MatronDebug.breadcrumb("server rejected send $localID: $code ${detail ?: ""}")
-            runCatching { store.outboxMarkFailed(localID, detail ?: code) }
-            synchronized(lock) { sentOnThisConnection.remove(localID) }
-            return
+            val row = runCatching { store.outboxRow(localID) }.getOrNull()
+            when {
+                row == null -> continue // confirmed-deleted (or discarded): its op succeeded
+                row.state == OutboxEntity.STATE_FAILED -> {
+                    MatronDebug.breadcrumb("server rejected duplicate write of failed send $localID: $code")
+                    return
+                }
+                else -> {
+                    MatronDebug.breadcrumb("server rejected send $localID: $code ${detail ?: ""}")
+                    runCatching { store.outboxMarkFailed(localID, detail ?: code) }
+                    synchronized(lock) { sentOnThisConnection.remove(localID) }
+                    return
+                }
+            }
         }
     }
 

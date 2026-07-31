@@ -133,6 +133,9 @@ interface OutboxDao {
     )
     suspend fun matching(convoID: String, body: String): List<OutboxEntity>
 
+    @Query("SELECT * FROM outbox WHERE local_id = :localID")
+    suspend fun row(localID: String): OutboxEntity?
+
     @Query("UPDATE outbox SET attempts = attempts + 1 WHERE local_id = :localID")
     suspend fun markAttempt(localID: String)
 

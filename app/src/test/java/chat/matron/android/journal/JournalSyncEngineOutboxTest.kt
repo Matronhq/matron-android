@@ -257,6 +257,37 @@ class JournalSyncEngineOutboxTest {
     }
 
     @Test
+    fun duplicateRejectionOfRetriedRowDoesNotFailLaterSend() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(0))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+        // R1 goes out, the user impatient-retries it on the same connection
+        // (two writes in flight, two FIFO slots), then T2 goes out.
+        engine.sendMessage("c1", "dup", "R1")
+        waitUntil { sentSendOps(socket).size >= 1 }
+        engine.retryOutboxItem("R1")
+        waitUntil { sentSendOps(socket).size >= 2 }
+        engine.sendMessage("c1", "second", "T2")
+        waitUntil { sentSendOps(socket).size >= 3 }
+        assertEquals(listOf("R1", "R1", "T2"), sentSendOps(socket).map { it.stringOrNull("local_id") })
+        // The server rejects both identical writes of R1. The first flips R1
+        // to failed; the second must be absorbed by R1's duplicate slot — not
+        // fall through and fail the still-in-flight T2.
+        socket.serve("""{"kind":"control","op":"error","code":"bad_request","ref":"send","detail":"nope"}""")
+        socket.serve("""{"kind":"control","op":"error","code":"bad_request","ref":"send","detail":"nope"}""")
+        // A trailing journal frame proves both errors were processed.
+        socket.serve("""{"kind":"journal","seq":1,"convo_id":"c1","ts":1000,"sender":"user:bob","type":"text","payload":{"body":"hi"}}""")
+        waitUntil { store.cursor() >= 1 }
+        val states = store.outboxRows("c1").associate { it.localID to it.state }
+        assertEquals(OutboxEntity.STATE_FAILED, states["R1"])
+        assertEquals(OutboxEntity.STATE_QUEUED, states["T2"])
+        engine.endSync()
+    }
+
+    @Test
     fun discardOutboxItemDeletesRow() = runBlocking {
         val store = seededStore()
         val engine = makeEngine(store, FakeConnector(emptyList()))

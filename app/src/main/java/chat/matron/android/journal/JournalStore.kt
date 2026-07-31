@@ -272,6 +272,8 @@ class JournalStore(
     /// what the timeline renders as pending/failed echoes.
     suspend fun outboxRows(convoID: String): List<OutboxEntity> = outboxDao.forConversation(convoID)
 
+    suspend fun outboxRow(localID: String): OutboxEntity? = outboxDao.row(localID)
+
     suspend fun outboxMarkAttempt(localID: String) = outboxDao.markAttempt(localID)
 
     suspend fun outboxMarkFailed(localID: String, error: String?) = outboxDao.markFailed(localID, error)
