@@ -398,7 +398,16 @@ class JournalSyncEngine(
             val next = rows.firstOrNull {
                 synchronized(lock) { !sentOnThisConnection.contains(it.localID) }
             } ?: return
-            runCatching { store.outboxMarkAttempt(next.localID) }
+            // If the mark can't be persisted, don't send: confirmation-delete
+            // and echo suppression only match rows with attempts > 0, so a
+            // send that goes out unmarked leaves a permanent ghost "queued"
+            // echo beside the delivered message. The row stays queued for a
+            // later flush instead (bugbot "Silent markAttempt breaks
+            // confirmation").
+            if (runCatching { store.outboxMarkAttempt(next.localID) }.isFailure) {
+                MatronDebug.breadcrumb("outbox flush stopped — markAttempt write failed for ${next.localID}")
+                return
+            }
             try {
                 connection.send(ClientOp.Send(next.convoID, next.body, next.localID))
                 synchronized(lock) {
