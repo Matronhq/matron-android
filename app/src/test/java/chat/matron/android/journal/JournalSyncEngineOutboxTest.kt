@@ -192,6 +192,42 @@ class JournalSyncEngineOutboxTest {
     }
 
     @Test
+    fun mediaRejectionDoesNotFailQueuedTextRow() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(0))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+        // A media send goes over the wire as `op:"send"` too — write it FIRST,
+        // then queue a text behind it, so the rejection FIFO is [M1, T1].
+        engine.sendOp(
+            ClientOp.SendMedia(
+                convoID = "c1", type = MediaKind.IMAGE, blobRef = "b1", name = "pic.png",
+                contentType = "image/png", size = 3, caption = null, localID = "M1",
+            )
+        )
+        engine.sendMessage("c1", "hello", "T1")
+        waitUntil { sentSendOps(socket).size >= 2 }
+        assertEquals(listOf("M1", "T1"), sentSendOps(socket).map { it.stringOrNull("local_id") })
+        // The server rejects the media op. The rejection must be consumed by
+        // the media FIFO slot, not misattributed to the unconfirmed text row.
+        socket.serve("""{"kind":"control","op":"error","code":"too_large","ref":"send","detail":"blob too big"}""")
+        // A trailing journal frame proves the error was processed (the frame
+        // loop is sequential) before we assert nothing was marked failed.
+        socket.serve("""{"kind":"journal","seq":1,"convo_id":"c1","ts":1000,"sender":"user:bob","type":"text","payload":{"body":"hi"}}""")
+        waitUntil { store.cursor() >= 1 }
+        assertEquals(listOf("T1"), store.outboxPending().map { it.localID })
+        assertEquals(listOf(OutboxEntity.STATE_QUEUED), store.outboxRows("c1").map { it.state })
+        // A second rejection now belongs to the text send — FIFO attribution
+        // still works past the consumed media slot.
+        socket.serve("""{"kind":"control","op":"error","code":"bad_request","ref":"send","detail":"nope"}""")
+        waitUntil { store.outboxPending().isEmpty() }
+        assertEquals(listOf(OutboxEntity.STATE_FAILED), store.outboxRows("c1").map { it.state })
+        engine.endSync()
+    }
+
+    @Test
     fun discardOutboxItemDeletesRow() = runBlocking {
         val store = seededStore()
         val engine = makeEngine(store, FakeConnector(emptyList()))

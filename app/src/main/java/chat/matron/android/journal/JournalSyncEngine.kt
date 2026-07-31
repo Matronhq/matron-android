@@ -127,6 +127,14 @@ class JournalSyncEngine(
     /// the oldest write that hasn't been confirmed or failed yet.
     private val sendOrderThisConnection = mutableListOf<String>()
 
+    /// LocalIDs in [sendOrderThisConnection] that are media sends
+    /// ([ClientOp.SendMedia]), not outbox rows. Media goes over the wire as
+    /// `op:"send"` too, so it must occupy its FIFO slot: a rejection that pops
+    /// a media entry is consumed there (media has no durable row to mark)
+    /// instead of falling through and failing an unrelated queued text row
+    /// (bugbot "Media send errors fail outbox text").
+    private val mediaSendsThisConnection = mutableSetOf<String>()
+
     /// Single-flight latch for [flushOutbox].
     private var flushingOutbox = false
 
@@ -258,6 +266,14 @@ class JournalSyncEngine(
     suspend fun sendOp(op: ClientOp) {
         val connection = synchronized(lock) { liveConnection } ?: throw JournalSyncError.Offline
         connection.send(op)
+        // Media shares the `op:"send"` wire namespace with outbox flushes, so
+        // it must take its slot in the rejection-attribution FIFO.
+        if (op is ClientOp.SendMedia) {
+            synchronized(lock) {
+                mediaSendsThisConnection.add(op.localID)
+                sendOrderThisConnection.add(op.localID)
+            }
+        }
     }
 
     // MARK: Offline outbox
@@ -314,6 +330,13 @@ class JournalSyncEngine(
             val localID = synchronized(lock) {
                 if (sendOrderThisConnection.isEmpty()) null else sendOrderThisConnection.removeAt(0)
             } ?: return
+            if (synchronized(lock) { mediaSendsThisConnection.remove(localID) }) {
+                // The rejected op was a media send: consume the rejection here.
+                // There's no durable row to flip — the upload path surfaced any
+                // synchronous error, and an async rejection is lost (as on iOS).
+                MatronDebug.breadcrumb("server rejected media send $localID: $code ${detail ?: ""}")
+                return
+            }
             if (!stillQueued.contains(localID)) continue
             MatronDebug.breadcrumb("server rejected send $localID: $code ${detail ?: ""}")
             runCatching { store.outboxMarkFailed(localID, detail ?: code) }
@@ -626,6 +649,7 @@ class JournalSyncEngine(
                 synchronized(lock) {
                     sentOnThisConnection.clear()
                     sendOrderThisConnection.clear()
+                    mediaSendsThisConnection.clear()
                 }
                 scope.launch { flushOutbox() }
                 if (store.cursor() >= headSeq) setState(SyncConnectionState.Running)
