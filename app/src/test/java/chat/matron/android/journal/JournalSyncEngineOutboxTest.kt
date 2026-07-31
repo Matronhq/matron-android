@@ -228,6 +228,35 @@ class JournalSyncEngineOutboxTest {
     }
 
     @Test
+    fun deliveredMediaSlotDoesNotSwallowTextRejection() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(0))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+        engine.sendOp(
+            ClientOp.SendMedia(
+                convoID = "c1", type = MediaKind.IMAGE, blobRef = "b1", name = "pic.png",
+                contentType = "image/png", size = 3, caption = null, localID = "M1",
+            )
+        )
+        engine.sendMessage("c1", "hello", "T1")
+        waitUntil { sentSendOps(socket).size >= 2 }
+        // The server journals the media send — delivery confirmed retires its
+        // rejection-FIFO slot…
+        socket.serve("""{"kind":"journal","seq":1,"convo_id":"c1","ts":1000,"sender":"user:dan","type":"image","payload":{"blob_ref":"b1","name":"pic.png","content_type":"image/png","size":3}}""")
+        waitUntil { store.cursor() >= 1 }
+        // …so a rejection arriving after it must fail the text row, not be
+        // swallowed by the stale media slot.
+        socket.serve("""{"kind":"control","op":"error","code":"bad_request","ref":"send","detail":"nope"}""")
+        waitUntil { store.outboxPending().isEmpty() }
+        assertEquals(listOf(OutboxEntity.STATE_FAILED), store.outboxRows("c1").map { it.state })
+        assertEquals("nope", store.outboxRows("c1").first().lastError)
+        engine.endSync()
+    }
+
+    @Test
     fun discardOutboxItemDeletesRow() = runBlocking {
         val store = seededStore()
         val engine = makeEngine(store, FakeConnector(emptyList()))

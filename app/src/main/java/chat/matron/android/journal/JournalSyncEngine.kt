@@ -127,13 +127,16 @@ class JournalSyncEngine(
     /// the oldest write that hasn't been confirmed or failed yet.
     private val sendOrderThisConnection = mutableListOf<String>()
 
-    /// LocalIDs in [sendOrderThisConnection] that are media sends
-    /// ([ClientOp.SendMedia]), not outbox rows. Media goes over the wire as
-    /// `op:"send"` too, so it must occupy its FIFO slot: a rejection that pops
-    /// a media entry is consumed there (media has no durable row to mark)
-    /// instead of falling through and failing an unrelated queued text row
-    /// (bugbot "Media send errors fail outbox text").
-    private val mediaSendsThisConnection = mutableSetOf<String>()
+    /// LocalID → blobRef of media sends ([ClientOp.SendMedia]) on the current
+    /// socket. Media goes over the wire as `op:"send"` too, so it must occupy
+    /// its slot in [sendOrderThisConnection]: a rejection that pops a media
+    /// entry is consumed there (media has no durable row to mark) instead of
+    /// falling through and failing an unrelated queued text row (bugbot "Media
+    /// send errors fail outbox text"). A slot is retired when the own media
+    /// journal frame echoes its blobRef back — delivery confirmed — so a stale
+    /// entry can't swallow a later text rejection (bugbot "Stale media slots
+    /// swallow send errors").
+    private val mediaSendsThisConnection = mutableMapOf<String, String>()
 
     /// Single-flight latch for [flushOutbox].
     private var flushingOutbox = false
@@ -270,7 +273,7 @@ class JournalSyncEngine(
         // it must take its slot in the rejection-attribution FIFO.
         if (op is ClientOp.SendMedia) {
             synchronized(lock) {
-                mediaSendsThisConnection.add(op.localID)
+                mediaSendsThisConnection[op.localID] = op.blobRef
                 sendOrderThisConnection.add(op.localID)
             }
         }
@@ -330,7 +333,7 @@ class JournalSyncEngine(
             val localID = synchronized(lock) {
                 if (sendOrderThisConnection.isEmpty()) null else sendOrderThisConnection.removeAt(0)
             } ?: return
-            if (synchronized(lock) { mediaSendsThisConnection.remove(localID) }) {
+            if (synchronized(lock) { mediaSendsThisConnection.remove(localID) != null }) {
                 // The rejected op was a media send: consume the rejection here.
                 // There's no durable row to flip — the upload path surfaced any
                 // synchronous error, and an async rejection is lost (as on iOS).
@@ -342,6 +345,18 @@ class JournalSyncEngine(
             runCatching { store.outboxMarkFailed(localID, detail ?: code) }
             synchronized(lock) { sentOnThisConnection.remove(localID) }
             return
+        }
+    }
+
+    /// Retires the rejection-FIFO slot of a delivered media send, matched by
+    /// the `blob_ref` its journal payload echoes (oldest first when the same
+    /// blob was sent twice).
+    private fun confirmMediaSend(blobRef: String) {
+        synchronized(lock) {
+            val localID = sendOrderThisConnection.firstOrNull { mediaSendsThisConnection[it] == blobRef }
+                ?: return
+            sendOrderThisConnection.remove(localID)
+            mediaSendsThisConnection.remove(localID)
         }
     }
 
@@ -700,6 +715,14 @@ class JournalSyncEngine(
         when (frame) {
             is ServerFrame.Journal -> {
                 val event = frame.event
+                // An own media frame confirms that send's delivery: retire its
+                // rejection-FIFO slot. In-order delivery means any error frame
+                // still to come belongs to a newer write.
+                if (event.sender == ownSender &&
+                    (event.type == JournalEventType.FILE || event.type == JournalEventType.IMAGE)
+                ) {
+                    event.payload.stringOrNull("blob_ref")?.let { confirmMediaSend(it) }
+                }
                 // Read before applyJournal creates the row: true exactly once
                 // per new conversation (its first-ever frame).
                 val isNewConvo = runCatching { store.conversationExists(event.convoID) }.getOrNull() == false
