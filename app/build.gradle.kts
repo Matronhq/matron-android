@@ -56,14 +56,14 @@ val releaseSigningReady: Boolean = run {
 
 android {
     namespace = "chat.matron.android"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "chat.matron.android"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.1"
+        targetSdk = 36
+        versionCode = 3
+        versionName = "0.1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
