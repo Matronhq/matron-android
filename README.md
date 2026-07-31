@@ -18,8 +18,8 @@ The app keeps a local Room (SQLite) mirror of the journal and renders entirely f
 
 ## Requirements
 
-- JDK 17
-- Android SDK 35
+- JDK 21 (Robolectric requires it to run unit tests against SDK 36)
+- Android SDK 36
 - Android 8.0+ (API 26) device or emulator
 - A matron-journal server (see the [matron-apple README](https://github.com/Matronhq/matron-apple#local-dev-server) for local-server setup)
 
