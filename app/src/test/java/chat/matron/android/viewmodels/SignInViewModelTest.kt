@@ -58,4 +58,14 @@ class SignInViewModelTest {
         vm.submit()
         assertEquals(SignInViewModel.State.Idle, vm.state.value)
     }
+
+    // App Review rejected iOS 1.0 (350) because the Server field shipped
+    // pre-filled with a dead host: the reviewer saw a filled field, typed
+    // only the demo credentials, and got "Couldn't reach that server."
+    // The field must start empty so the user has to supply their server.
+    @Test
+    fun serverURL_defaultsToEmpty() {
+        val vm = SignInViewModel(FakeAuthService(), "Matron Tests")
+        assertEquals("", vm.serverURL)
+    }
 }

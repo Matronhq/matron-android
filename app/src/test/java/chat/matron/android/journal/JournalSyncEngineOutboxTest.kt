@@ -1,0 +1,202 @@
+package chat.matron.android.journal
+
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import chat.matron.android.journal.db.MatronDatabase
+import chat.matron.android.journal.db.OutboxEntity
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+
+/// Offline outbox behaviour, ported from matron-apple's
+/// `JournalSyncEngineOutboxTests`: `sendMessage` queues instead of throwing
+/// when offline, queued rows flush FIFO with their original `local_id` on
+/// (re)connect (server-side idem dedup makes resends safe), and delivery is
+/// confirmed — and the row deleted — by the own-text journal frame.
+@RunWith(RobolectricTestRunner::class)
+@Config(manifest = Config.NONE)
+class JournalSyncEngineOutboxTest {
+    private val context: Context get() = ApplicationProvider.getApplicationContext()
+
+    private fun helloOK(head: Long) = """{"kind":"control","op":"hello_ok","seq":$head}"""
+
+    private fun ownTextLine(seq: Long, convo: String = "c1", body: String) =
+        """{"kind":"journal","seq":$seq,"convo_id":"$convo","ts":${seq * 1000},"sender":"user:dan","type":"text","payload":{"body":"$body"}}"""
+
+    private suspend fun seededStore(): JournalStore {
+        val store = JournalStore(MatronDatabase.inMemory(context), ownSender = "user:dan")
+        store.applyColdSnapshot(listOf(ConvoSummaryDTO("c1", "", "running", 0, "", 0)), headSeq = 0)
+        return store
+    }
+
+    private fun makeEngine(store: JournalStore, connector: WebSocketConnecting) = JournalSyncEngine(
+        api = FakeSnapshotSource(), store = store, connector = connector, token = "t",
+        ownSender = "user:dan", search = null, backoffBaseSeconds = 0.01,
+    )
+
+    /// Decoded `op: send` frames a fake socket captured, in order.
+    private fun sentSendOps(socket: FakeWebSocketConnection) =
+        socket.sent.mapNotNull { parseJsonObjectOrNull(it) }.filter { it.stringOrNull("op") == "send" }
+
+    private suspend fun waitUntil(timeoutMs: Long = 3000, cond: suspend () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!cond() && System.currentTimeMillis() < deadline) delay(10)
+    }
+
+    @Test
+    fun sendMessageOfflineQueuesWithoutThrowing() = runBlocking {
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(emptyList()))
+        // Engine never started: no connection at all.
+        engine.sendMessage("c1", "hello", "L1")
+        val pending = store.outboxPending()
+        assertEquals(listOf("L1"), pending.map { it.localID })
+        assertEquals("no connection — never attempted", 0, pending.first().attempts)
+    }
+
+    @Test
+    fun sendMessageOnlineSendsWithLocalIDAndKeepsRowUntilConfirmed() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(0))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+        engine.sendMessage("c1", "hello", "L1")
+        waitUntil { sentSendOps(socket).isNotEmpty() }
+        val sends = sentSendOps(socket)
+        assertEquals(1, sends.size)
+        assertEquals("L1", sends.first().stringOrNull("local_id"))
+        // Row survives the socket write — only the journal frame confirms.
+        assertEquals(listOf("L1"), store.outboxPending().map { it.localID })
+        assertEquals(1, store.outboxPending().first().attempts)
+        engine.endSync()
+    }
+
+    @Test
+    fun connectFlushesPreexistingQueueFIFO() = runBlocking {
+        val store = seededStore()
+        store.outboxInsert("A", "c1", "first", now = 1)
+        store.outboxInsert("B", "c1", "second", now = 2)
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(0))
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+        waitUntil { sentSendOps(socket).size >= 2 }
+        assertEquals(listOf("A", "B"), sentSendOps(socket).map { it.stringOrNull("local_id") })
+        engine.endSync()
+    }
+
+    @Test
+    fun ownTextFrameDeletesConfirmedRow() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(0))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+        engine.sendMessage("c1", "hello", "L1")
+        waitUntil { sentSendOps(socket).isNotEmpty() }
+        // Server journals the send and broadcasts it back.
+        socket.serve(ownTextLine(1, body = "hello"))
+        waitUntil { store.outboxPending().isEmpty() }
+        assertTrue("journal frame is the delivery confirmation", store.outboxPending().isEmpty())
+        engine.endSync()
+    }
+
+    @Test
+    fun otherSendersFrameDoesNotDeleteQueuedRow() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(0))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+        engine.sendMessage("c1", "hello", "L1")
+        waitUntil { sentSendOps(socket).isNotEmpty() }
+        socket.serve(
+            """{"kind":"journal","seq":1,"convo_id":"c1","ts":1000,"sender":"agent:a","type":"text","payload":{"body":"hello"}}"""
+        )
+        // Give the frame time to apply, then confirm the row survived.
+        waitUntil { store.events("c1").size == 1 }
+        assertEquals(listOf("L1"), store.outboxPending().map { it.localID })
+        engine.endSync()
+    }
+
+    @Test
+    fun socketDeathMidQueueResendsSameLocalIDOnReconnect() = runBlocking {
+        val store = seededStore()
+        store.outboxInsert("A", "c1", "first")
+        val first = FakeWebSocketConnection()
+        first.serve(helloOK(0))
+        val second = FakeWebSocketConnection()
+        second.serve(helloOK(0))
+        val engine = makeEngine(store, FakeConnector(listOf(first, second)))
+        engine.beginSync()
+        engine.waitUntilReady()
+        waitUntil { sentSendOps(first).isNotEmpty() }
+        assertEquals("A", sentSendOps(first).first().stringOrNull("local_id"))
+        // No journal confirmation arrives; the socket dies.
+        first.closeFromServer()
+        waitUntil { sentSendOps(second).isNotEmpty() }
+        // Reconnect resends the unconfirmed row with the SAME local_id — the
+        // server's idem key dedups if the first copy actually landed.
+        assertEquals("A", sentSendOps(second).first().stringOrNull("local_id"))
+        engine.endSync()
+    }
+
+    @Test
+    fun retryOutboxItemRequeuesFailedRowAndFlushes() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(0))
+        val store = seededStore()
+        store.outboxInsert("F", "c1", "stuck")
+        store.outboxMarkFailed("F", "rejected")
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+        // Failed rows are excluded from the automatic connect flush.
+        delay(50)
+        assertTrue(sentSendOps(socket).isEmpty())
+        engine.retryOutboxItem("F")
+        waitUntil { sentSendOps(socket).isNotEmpty() }
+        assertEquals("F", sentSendOps(socket).first().stringOrNull("local_id"))
+        engine.endSync()
+    }
+
+    @Test
+    fun serverRejectionMarksOldestUnconfirmedSendFailed() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(0))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+        engine.sendMessage("c1", "bad one", "R1")
+        waitUntil { sentSendOps(socket).isNotEmpty() }
+        // The server rejects the op — validation errors can never succeed on
+        // retry, so the row must surface as failed instead of silently
+        // re-flushing on every reconnect forever.
+        socket.serve("""{"kind":"control","op":"error","code":"bad_request","ref":"send","detail":"nope"}""")
+        waitUntil { store.outboxPending().isEmpty() }
+        val rows = store.outboxRows("c1")
+        assertEquals(listOf(OutboxEntity.STATE_FAILED), rows.map { it.state })
+        assertEquals("nope", rows.first().lastError)
+        engine.endSync()
+    }
+
+    @Test
+    fun discardOutboxItemDeletesRow() = runBlocking {
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(emptyList()))
+        engine.sendMessage("c1", "oops", "D1")
+        engine.discardOutboxItem("D1")
+        assertTrue(store.outboxRows("c1").isEmpty())
+    }
+}

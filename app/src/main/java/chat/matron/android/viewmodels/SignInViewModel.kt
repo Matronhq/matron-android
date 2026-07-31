@@ -24,7 +24,10 @@ class SignInViewModel(
     }
 
     /// User-editable inputs (Swift `public var`, @Observable-tracked).
-    var serverURL: String = "https://chat.example.com"
+    // Deliberately empty: shipping a pre-filled default (formerly a dead
+    // placeholder host) meant the field looked already-answered — App Review
+    // signed in over it and hit "Couldn't reach that server."
+    var serverURL: String = ""
     var username: String = ""
     var password: String = ""
 

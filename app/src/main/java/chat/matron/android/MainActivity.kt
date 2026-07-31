@@ -44,6 +44,7 @@ import chat.matron.android.features.settings.DeviceSettingsScreen
 import chat.matron.android.features.settings.DevicesScreen
 import chat.matron.android.journal.RelayApi
 import chat.matron.android.models.MatronDebug
+import chat.matron.android.sync.OutboxCatchUpWorker
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.UserSession
 import chat.matron.android.viewmodels.ChatListViewModel
@@ -138,6 +139,7 @@ private fun MatronApp(deps: AppDependencies) {
                         prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
                     },
                     onSignOut = {
+                        OutboxCatchUpWorker.cancel(context)
                         deps.signOut()
                         session = null
                     },
@@ -169,6 +171,12 @@ private fun SignedInApp(
     val allChats = remember(groups) { groups.flatMap { it.summaries } }
 
     LaunchedEffect(session.userID) { chatListVM.start() }
+    LaunchedEffect(session.userID) {
+        // Periodic background catch-up (journal + offline outbox flush) for
+        // when the process is gone — the analog of iOS's BGAppRefresh.
+        runCatching { OutboxCatchUpWorker.schedule(deps.context) }
+            .onFailure { MatronDebug.breadcrumb("OutboxCatchUpWorker.schedule failed: $it") }
+    }
     LaunchedEffect(session.userID) {
         val sync = deps.syncService(session)
         runCatching { sync.start() }

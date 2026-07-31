@@ -144,6 +144,7 @@ private fun askInputKindAsJson(kind: AskUserEvent.InputKind): JsonObject = when 
 private fun TimelineItem.sendStateAsJson(): JsonObject = when (val s = sendState) {
     is TimelineSendState.Sent -> buildJsonObject { put("status", "sent") }
     is TimelineSendState.Sending -> buildJsonObject { put("status", "sending") }
+    is TimelineSendState.Queued -> buildJsonObject { put("status", "queued") }
     is TimelineSendState.Failed -> buildJsonObject {
         put("status", "failed")
         put("reason", s.reason)

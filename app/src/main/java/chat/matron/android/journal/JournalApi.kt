@@ -15,6 +15,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okio.buffer
 
 data class LoginResponse(val token: String, val deviceID: Long, val userID: Long)
 
@@ -96,20 +97,27 @@ sealed interface LinkPollResult {
 }
 
 /// Errors surfaced by the REST client. Exceptions so they throw through the
-/// suspend surface the way the Swift `throws` do.
-sealed class JournalApiError(message: String? = null) : Exception(message) {
-    data object BadCredentials : JournalApiError()
-    data class LockedOut(val retryAfterSeconds: Int) : JournalApiError()
-    data object RateLimited : JournalApiError()
-    data object Unauthenticated : JournalApiError()
-    data object Forbidden : JournalApiError()
-    data object NotFound : JournalApiError()
+/// suspend surface the way the Swift `throws` do. The messages are
+/// human-readable because they surface verbatim in UI banners via
+/// `error.message` (chat error overlay, composer send error, sign-in form) —
+/// without them a rate-limit on a flaky link rendered as an enum dump
+/// (Dan's 2026-07-30 screenshot on iOS).
+sealed class JournalApiError(message: String) : Exception(message) {
+    data object BadCredentials : JournalApiError("Invalid credentials.")
+    data class LockedOut(val retryAfterSeconds: Int) :
+        JournalApiError("Too many attempts — try again in ${retryAfterSeconds}s.")
+    data object RateLimited : JournalApiError("The server is busy — trying again shortly.")
+    data object Unauthenticated : JournalApiError("Signed out by the server — please sign in again.")
+    data object Forbidden : JournalApiError("The server refused the request.")
+    data object NotFound : JournalApiError("Not found on the server.")
     /// 409 — exactly-once semantics: `pair/approve` (already approved),
     /// `link/claim` (code already claimed), `link/approve` (nothing to
     /// approve yet, or already resolved).
-    data object Conflict : JournalApiError()
-    data class Http(val status: Int, val serverMessage: String) : JournalApiError()
-    data class Transport(val detail: String) : JournalApiError()
+    data object Conflict : JournalApiError("Already handled — possibly on another device.")
+    data class Http(val status: Int, val serverMessage: String) :
+        JournalApiError(serverMessage.ifEmpty { "Server error (HTTP $status)." })
+    data class Transport(val detail: String) :
+        JournalApiError(if (detail.isEmpty()) "Couldn't reach the server." else "Couldn't reach the server — $detail")
 }
 
 /// Thin HTTP surface of the journal server: login, snapshot, pagination, media,
@@ -201,15 +209,53 @@ class JournalApi(
 
     /// Uploads raw media bytes and returns the server's `media_id`, which
     /// callers pass back as the `blob_ref` on a subsequent media `send`.
-    suspend fun uploadMedia(data: ByteArray, contentType: String): String {
-        val (status, respData) = raw(
-            path = "/media", method = "POST", rawBody = data, rawContentType = contentType,
-        )
+    ///
+    /// [progress] (optional) receives the fraction of the request body sent
+    /// (0…1), delivered on an OkHttp writer thread — the whole point on a slow
+    /// uplink, where a multi-MB screenshot otherwise looks frozen. The write/
+    /// read timeouts are raised well past the client default for the same
+    /// reason: a legitimate slow upload must not die mid-body.
+    suspend fun uploadMedia(data: ByteArray, contentType: String, progress: ((Double) -> Unit)? = null): String {
+        val body = data.toRequestBody((contentType.ifEmpty { "application/octet-stream" }).toMediaTypeOrNull())
+        val counted = if (progress != null) ProgressRequestBody(body, data.size.toLong(), progress) else body
+        val builder = Request.Builder().url(buildUrl("/media", emptyList()))
+        token?.let { builder.header("Authorization", "Bearer $it") }
+        builder.method("POST", counted)
+        val uploadClient = client.newBuilder()
+            .writeTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+        val (status, respData) = execute(uploadClient.newCall(builder.build()))
         if (status != 200) throw error(status, respData)
         val obj = parseJsonObjectOrNull(String(respData, Charsets.UTF_8))
         val mediaID = obj?.stringOrNull("media_id")
             ?: throw JournalApiError.Transport("malformed media upload response")
         return mediaID
+    }
+
+    /// Counts bytes as OkHttp writes the request body, reporting the running
+    /// fraction. `writeTo` can run more than once (OkHttp retries); the
+    /// counter is per-invocation so a retry restarts cleanly at 0.
+    private class ProgressRequestBody(
+        private val delegate: okhttp3.RequestBody,
+        private val totalBytes: Long,
+        private val onProgress: (Double) -> Unit,
+    ) : okhttp3.RequestBody() {
+        override fun contentType() = delegate.contentType()
+        override fun contentLength() = totalBytes
+        override fun writeTo(sink: okio.BufferedSink) {
+            var written = 0L
+            val counting = object : okio.ForwardingSink(sink) {
+                override fun write(source: okio.Buffer, byteCount: Long) {
+                    super.write(source, byteCount)
+                    written += byteCount
+                    if (totalBytes > 0) onProgress(written.toDouble() / totalBytes)
+                }
+            }
+            val buffered = counting.buffer()
+            delegate.writeTo(buffered)
+            buffered.flush()
+        }
     }
 
     /// The signed-in user's device roster. Order is not guaranteed — callers

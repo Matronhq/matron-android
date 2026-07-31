@@ -72,3 +72,30 @@ data class MetaEntity(
     val key: String,
     val value: String,
 )
+
+/// One unsent text message in the offline send queue. Rows are created by
+/// `JournalSyncEngine.sendMessage`, flushed FIFO on (re)connect with the same
+/// `local_id` every attempt (the server folds it into the row's idem_key, so
+/// at-least-once resends are dedup-safe — protocol.md "Publishes and sends are
+/// at-least-once"), and deleted only when the own-text journal frame confirming
+/// delivery is applied. Table/column names match the matron-apple GRDB schema.
+@Entity(tableName = "outbox", indices = [Index("convo_id")])
+data class OutboxEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "local_id") val localID: String,
+    @ColumnInfo(name = "convo_id") val convoID: String,
+    val body: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    /// [STATE_QUEUED] (waiting for a connection / the next flush pass) or
+    /// [STATE_FAILED] (rejected or given up — resent only via explicit retry).
+    val state: String,
+    val attempts: Int,
+    @ColumnInfo(name = "last_error") val lastError: String?,
+) {
+    val created: Instant get() = Instant.ofEpochMilli(createdAt)
+
+    companion object {
+        const val STATE_QUEUED = "queued"
+        const val STATE_FAILED = "failed"
+    }
+}

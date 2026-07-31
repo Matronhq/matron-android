@@ -52,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.AttachmentTray
+import chat.matron.android.designsystem.UploadProgressBar
 import chat.matron.android.models.BotCommand
 import chat.matron.android.viewmodels.ComposerDraftMemory
 import chat.matron.android.viewmodels.ComposerViewModel
@@ -86,6 +87,7 @@ fun ComposerView(viewModel: ComposerViewModel) {
     val isSending by viewModel.isSending.collectAsStateWithLifecycle()
     val staged by viewModel.stagedAttachments.collectAsStateWithLifecycle()
     val sendError by viewModel.sendError.collectAsStateWithLifecycle()
+    val uploadProgress by viewModel.uploadProgress.collectAsStateWithLifecycle()
 
     // Keyed to the room: without this, swapping the VM at the same call site
     // (navigating to a different room) leaves the previous room's typed text
@@ -160,6 +162,13 @@ fun ComposerView(viewModel: ComposerViewModel) {
 
         sendError?.let { message ->
             ComposerErrorBanner(message = message, onDismiss = { viewModel.dismissError() })
+        }
+
+        // Determinate upload feedback: on a slow uplink a multi-MB screenshot
+        // otherwise spends many seconds behind a bare disabled send button,
+        // which reads as the app hanging.
+        uploadProgress?.let { upload ->
+            UploadProgressBar(label = upload.label, fraction = upload.fraction)
         }
 
         if (recorderState is VoiceRecorder.State.Recording) {

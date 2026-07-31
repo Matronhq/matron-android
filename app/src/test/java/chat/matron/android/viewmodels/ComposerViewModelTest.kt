@@ -363,6 +363,30 @@ class ComposerViewModelTest {
     }
 
     @Test
+    fun send_attachmentUpload_reportsProgressAndClearsWhenDone() = runBlocking {
+        val file = makeTempFile("shot.png")
+        val fake = FakeTimelineService()
+        val vm = makeVM(timeline = fake)
+        vm.attachFiles(listOf(file))
+
+        vm.send()
+
+        assertEquals(
+            "uploads must go through the progress-capable send",
+            listOf(true), fake.mediaSendsWithProgressHandler,
+        )
+        assertNull("progress strip clears once the batch finishes", vm.uploadProgress.value)
+    }
+
+    @Test
+    fun uploadProgress_labels() {
+        val single = ComposerViewModel.UploadProgress("shot.png", index = 1, count = 1, fraction = 0.2)
+        assertEquals("Uploading shot.png…", single.label)
+        val batch = ComposerViewModel.UploadProgress("b.png", index = 2, count = 3, fraction = 0.7)
+        assertEquals("Uploading 2 of 3…", batch.label)
+    }
+
+    @Test
     fun send_withAttachmentAndNoText_sendsWithNoCaption() = runBlocking {
         val file = makeTempFile("shot.png")
         val fake = FakeTimelineService()

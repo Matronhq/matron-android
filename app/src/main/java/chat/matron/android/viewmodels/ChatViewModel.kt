@@ -491,10 +491,19 @@ class ChatViewModel(
         runCatching { timeline.sendText(command) }
     }
 
-    /// Retry handler for failed own-messages. Stub until the service-layer retry
-    /// surface lands (the affordance ships ahead of the wiring).
+    /// Retry handler for own-messages whose send state is Failed or Queued —
+    /// the timeline's tap-to-retry affordance. Requeues the message's outbox
+    /// row and forces a send attempt (or a reconnect nudge when offline); the
+    /// echo's state updates flow back through the normal `items()` snapshot
+    /// stream.
     fun retrySend(itemID: String) {
-        // no-op stub
+        scope.launch { runCatching { timeline.retrySend(itemID) } }
+    }
+
+    /// Discards an unsent (queued/failed) own-message — the escape hatch for a
+    /// message the user no longer wants delivered.
+    fun discardSend(itemID: String) {
+        scope.launch { runCatching { timeline.discardSend(itemID) } }
     }
 
     // MARK: - Media

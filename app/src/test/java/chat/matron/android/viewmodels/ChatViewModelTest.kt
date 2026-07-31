@@ -425,9 +425,23 @@ class ChatViewModelTest {
     }
 
     @Test
-    fun retrySend_isCallable_andStubDoesNotThrow() = vmTest { scope ->
-        val vm = makeVM(scope)
-        vm.retrySend("abc")
+    fun retrySend_forwardsToTimelineService() = vmTest { scope ->
+        // The "Tap to retry" affordance must actually reach the service layer
+        // (it shipped as a logging-only stub once — the button did nothing).
+        val fake = FakeTimelineService()
+        val vm = makeVM(scope, fake)
+        vm.retrySend("echo:abc")
+        waitUntil { fake.retrySendCalls.isNotEmpty() }
+        assertEquals(listOf("echo:abc"), fake.retrySendCalls)
+    }
+
+    @Test
+    fun discardSend_forwardsToTimelineService() = vmTest { scope ->
+        val fake = FakeTimelineService()
+        val vm = makeVM(scope, fake)
+        vm.discardSend("echo:abc")
+        waitUntil { fake.discardSendCalls.isNotEmpty() }
+        assertEquals(listOf("echo:abc"), fake.discardSendCalls)
     }
 
     // MARK: - media

@@ -33,10 +33,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.JsonElement
 
-/// Lifecycle-level errors surfaced by the engine.
-sealed class JournalSyncError : Exception() {
-    data object Offline : JournalSyncError()
-    data object AuthRevoked : JournalSyncError()
+/// Lifecycle-level errors surfaced by the engine. The messages surface
+/// verbatim in UI banners — without them, an offline send rendered as the
+/// class's toString gibberish (Dan's 2026-07-30 screenshot on iOS).
+sealed class JournalSyncError(message: String) : Exception(message) {
+    data object Offline : JournalSyncError("No connection to the server.")
+    data object AuthRevoked : JournalSyncError("This device was signed out by the server.")
 }
 
 /// An agent's answer to `agentRequest` — either the method's result (raw JSON,
@@ -46,11 +48,11 @@ sealed interface RPCReply {
     data class Failure(val code: String, val detail: String?) : RPCReply
 }
 
-sealed class RPCRequestError : Exception() {
+sealed class RPCRequestError(message: String) : Exception(message) {
     /// No answer within the deadline. At-most-once: the caller re-asks.
-    data object Timeout : RPCRequestError()
+    data object Timeout : RPCRequestError("The agent didn't answer in time.")
     /// No live journal connection to send on (or it died mid-request).
-    data object Offline : RPCRequestError()
+    data object Offline : RPCRequestError("No connection to the server.")
 }
 
 /// Sink for full-text search indexing of applied journal events. Optional
@@ -108,6 +110,31 @@ class JournalSyncEngine(
     private val toolStreamListeners = mutableMapOf<UUID, Pair<String, (ToolStreamUpdate) -> Unit>>()
     private val sessionStatusListeners = mutableMapOf<UUID, Pair<String, (SessionStatusUpdate) -> Unit>>()
     private val newConvoListeners = mutableMapOf<UUID, (String) -> Unit>()
+
+    // MARK: Offline outbox state (guarded by `lock`)
+
+    /// Rows already written to the CURRENT socket. A row stays in the outbox
+    /// until its journal frame confirms delivery, so without this set every
+    /// extra flush pass on the same connection would resend it. Cleared on
+    /// each new connection: the server's idem key (folded from `local_id`)
+    /// dedups the once-per-connection resend of anything that actually landed
+    /// but wasn't confirmed before the socket died.
+    private val sentOnThisConnection = mutableSetOf<String>()
+
+    /// FIFO of the same localIDs, in write order. A server rejection frame
+    /// (`op:'error', ref:'send'`) names only the op, not the row — but the
+    /// socket is processed in order on both ends, so the rejection belongs to
+    /// the oldest write that hasn't been confirmed or failed yet.
+    private val sendOrderThisConnection = mutableListOf<String>()
+
+    /// Single-flight latch for [flushOutbox].
+    private var flushingOutbox = false
+
+    /// Set when a flush is requested while one is running: the running flush
+    /// re-drains before releasing the latch, so a row enqueued after the
+    /// in-flight flush's last outbox read can't strand until the next
+    /// reconnect (bugbot "Concurrent flush task dropped").
+    private var flushRequestedWhileBusy = false
 
     private class PendingRPC(
         val op: ClientOp,
@@ -231,6 +258,122 @@ class JournalSyncEngine(
     suspend fun sendOp(op: ClientOp) {
         val connection = synchronized(lock) { liveConnection } ?: throw JournalSyncError.Offline
         connection.send(op)
+    }
+
+    // MARK: Offline outbox
+
+    /// Queue-and-flush text send — the offline-tolerant replacement for
+    /// `sendOp(ClientOp.Send(...))`. The message is durably enqueued first (it
+    /// survives relaunch and renders as a queued/sending echo via
+    /// [JournalStore.outboxFlow]), then flushed immediately when a connection
+    /// is live. Never throws for being offline; only a store write failure
+    /// (disk) escapes, so the composer can keep the text.
+    suspend fun sendMessage(convoID: String, body: String, localID: String) {
+        store.outboxInsert(localID = localID, convoID = convoID, body = body)
+        if (synchronized(lock) { liveConnection } != null) {
+            scope.launch { flushOutbox() }
+        }
+    }
+
+    /// Tap-to-retry for a failed (or stuck-queued) outbox row: requeues it,
+    /// clears its sent-marker so it's eligible on this connection again, and
+    /// kicks a flush — or, when offline, cancels any backoff sleep so the
+    /// reconnect (and its connect-flush) happens now.
+    suspend fun retryOutboxItem(localID: String) {
+        runCatching { store.outboxRequeue(localID) }
+        val live = synchronized(lock) {
+            sentOnThisConnection.remove(localID)
+            liveConnection != null
+        }
+        if (live) scope.launch { flushOutbox() } else nudge()
+    }
+
+    /// Removes an unsent message the user chose to discard.
+    suspend fun discardOutboxItem(localID: String) {
+        runCatching { store.outboxDelete(localID) }
+        synchronized(lock) { sentOnThisConnection.remove(localID) }
+    }
+
+    /// Whether any queued sends are still awaiting delivery confirmation. The
+    /// background catch-up worker polls this so a send-then-pocket flush can
+    /// finish before it returns.
+    suspend fun hasPendingOutbox(): Boolean =
+        runCatching { store.outboxPending().isNotEmpty() }.getOrDefault(false)
+
+    /// A post-hello `{op:'error', ref:'send'}` frame: the server REJECTED a
+    /// send op (validation), so retrying it unchanged can never succeed — flip
+    /// the row to failed (surfacing "Not delivered — tap to retry") instead of
+    /// leaving it silently re-flushing on every reconnect forever (bugbot
+    /// "Send rejections never mark rows failed"). The frame carries no row id;
+    /// FIFO ordering picks the victim (see [sendOrderThisConnection]). Rows
+    /// already confirmed-deleted (or already failed) are skipped.
+    private suspend fun handleSendRejected(code: String, detail: String?) {
+        val stillQueued = runCatching { store.outboxPending() }.getOrDefault(emptyList())
+            .map { it.localID }.toSet()
+        while (true) {
+            val localID = synchronized(lock) {
+                if (sendOrderThisConnection.isEmpty()) null else sendOrderThisConnection.removeAt(0)
+            } ?: return
+            if (!stillQueued.contains(localID)) continue
+            MatronDebug.breadcrumb("server rejected send $localID: $code ${detail ?: ""}")
+            runCatching { store.outboxMarkFailed(localID, detail ?: code) }
+            synchronized(lock) { sentOnThisConnection.remove(localID) }
+            return
+        }
+    }
+
+    /// Sends every queued outbox row not yet written to the current
+    /// connection, oldest first, coalescing concurrent callers behind a
+    /// single-flight latch that re-drains when a request landed mid-flush.
+    private suspend fun flushOutbox() {
+        synchronized(lock) {
+            if (flushingOutbox) {
+                // A flush is mid-flight and may already have taken its last
+                // outbox read; flag it to re-drain so the row that prompted
+                // this call can't be skipped until the next reconnect.
+                flushRequestedWhileBusy = true
+                return
+            }
+            flushingOutbox = true
+        }
+        try {
+            do {
+                synchronized(lock) { flushRequestedWhileBusy = false }
+                drainOutbox()
+            } while (synchronized(lock) { flushRequestedWhileBusy })
+        } finally {
+            synchronized(lock) { flushingOutbox = false }
+        }
+    }
+
+    /// One drain pass: sends every eligible queued row FIFO, stopping on the
+    /// first transport failure (rows stay queued for the next connection's
+    /// flush). [JournalStore.outboxMarkAttempt] runs BEFORE the write:
+    /// delivery-confirmation deletes only attempted rows, and marking after a
+    /// successful write would race the journal frame (a frame applied before
+    /// the mark would skip the delete, and the dedup'd resend gets no fresh
+    /// frame, so the row would never clear).
+    private suspend fun drainOutbox() {
+        while (true) {
+            val connection = synchronized(lock) { liveConnection } ?: return
+            val rows = runCatching { store.outboxPending() }.getOrDefault(emptyList())
+            val next = rows.firstOrNull {
+                synchronized(lock) { !sentOnThisConnection.contains(it.localID) }
+            } ?: return
+            runCatching { store.outboxMarkAttempt(next.localID) }
+            try {
+                connection.send(ClientOp.Send(next.convoID, next.body, next.localID))
+                synchronized(lock) {
+                    sentOnThisConnection.add(next.localID)
+                    sendOrderThisConnection.add(next.localID)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                MatronDebug.breadcrumb("outbox flush stopped — socket write failed: $e")
+                return
+            }
+        }
     }
 
     suspend fun setViewing(convoID: String?) {
@@ -476,6 +619,15 @@ class JournalSyncEngine(
                 // cursor to one reconnect's worth of frames.
                 if (store.cursor() > 0) runCatching { connection.send(ClientOp.Ack(store.cursor())) }
                 startRefreshSummaries()
+                // Fresh socket: everything unconfirmed is eligible to resend
+                // once (idem-dedup'd server-side), including messages queued
+                // while offline. Launched as a child job so the frame loop
+                // below starts consuming immediately.
+                synchronized(lock) {
+                    sentOnThisConnection.clear()
+                    sendOrderThisConnection.clear()
+                }
+                scope.launch { flushOutbox() }
                 if (store.cursor() >= headSeq) setState(SyncConnectionState.Running)
 
                 val watchdog = launchWatchdog(connection)
@@ -559,7 +711,16 @@ class JournalSyncEngine(
             is ServerFrame.ToolStream -> fanOutToolStream(frame.update)
             is ServerFrame.SessionStatusFrame -> handleSessionStatus(frame.update)
             is ServerFrame.RpcResponse -> resumeRPC(frame.response)
-            is ServerFrame.Error -> frame.requestID?.let { failRPC(it, frame.code, frame.detail) }
+            is ServerFrame.Error -> {
+                // Correlated RPC errors resume their waiter; a rejected send op
+                // fails its outbox row; other post-hello control frames are
+                // advisory.
+                val requestID = frame.requestID
+                when {
+                    requestID != null -> failRPC(requestID, frame.code, frame.detail)
+                    frame.ref == "send" -> handleSendRejected(frame.code, frame.detail)
+                }
+            }
             is ServerFrame.SnapshotRequired -> {
                 // Gap too large to replay (server valve). Cancel any in-flight
                 // refreshSummaries() first (its response is stale relative to

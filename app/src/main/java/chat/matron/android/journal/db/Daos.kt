@@ -103,6 +103,54 @@ interface EventDao {
 }
 
 @Dao
+interface OutboxDao {
+    /// Idempotent on `local_id` so a retry racing the original insert can't
+    /// duplicate the row.
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIgnore(row: OutboxEntity)
+
+    /// Every queued row across all conversations, oldest first — the flush
+    /// order. Failed rows are excluded: they only move again via an explicit
+    /// user retry ([requeue]).
+    @Query("SELECT * FROM outbox WHERE state = 'queued' ORDER BY created_at ASC, local_id ASC")
+    suspend fun pending(): List<OutboxEntity>
+
+    /// All outbox rows for one conversation (queued AND failed), oldest first —
+    /// what the timeline renders as pending/failed echoes.
+    @Query("SELECT * FROM outbox WHERE convo_id = :convoID ORDER BY created_at ASC, local_id ASC")
+    suspend fun forConversation(convoID: String): List<OutboxEntity>
+
+    @Query("SELECT * FROM outbox WHERE convo_id = :convoID ORDER BY created_at ASC, local_id ASC")
+    fun forConversationFlow(convoID: String): Flow<List<OutboxEntity>>
+
+    /// Delivery-confirmation candidates: rows in [convoID] with [body] that
+    /// have been attempted at least once, oldest first. See
+    /// `JournalStore.outboxDeleteFirstMatching` for why never-attempted rows
+    /// are excluded.
+    @Query(
+        "SELECT * FROM outbox WHERE convo_id = :convoID AND body = :body AND attempts > 0 " +
+            "ORDER BY created_at ASC, local_id ASC"
+    )
+    suspend fun matching(convoID: String, body: String): List<OutboxEntity>
+
+    @Query("UPDATE outbox SET attempts = attempts + 1 WHERE local_id = :localID")
+    suspend fun markAttempt(localID: String)
+
+    @Query("UPDATE outbox SET state = 'failed', last_error = :error WHERE local_id = :localID")
+    suspend fun markFailed(localID: String, error: String?)
+
+    /// Puts a failed row back in the flush set (tap-to-retry).
+    @Query("UPDATE outbox SET state = 'queued', last_error = NULL WHERE local_id = :localID")
+    suspend fun requeue(localID: String)
+
+    @Query("DELETE FROM outbox WHERE local_id = :localID")
+    suspend fun delete(localID: String)
+
+    @Query("DELETE FROM outbox")
+    suspend fun deleteAll()
+}
+
+@Dao
 interface MetaDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(meta: MetaEntity)

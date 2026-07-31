@@ -56,6 +56,13 @@ class FakeTimelineService : TimelineService {
     val sentFiles = mutableListOf<SentMedia>()
     var paginateCalls = 0
     var markReadCalls = 0
+    val retrySendCalls = mutableListOf<String>()
+    val discardSendCalls = mutableListOf<String>()
+
+    /// True per media send when the caller supplied a progress handler — pins
+    /// that the composer reaches the progress-capable overload, not the
+    /// drop-the-handler default.
+    val mediaSendsWithProgressHandler = mutableListOf<Boolean>()
 
     override fun items(): Flow<List<TimelineItem>> = flow {
         snapshotsToEmit.forEach { emit(it) }
@@ -89,6 +96,30 @@ class FakeTimelineService : TimelineService {
         nextSendError?.let { nextSendError = null; throw it }
         failIfPastMediaLimit()
         sentFiles.add(SentMedia(filename, mimeType, data.size, caption))
+    }
+
+    override suspend fun sendImage(
+        data: ByteArray, filename: String, mimeType: String, caption: String?, progress: ((Double) -> Unit)?,
+    ) {
+        mediaSendsWithProgressHandler.add(progress != null)
+        progress?.invoke(0.5)
+        sendImage(data, filename, mimeType, caption)
+    }
+
+    override suspend fun sendFile(
+        data: ByteArray, filename: String, mimeType: String, caption: String?, progress: ((Double) -> Unit)?,
+    ) {
+        mediaSendsWithProgressHandler.add(progress != null)
+        progress?.invoke(0.5)
+        sendFile(data, filename, mimeType, caption)
+    }
+
+    override suspend fun retrySend(itemID: String) {
+        retrySendCalls.add(itemID)
+    }
+
+    override suspend fun discardSend(itemID: String) {
+        discardSendCalls.add(itemID)
     }
 
     private fun failIfPastMediaLimit() {

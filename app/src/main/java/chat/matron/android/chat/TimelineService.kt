@@ -26,6 +26,26 @@ interface TimelineService {
     /// Sends a file attachment. [caption] behaves as for [sendImage].
     suspend fun sendFile(data: ByteArray, filename: String, mimeType: String, caption: String?)
 
+    /// Progress-reporting variants: [progress] receives the uploaded fraction
+    /// (0…1), off-main. Defaults drop the handler and forward to the plain
+    /// sends so fakes and outbox-less implementations compile unchanged;
+    /// [JournalTimelineService] overrides both.
+    suspend fun sendImage(
+        data: ByteArray, filename: String, mimeType: String, caption: String?, progress: ((Double) -> Unit)?,
+    ) = sendImage(data, filename, mimeType, caption)
+
+    suspend fun sendFile(
+        data: ByteArray, filename: String, mimeType: String, caption: String?, progress: ((Double) -> Unit)?,
+    ) = sendFile(data, filename, mimeType, caption)
+
+    /// Retries a pending/failed own-message (the timeline's tap-to-retry
+    /// affordance). [itemID] is the timeline item's id. Implementations
+    /// without an offline outbox inherit the default no-op.
+    suspend fun retrySend(itemID: String) {}
+
+    /// Discards an unsent own-message. Default no-op, same as [retrySend].
+    suspend fun discardSend(itemID: String) {}
+
     /// Paginates older history. Returns `true` if the fetched page had new rows.
     suspend fun paginateBackward(requestSize: Int): Boolean
 
