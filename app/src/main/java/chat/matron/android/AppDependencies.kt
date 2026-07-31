@@ -39,11 +39,14 @@ import chat.matron.android.viewmodels.JournalDevicesService
 import chat.matron.android.viewmodels.KeyValueStore
 import chat.matron.android.viewmodels.RecentStartFolders
 import chat.matron.android.viewmodels.SharedPreferencesKeyValueStore
+import chat.matron.android.models.SyncConnectionState
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -212,6 +215,30 @@ class AppDependencies(
 
     fun syncService(session: UserSession): SyncService = core(session).engine
 
+    /**
+     * Bounded background catch-up — the Android analog of iOS's BGAppRefresh
+     * handler (`chat.matron.refresh`): ensures the sync engine is running,
+     * waits (capped) until the journal is caught up, then gives queued outbox
+     * rows a short grace to flush so a send-then-pocket actually delivers.
+     * When this call started the engine itself (app not visible), it stops it
+     * again so a background process doesn't hold a socket open between runs;
+     * an engine the UI started is left untouched.
+     */
+    suspend fun backgroundCatchUp(session: UserSession, isAppVisible: () -> Boolean = { false }) {
+        val engine = core(session).engine
+        val startedHere = !engine.isRunning()
+        if (startedHere) engine.beginSync()
+        // stateStream is a StateFlow: an already-Running engine passes through
+        // immediately. The cap bounds the whole wait, not each yield.
+        withTimeoutOrNull(15_000) {
+            engine.stateStream.first { it is SyncConnectionState.Running }
+        }
+        withTimeoutOrNull(10_000) {
+            while (engine.hasPendingOutbox()) delay(500)
+        }
+        if (startedHere && !isAppVisible()) engine.endSync()
+    }
+
     fun chatService(session: UserSession): ChatService {
         val core = core(session)
         return JournalChatService(store = core.store, engine = core.engine)
@@ -312,6 +339,12 @@ class AppDependencies(
                 core.engine.endSync()
                 runCatching { core.store.wipe() }
                     .onFailure { MatronDebug.breadcrumb("signOut: store.wipe failed: $it") }
+                // wipe() deliberately preserves the offline outbox (a
+                // snapshot_required mirror wipe must not eat unsent messages);
+                // sign-out must clear it so the next account can't inherit —
+                // or send — the previous user's queued messages.
+                runCatching { core.store.wipeOutbox() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: store.wipeOutbox failed: $it") }
                 runCatching { core.db.close() }
                     .onFailure { MatronDebug.breadcrumb("signOut: db.close failed: $it") }
             }

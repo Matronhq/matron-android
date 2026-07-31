@@ -15,6 +15,8 @@ import chat.matron.android.journal.objectOrNull
 import chat.matron.android.journal.parseJsonObjectOrNull
 import chat.matron.android.journal.stringOrNull
 import chat.matron.android.journal.db.MatronDatabase
+import chat.matron.android.journal.db.OutboxEntity
+import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.TimelineSendState
 import chat.matron.android.models.UserSession
 import chat.matron.android.search.SearchHit
@@ -404,34 +406,55 @@ class JournalTimelineServiceTest {
         }
     }
 
-    // MARK: (f) sendText failure flips echo to failed and rethrows
+    // MARK: (f) offline sendText queues durably and renders a queued echo
 
-    @Test fun sendTextFailureMarksEchoFailed() = runBlocking {
+    @Test fun sendTextOfflineQueuesAndRendersQueuedEcho() = runBlocking {
         val store = makeStore()
         val api = JournalApi("https://x")
-        // No socket, beginSync never called: sendOp throws offline synchronously.
+        // No socket at all and beginSync never called: `liveConnection` stays
+        // null, exactly like calling send while genuinely offline.
         val engine = makeEngine(store, FakeConnector(emptyList()), api)
         val service = JournalTimelineService("c1", store, engine, api, makeSession())
 
         val (collector, task) = collectItems(service.items())
-        waitUntil { collector.last() != null }
+        waitUntil { collector.last() != null } // initial empty snapshot
 
-        try {
-            service.sendText("hi there", inReplyTo = null)
-            fail("expected sendText to rethrow the offline send failure")
-        } catch (e: JournalSyncError) {
-            assertEquals(JournalSyncError.Offline, e)
-        }
+        // Offline is no longer an error — the message queues durably.
+        service.sendText("hi there", inReplyTo = null)
 
         waitUntil {
-            collector.last()?.any { it.isOwn && it.sendState == TimelineSendState.Failed("Not delivered") } == true
+            collector.last()?.any { it.isOwn && it.sendState == TimelineSendState.Queued } == true
         }
-        val failed = collector.last()!!
-        assertEquals(1, failed.size)
-        assertEquals(TimelineSendState.Failed("Not delivered"), failed.first().sendState)
-        assertEquals(TimelineItem.Kind.Text("hi there", null), failed.first().kind)
+        val queued = collector.last()!!
+        assertEquals(1, queued.size)
+        assertEquals(TimelineSendState.Queued, queued.first().sendState)
+        assertEquals(TimelineItem.Kind.Text("hi there", null), queued.first().kind)
+        // And it is durably in the outbox, ready for the next connection.
+        assertEquals(listOf("hi there"), store.outboxPending().map { it.body })
 
         task.cancel()
+    }
+
+    // MARK: tap-to-retry requeues a failed row; discard removes it
+
+    @Test fun retrySendRequeuesFailedOutboxRow() = runBlocking {
+        val store = makeStore()
+        val api = JournalApi("https://x")
+        val engine = makeEngine(store, FakeConnector(emptyList()), api)
+        val service = JournalTimelineService("c1", store, engine, api, makeSession())
+        store.outboxInsert("F", "c1", "stuck")
+        store.outboxMarkFailed("F", "rejected")
+
+        service.retrySend("echo:F")
+        waitUntil { store.outboxPending().isNotEmpty() }
+        assertEquals(
+            "retry puts the failed row back in the flush set",
+            listOf("F"), store.outboxPending().map { it.localID },
+        )
+
+        service.discardSend("echo:F")
+        waitUntil { store.outboxRows("c1").isEmpty() }
+        assertTrue("discard removes the unsent message", store.outboxRows("c1").isEmpty())
     }
 
     @Test fun sendButtonResponseRejectsNonNumericPromptID() = runBlocking {
@@ -447,66 +470,147 @@ class JournalTimelineServiceTest {
         }
     }
 
-    // MARK: OverlayState echo reconciliation (no engine)
+    // MARK: pending-send suppression (echo ↔ journal-row handoff, no engine)
 
-    @Test fun reconcileSkipsFailedEchoOnDuplicateBody() = runBlocking {
+    private fun outboxRow(
+        localID: String, body: String,
+        state: String = OutboxEntity.STATE_QUEUED,
+        createdAt: Long = 0, attempts: Int = 1,
+    ) = OutboxEntity(
+        localID = localID, convoID = "c1", body = body, createdAt = createdAt,
+        state = state, attempts = attempts, lastError = null,
+    )
+
+    @Test fun sendStateMapping() {
+        // Connecting covers journal catch-up on a LIVE socket, where the
+        // connect-flush has already written attempted rows to the wire — those
+        // must read "Sending…", not "waiting to send when online" (bugbot
+        // "Queued label while already on the wire"). Unattempted rows
+        // genuinely haven't left; offline (backoff) queues everything.
         val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
-        overlay.addEcho("failed-one", "dup")
-        overlay.markEchoFailed("failed-one")
-        overlay.addEcho("delivered-one", "dup")
-        overlay.reconcile(listOf(ev(1, sender = "user:dan", payload = body("dup"))), "user:dan")
-        val echoes = overlay.echoes
-        assertEquals(listOf("failed-one"), echoes.map { it.localID })
-        assertTrue(echoes.first().failed)
+        val attempted = outboxRow("a", "x", attempts = 1)
+        val unattempted = outboxRow("b", "y", attempts = 0)
+        val failedRow = outboxRow("f", "z", state = OutboxEntity.STATE_FAILED)
+
+        overlay.setSyncState(SyncConnectionState.Connecting)
+        assertEquals(TimelineSendState.Sending, overlay.sendState(attempted))
+        assertEquals(TimelineSendState.Queued, overlay.sendState(unattempted))
+
+        overlay.setSyncState(SyncConnectionState.Running)
+        assertEquals(TimelineSendState.Sending, overlay.sendState(unattempted))
+
+        overlay.setSyncState(SyncConnectionState.Offline(null))
+        assertEquals(TimelineSendState.Queued, overlay.sendState(attempted))
+        assertEquals(TimelineSendState.Failed("Not delivered"), overlay.sendState(failedRow))
     }
 
-    @Test fun failedEchoSurvivesStalenessSweep() = runBlocking {
+    @Test fun reconcileDoesNotSuppressNeverAttemptedSend() {
+        // Mirrors outboxDeleteFirstMatching's `attempts > 0` rule: an own row
+        // with the same body as a row this device NEVER sent (queued offline;
+        // the twin came from another device) must not hide the echo — the
+        // store keeps the row and will still deliver it, so hiding it would
+        // make a message the user watched disappear reappear later (bugbot
+        // "UI suppresses without outbox delete").
+        val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
+        overlay.setOutbox(listOf(outboxRow("unsent", "dup", attempts = 0)))
+        overlay.reconcile(listOf(ev(1, sender = "user:dan", payload = body("dup"))), "user:dan")
+        assertEquals(
+            "a never-attempted row stays visible — it is still owed delivery",
+            listOf("unsent"), overlay.visibleSends().map { it.localID },
+        )
+    }
+
+    @Test fun reconcileSuppressesQueuedCopyBeforeFailedOnDuplicateBody() {
+        // Two pending sends with identical text: one failed, one queued
+        // (delivered). The delivered copy's journal row must suppress the
+        // *queued* echo, leaving the failed one visible.
+        val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
+        overlay.setOutbox(
+            listOf(
+                outboxRow("failed-one", "dup", state = OutboxEntity.STATE_FAILED, createdAt = 1),
+                outboxRow("delivered-one", "dup", createdAt = 2),
+            )
+        )
+        overlay.reconcile(listOf(ev(1, sender = "user:dan", payload = body("dup"))), "user:dan")
+        assertEquals(
+            "the delivered copy hides; the failed one stays visible",
+            listOf("failed-one"), overlay.visibleSends().map { it.localID },
+        )
+    }
+
+    @Test fun pendingSendsAreExemptFromStalenessSweep() = runBlocking {
+        // Outbox rows are durable at-least-once sends — a queued message must
+        // never evaporate on a timer (2026-07-13: send on a dead socket,
+        // message vanished 30s later).
         val overlay = JournalTimelineService.OverlayState(staleness = 20.milliseconds)
-        overlay.addEcho("gone", "pending one")
-        overlay.addEcho("kept", "failed one")
-        overlay.markEchoFailed("kept")
+        overlay.setOutbox(listOf(outboxRow("kept", "queued one")))
         delay(60)
         overlay.reconcile(emptyList(), "user:dan")
-        assertEquals(listOf("kept"), overlay.echoes.map { it.localID })
+        assertEquals(listOf("kept"), overlay.visibleSends().map { it.localID })
     }
 
-    @Test fun deliveredRetryClearsFailedEcho() = runBlocking {
+    @Test fun deliveredRetrySuppressesFailedEcho() {
+        // Only a failed copy matches the arriving own row → that row IS the
+        // successful retry landing; the failure is resolved.
         val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
-        overlay.addEcho("failed-one", "dup")
-        overlay.markEchoFailed("failed-one")
+        overlay.setOutbox(listOf(outboxRow("failed-one", "dup", state = OutboxEntity.STATE_FAILED)))
         overlay.reconcile(listOf(ev(1, sender = "user:dan", payload = body("dup"))), "user:dan")
-        assertTrue(overlay.echoes.isEmpty())
+        assertTrue(
+            "a delivered retry resolves the failed echo",
+            overlay.visibleSends().isEmpty(),
+        )
     }
 
-    @Test fun oldHistoryRowDoesNotClearFailedEcho() = runBlocking {
+    @Test fun oldHistoryRowDoesNotSuppressFreshSend() {
+        // reconcile re-walks the FULL event list on every emit. An old own
+        // message with the same body (seen in a prior reconcile) must not
+        // hide a fresh pending send — only rows ARRIVING may (bugbot
+        // "History clears failed echo").
         val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
         val oldOwnRow = ev(5, sender = "user:dan", payload = body("dup"))
-        overlay.reconcile(listOf(oldOwnRow), "user:dan")
-        overlay.addEcho("fresh-fail", "dup")
-        overlay.markEchoFailed("fresh-fail")
-        overlay.reconcile(listOf(oldOwnRow), "user:dan")
-        assertEquals(listOf("fresh-fail"), overlay.echoes.map { it.localID })
+        overlay.reconcile(listOf(oldOwnRow), "user:dan") // row is now history
+        overlay.setOutbox(listOf(outboxRow("fresh", "dup")))
+        overlay.reconcile(listOf(oldOwnRow), "user:dan") // same list re-walked
+        assertEquals(
+            "an already-seen row must not hide a newer send",
+            listOf("fresh"), overlay.visibleSends().map { it.localID },
+        )
+    }
+
+    @Test fun suppressionMarkerDropsWhenRowLeavesOutbox() {
+        // The store's delivery-confirmed delete removes the row; the
+        // suppression marker must go with it so the set can't pin memory (and
+        // a reused localID could never be silently hidden).
+        val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
+        overlay.setOutbox(listOf(outboxRow("a", "dup")))
+        overlay.reconcile(listOf(ev(1, sender = "user:dan", payload = body("dup"))), "user:dan")
+        overlay.setOutbox(emptyList()) // store deleted the row
+        overlay.setOutbox(listOf(outboxRow("a", "new message")))
+        assertEquals(
+            "marker must not outlive the row",
+            listOf("a"), overlay.visibleSends().map { it.localID },
+        )
     }
 
     // Bugbot "Echo cleared by history replay": with the baseline seeded to the
     // persisted high-water at room open, the FIRST reconcile's history rows
-    // cannot retire a fresh echo whose body matches an old own message…
-    @Test fun seededBaselineKeepsEchoThroughFirstReconcile() = runBlocking {
+    // cannot suppress a fresh send whose body matches an old own message…
+    @Test fun seededBaselineKeepsSendThroughFirstReconcile() {
         val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
         overlay.seedBaseline(5)
-        overlay.addEcho("fresh", "dup")
+        overlay.setOutbox(listOf(outboxRow("fresh", "dup")))
         overlay.reconcile(listOf(ev(5, sender = "user:dan", payload = body("dup"))), "user:dan")
-        assertEquals(listOf("fresh"), overlay.echoes.map { it.localID })
+        assertEquals(listOf("fresh"), overlay.visibleSends().map { it.localID })
     }
 
-    // …while a row APPENDED after open (seq above the baseline) still retires
-    // its echo, even when it arrives in the very first reconcile.
-    @Test fun seededBaselineStillRetiresEchoOnNewRow() = runBlocking {
+    // …while a row APPENDED after open (seq above the baseline) still
+    // suppresses its echo, even when it arrives in the very first reconcile.
+    @Test fun seededBaselineStillSuppressesSendOnNewRow() {
         val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
         overlay.seedBaseline(5)
-        overlay.addEcho("fresh", "dup")
+        overlay.setOutbox(listOf(outboxRow("fresh", "dup")))
         overlay.reconcile(listOf(ev(6, sender = "user:dan", payload = body("dup"))), "user:dan")
-        assertTrue(overlay.echoes.isEmpty())
+        assertTrue(overlay.visibleSends().isEmpty())
     }
 
     // MARK: (g) stalled overlay self-prunes via the periodic sweep

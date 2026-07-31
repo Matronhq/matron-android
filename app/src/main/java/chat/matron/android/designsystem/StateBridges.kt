@@ -25,5 +25,6 @@ fun syncBannerStateFrom(state: SyncConnectionState): SyncBannerState = when (sta
 fun sendStateGlyphFrom(state: TimelineSendState): SendStateGlyph = when (state) {
     is TimelineSendState.Sent -> SendStateGlyph.Sent
     is TimelineSendState.Sending -> SendStateGlyph.Sending
+    is TimelineSendState.Queued -> SendStateGlyph.Queued
     is TimelineSendState.Failed -> SendStateGlyph.Failed(state.reason)
 }

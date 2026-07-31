@@ -10,6 +10,7 @@ import chat.matron.android.journal.JournalEventType
 import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.JournalSyncEngine
 import chat.matron.android.journal.JournalSyncError
+import chat.matron.android.journal.db.OutboxEntity
 import chat.matron.android.journal.MediaKind
 import chat.matron.android.journal.previewText
 import chat.matron.android.journal.ToolStreamUpdate
@@ -42,9 +43,17 @@ private fun maxInstant(a: Instant, b: Instant): Instant = if (a.isAfter(b)) a el
 ///
 /// `items()` merges three inputs into a single snapshot stream: store events
 /// mapped through [JournalTimelineMapper], streaming/tool-stream ephemeral
-/// overlays, and local-echo rows for in-flight sends. All three are coalesced on
+/// overlays, and pending-send echoes. All three are coalesced on
 /// [OverlayState] so mutation from the ephemeral fan-out and from `sendText`
 /// can't race.
+///
+/// Pending-send echoes are a projection of the durable outbox
+/// ([JournalStore.outboxFlow]): rows are created by `sendText` →
+/// [JournalSyncEngine.sendMessage], survive relaunch, and are deleted by the
+/// store when the own-text journal frame confirms delivery. `suppressedSendIDs`
+/// bridges the gap between the events observation and the outbox observation
+/// firing: the same reconcile pass that surfaces the confirming row hides its
+/// echo, so the row and its echo can never render together in one snapshot.
 class JournalTimelineService(
     private val convoID: String,
     private val store: JournalStore,
@@ -70,7 +79,6 @@ class JournalTimelineService(
         private val staleness: Duration,
         private val toolStaleness: Duration = 600.seconds,
     ) {
-        data class Echo(val localID: String, val body: String, val created: Instant, var failed: Boolean = false)
         data class Streaming(val text: String, val updated: Instant)
         data class Activity(val label: String, val updated: Instant)
 
@@ -91,7 +99,21 @@ class JournalTimelineService(
         private val mappedCache = mutableMapOf<Long, TimelineItem>()
         private val unmappable = mutableSetOf<Long>()
         private var activity: Activity? = null
-        private val echoesList = mutableListOf<Echo>()
+
+        /// Latest outbox rows for this conversation (queued + failed, oldest
+        /// first) — the durable replacement for the old in-memory echo array.
+        private var outboxRowsList: List<OutboxEntity> = emptyList()
+
+        /// Rows hidden at render time because a reconcile pass already saw
+        /// their confirming own-text journal row (the store's DB delete lands
+        /// a beat later; without this the delivered message and its echo would
+        /// double-render for a frame).
+        private val suppressedSendIDs = mutableSetOf<String>()
+
+        /// Last-known engine connection state — drives the queued/sending
+        /// glyph on pending sends (see [sendState]).
+        private var syncState: SyncConnectionState = SyncConnectionState.Connecting
+
         private val toolStreams = mutableMapOf<String, ToolStream>()
         private val retiredToolRefs = mutableListOf<String>()
         private val resyncRequested = mutableMapOf<String, Instant>()
@@ -110,22 +132,50 @@ class JournalTimelineService(
         fun seedBaseline(seq: Long) = synchronized(lock) {
             if (!baselineSeeded) { baselineSeq = seq; baselineSeeded = true }
         }
-        private val changeContinuations = mutableMapOf<UUID, () -> Unit>()
 
         // MARK: Reads (return snapshots for the items() emit)
 
         val events: List<JournalEvent> get() = synchronized(lock) { eventsList }
-        val echoes: List<Echo> get() = synchronized(lock) { echoesList.toList() }
 
         fun setEvents(events: List<JournalEvent>) = synchronized(lock) { eventsList = events }
+
+        /// Replaces the outbox projection with the observation's latest rows.
+        /// Suppression markers for rows the store has since deleted are
+        /// dropped so the set can't grow unbounded.
+        fun setOutbox(rows: List<OutboxEntity>) = synchronized(lock) {
+            outboxRowsList = rows
+            suppressedSendIDs.retainAll(rows.map { it.localID }.toSet())
+        }
+
+        fun setSyncState(state: SyncConnectionState) = synchronized(lock) { syncState = state }
+
+        /// The pending sends `emit()` renders: every outbox row whose
+        /// confirming journal row hasn't been seen yet.
+        fun visibleSends(): List<OutboxEntity> = synchronized(lock) {
+            outboxRowsList.filter { !suppressedSendIDs.contains(it.localID) }
+        }
+
+        /// Glyph state for one pending send. `Connecting` covers journal
+        /// catch-up on a LIVE socket — the connect-flush has already put
+        /// attempted rows on the wire there, so they show `Sending`, not
+        /// "waiting to send when online" (bugbot "Queued label while already
+        /// on the wire"). A never-attempted row during `Connecting` genuinely
+        /// hasn't left, and everything is `Queued` while `Offline` (backoff).
+        fun sendState(row: OutboxEntity): TimelineSendState = synchronized(lock) {
+            if (row.state == OutboxEntity.STATE_FAILED) return TimelineSendState.Failed("Not delivered")
+            when (syncState) {
+                is SyncConnectionState.Running -> TimelineSendState.Sending
+                is SyncConnectionState.Connecting ->
+                    if (row.attempts > 0) TimelineSendState.Sending else TimelineSendState.Queued
+                is SyncConnectionState.Offline -> TimelineSendState.Queued
+            }
+        }
 
         fun streamingSorted(): List<Pair<String, Streaming>> =
             synchronized(lock) { streaming.toList().sortedBy { it.first } }
 
         fun toolStreamsSorted(): List<Pair<String, ToolStream>> =
             synchronized(lock) { toolStreams.toList().sortedBy { it.first } }
-
-        fun echoesSnapshot(): List<Echo> = synchronized(lock) { echoesList.toList() }
 
         fun activitySnapshot(): Activity? = synchronized(lock) { activity }
 
@@ -254,25 +304,41 @@ class JournalTimelineService(
                             .forEach { streaming.remove(it) }
                     }
                 }
-                // Only rows arriving in THIS reconcile (seq > floor) may retire
-                // an echo; prefer a pending echo so a delivered copy's ack can't
-                // retire an undelivered one.
+                // Only rows arriving in THIS reconcile (seq > floor) may
+                // suppress an echo. The store deletes the outbox row on this
+                // same frame (inside applyJournal's transaction) but that
+                // delete arrives via a separate observation — suppress the
+                // echo HERE, in the same pass that surfaces the row, so they
+                // never double-render. `attempts > 0` mirrors
+                // outboxDeleteFirstMatching: a never-attempted row can't be
+                // the send this row confirms (e.g. the same text sent from
+                // another device while this one queued offline) — hiding it
+                // here while the store keeps the row would deliver a message
+                // the user watched disappear (bugbot "UI suppresses without
+                // outbox delete"). Preference mirrors the store's delete:
+                // oldest queued copy first (a delivered copy's ack can't
+                // retire an undelivered one); when only a failed copy matches,
+                // this own-row IS its successful retry landing.
                 if (event.seq > newSeqFloor && event.sender == ownSender && event.type == JournalEventType.TEXT) {
                     val body = event.body()
                     if (body != null) {
-                        val index = echoesList.indexOfFirst { it.body == body && !it.failed }
-                            .takeIf { it >= 0 }
-                            ?: echoesList.indexOfFirst { it.body == body }.takeIf { it >= 0 }
-                        if (index != null) echoesList.removeAt(index)
+                        val candidates = outboxRowsList.filter {
+                            !suppressedSendIDs.contains(it.localID) && it.body == body && it.attempts > 0
+                        }
+                        val match = candidates.firstOrNull { it.state == OutboxEntity.STATE_QUEUED }
+                            ?: candidates.firstOrNull()
+                        if (match != null) suppressedSendIDs.add(match.localID)
                     }
                 }
                 lastReconciledSeq = maxOf(lastReconciledSeq, event.seq)
             }
             val cutoff = Instant.now().minusMillis(staleness.inWholeMilliseconds)
             streaming.entries.retainAll { it.value.updated.isAfter(cutoff) }
-            // Failed echoes are exempt from staleness (a "Not delivered" row must
-            // not silently vanish); pending echoes still expire.
-            echoesList.retainAll { it.failed || it.created.isAfter(cutoff) }
+            // Pending sends are deliberately NOT staleness-swept: an outbox
+            // row is a durable at-least-once send (2026-07-13 phone incident —
+            // a send on a dead socket must never evaporate). It leaves the
+            // timeline only via delivery confirmation, explicit discard, or
+            // sign-out.
             activity?.let { if (!it.updated.isAfter(cutoff)) activity = null }
             // Tool streams are exempt from the short text cutoff (a quiet build
             // step produces nothing for minutes); their own long staleness backs it.
@@ -281,30 +347,6 @@ class JournalTimelineService(
             resyncRequested.entries.retainAll { it.value.isAfter(toolCutoff) }
         }
 
-        fun addEcho(localID: String, body: String) {
-            synchronized(lock) { echoesList.add(Echo(localID, body, Instant.now())) }
-            broadcastChange()
-        }
-
-        fun markEchoFailed(localID: String) {
-            val changed = synchronized(lock) {
-                val echo = echoesList.firstOrNull { it.localID == localID }
-                if (echo != null) { echo.failed = true; true } else false
-            }
-            if (changed) broadcastChange()
-        }
-
-        /// A tick emitted whenever isolated state changes in a way that items()
-        /// subscribers must re-render for (currently just echo add/fail).
-        fun changes(): Flow<Unit> = callbackFlow {
-            val id = UUID.randomUUID()
-            synchronized(lock) { changeContinuations[id] = { trySend(Unit) } }
-            awaitClose { synchronized(lock) { changeContinuations.remove(id) } }
-        }
-
-        private fun broadcastChange() {
-            synchronized(lock) { changeContinuations.values.toList() }.forEach { it() }
-        }
     }
 
     override fun items(): Flow<List<TimelineItem>> = callbackFlow {
@@ -331,15 +373,15 @@ class JournalTimelineService(
                     )
                 )
             }
-            for (echo in overlay.echoesSnapshot()) {
+            for (row in overlay.visibleSends()) {
                 items.add(
                     TimelineItem(
-                        id = "echo:${echo.localID}",
+                        id = "echo:${row.localID}",
                         sender = ownSender,
-                        timestamp = echo.created,
-                        kind = TimelineItem.Kind.Text(echo.body, null),
+                        timestamp = row.created,
+                        kind = TimelineItem.Kind.Text(row.body, null),
                         isOwn = true,
-                        sendState = if (echo.failed) TimelineSendState.Failed("Not delivered") else TimelineSendState.Sending,
+                        sendState = overlay.sendState(row),
                     )
                 )
             }
@@ -382,7 +424,23 @@ class JournalTimelineService(
                 signal()
             }
         }
-        val echoJob = launch { overlay.changes().collect { signal() } }
+        // Pending sends: the outbox observation delivers the current rows on
+        // subscribe (so queued messages survive relaunch / room re-open) and
+        // re-fires on enqueue, retry, and delivery-confirmed delete.
+        val outboxJob = launch {
+            store.outboxFlow(convoID).collect { rows ->
+                overlay.setOutbox(rows)
+                signal()
+            }
+        }
+        // Connection state drives the queued ("waiting to send") vs sending
+        // glyph on pending sends.
+        val onlineJob = launch {
+            engine.stateStream.collect { state ->
+                overlay.setSyncState(state)
+                signal()
+            }
+        }
         // Guarantees a re-emit at least every sweepInterval so reconcile's
         // staleness cutoff always gets a chance to prune a stalled overlay.
         val sweepJob = launch {
@@ -397,7 +455,8 @@ class JournalTimelineService(
             ephemeralJob.cancel()
             activityJob.cancel()
             toolStreamJob.cancel()
-            echoJob.cancel()
+            outboxJob.cancel()
+            onlineJob.cancel()
             sweepJob.cancel()
             emitJob.cancel()
             ticks.close()
@@ -411,16 +470,28 @@ class JournalTimelineService(
             engine.sendOp(ClientOp.PromptReply(convoID, target, choice = null, text = body))
             return
         }
-        val localID = UUID.randomUUID().toString()
-        overlay.addEcho(localID, body)
-        try {
-            engine.sendOp(ClientOp.Send(convoID, body, localID))
-        } catch (e: Throwable) {
-            // Flip the echo to failed rather than leave it stuck in `.sending`
-            // forever, and rethrow so the composer surfaces the error.
-            overlay.markEchoFailed(localID)
-            throw e
-        }
+        // Durable queue-and-flush: the outbox row IS the local echo (it
+        // arrives in `items()` via the outbox observation, as `Sending` when
+        // online or `Queued` when not) and survives offline, relaunch, and
+        // mirror wipes until the journal frame confirms delivery. Being
+        // offline is not an error any more — only a store write failure
+        // throws, so the composer can keep the user's text.
+        engine.sendMessage(convoID, body, UUID.randomUUID().toString())
+    }
+
+    /// Tap-to-retry on a pending/failed own-message: requeues a failed outbox
+    /// row and forces a send attempt (or a reconnect nudge when offline).
+    /// [itemID] is the echo row's id, `echo:<localID>`.
+    override suspend fun retrySend(itemID: String) {
+        if (!itemID.startsWith("echo:")) return
+        engine.retryOutboxItem(itemID.removePrefix("echo:"))
+    }
+
+    /// Removes an unsent (queued or failed) own-message the user chose to
+    /// discard. No-op for anything that isn't a pending-send echo.
+    override suspend fun discardSend(itemID: String) {
+        if (!itemID.startsWith("echo:")) return
+        engine.discardOutboxItem(itemID.removePrefix("echo:"))
     }
 
     override suspend fun sendButtonResponse(selectedValues: List<String>, inReplyTo: String) {
@@ -433,15 +504,24 @@ class JournalTimelineService(
     }
 
     override suspend fun sendImage(data: ByteArray, filename: String, mimeType: String, caption: String?) =
-        sendMedia(data, filename, mimeType, type = MediaKind.IMAGE, caption = caption)
+        sendMedia(data, filename, mimeType, type = MediaKind.IMAGE, caption = caption, progress = null)
 
     override suspend fun sendFile(data: ByteArray, filename: String, mimeType: String, caption: String?) =
-        sendMedia(data, filename, mimeType, type = MediaKind.FILE, caption = caption)
+        sendMedia(data, filename, mimeType, type = MediaKind.FILE, caption = caption, progress = null)
+
+    override suspend fun sendImage(
+        data: ByteArray, filename: String, mimeType: String, caption: String?, progress: ((Double) -> Unit)?,
+    ) = sendMedia(data, filename, mimeType, type = MediaKind.IMAGE, caption = caption, progress = progress)
+
+    override suspend fun sendFile(
+        data: ByteArray, filename: String, mimeType: String, caption: String?, progress: ((Double) -> Unit)?,
+    ) = sendMedia(data, filename, mimeType, type = MediaKind.FILE, caption = caption, progress = progress)
 
     private suspend fun sendMedia(
         data: ByteArray, filename: String, mimeType: String, type: MediaKind, caption: String?,
+        progress: ((Double) -> Unit)?,
     ) {
-        val blobRef = api.uploadMedia(data, mimeType)
+        val blobRef = api.uploadMedia(data, mimeType, progress)
         engine.sendOp(
             ClientOp.SendMedia(
                 convoID = convoID, type = type, blobRef = blobRef, name = filename,

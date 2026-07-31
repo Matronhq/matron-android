@@ -177,7 +177,7 @@ fun SignInScreen(
                 OutlinedTextField(
                     value = server,
                     onValueChange = { server = it; viewModel.serverURL = it },
-                    label = { Text("Homeserver URL") },
+                    label = { Text("Server URL") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Uri,

@@ -5,6 +5,7 @@ import chat.matron.android.journal.db.ConversationEntity
 import chat.matron.android.journal.db.EventEntity
 import chat.matron.android.journal.db.MatronDatabase
 import chat.matron.android.journal.db.MetaEntity
+import chat.matron.android.journal.db.OutboxEntity
 import kotlin.math.max
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -32,6 +33,7 @@ class JournalStore(
     private val conversationDao = db.conversationDao()
     private val eventDao = db.eventDao()
     private val metaDao = db.metaDao()
+    private val outboxDao = db.outboxDao()
 
     /// Test-only failure injection, checked before the transaction opens so the
     /// cursor is left untouched on a simulated failure — the same shape a real
@@ -154,6 +156,16 @@ class JournalStore(
             }
             conversationDao.upsert(convo)
             metaDao.upsert(MetaEntity(CURSOR_KEY, event.seq.toString()))
+            // Delivery confirmation for the offline outbox, in the SAME
+            // transaction as the row insert: an own-text frame is a queued send
+            // landing (body-match is the only signal — the server strips
+            // idem_key from broadcast rows). Doing it here rather than as a
+            // follow-up write means the confirming row and its outbox delete
+            // commit or fail together, so a relaunch can never show a durable
+            // duplicate echo beside the delivered message.
+            if (event.sender == ownSender && event.type == JournalEventType.TEXT) {
+                event.body()?.let { deleteFirstMatchingInTransaction(event.convoID, it) }
+            }
             true
         }
     }
@@ -163,6 +175,17 @@ class JournalStore(
     suspend fun insertHistory(events: List<JournalEvent>) {
         db.withTransaction {
             for (e in events) eventDao.insertIgnore(EventEntity.from(e))
+            // A post-snapshot refill can contain the frames that confirm
+            // pre-wipe outbox sends: applyColdSnapshot jumps the cursor past
+            // them, so applyJournal will never see them again and the rows
+            // would re-flush (idem-dedup'd, so invisibly) on every reconnect
+            // forever (bugbot "Post-snapshot outbox never confirms"). Run the
+            // same confirmation-delete here, timestamp-guarded so genuinely
+            // old history can't eat a fresh queued send.
+            for (e in events) {
+                if (e.sender != ownSender || e.type != JournalEventType.TEXT) continue
+                e.body()?.let { deleteFirstMatchingInTransaction(e.convoID, it, journaledAtMs = e.ts.toEpochMilli()) }
+            }
             // Paginated rows can include unread messages (e.g. the refill after
             // a snapshot_required wipe). Live applyJournal counts unread
             // incrementally; recount here so the list doesn't under-report.
@@ -226,6 +249,10 @@ class JournalStore(
         }
     }
 
+    /// Clears the journal mirror (events, conversations, cursor) but NOT the
+    /// outbox: this runs on `snapshot_required` (replay gap too large), and a
+    /// mirror wipe must not eat the user's unsent messages. Sign-out calls
+    /// [wipeOutbox] separately.
     suspend fun wipe() {
         db.withTransaction {
             eventDao.deleteAll()
@@ -233,6 +260,80 @@ class JournalStore(
             metaDao.deleteAll()
         }
     }
+
+    // MARK: Outbox
+
+    /// Enqueues one unsent text message. Idempotent on [localID] so a retry
+    /// racing the original insert can't duplicate the row.
+    suspend fun outboxInsert(localID: String, convoID: String, body: String, now: Long = System.currentTimeMillis()) {
+        outboxDao.insertIgnore(
+            OutboxEntity(
+                localID = localID, convoID = convoID, body = body, createdAt = now,
+                state = OutboxEntity.STATE_QUEUED, attempts = 0, lastError = null,
+            )
+        )
+    }
+
+    /// Every queued row across all conversations, oldest first — the flush
+    /// order. Failed rows are excluded: they only move again via an explicit
+    /// user retry ([outboxRequeue]).
+    suspend fun outboxPending(): List<OutboxEntity> = outboxDao.pending()
+
+    /// All outbox rows for one conversation (queued AND failed), oldest first —
+    /// what the timeline renders as pending/failed echoes.
+    suspend fun outboxRows(convoID: String): List<OutboxEntity> = outboxDao.forConversation(convoID)
+
+    suspend fun outboxRow(localID: String): OutboxEntity? = outboxDao.row(localID)
+
+    suspend fun outboxMarkAttempt(localID: String) = outboxDao.markAttempt(localID)
+
+    suspend fun outboxMarkFailed(localID: String, error: String?) = outboxDao.markFailed(localID, error)
+
+    /// Puts a failed row back in the flush set (tap-to-retry).
+    suspend fun outboxRequeue(localID: String) = outboxDao.requeue(localID)
+
+    suspend fun outboxDelete(localID: String) = outboxDao.delete(localID)
+
+    /// Delivery confirmation: an own-text journal frame with [body] landed for
+    /// [convoID] — delete the OLDEST attempted row with that body and return
+    /// its `localID` (null when nothing matches). The server strips the
+    /// idem_key from broadcast rows, so body-match is the only signal (mirrors
+    /// the echo-suppression heuristic in `JournalTimelineService`). Only rows
+    /// with `attempts > 0` qualify: a never-sent row can't be the one the frame
+    /// confirms — deleting it would silently eat a message that never went out
+    /// (e.g. the same text sent from another device). Queued rows are preferred
+    /// over failed ones ("prefer a pending echo so a delivered copy's ack can't
+    /// retire an undelivered one — but when only a failed copy matches, this
+    /// own-row IS its successful retry landing").
+    ///
+    /// [applyJournal] runs the same deletion INSIDE its own transaction so a
+    /// confirming row and its outbox delete commit atomically. This public
+    /// wrapper remains for tests and non-transactional callers.
+    suspend fun outboxDeleteFirstMatching(convoID: String, body: String): String? =
+        db.withTransaction { deleteFirstMatchingInTransaction(convoID, body) }
+
+    /// [journaledAtMs] (the confirming event's server timestamp), when given,
+    /// restricts candidates to rows created at or before it: a history event
+    /// can only confirm a send that already existed when the server journaled
+    /// it, so an OLD identical message replayed by pagination can't delete a
+    /// fresh queued send.
+    private suspend fun deleteFirstMatchingInTransaction(
+        convoID: String,
+        body: String,
+        journaledAtMs: Long? = null,
+    ): String? {
+        val candidates = outboxDao.matching(convoID, body)
+            .filter { journaledAtMs == null || it.createdAt <= journaledAtMs }
+        val row = candidates.firstOrNull { it.state == OutboxEntity.STATE_QUEUED }
+            ?: candidates.firstOrNull()
+            ?: return null
+        outboxDao.delete(row.localID)
+        return row.localID
+    }
+
+    /// Sign-out hygiene: the next account on this database file must not
+    /// inherit (or send) the previous user's queued messages.
+    suspend fun wipeOutbox() = outboxDao.deleteAll()
 
     // MARK: Observation
     //
@@ -253,6 +354,11 @@ class JournalStore(
 
     fun eventsFlow(convoID: String): Flow<List<JournalEvent>> =
         eventDao.forConversationFlow(convoID).map { list -> list.map { it.toJournalEvent() } }
+
+    /// Live stream of one conversation's outbox rows (queued + failed, oldest
+    /// first). The timeline renders these as pending/failed echoes; re-fires on
+    /// enqueue, state change, and delivery-confirmed delete.
+    fun outboxFlow(convoID: String): Flow<List<OutboxEntity>> = outboxDao.forConversationFlow(convoID)
 
     // MARK: Tool-output TTL
 

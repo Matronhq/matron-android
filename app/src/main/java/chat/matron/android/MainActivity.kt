@@ -21,7 +21,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -44,6 +47,7 @@ import chat.matron.android.features.settings.DeviceSettingsScreen
 import chat.matron.android.features.settings.DevicesScreen
 import chat.matron.android.journal.RelayApi
 import chat.matron.android.models.MatronDebug
+import chat.matron.android.sync.OutboxCatchUpWorker
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.UserSession
 import chat.matron.android.viewmodels.ChatListViewModel
@@ -138,6 +142,7 @@ private fun MatronApp(deps: AppDependencies) {
                         prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
                     },
                     onSignOut = {
+                        OutboxCatchUpWorker.cancel(context)
                         deps.signOut()
                         session = null
                     },
@@ -170,11 +175,25 @@ private fun SignedInApp(
 
     LaunchedEffect(session.userID) { chatListVM.start() }
     LaunchedEffect(session.userID) {
+        // Periodic background catch-up (journal + offline outbox flush) for
+        // when the process is gone — the analog of iOS's BGAppRefresh.
+        runCatching { OutboxCatchUpWorker.schedule(deps.context) }
+            .onFailure { MatronDebug.breadcrumb("OutboxCatchUpWorker.schedule failed: $it") }
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(session.userID) {
         val sync = deps.syncService(session)
-        runCatching { sync.start() }
-        sync.stateStream.collect { state ->
-            connectionState = syncBannerStateFrom(state)
-            if (state is SyncConnectionState.Running) hasEverConnected = true
+        // (Re)start on EVERY foreground entry, not once: the catch-up worker
+        // legitimately stops an engine it started when the app isn't visible
+        // at its teardown, which can happen while this composition is alive
+        // in the background (bugbot "Worker teardown stops foreground sync").
+        // start() is a no-op on an already-running engine.
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            runCatching { sync.start() }
+            sync.stateStream.collect { state ->
+                connectionState = syncBannerStateFrom(state)
+                if (state is SyncConnectionState.Running) hasEverConnected = true
+            }
         }
     }
     LaunchedEffect(session.userID) {

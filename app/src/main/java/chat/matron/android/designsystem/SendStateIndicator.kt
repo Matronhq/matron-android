@@ -23,6 +23,8 @@ import androidx.compose.ui.unit.dp
 sealed interface SendStateGlyph {
     data object Sending : SendStateGlyph
     data object Sent : SendStateGlyph
+    /// Waiting in the offline outbox for connectivity.
+    data object Queued : SendStateGlyph
     data class Failed(val reason: String) : SendStateGlyph
 }
 
@@ -51,6 +53,27 @@ fun SendStateIndicator(
             Spacer(Modifier.width(4.dp))
             Text(
                 "Sending…",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        is SendStateGlyph.Queued -> Row(
+            // Offline outbox: honest "not in flight yet" treatment. Clickable
+            // (like Failed) so a tap can force a send attempt / reconnect
+            // nudge via the same onRetry plumbing.
+            modifier
+                .semantics { contentDescription = "Queued. Will send when online. Tap to try now." }
+                .then(if (onRetry != null) Modifier.clickable { onRetry() } else Modifier),
+        ) {
+            Icon(
+                Icons.Outlined.Schedule,
+                contentDescription = null,
+                modifier = Modifier.size(12.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                "Waiting to send — will retry when online",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

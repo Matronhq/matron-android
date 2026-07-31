@@ -7,9 +7,11 @@ import chat.matron.android.models.StagedAttachment
 import java.io.File
 import kotlin.time.Duration
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 
 /// Drives the message composer: text input, slash-command palette, recent-folder
 /// completion, sent-message recall, and the send / attach actions. Ported from
@@ -37,6 +39,27 @@ class ComposerViewModel(
 
     private val _sendError = MutableStateFlow<String?>(null)
     val sendError: StateFlow<String?> = _sendError.asStateFlow()
+
+    /// Live state of an in-flight attachment upload, or null when none. On a
+    /// slow uplink a multi-MB screenshot takes long enough that a bare spinner
+    /// reads as "frozen" — the composer renders this as a labelled progress
+    /// bar ("Uploading photo 1 of 2…") above the input.
+    data class UploadProgress(
+        val filename: String,
+        /// 1-based position within this send's batch.
+        val index: Int,
+        val count: Int,
+        /// Uploaded fraction of the current attachment (0…1).
+        val fraction: Double,
+    ) {
+        /// Display label — batch position when sending several, filename when
+        /// sending one.
+        val label: String
+            get() = if (count > 1) "Uploading $index of $count…" else "Uploading $filename…"
+    }
+
+    private val _uploadProgress = MutableStateFlow<UploadProgress?>(null)
+    val uploadProgress: StateFlow<UploadProgress?> = _uploadProgress.asStateFlow()
 
     /// Attachments picked/pasted/dropped but not yet sent, in add order. Order is
     /// load-bearing: the caption rides on the first one.
@@ -256,26 +279,47 @@ class ComposerViewModel(
     /// Stops at the first failure instead of pressing on.
     private suspend fun sendAttachments(attachments: List<StagedAttachment>, caption: String) {
         var captionDelivered = false
-        attachments.forEachIndexed { index, attachment ->
-            val itemCaption = if (index == 0 && caption.isNotEmpty()) caption else null
-            try {
-                val data = attachment.file.readBytes()
-                if (attachment.isImage) {
-                    timeline.sendImage(data, attachment.filename, attachment.mimeType, itemCaption)
-                } else {
-                    timeline.sendFile(data, attachment.filename, attachment.mimeType, itemCaption)
-                }
-            } catch (cancel: CancellationException) {
-                throw cancel
-            } catch (error: Throwable) {
-                throw AttachmentSendFailure(
-                    underlying = error,
-                    unsent = attachments.subList(index, attachments.size).toList(),
-                    captionDelivered = captionDelivered,
+        try {
+            attachments.forEachIndexed { index, attachment ->
+                val itemCaption = if (index == 0 && caption.isNotEmpty()) caption else null
+                val batchIndex = index + 1
+                _uploadProgress.value = UploadProgress(
+                    filename = attachment.filename, index = batchIndex,
+                    count = attachments.size, fraction = 0.0,
                 )
+                // Fraction updates arrive on an OkHttp writer thread; drop
+                // stale ones that land after this attachment (or the whole
+                // batch) has moved on.
+                val onProgress: (Double) -> Unit = { fraction ->
+                    _uploadProgress.value = _uploadProgress.value
+                        ?.takeIf { it.index == batchIndex }
+                        ?.copy(fraction = fraction)
+                        ?: _uploadProgress.value
+                }
+                try {
+                    // Off-main file read: a multi-MB staged screenshot loaded
+                    // synchronously on the main dispatcher froze the composer
+                    // for visible fractions of a second.
+                    val data = withContext(Dispatchers.IO) { attachment.file.readBytes() }
+                    if (attachment.isImage) {
+                        timeline.sendImage(data, attachment.filename, attachment.mimeType, itemCaption, onProgress)
+                    } else {
+                        timeline.sendFile(data, attachment.filename, attachment.mimeType, itemCaption, onProgress)
+                    }
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (error: Throwable) {
+                    throw AttachmentSendFailure(
+                        underlying = error,
+                        unsent = attachments.subList(index, attachments.size).toList(),
+                        captionDelivered = captionDelivered,
+                    )
+                }
+                attachment.deleteStagedCopy()
+                if (itemCaption != null) captionDelivered = true
             }
-            attachment.deleteStagedCopy()
-            if (itemCaption != null) captionDelivered = true
+        } finally {
+            _uploadProgress.value = null
         }
     }
 

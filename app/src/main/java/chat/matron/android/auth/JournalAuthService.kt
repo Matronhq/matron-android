@@ -63,7 +63,9 @@ class JournalAuthService(
         } catch (e: JournalApiError.RateLimited) {
             throw AuthError.Unexpected("Too many attempts — try again in a minute")
         } catch (e: JournalApiError) {
-            throw AuthError.Unexpected(e.toString())
+            // The human `message`, never `toString()` — the raw form leaks
+            // class internals like "JournalApiError$Http" into the sign-in form.
+            throw AuthError.Unexpected(e.message ?: "Couldn't reach the server.")
         }
     }
 
