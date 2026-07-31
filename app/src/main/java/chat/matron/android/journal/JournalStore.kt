@@ -175,6 +175,17 @@ class JournalStore(
     suspend fun insertHistory(events: List<JournalEvent>) {
         db.withTransaction {
             for (e in events) eventDao.insertIgnore(EventEntity.from(e))
+            // A post-snapshot refill can contain the frames that confirm
+            // pre-wipe outbox sends: applyColdSnapshot jumps the cursor past
+            // them, so applyJournal will never see them again and the rows
+            // would re-flush (idem-dedup'd, so invisibly) on every reconnect
+            // forever (bugbot "Post-snapshot outbox never confirms"). Run the
+            // same confirmation-delete here, timestamp-guarded so genuinely
+            // old history can't eat a fresh queued send.
+            for (e in events) {
+                if (e.sender != ownSender || e.type != JournalEventType.TEXT) continue
+                e.body()?.let { deleteFirstMatchingInTransaction(e.convoID, it, journaledAtMs = e.ts.toEpochMilli()) }
+            }
             // Paginated rows can include unread messages (e.g. the refill after
             // a snapshot_required wipe). Live applyJournal counts unread
             // incrementally; recount here so the list doesn't under-report.
@@ -301,8 +312,18 @@ class JournalStore(
     suspend fun outboxDeleteFirstMatching(convoID: String, body: String): String? =
         db.withTransaction { deleteFirstMatchingInTransaction(convoID, body) }
 
-    private suspend fun deleteFirstMatchingInTransaction(convoID: String, body: String): String? {
+    /// [journaledAtMs] (the confirming event's server timestamp), when given,
+    /// restricts candidates to rows created at or before it: a history event
+    /// can only confirm a send that already existed when the server journaled
+    /// it, so an OLD identical message replayed by pagination can't delete a
+    /// fresh queued send.
+    private suspend fun deleteFirstMatchingInTransaction(
+        convoID: String,
+        body: String,
+        journaledAtMs: Long? = null,
+    ): String? {
         val candidates = outboxDao.matching(convoID, body)
+            .filter { journaledAtMs == null || it.createdAt <= journaledAtMs }
         val row = candidates.firstOrNull { it.state == OutboxEntity.STATE_QUEUED }
             ?: candidates.firstOrNull()
             ?: return null

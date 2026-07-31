@@ -163,6 +163,37 @@ class JournalStoreOutboxTest {
     }
 
     @Test
+    fun insertHistoryConfirmsPostSnapshotOutboxRow() = runBlocking {
+        // After a snapshot_required wipe the cursor jumps past the confirming
+        // frames — the history refill must confirm attempted rows instead.
+        val store = makeStore()
+        store.outboxInsert("A", "c1", "hello", now = 1000)
+        store.outboxMarkAttempt("A")
+        store.insertHistory(listOf(ownText(2, "hello"))) // ts = 2000, after the row
+        assertTrue(store.outboxRows("c1").isEmpty())
+    }
+
+    @Test
+    fun oldHistoryEventDoesNotConfirmFreshSend() = runBlocking {
+        // An identical body sent LONG AGO replayed by pagination must not eat
+        // a fresh queued send: the confirming event can't predate its row.
+        val store = makeStore()
+        store.outboxInsert("A", "c1", "hello", now = 5000)
+        store.outboxMarkAttempt("A")
+        store.insertHistory(listOf(ownText(1, "hello"))) // ts = 1000, before the row
+        assertEquals(listOf("A"), store.outboxRows("c1").map { it.localID })
+    }
+
+    @Test
+    fun insertHistoryFromOtherSenderKeepsOutboxRow() = runBlocking {
+        val store = makeStore()
+        store.outboxInsert("A", "c1", "hello", now = 1000)
+        store.outboxMarkAttempt("A")
+        store.insertHistory(listOf(ownText(2, "hello", sender = "agent:a")))
+        assertEquals(listOf("A"), store.outboxRows("c1").map { it.localID })
+    }
+
+    @Test
     fun applyJournalFromOtherSenderKeepsOutboxRow() = runBlocking {
         val store = makeStore()
         store.outboxInsert("A", "c1", "hello")
