@@ -99,75 +99,97 @@ class JournalStore(
     /// and returns `true`.
     suspend fun applyJournal(event: JournalEvent): Boolean {
         if (failApplyForTesting?.invoke(event.seq) == true) throw JournalStoreWriteException()
+        return db.withTransaction { applyOneInTransaction(event) }
+    }
+
+    /// Applies a reconnect-replay batch inside ONE transaction (port of
+    /// matron-apple #85): a catch-up burst previously committed — and
+    /// re-triggered every Room observer — once per frame, making history
+    /// load O(backlog) transactions. Returns the events actually applied
+    /// (duplicates with `seq <= cursor` are skipped, same as [applyJournal])
+    /// so the caller can index exactly those for search. A write failure
+    /// mid-batch rolls the WHOLE batch back, leaving the cursor untouched —
+    /// the same reconnect-from-cursor recovery shape as the per-frame path.
+    suspend fun applyJournalBatch(events: List<JournalEvent>): List<JournalEvent> {
+        if (events.isEmpty()) return emptyList()
         return db.withTransaction {
-            val current = metaDao.value(CURSOR_KEY)?.toLongOrNull() ?: 0
-            if (event.seq <= current) return@withTransaction false
-            eventDao.insertReplace(EventEntity.from(event))
-
-            var convo = conversationDao.byId(event.convoID) ?: ConversationEntity(
-                id = event.convoID, title = "", sessionState = SessionState.RUNNING, lastSeq = 0,
-                snippet = "", createdAt = event.ts.toEpochMilli(), lastActivityTS = null,
-                muted = false, hidden = false, readUpToSeq = 0, unreadCount = 0, parentConvoID = null,
-            )
-
-            convo = convo.copy(lastSeq = max(convo.lastSeq, event.seq))
-            // Only real message traffic counts as "activity" for the chat
-            // list's timestamp; bookkeeping frames (read_marker, session_status,
-            // convo_meta) must not fake aliveness. lastSeq still tracks every
-            // frame (mirrors the server's last_seq for snapshot ordering).
-            if (event.type in JournalEventType.MESSAGE_TYPES) {
-                convo = convo.copy(lastActivityTS = event.ts.toEpochMilli())
+            events.filter { event ->
+                if (failApplyForTesting?.invoke(event.seq) == true) throw JournalStoreWriteException()
+                applyOneInTransaction(event)
             }
-
-            val payload = event.payload
-            when {
-                event.type == JournalEventType.CONVO_META -> {
-                    payload.stringOrNull("title")?.takeIf { it.isNotEmpty() }?.let {
-                        convo = convo.copy(title = it)
-                    }
-                    // Learn the parent linkage once; immutable, never cleared by
-                    // a later meta that omits it.
-                    if (convo.parentConvoID == null) {
-                        payload.stringOrNull("parent_convo_id")?.takeIf { it.isNotEmpty() }?.let {
-                            convo = convo.copy(parentConvoID = it)
-                        }
-                    }
-                }
-                event.type == JournalEventType.SESSION_STATUS -> {
-                    payload.stringOrNull("state")?.let { convo = convo.copy(sessionState = it) }
-                }
-                event.type == JournalEventType.READ_MARKER -> {
-                    // All read_markers are the user's own (other devices included).
-                    val upTo = payload.longOrNull("up_to_seq") ?: 0
-                    val newRead = max(convo.readUpToSeq, upTo)
-                    convo = convo.copy(
-                        readUpToSeq = newRead,
-                        unreadCount = eventDao.countUnread(
-                            convo.id, newRead, JournalEventType.MESSAGE_TYPES, ownSender,
-                        ),
-                    )
-                }
-                event.type in JournalEventType.MESSAGE_TYPES -> {
-                    convo = convo.copy(snippet = snippet(event))
-                    if (event.sender != ownSender && event.seq > convo.readUpToSeq) {
-                        convo = convo.copy(unreadCount = convo.unreadCount + 1)
-                    }
-                }
-            }
-            conversationDao.upsert(convo)
-            metaDao.upsert(MetaEntity(CURSOR_KEY, event.seq.toString()))
-            // Delivery confirmation for the offline outbox, in the SAME
-            // transaction as the row insert: an own-text frame is a queued send
-            // landing (body-match is the only signal — the server strips
-            // idem_key from broadcast rows). Doing it here rather than as a
-            // follow-up write means the confirming row and its outbox delete
-            // commit or fail together, so a relaunch can never show a durable
-            // duplicate echo beside the delivered message.
-            if (event.sender == ownSender && event.type == JournalEventType.TEXT) {
-                event.body()?.let { deleteFirstMatchingInTransaction(event.convoID, it) }
-            }
-            true
         }
+    }
+
+    /// Per-event apply body shared by [applyJournal] and [applyJournalBatch].
+    /// MUST be called inside an open transaction.
+    private suspend fun applyOneInTransaction(event: JournalEvent): Boolean {
+        val current = metaDao.value(CURSOR_KEY)?.toLongOrNull() ?: 0
+        if (event.seq <= current) return false
+        eventDao.insertReplace(EventEntity.from(event))
+
+        var convo = conversationDao.byId(event.convoID) ?: ConversationEntity(
+            id = event.convoID, title = "", sessionState = SessionState.RUNNING, lastSeq = 0,
+            snippet = "", createdAt = event.ts.toEpochMilli(), lastActivityTS = null,
+            muted = false, hidden = false, readUpToSeq = 0, unreadCount = 0, parentConvoID = null,
+        )
+
+        convo = convo.copy(lastSeq = max(convo.lastSeq, event.seq))
+        // Only real message traffic counts as "activity" for the chat
+        // list's timestamp; bookkeeping frames (read_marker, session_status,
+        // convo_meta) must not fake aliveness. lastSeq still tracks every
+        // frame (mirrors the server's last_seq for snapshot ordering).
+        if (event.type in JournalEventType.MESSAGE_TYPES) {
+            convo = convo.copy(lastActivityTS = event.ts.toEpochMilli())
+        }
+
+        val payload = event.payload
+        when {
+            event.type == JournalEventType.CONVO_META -> {
+                payload.stringOrNull("title")?.takeIf { it.isNotEmpty() }?.let {
+                    convo = convo.copy(title = it)
+                }
+                // Learn the parent linkage once; immutable, never cleared by
+                // a later meta that omits it.
+                if (convo.parentConvoID == null) {
+                    payload.stringOrNull("parent_convo_id")?.takeIf { it.isNotEmpty() }?.let {
+                        convo = convo.copy(parentConvoID = it)
+                    }
+                }
+            }
+            event.type == JournalEventType.SESSION_STATUS -> {
+                payload.stringOrNull("state")?.let { convo = convo.copy(sessionState = it) }
+            }
+            event.type == JournalEventType.READ_MARKER -> {
+                // All read_markers are the user's own (other devices included).
+                val upTo = payload.longOrNull("up_to_seq") ?: 0
+                val newRead = max(convo.readUpToSeq, upTo)
+                convo = convo.copy(
+                    readUpToSeq = newRead,
+                    unreadCount = eventDao.countUnread(
+                        convo.id, newRead, JournalEventType.MESSAGE_TYPES, ownSender,
+                    ),
+                )
+            }
+            event.type in JournalEventType.MESSAGE_TYPES -> {
+                convo = convo.copy(snippet = snippet(event))
+                if (event.sender != ownSender && event.seq > convo.readUpToSeq) {
+                    convo = convo.copy(unreadCount = convo.unreadCount + 1)
+                }
+            }
+        }
+        conversationDao.upsert(convo)
+        metaDao.upsert(MetaEntity(CURSOR_KEY, event.seq.toString()))
+        // Delivery confirmation for the offline outbox, in the SAME
+        // transaction as the row insert: an own-text frame is a queued send
+        // landing (body-match is the only signal — the server strips
+        // idem_key from broadcast rows). Doing it here rather than as a
+        // follow-up write means the confirming row and its outbox delete
+        // commit or fail together, so a relaunch can never show a durable
+        // duplicate echo beside the delivered message.
+        if (event.sender == ownSender && event.type == JournalEventType.TEXT) {
+            event.body()?.let { deleteFirstMatchingInTransaction(event.convoID, it) }
+        }
+        return true
     }
 
     // MARK: History

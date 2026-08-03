@@ -519,4 +519,71 @@ class JournalStoreTest {
             cancelAndIgnoreRemainingEvents()
         }
     }
+
+    // MARK: applyJournalBatch (matron-apple #85 port)
+
+    @Test
+    fun batchAppliesAllAndAdvancesCursor() = runBlocking {
+        val store = makeStore()
+        val applied = store.applyJournalBatch((1L..5L).map { ev(it) })
+        assertEquals(listOf(1L, 2L, 3L, 4L, 5L), applied.map { it.seq })
+        assertEquals(5L, store.cursor())
+        assertEquals(5, store.events("c1").size)
+    }
+
+    @Test
+    fun batchSkipsDuplicatesAndReturnsOnlyApplied() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(ev(1))
+        store.applyJournal(ev(2))
+        val applied = store.applyJournalBatch(listOf(ev(1), ev(2), ev(3), ev(4)))
+        assertEquals(listOf(3L, 4L), applied.map { it.seq })
+        assertEquals(4L, store.cursor())
+        assertEquals(4, store.events("c1").size)
+    }
+
+    @Test
+    fun batchWriteFailureRollsBackTheWholeBatch() = runBlocking {
+        val store = makeStore()
+        store.failApplyForTesting = { it == 3L }
+        val thrown = runCatching { store.applyJournalBatch(listOf(ev(1), ev(2), ev(3))) }.exceptionOrNull()
+        assertTrue(thrown is JournalStoreWriteException)
+        // The cursor-only-advances-with-the-write invariant must hold for the
+        // whole batch: frames 1-2 committed nothing, so a reconnect replays
+        // all three.
+        assertEquals(0L, store.cursor())
+        assertTrue(store.events("c1").isEmpty())
+    }
+
+    @Test
+    fun batchConfirmsAttemptedOutboxSendsInSameTransaction() = runBlocking {
+        val store = makeStore()
+        store.outboxInsert("local-1", "c1", "queued body", now = 1)
+        store.outboxMarkAttempt("local-1")
+        val applied = store.applyJournalBatch(
+            listOf(ev(1, sender = "user:dan", payload = body("queued body"))),
+        )
+        assertEquals(1, applied.size)
+        assertTrue(store.outboxRows("c1").isEmpty())
+    }
+
+    @Test
+    fun batchUnreadCountsMatchPerFrameApplication() = runBlocking {
+        val batched = makeStore()
+        val perFrame = makeStore()
+        val events = (1L..6L).map { ev(it) }
+        batched.applyJournalBatch(events)
+        events.forEach { perFrame.applyJournal(it) }
+        assertEquals(
+            perFrame.conversations(now = 10_000).single().unreadCount,
+            batched.conversations(now = 10_000).single().unreadCount,
+        )
+    }
+
+    @Test
+    fun emptyBatchIsANoOp() = runBlocking {
+        val store = makeStore()
+        assertTrue(store.applyJournalBatch(emptyList()).isEmpty())
+        assertEquals(0L, store.cursor())
+    }
 }

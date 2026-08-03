@@ -16,6 +16,7 @@ import chat.matron.android.models.TimelineSendState
 /// without changing every caller.
 fun syncBannerStateFrom(state: SyncConnectionState): SyncBannerState = when (state) {
     is SyncConnectionState.Connecting -> SyncBannerState.Connecting
+    is SyncConnectionState.CatchingUp -> SyncBannerState.CatchingUp
     is SyncConnectionState.Running -> SyncBannerState.Running
     is SyncConnectionState.Offline -> SyncBannerState.Offline(state.reason)
 }

@@ -9,6 +9,12 @@ package chat.matron.android.models
 /// reconnect is in flight.
 sealed interface SyncConnectionState {
     data object Connecting : SyncConnectionState
+
+    /// Socket is up and a reconnect backlog is replaying into the mirror.
+    /// Distinct from [Connecting] so hosts can say "Loading messages…" —
+    /// progress, not a stalled connection (port of matron-apple #84).
+    data object CatchingUp : SyncConnectionState
+
     data object Running : SyncConnectionState
     data class Offline(val reason: String?) : SyncConnectionState
 }

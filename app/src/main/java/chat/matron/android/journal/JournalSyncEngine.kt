@@ -34,6 +34,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.JsonElement
 
+/// How many reconnect-replay journal frames land per store transaction. The
+/// value matron-apple #85 settled on: big enough that a 10k-frame backlog is
+/// ~40 commits instead of 10k, small enough that the first screenful paints
+/// without waiting for the whole backlog.
+private const val REPLAY_BATCH_SIZE = 250
+
 /// Lifecycle-level errors surfaced by the engine. The messages surface
 /// verbatim in UI banners — without them, an offline send rendered as the
 /// class's toString gibberish (Dan's 2026-07-30 screenshot on iOS).
@@ -690,16 +696,85 @@ class JournalSyncEngine(
                     mediaSendsThisConnection.clear()
                 }
                 scope.launch { flushOutbox() }
-                if (store.cursor() >= headSeq) setState(SyncConnectionState.Running)
+                // Behind the head: the backlog replay is about to stream in.
+                // Surface CatchingUp (hosts render "Loading messages…") and
+                // batch the replay below instead of committing per frame.
+                var caughtUp = store.cursor() >= headSeq
+                if (caughtUp) setState(SyncConnectionState.Running)
+                else setState(SyncConnectionState.CatchingUp)
 
                 val watchdog = launchWatchdog(connection)
+                // Reconnect-replay buffer (port of matron-apple #85). During
+                // catch-up each journal frame previously got its own Room
+                // transaction — and each commit re-triggered every observer —
+                // so history load was O(backlog) commits + requeries. Journal
+                // frames buffer here and land REPLAY_BATCH_SIZE at a time in
+                // one transaction. Live frames (after caughtUp) keep the
+                // per-frame path: latency matters more than throughput there.
+                val replayBuffer = mutableListOf<JournalEvent>()
+                // Set when a flush ITSELF failed (store write error): the
+                // teardown salvage below must not immediately retry a batch
+                // the store just refused — reconnect-from-cursor owns that.
+                var replayFlushFailed = false
+                suspend fun drainReplay(connection: JournalConnection, appliedSinceAck: Long): Long {
+                    val next = try {
+                        flushReplay(replayBuffer, connection, appliedSinceAck)
+                    } catch (e: Throwable) {
+                        replayFlushFailed = true
+                        throw e
+                    }
+                    if (!caughtUp && store.cursor() >= headSeq) {
+                        caughtUp = true
+                        setState(SyncConnectionState.Running)
+                    }
+                    return next
+                }
+                var appliedSinceAck = 0L
                 try {
-                    var appliedSinceAck = 0L
                     connection.frames().collect { frame ->
-                        appliedSinceAck = handleFrame(frame, connection, headSeq, appliedSinceAck)
+                        if (!caughtUp && frame is ServerFrame.Journal) {
+                            replayBuffer += frame.event
+                            // The replay is contiguous from our cursor to (at
+                            // least) headSeq, so a frame at/past headSeq is
+                            // the end of the backlog — flush without waiting
+                            // for a full batch.
+                            if (replayBuffer.size >= REPLAY_BATCH_SIZE || frame.event.seq >= headSeq) {
+                                appliedSinceAck = drainReplay(connection, appliedSinceAck)
+                            }
+                        } else {
+                            // Any interleaved non-journal frame flushes first
+                            // so downstream consumers never observe it ahead
+                            // of journal rows that preceded it on the wire.
+                            if (replayBuffer.isNotEmpty()) {
+                                appliedSinceAck = drainReplay(connection, appliedSinceAck)
+                            }
+                            appliedSinceAck = handleFrame(frame, connection, headSeq, appliedSinceAck)
+                        }
+                    }
+                    // Socket ended with a partial batch pending: land it now.
+                    if (replayBuffer.isNotEmpty()) {
+                        appliedSinceAck = drainReplay(connection, appliedSinceAck)
                     }
                 } catch (e: SnapshotRequiredExit) {
-                    // Mirror already wiped in handleFrame; fall through to reconnect.
+                    // Mirror already wiped in handleFrame; fall through to
+                    // reconnect. The buffer is deliberately dropped — its
+                    // frames predate the wipe.
+                } catch (e: CancellationException) {
+                    // endSync — dropping the buffer is safe: the cursor never
+                    // advanced past those frames, so they replay next start.
+                    throw e
+                } catch (e: Throwable) {
+                    // Socket died mid-replay: land what already arrived
+                    // (matron-apple #85's teardown-flush lesson). Without
+                    // this, a connection that never survives long enough to
+                    // hit a flush trigger makes zero cursor progress and the
+                    // replay restarts from scratch every reconnect — a
+                    // livelock on flaky links. Skipped when the flush itself
+                    // was what failed: reconnect-from-cursor retries that.
+                    if (!replayFlushFailed && replayBuffer.isNotEmpty()) {
+                        runCatching { appliedSinceAck = drainReplay(connection, appliedSinceAck) }
+                    }
+                    throw e
                 } finally {
                     watchdog.cancel()
                 }
@@ -727,6 +802,38 @@ class JournalSyncEngine(
             setState(SyncConnectionState.Offline(null))
             backoff()
         }
+    }
+
+    /// Lands a buffered replay batch: outbox media confirms first (same order
+    /// as the per-frame path), then one [JournalStore.applyJournalBatch]
+    /// transaction, then search indexing for exactly the applied events.
+    /// `publishNewConversation` is deliberately absent — the per-frame path
+    /// only publishes while `isRunningState()`, which is never true mid-replay,
+    /// so the batch path matches by construction. Clears [buffer] on success;
+    /// a thrown store write leaves the cursor untouched and propagates to the
+    /// reconnect path, identical to the per-frame failure shape.
+    private suspend fun flushReplay(
+        buffer: MutableList<JournalEvent>,
+        connection: JournalConnection,
+        appliedSinceAck: Long,
+    ): Long {
+        if (buffer.isEmpty()) return appliedSinceAck
+        for (event in buffer) {
+            if (event.sender == ownSender &&
+                (event.type == JournalEventType.FILE || event.type == JournalEventType.IMAGE)
+            ) {
+                event.payload.stringOrNull("blob_ref")?.let { confirmMediaSend(it) }
+            }
+        }
+        val applied = store.applyJournalBatch(buffer.toList())
+        buffer.clear()
+        applied.forEach { indexForSearch(it) }
+        var count = appliedSinceAck + applied.size
+        if (count >= 50) {
+            runCatching { connection.send(ClientOp.Ack(store.cursor())) }
+            count = 0
+        }
+        return count
     }
 
     private suspend fun handleFrame(
