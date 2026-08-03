@@ -108,12 +108,19 @@ class AppDependencies(
     val search: SearchService?
 
     /**
-     * Per-screen view-model dependencies. Answered-prompt persistence and
-     * recent-folder completion were `UserDefaults` singletons on iOS; here they
-     * ride one EncryptedSharedPreferences-free plain prefs store, injected into
-     * the VMs the UI stage constructs.
+     * The app's plain (unencrypted) preference store — the iOS originals'
+     * `UserDefaults.standard`. Holds nothing secret: answered-prompt ids,
+     * recent start folders, and the app-lock settings, all of which are
+     * device-local UI state rather than credentials (those live in the
+     * EncryptedSharedPreferences-backed session store).
      */
-    val answeredPromptStore: KeyValueStore
+    val preferences: KeyValueStore
+
+    /**
+     * Recent start-folder completion, a `UserDefaults` singleton on iOS; here it
+     * rides the same [preferences] store, injected into the VMs the UI stage
+     * constructs.
+     */
     val recentStartFolders: RecentStartFolders
 
     /** Where the composer stages picked/pasted attachment copies. */
@@ -160,8 +167,8 @@ class AppDependencies(
         }.onFailure { MatronDebug.breadcrumb("AppDependencies: search DB open failed: $it") }.getOrNull()
 
         val prefs = context.getSharedPreferences("matron-kv", Context.MODE_PRIVATE)
-        answeredPromptStore = SharedPreferencesKeyValueStore(prefs)
-        recentStartFolders = RecentStartFolders(answeredPromptStore)
+        preferences = SharedPreferencesKeyValueStore(prefs)
+        recentStartFolders = RecentStartFolders(preferences)
 
         stagingDirectory = File(context.cacheDir, "attachments").apply { mkdirs() }
     }

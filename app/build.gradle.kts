@@ -128,6 +128,15 @@ dependencies {
     implementation(libs.room.ktx)
     ksp(libs.room.compiler)
     implementation(libs.androidx.security.crypto)
+    // App lock (Settings → Privacy). Brings androidx.fragment in, which is why
+    // MainActivity extends FragmentActivity — BiometricPrompt requires one.
+    implementation(libs.androidx.biometric)
+    // Already on the classpath transitively, but declared because Theme.Matron
+    // now inherits from Theme.AppCompat: below API 28 androidx.biometric draws
+    // its own fingerprint dialog with androidx.appcompat's AlertDialog, which
+    // throws outside an AppCompat theme. Nothing else in this Compose-only app
+    // uses appcompat.
+    implementation(libs.androidx.appcompat)
     implementation(libs.androidx.work.runtime)
 
     implementation(platform(libs.compose.bom))
