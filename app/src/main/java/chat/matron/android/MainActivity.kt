@@ -1,7 +1,6 @@
 package chat.matron.android
 
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
@@ -21,6 +20,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -30,6 +30,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import chat.matron.android.designsystem.AppLockShield
 import chat.matron.android.designsystem.MatronAppearance
 import chat.matron.android.designsystem.MatronTheme
 import chat.matron.android.designsystem.SyncBannerState
@@ -50,6 +51,8 @@ import chat.matron.android.models.MatronDebug
 import chat.matron.android.sync.OutboxCatchUpWorker
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.UserSession
+import chat.matron.android.platform.AndroidBiometricAuthenticator
+import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.ChatListViewModel
 import chat.matron.android.viewmodels.LinkSignInViewModel
 import chat.matron.android.viewmodels.RendezvousSignInViewModel
@@ -62,8 +65,21 @@ import kotlinx.coroutines.launch
  * session, switch signed-out → [SignInScreen] vs signed-in → the [NavHost]. Push
  * (APNs/FCM) and its notification-tap deep-link are NOT wired — Android push is
  * dormant; those iOS `.task`s are dropped (see the class docs).
+ *
+ * Extends [FragmentActivity] rather than `ComponentActivity` purely so
+ * `BiometricPrompt` has a host for its internal fragment; `FragmentActivity` IS a
+ * `ComponentActivity`, so `enableEdgeToEdge`/`setContent` are unaffected.
  */
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
+
+    /**
+     * App lock, activity-scoped because its authenticator needs a
+     * [FragmentActivity]. That scoping also gives the iOS "always lock on cold
+     * launch" rule for free: a recreated activity builds a fresh controller,
+     * which re-locks. Erring towards locking is the right direction for a lock.
+     */
+    private lateinit var appLock: AppLockController
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Android 15 (targetSdk 35) enforces edge-to-edge, which disables the
@@ -71,18 +87,37 @@ class MainActivity : ComponentActivity() {
         // behaviour uniform so screens can rely on imePadding() for the IME.
         enableEdgeToEdge()
         val deps = (application as MatronApplication).dependencies
-        setContent { MatronApp(deps) }
+        appLock = AppLockController(
+            auth = AndroidBiometricAuthenticator(this),
+            store = deps.preferences,
+        )
+        setContent { MatronApp(deps, appLock) }
+    }
+
+    // Activity start/stop rather than ProcessLifecycleOwner: this is a
+    // single-activity app, so the two coincide, and ON_START/ON_STOP need no
+    // extra dependency. The controller's own guards absorb the churn from the
+    // credential prompt, which runs in a system activity that stops ours.
+    override fun onStart() {
+        super.onStart()
+        appLock.noteForegrounded()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        appLock.noteBackgrounded()
     }
 }
 
 @Composable
-private fun MatronApp(deps: AppDependencies) {
+private fun MatronApp(deps: AppDependencies, appLock: AppLockController) {
     val context = deps.context
     val prefs = remember { context.getSharedPreferences("matron-kv", android.content.Context.MODE_PRIVATE) }
     var appearance by remember {
         mutableStateOf(MatronAppearance.fromStored(prefs.getString(MatronAppearance.STORAGE_KEY, null)))
     }
     val scope = rememberCoroutineScope()
+    val isLocked by appLock.isLocked.collectAsStateWithLifecycle()
 
     MatronTheme(appearance = appearance) {
         Surface(modifier = Modifier.fillMaxSize()) {
@@ -94,6 +129,22 @@ private fun MatronApp(deps: AppDependencies) {
                     .onFailure { MatronDebug.breadcrumb("restoreSession threw — starting signed out: $it") }
                     .getOrNull()
                 bootstrapped = true
+            }
+
+            // The shield REPLACES the app rather than covering it. Sheets and
+            // dialogs render in their own platform windows, so an overlay drawn
+            // "on top" would leave an open one visible; not composing content at
+            // all leaves nothing to escape through, and a cold launch that
+            // starts locked never shows a frame of content. See AppLockShield.
+            if (isLocked) {
+                val authenticating by appLock.isAuthenticating.collectAsStateWithLifecycle()
+                val error by appLock.authError.collectAsStateWithLifecycle()
+                AppLockShield(
+                    isAuthenticating = authenticating,
+                    errorMessage = error,
+                    onUnlock = { scope.launch { appLock.unlock() } },
+                )
+                return@Surface
             }
 
             when {
@@ -128,6 +179,9 @@ private fun MatronApp(deps: AppDependencies) {
                             scope.launch {
                                 deps.awaitPendingTeardown()
                                 deps.wipeLocalDataForFreshLogin()
+                                // Signing in interactively IS an authentication;
+                                // the new session must not open behind a shield.
+                                appLock.noteSignedIn()
                                 session = s
                             }
                         },
@@ -137,14 +191,24 @@ private fun MatronApp(deps: AppDependencies) {
                     deps = deps,
                     session = session!!,
                     appearance = appearance,
+                    appLock = appLock,
                     onAppearanceChange = { next ->
                         appearance = next
                         prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
                     },
+                    // Refused while locked: signing out clears the lock, so it
+                    // must not be reachable from behind the shield. Unreachable
+                    // in practice (the menu isn't composed while locked) — the
+                    // guard belongs with the lock state regardless.
                     onSignOut = {
-                        OutboxCatchUpWorker.cancel(context)
-                        deps.signOut()
-                        session = null
+                        appLock.signOutIfUnlocked {
+                            OutboxCatchUpWorker.cancel(context)
+                            deps.signOut()
+                            // Per-account state, cleared like the rest: the next
+                            // account starts opted out.
+                            appLock.resetForSignOut()
+                            session = null
+                        }
                     },
                 )
             }
@@ -158,6 +222,7 @@ private fun SignedInApp(
     deps: AppDependencies,
     session: UserSession,
     appearance: MatronAppearance,
+    appLock: AppLockController,
     onAppearanceChange: (MatronAppearance) -> Unit,
     onSignOut: () -> Unit,
 ) {
@@ -267,6 +332,7 @@ private fun SignedInApp(
                 onAppearanceChange = onAppearanceChange,
                 onManageDevices = { nav.navigate("devices") },
                 onLinkDevice = { nav.navigate("link-device") },
+                appLock = appLock,
                 onBack = { nav.popBackStack() },
             )
         }

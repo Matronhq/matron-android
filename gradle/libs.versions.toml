@@ -12,6 +12,8 @@ navigationCompose = "2.8.5"
 lifecycle = "2.8.7"
 coreKtx = "1.15.0"
 securityCrypto = "1.1.0-alpha06"
+biometric = "1.1.0"
+appcompat = "1.6.1"
 coil = "2.7.0"
 junit = "4.13.2"
 robolectric = "4.16.1"
@@ -41,6 +43,8 @@ androidx-navigation-compose = { module = "androidx.navigation:navigation-compose
 androidx-lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycle" }
 androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycle" }
 androidx-security-crypto = { module = "androidx.security:security-crypto", version.ref = "securityCrypto" }
+androidx-biometric = { module = "androidx.biometric:biometric", version.ref = "biometric" }
+androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
 androidx-work-runtime = { module = "androidx.work:work-runtime-ktx", version.ref = "workManager" }
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
 compose-ui = { module = "androidx.compose.ui:ui" }

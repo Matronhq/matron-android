@@ -11,27 +11,37 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.AppearancePicker
 import chat.matron.android.designsystem.MatronAppearance
 import chat.matron.android.models.UserSession
+import chat.matron.android.viewmodels.AppLockController
+import chat.matron.android.viewmodels.AppLockTimeout
 import chat.matron.android.viewmodels.DevicesProviding
+import kotlinx.coroutines.launch
 
 /**
  * Settings → Device. Ports Features/Settings/DeviceSettingsView.swift: a
  * read-only account summary (userID, deviceID, homeserver host), a Manage
- * Devices link, and the appearance picker. Verification/recovery-key sections
- * were Matrix-SDK-only and are absent from the journal stack.
+ * Devices link, the appearance picker, and the Privacy section hosting the app
+ * lock. Verification/recovery-key sections were Matrix-SDK-only and are absent
+ * from the journal stack.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -42,6 +52,9 @@ fun DeviceSettingsScreen(
     onAppearanceChange: (MatronAppearance) -> Unit,
     onManageDevices: () -> Unit,
     onLinkDevice: (() -> Unit)? = null,
+    /// `null` in hosts that have no lock (and in previews); the Privacy section
+    /// then doesn't render at all.
+    appLock: AppLockController? = null,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -96,6 +109,91 @@ fun DeviceSettingsScreen(
             SettingsSection("Appearance") {
                 AppearancePicker(selected = appearance, onSelect = onAppearanceChange)
             }
+
+            if (appLock != null) AppLockSection(appLock)
+        }
+    }
+}
+
+/**
+ * Privacy → app lock. Renders only when the device can actually authenticate:
+ * offering a toggle that would immediately fail is worse than offering nothing,
+ * and it is the same rule the lock itself stands down on.
+ *
+ * The toggle writes through [AppLockController.setEnabled], which authenticates
+ * BEFORE enabling — so flipping it on raises the system prompt and the switch
+ * only moves once that succeeds. The local `switchOn` mirror exists so the
+ * switch tracks the controller rather than the user's optimistic tap.
+ */
+@Composable
+private fun AppLockSection(appLock: AppLockController) {
+    // Read once per composition: a settings screen is not on screen while the
+    // screen lock is being reconfigured, so re-probing on recomposition buys
+    // nothing over a stable read.
+    val methodName = remember(appLock) { appLock.methodName } ?: return
+
+    val enabled by appLock.isEnabled.collectAsStateWithLifecycle()
+    val timeout by appLock.timeout.collectAsStateWithLifecycle()
+    val authenticating by appLock.isAuthenticating.collectAsStateWithLifecycle()
+    val error by appLock.authError.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+
+    SettingsSection("Privacy") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Require unlock", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "Lock Matron with $methodName",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = enabled,
+                enabled = !authenticating,
+                onCheckedChange = { wanted -> scope.launch { appLock.setEnabled(wanted) } },
+            )
+        }
+
+        if (error != null) {
+            Text(
+                error!!,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+        }
+
+        if (enabled) {
+            Text(
+                "Lock",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier.padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AppLockTimeout.entries.forEach { option ->
+                    FilterChip(
+                        selected = option == timeout,
+                        onClick = { appLock.setTimeout(option) },
+                        label = { Text(option.shortTitle) },
+                    )
+                }
+            }
+            Text(
+                timeout.title.replaceFirstChar { it.lowercase() }
+                    .let { "Locks $it in the background." },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

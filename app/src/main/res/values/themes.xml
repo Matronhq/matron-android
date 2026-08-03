@@ -1,6 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Matron" parent="android:Theme.Material.NoActionBar">
+    <!--
+      The window theme only paints the launch background; every pixel after that
+      is Compose (see MatronTheme), so this stays deliberately bare.
+
+      The AppCompat parent is a requirement, not a preference: below API 28
+      androidx.biometric draws its OWN fingerprint dialog using androidx.appcompat's
+      AlertDialog, which throws "You need to use a Theme.AppCompat theme (or
+      descendant)" under a plain framework theme. minSdk is 26, so those devices are
+      in scope and the app lock would crash on its first unlock attempt there.
+      API 28+ delegates to the framework prompt and never touches this.
+    -->
+    <style name="Theme.Matron" parent="Theme.AppCompat.NoActionBar">
         <item name="android:windowBackground">@android:color/black</item>
     </style>
 </resources>
