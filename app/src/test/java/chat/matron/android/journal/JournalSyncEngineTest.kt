@@ -447,16 +447,23 @@ class JournalSyncEngineTest {
     }
 
     @Test
-    fun ackSentEveryFiftyAppliedFrames() = runBlocking {
+    fun ackSentOncePastFiftyAppliedFrames() = runBlocking {
+        // Replay frames land in batches, so the ≥50-applied ack fires at the
+        // batch boundary — for a 60-frame backlog that's one ack at cursor 60
+        // (pre-batching it was an exact-50 ack). The contract that matters is
+        // bounded un-acked progress, not the precise boundary.
         val socket = FakeWebSocketConnection()
         socket.serve(helloOK(60))
         for (seq in 1L..60L) socket.serve(journalLine(seq))
         val store = seededStore()
         val engine = makeEngine(store, FakeConnector(listOf(socket)))
         engine.beginSync()
-        waitUntil(timeoutMs = 5000) { store.cursor() >= 60 }
-        val acks = socket.sent.mapNotNull { parseJsonObjectOrNull(it) }.filter { it.stringOrNull("op") == "ack" }
-        assertTrue("expected an ack at the 50-applied-frames mark", acks.any { it.longOrNull("cursor") == 50L })
+        // Wait for the ACK itself, not the cursor: the cursor advances when
+        // the batch transaction commits, but the ack goes on the wire a beat
+        // later — gating on the cursor races the assertion on slow runners.
+        fun acks() = socket.sent.mapNotNull { parseJsonObjectOrNull(it) }.filter { it.stringOrNull("op") == "ack" }
+        waitUntil(timeoutMs = 5000) { acks().any { it.longOrNull("cursor") == 60L } }
+        assertTrue("expected an ack once ≥50 frames applied", acks().any { it.longOrNull("cursor") == 60L })
         engine.endSync()
     }
 
@@ -602,8 +609,13 @@ class JournalSyncEngineTest {
     fun storeWriteFailureReconnectsRatherThanWedging() = runBlocking {
         val socket1 = FakeWebSocketConnection()
         socket1.serve(helloOK(3)); socket1.serve(journalLine(1)); socket1.serve(journalLine(2)); socket1.serve(journalLine(3))
+        // The server replays from the cursor the client sends in its hello.
+        // A batched apply is all-or-nothing, so the failed first attempt
+        // leaves the cursor at 0 and the reconnect replays ALL THREE frames
+        // (pre-batching, frame 1 had committed alone and the replay started
+        // at 2).
         val socket2 = FakeWebSocketConnection()
-        socket2.serve(helloOK(3)); socket2.serve(journalLine(2)); socket2.serve(journalLine(3))
+        socket2.serve(helloOK(3)); socket2.serve(journalLine(1)); socket2.serve(journalLine(2)); socket2.serve(journalLine(3))
         val store = seededStore()
         var hasFailedOnce = false
         store.failApplyForTesting = { seq ->
@@ -852,6 +864,70 @@ class JournalSyncEngineTest {
         assertFalse(store.conversations().any { it.id == "c1" })
         assertTrue(store.conversations().any { it.id == "c9" })
         assertEquals(400L, store.cursor())
+        engine.endSync()
+    }
+
+    // MARK: Batched catch-up replay (matron-apple #84/#85 port)
+
+    @Test
+    fun largeReplayLandsFullyAcrossMultipleBatches() = runBlocking {
+        // 600 frames spans two full REPLAY_BATCH_SIZE batches plus a
+        // remainder whose flush is triggered by seq reaching headSeq.
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(600))
+        for (seq in 1L..600L) socket.serve(journalLine(seq))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+        waitUntil { store.cursor() >= 600 }
+        assertEquals(600L, store.cursor())
+        assertEquals(600, store.events("c1").size)
+        assertEquals(SyncConnectionState.Running, engine.stateStream.value)
+        engine.endSync()
+    }
+
+    @Test
+    fun backlogConnectSurfacesCatchingUpUntilCaughtUp() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(2))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        // Hello said head=2 but the replay hasn't arrived: the engine is
+        // catching up, not connecting — hosts render "Loading messages…".
+        waitUntil { engine.stateStream.value == SyncConnectionState.CatchingUp }
+        assertEquals(SyncConnectionState.CatchingUp, engine.stateStream.value)
+        socket.serve(journalLine(1))
+        socket.serve(journalLine(2))
+        engine.waitUntilReady()
+        assertEquals(SyncConnectionState.Running, engine.stateStream.value)
+        assertEquals(2L, store.cursor())
+        engine.endSync()
+    }
+
+    @Test
+    fun interleavedNonJournalFrameFlushesTheReplayBuffer() = runBlocking {
+        // Mid-replay ephemeral: the buffered journal frames must land BEFORE
+        // the ephemeral fans out, and must not sit unflushed waiting for a
+        // full batch.
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(4))
+        socket.serve(journalLine(1))
+        socket.serve(journalLine(2))
+        socket.serve("""{"kind":"ephemeral","convo_id":"c1","message_ref":"m1","replace_text":"working…"}""")
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        waitUntil { store.cursor() >= 2 }
+        // Frames 1-2 landed even though the backlog (head=4) isn't complete
+        // and the batch (250) is nowhere near full.
+        assertEquals(2L, store.cursor())
+        assertEquals(SyncConnectionState.CatchingUp, engine.stateStream.value)
+        socket.serve(journalLine(3))
+        socket.serve(journalLine(4))
+        engine.waitUntilReady()
+        assertEquals(4L, store.cursor())
         engine.endSync()
     }
 }

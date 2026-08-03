@@ -25,6 +25,11 @@ import androidx.compose.ui.unit.dp
 /// translate from `SyncConnectionState` at the boundary via [syncBannerStateFrom].
 sealed interface SyncBannerState {
     data object Connecting : SyncBannerState
+
+    /// Connected, replaying the missed-frame backlog. Renders as progress
+    /// ("Loading messages…"), not as a connection problem.
+    data object CatchingUp : SyncBannerState
+
     data object Running : SyncBannerState
     data class Offline(val reason: String?) : SyncBannerState
 }
@@ -41,7 +46,7 @@ fun ConnectionStatusBanner(
 ) {
     when (state) {
         is SyncBannerState.Running -> Unit
-        is SyncBannerState.Connecting -> Row(
+        is SyncBannerState.Connecting, is SyncBannerState.CatchingUp -> Row(
             modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceVariant)
@@ -51,7 +56,11 @@ fun ConnectionStatusBanner(
             CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
             Spacer(Modifier.width(8.dp))
             Text(
-                if (hasEverConnected) "Reconnecting…" else "Connecting…",
+                when {
+                    state is SyncBannerState.CatchingUp -> "Loading messages…"
+                    hasEverConnected -> "Reconnecting…"
+                    else -> "Connecting…"
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

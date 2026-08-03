@@ -165,7 +165,10 @@ class JournalTimelineService(
             if (row.state == OutboxEntity.STATE_FAILED) return TimelineSendState.Failed("Not delivered")
             when (syncState) {
                 is SyncConnectionState.Running -> TimelineSendState.Sending
-                is SyncConnectionState.Connecting ->
+                // CatchingUp is the same live-socket window as Connecting for
+                // send purposes: the connect-flush already ran, so attempted
+                // rows are on the wire.
+                is SyncConnectionState.Connecting, is SyncConnectionState.CatchingUp ->
                     if (row.attempts > 0) TimelineSendState.Sending else TimelineSendState.Queued
                 is SyncConnectionState.Offline -> TimelineSendState.Queued
             }

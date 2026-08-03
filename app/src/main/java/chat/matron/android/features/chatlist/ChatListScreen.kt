@@ -113,7 +113,12 @@ fun ChatListScreen(
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             when {
-                isLoading && groups.isEmpty() -> CenteredMessage("Connecting…", showSpinner = true)
+                isLoading && groups.isEmpty() -> CenteredMessage(
+                    // A backlog replay is progress, not a stalled socket —
+                    // name what's actually happening (matron-apple #84).
+                    if (connectionState is SyncBannerState.CatchingUp) "Loading messages…" else "Connecting…",
+                    showSpinner = true,
+                )
                 error != null && groups.isEmpty() -> CenteredMessage(error!!)
                 groups.isEmpty() -> CenteredMessage("No chats yet. Provision a bot via dev-boxer to get started.")
                 else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -155,14 +160,18 @@ fun ChatListScreen(
 private fun ConnectionIndicator(state: SyncBannerState, hasEverConnected: Boolean) {
     when (state) {
         is SyncBannerState.Running -> Unit
-        is SyncBannerState.Connecting -> Row(
+        is SyncBannerState.Connecting, is SyncBannerState.CatchingUp -> Row(
             modifier = Modifier.padding(start = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             CircularProgressIndicator(modifier = Modifier.padding(2.dp), strokeWidth = 2.dp)
             Text(
-                if (hasEverConnected) "Reconnecting…" else "Connecting…",
+                when {
+                    state is SyncBannerState.CatchingUp -> "Loading messages…"
+                    hasEverConnected -> "Reconnecting…"
+                    else -> "Connecting…"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

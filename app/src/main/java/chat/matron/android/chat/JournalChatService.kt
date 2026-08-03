@@ -35,12 +35,13 @@ class JournalChatService(
 ) : ChatService {
 
     override fun chatSummaries(): Flow<List<ChatSummary>> = flow {
-        // A reconnect replay applies each missed frame in its own store
-        // transaction, so a catch-up burst yields one snapshot per frame. The
-        // first goes out immediately (instant paint from the local mirror),
-        // then at most one per `coalesceInterval`, always the newest —
-        // `conflate()` drops every intermediate snapshot that lands while the
-        // pacer sleeps (the Apple `bufferingNewest(1)` + `Task.sleep` pacer).
+        // A reconnect replay lands in batched transactions (one commit per
+        // ~250 frames), but a catch-up burst still yields several snapshots.
+        // The first goes out immediately (instant paint from the local
+        // mirror), then at most one per `coalesceInterval`, always the newest
+        // — `conflate()` drops every intermediate snapshot that lands while
+        // the pacer sleeps (the Apple `bufferingNewest(1)` + `Task.sleep`
+        // pacer).
         store.conversationsFlow().conflate().collect { records ->
             emit(records.map(::summary))
             delay(coalesceInterval)
