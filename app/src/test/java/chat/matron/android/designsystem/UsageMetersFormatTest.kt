@@ -1,5 +1,6 @@
 package chat.matron.android.designsystem
 
+import chat.matron.android.models.SessionStatus
 import java.time.Instant
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
@@ -71,5 +72,24 @@ class UsageMetersFormatTest {
         // Six hours or more -> weekday + hour in the given time zone.
         // 1_760_000_000 is Thu 2025-10-09 08:53:20 UTC; +3 days -> Sun 08:53 -> "Sun 8am".
         assertEquals("Sun 8am", UsageMetersFormat.resetDisplay(now.plusSeconds(3 * 24 * 3600L), null, now, utc))
+    }
+
+    // MARK: homeAbbreviated + vitalsLine (matron-apple #90 port)
+
+    @Test
+    fun homeAbbreviatedHandlesMacAndLinuxHomes() {
+        assertEquals("~/Dev/matron-apple", UsageMetersFormat.homeAbbreviated("/Users/dan/Dev/matron-apple"))
+        assertEquals("~/work", UsageMetersFormat.homeAbbreviated("/home/dan/work"))
+        assertEquals("~", UsageMetersFormat.homeAbbreviated("/Users/dan"))
+        assertEquals("/opt/matron", UsageMetersFormat.homeAbbreviated("/opt/matron"))
+        assertEquals("/Users/", UsageMetersFormat.homeAbbreviated("/Users/"))
+    }
+
+    @Test
+    fun vitalsLineJoinsKnownHalvesAndDropsWhenEmpty() {
+        assertEquals("CPU 12% · RAM 63%", UsageMetersFormat.vitalsLine(SessionStatus.Vitals(12, 63)))
+        assertEquals("RAM 63%", UsageMetersFormat.vitalsLine(SessionStatus.Vitals(null, 63)))
+        assertEquals("CPU 12%", UsageMetersFormat.vitalsLine(SessionStatus.Vitals(12, null)))
+        assertNull(UsageMetersFormat.vitalsLine(SessionStatus.Vitals(null, null)))
     }
 }

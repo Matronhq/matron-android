@@ -1,6 +1,7 @@
 package chat.matron.android.designsystem
 
 import androidx.compose.ui.graphics.Color
+import chat.matron.android.models.SessionStatus
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -54,6 +55,33 @@ object UsageMetersFormat {
         percent < 50 -> green
         percent < 80 -> orange
         else -> red
+    }
+
+    /// Abbreviate a BRIDGE-machine path's home prefix to "~". Textual only —
+    /// the path belongs to the bridge host, so anything derived from the
+    /// local device would be the wrong machine. Handles the two layouts
+    /// bridges run on (macOS /Users/<name>, Linux /home/<name>); anything
+    /// else passes through untouched.
+    fun homeAbbreviated(path: String): String {
+        for (prefix in listOf("/Users/", "/home/")) {
+            if (!path.startsWith(prefix)) continue
+            val rest = path.removePrefix(prefix)
+            if (rest.isEmpty()) return path
+            val slash = rest.indexOf('/')
+            return if (slash >= 0) "~" + rest.substring(slash) else "~"
+        }
+        return path
+    }
+
+    /// "CPU 12% · RAM 63%" — the bridge host's vitals as one quiet caption
+    /// line. Either half can be missing (CPU needs two sampler ticks after a
+    /// bridge boot); null when neither is known so callers drop the line.
+    fun vitalsLine(vitals: SessionStatus.Vitals): String? {
+        val parts = buildList {
+            vitals.cpuPct?.let { add("CPU $it%") }
+            vitals.ramPct?.let { add("RAM $it%") }
+        }
+        return if (parts.isEmpty()) null else parts.joinToString(" · ")
     }
 
     /// Reset time for a bar's trailing text. Near resets read as a countdown,

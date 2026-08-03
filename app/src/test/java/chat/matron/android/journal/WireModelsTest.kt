@@ -313,4 +313,33 @@ class WireModelsTest {
         assertEquals(SessionState.Other("waiting"), other)
         assertEquals("waiting", other.wire)
     }
+
+    // MARK: workdir + vitals decode (matron-apple #90 port)
+
+    @Test
+    fun decodeStatusWorkdirAndVitals() {
+        val text = """{"kind":"ephemeral","convo_id":"c1","status":{"workdir":"/Users/dan/Dev/matron-apple","vitals":{"cpu_pct":12,"ram_pct":63}}}"""
+        val update = (ServerFrame.decode(text) as ServerFrame.SessionStatusFrame).update
+        assertEquals("/Users/dan/Dev/matron-apple", update.workdir)
+        assertEquals(SessionStatus.Vitals(cpuPct = 12, ramPct = 63), update.vitals)
+    }
+
+    @Test
+    fun decodeStatusVitalsWithOnlyRam() {
+        // CPU needs two sampler ticks after a bridge boot — the first frames
+        // carry RAM alone and must still decode.
+        val text = """{"kind":"ephemeral","convo_id":"c1","status":{"vitals":{"ram_pct":41}}}"""
+        val update = (ServerFrame.decode(text) as ServerFrame.SessionStatusFrame).update
+        assertEquals(SessionStatus.Vitals(cpuPct = null, ramPct = 41), update.vitals)
+    }
+
+    @Test
+    fun decodeStatusEmptyVitalsDegradesToNull() {
+        // An object carrying neither number degrades to null so the merge
+        // keeps the last good sample instead of blanking it.
+        val text = """{"kind":"ephemeral","convo_id":"c1","status":{"model":"m","vitals":{}}}"""
+        val update = (ServerFrame.decode(text) as ServerFrame.SessionStatusFrame).update
+        assertEquals("m", update.model)
+        assertNull(update.vitals)
+    }
 }

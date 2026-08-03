@@ -17,10 +17,21 @@ data class SessionStatus(
     /// For a subagent child conversation, the `tool_use_id` of the parent's
     /// spawning Task call. `null` for normal conversations.
     val taskRef: String? = null,
+    /// The session's absolute working directory on the bridge machine.
+    val workdir: String? = null,
+    /// Last host CPU/RAM sample from the bridge machine.
+    val vitals: Vitals? = null,
 ) {
     /// Context-window gauge — an estimate computed by the bridge from the last
     /// request's usage block, not /context's exact accounting.
     data class Context(val tokens: Int, val window: Int, val pct: Int)
+
+    /// Host CPU/RAM sample from the bridge machine, published top-level
+    /// (deliberately NOT a [Limit] — these are machine metrics, not account
+    /// subscription meters, and must never render as one). Either half can be
+    /// null: CPU needs two sampler ticks, so the first frames after a bridge
+    /// boot carry RAM alone.
+    data class Vitals(val cpuPct: Int?, val ramPct: Int?)
 
     /// One account rate-limit line (session / week / per-model week). `resets`
     /// is the raw text claude printed; `resetsAt` is the bridge's normalised
@@ -44,6 +55,8 @@ data class SessionStatus(
         limits = update.limits ?: limits,
         email = update.email ?: email,
         taskRef = update.taskRef ?: taskRef,
+        workdir = update.workdir ?: workdir,
+        vitals = update.vitals ?: vitals,
     )
 }
 
@@ -61,4 +74,8 @@ data class SessionStatusUpdate(
     /// The spawning Task call's `tool_use_id` for a subagent child. `null` when
     /// the frame doesn't carry one.
     val taskRef: String?,
+    /// Absolute workdir on the bridge machine. `null` when absent.
+    val workdir: String?,
+    /// Host CPU/RAM sample. `null` when absent or carrying no numbers.
+    val vitals: SessionStatus.Vitals?,
 )
