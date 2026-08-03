@@ -458,9 +458,12 @@ class JournalSyncEngineTest {
         val store = seededStore()
         val engine = makeEngine(store, FakeConnector(listOf(socket)))
         engine.beginSync()
-        waitUntil(timeoutMs = 5000) { store.cursor() >= 60 }
-        val acks = socket.sent.mapNotNull { parseJsonObjectOrNull(it) }.filter { it.stringOrNull("op") == "ack" }
-        assertTrue("expected an ack once ≥50 frames applied", acks.any { it.longOrNull("cursor") == 60L })
+        // Wait for the ACK itself, not the cursor: the cursor advances when
+        // the batch transaction commits, but the ack goes on the wire a beat
+        // later — gating on the cursor races the assertion on slow runners.
+        fun acks() = socket.sent.mapNotNull { parseJsonObjectOrNull(it) }.filter { it.stringOrNull("op") == "ack" }
+        waitUntil(timeoutMs = 5000) { acks().any { it.longOrNull("cursor") == 60L } }
+        assertTrue("expected an ack once ≥50 frames applied", acks().any { it.longOrNull("cursor") == 60L })
         engine.endSync()
     }
 
