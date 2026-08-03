@@ -18,6 +18,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.ContextGaugeLabel
 import chat.matron.android.designsystem.UsageBarScale
 import chat.matron.android.designsystem.UsageBarsView
+import chat.matron.android.designsystem.UsageMetersFormat
 import chat.matron.android.viewmodels.ChatViewModel
 import kotlinx.coroutines.launch
 
@@ -35,7 +36,8 @@ fun SessionStatusSheet(viewModel: ChatViewModel, onDismiss: () -> Unit) {
 
     val current = status
     val hasContent = current != null &&
-        (current.model != null || current.context != null || !current.limits.isNullOrEmpty() || current.email != null)
+        (current.model != null || current.context != null || !current.limits.isNullOrEmpty() ||
+            current.email != null || current.workdir != null || current.vitals != null)
 
     Column(
         modifier = Modifier
@@ -58,10 +60,21 @@ fun SessionStatusSheet(viewModel: ChatViewModel, onDismiss: () -> Unit) {
             current.limits?.takeIf { it.isNotEmpty() }?.let { limits ->
                 UsageBarsView(limits = limits, scale = UsageBarScale.Regular)
             }
-            if (current.email != null || current.model != null) {
+            // Vitals renders as one quiet caption line, never as a usage bar —
+            // machine metrics must not read as subscription meters (#90).
+            val vitalsText = current.vitals?.let { UsageMetersFormat.vitalsLine(it) }
+            if (current.email != null || current.model != null || current.workdir != null || vitalsText != null) {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    current.workdir?.let {
+                        Text(
+                            UsageMetersFormat.homeAbbreviated(it),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     current.email?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                     current.model?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    vitalsText?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 }
             }
         } else {

@@ -273,6 +273,20 @@ sealed interface ServerFrame {
                     }
                     if (parsed.isNotEmpty()) limits = parsed
                 }
+                // Host CPU/RAM sample — top-level `vitals`, never a limits[]
+                // entry (machine metrics must not render as subscription
+                // meters). Either half can be null (CPU needs two sampler
+                // ticks after a bridge boot); an object carrying neither
+                // number degrades to null so the merge keeps the last good
+                // sample instead of blanking it.
+                var vitals: SessionStatus.Vitals? = null
+                status.objectOrNull("vitals")?.let { raw ->
+                    val cpu = raw.intOrNull("cpu_pct")
+                    val ram = raw.intOrNull("ram_pct")
+                    if (cpu != null || ram != null) {
+                        vitals = SessionStatus.Vitals(cpuPct = cpu, ramPct = ram)
+                    }
+                }
                 return SessionStatusFrame(SessionStatusUpdate(
                     convoID = convoID,
                     model = status.stringOrNull("model"),
@@ -280,6 +294,8 @@ sealed interface ServerFrame {
                     limits = limits,
                     email = status.stringOrNull("email"),
                     taskRef = status.stringOrNull("task_ref"),
+                    workdir = status.stringOrNull("workdir"),
+                    vitals = vitals,
                 ))
             }
             val ref = obj.stringOrNull("message_ref") ?: return null
