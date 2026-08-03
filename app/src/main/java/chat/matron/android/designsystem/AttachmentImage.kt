@@ -26,6 +26,9 @@ import coil.compose.SubcomposeAsyncImage
 /// Loads [model] (a URL string, `File`, `Uri`, …) via Coil, showing a
 /// placeholder box while it resolves or if it fails, caps to a 280×280 box
 /// with rounded corners, and surfaces an optional [caption] underneath.
+/// The caption renders as normal message body text — it IS the message the
+/// sender typed alongside the image, not metadata about it (same styling as
+/// [AttachmentFile]'s caption).
 ///
 /// [onTap] (when wired) fires on the whole image box — including the
 /// placeholder state, so the user can open the (eventually-resolved) image
@@ -53,8 +56,8 @@ fun AttachmentImage(
             error = { ImagePlaceholder(placeholder) },
         )
 
-        if (caption != null) {
-            Text(caption, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (caption != null && caption.isNotEmpty()) {
+            Text(caption, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
         }
     }
 }
