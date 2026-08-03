@@ -32,7 +32,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import chat.matron.android.chat.TimelineItem
 import chat.matron.android.designsystem.AttachmentFullscreenViewer
 import chat.matron.android.designsystem.ContextGaugeLabel
 import chat.matron.android.designsystem.MatronTimelineBackground
@@ -60,7 +59,6 @@ fun SubChatView(
     val title = currentChild?.title ?: fallbackTitle
     val isRunning = currentChild?.isRunning ?: true
 
-    var sourceItem by remember { mutableStateOf<TimelineItem?>(null) }
     var previewModel by remember { mutableStateOf<Any?>(null) }
     var showSwitcher by remember { mutableStateOf(false) }
 
@@ -137,19 +135,12 @@ fun SubChatView(
                     activityLabel = null,
                     onOpenChild = onSwitchTo,
                     onPreviewImage = { previewModel = it },
-                    onShowSource = { sourceItem = it },
                     modifier = Modifier.weight(1f),
                 )
             }
         }
     }
 
-    sourceItem?.let { item ->
-        val sheetState = androidx.compose.material3.rememberModalBottomSheetState()
-        androidx.compose.material3.ModalBottomSheet(onDismissRequest = { sourceItem = null }, sheetState = sheetState) {
-            EventSourceSheet(item = item)
-        }
-    }
     previewModel?.let { model ->
         AttachmentFullscreenViewer(model = model, onDismiss = { previewModel = null })
     }

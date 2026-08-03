@@ -87,7 +87,9 @@ private fun RenderedBody(
     val style = if (item.isOwn) MessageAuthorStyle.Me else MessageAuthorStyle.Bot
     when (val kind = item.kind) {
         is TimelineItem.Kind.Text ->
-            MessageBubble(style = style, timestamp = item.timestamp) {
+            // copyText carries the raw markdown body — what the sender actually
+            // wrote — so a copied message pastes as text, not styled spans.
+            MessageBubble(style = style, timestamp = item.timestamp, copyText = kind.body) {
                 MarkdownText(kind.body)
             }
 
