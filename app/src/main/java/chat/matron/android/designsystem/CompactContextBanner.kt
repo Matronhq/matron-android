@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -34,9 +35,10 @@ fun shouldShowCompactHeader(context: SessionStatus.Context?): Boolean =
 
 /// Tappable strip pinned at the top of a large conversation nudging the user to
 /// compact it. Always renders the coloured strip for [tokens]; the show/hide
-/// decision belongs to the caller (see [shouldShowCompactHeader]). Structurally
-/// mirrors [ConnectionStatusBanner]. Tapping calls [onCompact], which sends a
-/// bare `/compact`.
+/// decision belongs to the caller (see [shouldShowCompactHeader]). Mirrors
+/// [ConnectionStatusBanner]'s offline state — opaque red with white content —
+/// so the two attention strips share one vocabulary (matches the Apple apps).
+/// Tapping calls [onCompact], which sends a bare `/compact`.
 @Composable
 fun CompactContextBanner(
     tokens: Int,
@@ -48,7 +50,7 @@ fun CompactContextBanner(
         modifier
             .fillMaxWidth()
             .clickable(onClick = onCompact)
-            .background(MaterialTheme.colorScheme.tertiaryContainer)
+            .background(MatronRed.copy(alpha = 0.9f))
             .padding(horizontal = 12.dp, vertical = 8.dp)
             // Merge the children so TalkBack announces the single spoken label
             // below, not the inner Text's abbreviated visible token string.
@@ -58,14 +60,14 @@ fun CompactContextBanner(
         Icon(
             Icons.Filled.Compress,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+            tint = Color.White,
             modifier = Modifier.size(16.dp),
         )
         Spacer(Modifier.width(8.dp))
         Text(
             "Large conversation (${UsageMetersFormat.compactTokens(tokens)} tokens) · Tap to compact",
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onTertiaryContainer,
+            color = Color.White,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
