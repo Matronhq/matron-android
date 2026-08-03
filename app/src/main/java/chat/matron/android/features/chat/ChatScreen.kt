@@ -89,7 +89,6 @@ fun ChatScreen(
 
     var showSessionStatus by remember { mutableStateOf(false) }
     var showSwitcher by remember { mutableStateOf(false) }
-    var sourceItem by remember { mutableStateOf<TimelineItem?>(null) }
     var previewModel by remember { mutableStateOf<Any?>(null) }
     val compactScope = rememberCoroutineScope()
 
@@ -151,7 +150,6 @@ fun ChatScreen(
                     activityLabel = activityLabel,
                     onOpenChild = onOpenChild,
                     onPreviewImage = { previewModel = it },
-                    onShowSource = { sourceItem = it },
                     modifier = Modifier.weight(1f),
                 )
                 ComposerView(viewModel = composerVM)
@@ -186,12 +184,6 @@ fun ChatScreen(
             }
         }
     }
-    sourceItem?.let { item ->
-        val sheetState = rememberModalBottomSheetState()
-        ModalBottomSheet(onDismissRequest = { sourceItem = null }, sheetState = sheetState) {
-            EventSourceSheet(item = item)
-        }
-    }
     previewModel?.let { model ->
         AttachmentFullscreenViewer(model = model, onDismiss = { previewModel = null })
     }
@@ -210,7 +202,6 @@ fun TimelineList(
     activityLabel: String?,
     onOpenChild: (String) -> Unit,
     onPreviewImage: (Any) -> Unit,
-    onShowSource: (TimelineItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val rows by chatVM.windowedRows.collectAsStateWithLifecycle()
@@ -307,7 +298,6 @@ fun TimelineList(
                         onOpenChild = onOpenChild,
                         onPreviewImage = onPreviewImage,
                         onTapFile = onTapFile,
-                        onShowSource = onShowSource,
                     )
                 }
                 if (activityLabel != null) {
@@ -377,7 +367,6 @@ private fun TimelineRowView(
     onOpenChild: (String) -> Unit,
     onPreviewImage: (Any) -> Unit,
     onTapFile: (url: String, filename: String) -> Unit,
-    onShowSource: (TimelineItem) -> Unit,
 ) {
     when (row) {
         is TimelineRow.Separator -> DateSeparator(label = DateSeparatorLabel.format(row.date))
