@@ -46,6 +46,17 @@ jobs:
         if: always()
         run: rm -f matron-upload.jks
 
+      # Gradle deliberately falls back to an unsigned bundle when the keystore
+      # isn't usable (so local builds without secrets still work). In CI that
+      # fallback is a trap — Play rejects unsigned bundles — so fail the run
+      # instead of shipping an artifact that can't be uploaded.
+      - name: Fail if bundle is unsigned
+        run: |
+          if ! unzip -l app/build/outputs/bundle/release/app-release.aab | grep -Eq 'META-INF/.*\.(RSA|DSA|EC)$'; then
+            echo "::error::Bundle is unsigned — are the MATRON_UPLOAD_* secrets configured?"
+            exit 1
+          fi
+
       - name: Upload AAB artifact
         uses: actions/upload-artifact@v4
         with:
