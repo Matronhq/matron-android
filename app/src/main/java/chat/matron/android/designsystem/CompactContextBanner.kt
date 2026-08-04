@@ -33,6 +33,16 @@ const val COMPACT_HEADER_TOKEN_THRESHOLD = 200_000
 fun shouldShowCompactHeader(context: SessionStatus.Context?): Boolean =
     context != null && context.tokens > COMPACT_HEADER_TOKEN_THRESHOLD
 
+/// Visible copy — exposed for tests so the wording stays pinned (and in step
+/// with the Apple apps' `CompactContextBanner`). The token count and the
+/// action verb are separate pieces: the title may truncate on narrow phones,
+/// the trailing [COMPACT_BANNER_ACTION] verb never does.
+fun compactBannerTitle(tokens: Int): String =
+    "Large conversation (${UsageMetersFormat.compactTokens(tokens)})"
+
+/// Trailing action label, rendered next to the compress glyph.
+const val COMPACT_BANNER_ACTION = "Compact"
+
 /// Tappable strip pinned at the top of a large conversation nudging the user to
 /// compact it. Always renders the coloured strip for [tokens]; the show/hide
 /// decision belongs to the caller (see [shouldShowCompactHeader]). Mirrors
@@ -57,6 +67,20 @@ fun CompactContextBanner(
             .semantics(mergeDescendants = true) { contentDescription = spoken },
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        Text(
+            compactBannerTitle(tokens),
+            style = MaterialTheme.typography.bodyMedium,
+            color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            // weight() makes the title the flexible child: it yields to the
+            // trailing glyph + verb, which keep intrinsic size, so a narrow
+            // phone truncates the token count, never the action.
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(8.dp))
+        // Same glyph as elsewhere for the compact action, so the trailing
+        // pair reads as the button half of the strip.
         Icon(
             Icons.Filled.Compress,
             contentDescription = null,
@@ -65,11 +89,10 @@ fun CompactContextBanner(
         )
         Spacer(Modifier.width(8.dp))
         Text(
-            "Large conversation (${UsageMetersFormat.compactTokens(tokens)} tokens) · Tap to compact",
+            COMPACT_BANNER_ACTION,
             style = MaterialTheme.typography.bodyMedium,
             color = Color.White,
             maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
         )
     }
 }
