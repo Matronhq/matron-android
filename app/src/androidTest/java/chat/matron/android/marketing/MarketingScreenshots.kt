@@ -68,16 +68,17 @@ class MarketingScreenshots {
         }
     }
 
-    /// Compose text fields are found by their floating label, then written via
-    /// the focused node — By.focused is the only handle Compose reliably
-    /// exposes for setText across empty and filled states.
-    private fun typeInto(label: String, value: String) {
-        val field = device.wait(Until.findObject(By.text(label)), UI_TIMEOUT)
-            ?: error("field with label '$label' not found")
-        field.click()
-        val focused = device.wait(Until.findObject(By.focused(true)), UI_TIMEOUT)
-            ?: error("nothing took focus after tapping '$label'")
-        focused.text = value
+    /// Fill the three sign-in fields by document order (server, username,
+    /// password). Label-click + By.focused proved unreliable once the screen
+    /// grew section headers and the QR block — ACTION_SET_TEXT on the
+    /// EditText nodes themselves doesn't depend on focus.
+    private fun fillSignInFields() {
+        device.wait(Until.hasObject(By.clazz("android.widget.EditText")), UI_TIMEOUT)
+        val fields = device.findObjects(By.clazz("android.widget.EditText"))
+        check(fields.size >= 3) { "expected >=3 sign-in fields, found ${fields.size}" }
+        fields[0].text = SERVER_URL
+        fields[1].text = USERNAME
+        fields[2].text = PASSWORD
     }
 
     private fun signInIfNeeded() {
@@ -87,10 +88,7 @@ class MarketingScreenshots {
         check(device.wait(Until.hasObject(By.text("Sign in to Matron")), UI_TIMEOUT)) {
             "neither the chat list nor the sign-in screen appeared"
         }
-        typeInto("Homeserver URL", SERVER_URL)
-        typeInto("Username", USERNAME)
-        typeInto("Password", PASSWORD)
-        device.pressBack() // dismiss the keyboard so the Sign in button is tappable
+        fillSignInFields() // ACTION_SET_TEXT opens no keyboard — nothing to dismiss
         // Exact-match By.text: hits the button label, not the "Sign in to
         // Matron" title. The Compose Button's clickable node is the label's
         // parent, so click the label itself (dispatches at its center).
