@@ -1,6 +1,7 @@
 package chat.matron.android.designsystem
 
 import chat.matron.android.models.SessionStatus
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -28,5 +29,15 @@ class CompactContextBannerTest {
         // A huge window does not suppress the header — the trigger is absolute.
         val ctx = SessionStatus.Context(tokens = 250_000, window = 1_000_000, pct = 25)
         assertTrue(shouldShowCompactHeader(ctx))
+    }
+
+    @Test
+    fun title_usesCompactTokens_withoutActionCopy() {
+        assertEquals("Large conversation (265k)", compactBannerTitle(265_400))
+    }
+
+    @Test
+    fun actionLabel_isCompact() {
+        assertEquals("Compact", COMPACT_BANNER_ACTION)
     }
 }
