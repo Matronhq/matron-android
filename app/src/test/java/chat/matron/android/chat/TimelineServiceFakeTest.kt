@@ -69,6 +69,20 @@ class FakeTimelineService : TimelineService {
         streamError?.let { throw it }
     }
 
+    /// Session-state values [sessionState] yields (then finishes) — drives
+    /// `ChatViewModel.isTurnRunning` tests. [sessionStateEmitGapMs] spaces the
+    /// emissions so a test can observe the intermediate states, not just the
+    /// final one.
+    var sessionStatesToEmit: List<String> = emptyList()
+    var sessionStateEmitGapMs: Long = 0
+
+    override fun sessionState(): Flow<String> = flow {
+        sessionStatesToEmit.forEachIndexed { index, state ->
+            if (index > 0 && sessionStateEmitGapMs > 0) kotlinx.coroutines.delay(sessionStateEmitGapMs)
+            emit(state)
+        }
+    }
+
     override suspend fun sendText(body: String, inReplyTo: String?) {
         if (sendDelayNanos > 0) kotlinx.coroutines.delay(sendDelayNanos / 1_000_000)
         sendGate?.let { it.markStarted(); it.await() }

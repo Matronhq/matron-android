@@ -23,6 +23,9 @@ interface ConversationDao {
     @Query("SELECT parent_convo_id FROM conversation WHERE id = :id")
     fun parentConvoIDFlow(id: String): Flow<String?>
 
+    @Query("SELECT session_state FROM conversation WHERE id = :id")
+    fun sessionStateFlow(id: String): Flow<String?>
+
     /// Chat-list query: visible, top-level (no parent), newest first.
     /// Ordered by `last_activity_ts` (bumped only for MESSAGE_TYPES, see
     /// JournalStore.applyJournal) rather than `last_seq` (bumped for every

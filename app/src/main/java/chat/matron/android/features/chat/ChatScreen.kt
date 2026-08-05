@@ -54,6 +54,7 @@ import chat.matron.android.designsystem.EmptyChatPlaceholder
 import chat.matron.android.designsystem.JumpToBottomButton
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.PaginatingHeader
+import chat.matron.android.designsystem.StopTurnButton
 import chat.matron.android.designsystem.SubtaskLinkCard
 import chat.matron.android.designsystem.TimelineLoadingIndicator
 import chat.matron.android.designsystem.shouldShowCompactHeader
@@ -85,6 +86,7 @@ fun ChatScreen(
     val children by stripVM.children.collectAsStateWithLifecycle()
     val runningChildren by stripVM.runningChildren.collectAsStateWithLifecycle()
     val activityLabel by chatVM.activityLabel.collectAsStateWithLifecycle()
+    val isTurnRunning by chatVM.isTurnRunning.collectAsStateWithLifecycle()
     val sessionStatus by chatVM.sessionStatus.collectAsStateWithLifecycle()
 
     var showSessionStatus by remember { mutableStateOf(false) }
@@ -148,6 +150,8 @@ fun ChatScreen(
                     chatVM = chatVM,
                     stripVM = stripVM,
                     activityLabel = activityLabel,
+                    isTurnRunning = isTurnRunning,
+                    onStopTurn = { compactScope.launch { chatVM.sendCommand("!esc") } },
                     onOpenChild = onOpenChild,
                     onPreviewImage = { previewModel = it },
                     modifier = Modifier.weight(1f),
@@ -203,6 +207,12 @@ fun TimelineList(
     onOpenChild: (String) -> Unit,
     onPreviewImage: (Any) -> Unit,
     modifier: Modifier = Modifier,
+    // Floating stop button — supplied only by the main chat pane (sub-chat
+    // viewers are read-only, matching matron-apple). Visible while the durable
+    // session_state says a turn is running, with the ephemeral activity label
+    // OR-ed in as a fast path in case a session_state frame is missed.
+    isTurnRunning: Boolean = false,
+    onStopTurn: (() -> Unit)? = null,
 ) {
     val rows by chatVM.windowedRows.collectAsStateWithLifecycle()
     val settledEmpty by chatVM.settledEmpty.collectAsStateWithLifecycle()
@@ -312,6 +322,13 @@ fun TimelineList(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(16.dp),
+            )
+        }
+
+        if (onStopTurn != null && (isTurnRunning || activityLabel != null)) {
+            StopTurnButton(
+                onClick = onStopTurn,
+                modifier = Modifier.align(Alignment.TopEnd),
             )
         }
 

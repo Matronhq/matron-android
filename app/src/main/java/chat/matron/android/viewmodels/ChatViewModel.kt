@@ -5,6 +5,7 @@ import chat.matron.android.chat.TimelineItem
 import chat.matron.android.chat.TimelineService
 import chat.matron.android.events.AskUserEvent
 import chat.matron.android.models.MatronDebug
+import chat.matron.android.journal.SessionState
 import chat.matron.android.models.SessionStatus
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.platform.Haptics
@@ -99,6 +100,14 @@ class ChatViewModel(
     private val _activityLabel = MutableStateFlow<String?>(null)
     val activityLabel: StateFlow<String?> = _activityLabel.asStateFlow()
 
+    /// True while the conversation's durable session_state is "running" — the
+    /// bridge flips it at turn start/end. Carries the floating stop button:
+    /// [activityLabel] legitimately clears mid-turn (bridge dedups activity
+    /// frames; the overlay staleness sweep drops a quiet indicator), so it
+    /// can't keep an affordance visible for a whole turn.
+    private val _isTurnRunning = MutableStateFlow(false)
+    val isTurnRunning: StateFlow<Boolean> = _isTurnRunning.asStateFlow()
+
     private val _lastRenderableItemID = MutableStateFlow<String?>(null)
     val lastRenderableItemID: StateFlow<String?> = _lastRenderableItemID.asStateFlow()
 
@@ -155,6 +164,7 @@ class ChatViewModel(
     private var isResuming = false
     private var observationTask: Job? = null
     private var statusTask: Job? = null
+    private var sessionStateTask: Job? = null
     private var connectionTask: Job? = null
     private var emptyDebounceTask: Job? = null
     private var resumeTask: Job? = null
@@ -396,6 +406,18 @@ class ChatViewModel(
             }
         }
 
+        // _isTurnRunning is deliberately NOT reset before the stream re-arms:
+        // the VM is cached across re-entries (ChatVMCache) and the Room
+        // observation re-emits the current state immediately, so a
+        // false-then-true blip would flicker the stop button on every chat
+        // switch mid-turn.
+        sessionStateTask?.cancel()
+        sessionStateTask = scope.launch {
+            timeline.sessionState().collect { state ->
+                _isTurnRunning.value = SessionState.fromWire(state) == SessionState.Running
+            }
+        }
+
         // A prior failed image fetch only means "unreachable then" — once the
         // sync connection comes back up, give it another chance rather than
         // negative-caching it for the rest of the VM's (session-long) lifetime.
@@ -425,6 +447,8 @@ class ChatViewModel(
         observationTask = null
         statusTask?.cancel()
         statusTask = null
+        sessionStateTask?.cancel()
+        sessionStateTask = null
         connectionTask?.cancel()
         connectionTask = null
         emptyDebounceTask?.cancel()

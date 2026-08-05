@@ -552,6 +552,8 @@ class JournalTimelineService(
 
     override fun sessionStatus(): Flow<SessionStatusUpdate> = engine.sessionStatus(convoID)
 
+    override fun sessionState(): Flow<String> = store.sessionStateFlow(convoID)
+
     override fun connectionState(): Flow<SyncConnectionState> = engine.stateStream
 
     override suspend fun markAsRead() {

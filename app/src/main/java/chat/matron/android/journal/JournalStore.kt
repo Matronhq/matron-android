@@ -242,6 +242,17 @@ class JournalStore(
     fun parentConvoIDFlow(convoID: String): Flow<String?> =
         conversationDao.parentConvoIDFlow(convoID).distinctUntilChanged()
 
+    /// Live durable turn state for one conversation — "running" flipped at turn
+    /// start, "waiting"/"done" at turn end, via the `session_status` frames the
+    /// mirror already applies. Unlike the ephemeral activity indicator (deduped
+    /// by the bridge, swept after 30s quiet) this covers the WHOLE turn, so
+    /// it can carry always-on affordances like the floating stop button. A row
+    /// not yet mirrored reads as [SessionState.DONE] (nothing running).
+    fun sessionStateFlow(convoID: String): Flow<String> =
+        conversationDao.sessionStateFlow(convoID)
+            .map { it ?: SessionState.DONE }
+            .distinctUntilChanged()
+
     suspend fun events(convoID: String): List<JournalEvent> =
         eventDao.forConversation(convoID).map { it.toJournalEvent() }
 

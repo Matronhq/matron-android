@@ -102,6 +102,38 @@ class ChatViewModelTest {
 
     // MARK: - stream + derived state
 
+    /// Polls [condition] until true or a 2s deadline — the sessionState
+    /// collector runs on a real scope, so emissions land asynchronously.
+    private suspend fun waitFor(condition: () -> Boolean) {
+        val deadline = System.nanoTime() + 2_000_000_000L
+        while (!condition() && System.nanoTime() < deadline) delay(10)
+        assertTrue(condition())
+    }
+
+    @Test
+    fun sessionStateRunning_setsIsTurnRunning() = vmTest { scope ->
+        val fake = FakeTimelineService()
+        fake.snapshotsToEmit = listOf(emptyList())
+        fake.sessionStatesToEmit = listOf("running")
+        val vm = makeVM(scope, fake)
+        vm.start().join()
+        waitFor { vm.isTurnRunning.value }
+    }
+
+    @Test
+    fun sessionStateWaiting_clearsIsTurnRunning() = vmTest { scope ->
+        val fake = FakeTimelineService()
+        fake.snapshotsToEmit = listOf(emptyList())
+        fake.sessionStatesToEmit = listOf("running", "waiting")
+        // Space the emissions so the test observes the armed state first —
+        // otherwise the final `false` is indistinguishable from "never armed".
+        fake.sessionStateEmitGapMs = 50
+        val vm = makeVM(scope, fake)
+        vm.start().join()
+        waitFor { vm.isTurnRunning.value }
+        waitFor { !vm.isTurnRunning.value }
+    }
+
     @Test
     fun streamReceivedItems_appearInState() = vmTest { scope ->
         val fake = FakeTimelineService()
