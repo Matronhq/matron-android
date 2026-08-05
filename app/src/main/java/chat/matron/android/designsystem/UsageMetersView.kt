@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
@@ -106,6 +107,14 @@ private fun UsageBarRow(limit: SessionStatus.Limit, scale: UsageBarScale, now: I
             textAlign = TextAlign.End,
         )
         UsageBar(limit.percent, scale)
+        // Exact number beside the bar — near-full bars are visually
+        // ambiguous at this size (Dan, 2026-08-04; port of apple #98).
+        Text(
+            "${limit.percent}%",
+            fontSize = scale.fontSize,
+            color = MaterialTheme.colorScheme.onSurface,
+            style = TextStyle(fontFeatureSettings = "tnum"),
+        )
         Text(
             reset ?: "",
             fontSize = scale.fontSize,
@@ -116,17 +125,18 @@ private fun UsageBarRow(limit: SessionStatus.Limit, scale: UsageBarScale, now: I
 
 @Composable
 private fun UsageBar(percent: Int, scale: UsageBarScale) {
-    val fraction = (percent.coerceIn(0, 100)) / 100f
+    // Track alpha 0.12 → 0.2: at 3dp tall the remaining sliver of a 90% bar
+    // was too faint to register against a saturated red fill (apple #98).
     Box(
         Modifier
             .width(scale.barWidth)
             .height(scale.barHeight)
             .clip(RoundedCornerShape(percent = 50))
-            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)),
+            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)),
     ) {
         Box(
             Modifier
-                .fillMaxWidth(fraction)
+                .width(UsageMetersFormat.barFillWidth(percent, scale.barWidth, scale.barHeight))
                 .height(scale.barHeight)
                 .clip(RoundedCornerShape(percent = 50))
                 .background(UsageMetersFormat.barColor(percent)),
