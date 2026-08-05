@@ -39,6 +39,19 @@ class BotCommandCatalogTest {
         }
     }
 
+    /// Pins the 2026-08-05 palette audit against the bridge's command set:
+    /// /timer and /switch were missing entirely, and the rescue keystrokes
+    /// must be the bang forms — the bridge only intercepts "!esc"/"!enter";
+    /// a typed "/esc" passes through into the agent's terminal as junk.
+    @Test
+    fun claudeBridgeIncludesTimerSwitchAndBangRescues() {
+        val triggers = BotCommandCatalog.claudeBridge.map { it.trigger }.toSet()
+        for (expected in listOf("/timer", "/switch", "!esc", "!enter")) {
+            assertTrue("catalog must include $expected", triggers.contains(expected))
+        }
+        assertFalse("slash-form esc is not a bridge command", triggers.contains("/esc"))
+    }
+
     @Test
     fun claudeBridgeIsNonEmptyAndHasUniqueTriggers() {
         val all = BotCommandCatalog.claudeBridge
