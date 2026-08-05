@@ -56,6 +56,13 @@ interface TimelineService {
     /// fakes without a status source need no override.
     fun sessionStatus(): Flow<SessionStatusUpdate> = emptyFlow()
 
+    /// Durable turn state for this conversation ("running" / "waiting" /
+    /// "done"), flipped by the bridge at turn boundaries. Covers the whole
+    /// turn, unlike the ephemeral activity indicator — drives the floating
+    /// stop button. Default: an empty stream, same rationale as
+    /// [sessionStatus].
+    fun sessionState(): Flow<String> = emptyFlow()
+
     /// The underlying sync engine's connection state. Default: an empty stream,
     /// so fakes without a connectivity source need no override. Lets a VM cheaply
     /// observe connectivity without a new dependency of its own.
