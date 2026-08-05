@@ -1,6 +1,8 @@
 package chat.matron.android.designsystem
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import chat.matron.android.models.SessionStatus
 import java.time.Instant
 import java.time.ZoneId
@@ -55,6 +57,21 @@ object UsageMetersFormat {
         percent < 50 -> green
         percent < 80 -> orange
         else -> red
+    }
+
+    /// Fill width for a usage bar, proportional with two perceptual guards
+    /// sized to the capsule height (port of apple #98): a bar that isn't
+    /// exhausted never renders flush-full — below 100% the fill leaves at
+    /// least one capsule-height of track visible, so 90–95% stops reading as
+    /// "all gone" (only a true 100% touches the far edge) — and a nonzero
+    /// percent renders at least the capsule's own diameter, below which the
+    /// shape distorts.
+    fun barFillWidth(percent: Int, barWidth: Dp, barHeight: Dp): Dp {
+        val clamped = percent.coerceIn(0, 100)
+        if (clamped == 0) return 0.dp
+        if (clamped == 100) return barWidth
+        val proportional = barWidth * (clamped / 100f)
+        return proportional.coerceIn(barHeight, barWidth - barHeight)
     }
 
     /// Abbreviate a BRIDGE-machine path's home prefix to "~". Textual only —
