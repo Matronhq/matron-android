@@ -45,6 +45,7 @@ import chat.matron.android.features.onboarding.SignInScreen
 import chat.matron.android.features.search.SearchScreen
 import chat.matron.android.features.settings.DeviceLinkScreen
 import chat.matron.android.features.settings.DeviceSettingsScreen
+import chat.matron.android.features.settings.AgentChatScreen
 import chat.matron.android.features.settings.DevicesScreen
 import chat.matron.android.journal.RelayApi
 import chat.matron.android.models.MatronDebug
@@ -332,6 +333,7 @@ private fun SignedInApp(
                 onAppearanceChange = onAppearanceChange,
                 onManageDevices = { nav.navigate("devices") },
                 onLinkDevice = { nav.navigate("link-device") },
+                onAgentChats = { nav.navigate("agent-chats") },
                 appLock = appLock,
                 onBack = { nav.popBackStack() },
             )
@@ -341,6 +343,13 @@ private fun SignedInApp(
             DevicesScreen(
                 api = deps.devicesService(session),
                 onSelfRevoked = onSignOut,
+                onBack = { nav.popBackStack() },
+            )
+        }
+
+        composable("agent-chats") {
+            AgentChatScreen(
+                api = deps.agentChatService(session),
                 onBack = { nav.popBackStack() },
             )
         }

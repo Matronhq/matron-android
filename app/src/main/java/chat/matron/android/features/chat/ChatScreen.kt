@@ -45,6 +45,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.chat.TimelineItem
+import chat.matron.android.journal.AgentChatDecision
 import chat.matron.android.designsystem.ActivityIndicatorRow
 import chat.matron.android.designsystem.AttachmentFullscreenViewer
 import chat.matron.android.designsystem.CompactContextBanner
@@ -385,6 +386,11 @@ private fun TimelineRowView(
     onPreviewImage: (Any) -> Unit,
     onTapFile: (url: String, filename: String) -> Unit,
 ) {
+    // Collected so a consent card's in-flight / answered state redraws: the
+    // answer is an HTTP call with no journal event behind it, so nothing in the
+    // timeline snapshot would otherwise change.
+    val agentChatStates by chatVM.agentChatStates.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
     when (row) {
         is TimelineRow.Separator -> DateSeparator(label = DateSeparatorLabel.format(row.date))
         is TimelineRow.Message -> {
@@ -408,6 +414,21 @@ private fun TimelineRowView(
                     askViewModel = { id -> chatVM.askViewModel(id) },
                     isPromptAnswered = { id -> chatVM.isPromptAnswered(id) },
                     answerSummary = { id -> chatVM.answerSummary(id) },
+                    agentChatState = { id ->
+                        // Read through the view model (persisted decision wins);
+                        // `agentChatStates` above is what makes this recompose.
+                        agentChatStates.let { chatVM.agentChatState(id) }
+                    },
+                    onAnswerAgentChat = { eventID, request, approve, alwaysAllow ->
+                        scope.launch {
+                            chatVM.answerAgentChat(
+                                eventID = eventID,
+                                request = request,
+                                decision = if (approve) AgentChatDecision.APPROVE else AgentChatDecision.DENY,
+                                alwaysAllow = alwaysAllow,
+                            )
+                        }
+                    },
                 )
             }
         }

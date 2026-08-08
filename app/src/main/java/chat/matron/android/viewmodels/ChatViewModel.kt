@@ -3,8 +3,12 @@ package chat.matron.android.viewmodels
 import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineItem
 import chat.matron.android.chat.TimelineService
+import chat.matron.android.events.AgentChatCardState
+import chat.matron.android.events.AgentChatRequest
 import chat.matron.android.events.AskUserEvent
 import chat.matron.android.models.MatronDebug
+import chat.matron.android.journal.AgentChatDecision
+import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.SessionState
 import chat.matron.android.models.SessionStatus
 import chat.matron.android.models.SyncConnectionState
@@ -66,6 +70,11 @@ class ChatViewModel(
     private val scope: CoroutineScope,
     private val answeredPromptStore: KeyValueStore,
     private val haptics: Haptics = Haptics.None,
+    /// Answers agent-chat consent cards. Nullable so the many call sites that
+    /// don't render them (tests, previews) construct unchanged; a card with no
+    /// answerer renders read-only rather than offering buttons that would do
+    /// nothing — the exact failure this whole path exists to fix.
+    private val agentChat: AgentChatAnswering? = null,
 ) {
     // MARK: - Published state
 
@@ -179,6 +188,94 @@ class ChatViewModel(
         answeredPromptStore.getStringList(answeredPromptsKey)?.toMutableSet() ?: mutableSetOf()
 
     private val askViewModels = mutableMapOf<String, AskUserSheetViewModel>()
+
+    // MARK: - Agent-chat consent cards
+
+    /// Consent cards answered on THIS device, keyed by journal seq, with the
+    /// decision made. Persisted under `matron.agentChatAnswers.<roomID>`.
+    ///
+    /// Unlike an ask-user reply, answering a consent card is an HTTP call and
+    /// produces no journal event — so there is nothing in the timeline to read
+    /// the outcome back from, on this device or any other. Local memory is the
+    /// only thing standing between the user and a card that looks unanswered
+    /// forever.
+    ///
+    /// Stored as "<seq>:<decision>" strings because [KeyValueStore] carries
+    /// ordered string lists, not maps. Journal seqs are digits, so the first
+    /// ':' is an unambiguous separator.
+    private val agentChatAnswersKey = "matron.agentChatAnswers.$roomID"
+    private val agentChatAnswers: MutableMap<String, String> =
+        answeredPromptStore.getStringList(agentChatAnswersKey).orEmpty()
+            .mapNotNull { entry ->
+                val split = entry.indexOf(':')
+                if (split <= 0) null else entry.substring(0, split) to entry.substring(split + 1)
+            }.toMap().toMutableMap()
+
+    /// Live per-card state while a call is in flight or has failed. Not
+    /// persisted: a send that was interrupted should come back answerable.
+    private val _agentChatStates = MutableStateFlow<Map<String, AgentChatCardState>>(emptyMap())
+    val agentChatStates: StateFlow<Map<String, AgentChatCardState>> = _agentChatStates.asStateFlow()
+
+    /// Render state for one consent card. A remembered decision wins over
+    /// everything: once answered, the card is history.
+    fun agentChatState(eventID: String): AgentChatCardState {
+        agentChatAnswers[eventID]?.let { decision ->
+            return if (decision == EXPIRED_ANSWER) {
+                AgentChatCardState.Expired
+            } else {
+                AgentChatCardState.Answered(decision == AgentChatDecision.APPROVE.wire)
+            }
+        }
+        _agentChatStates.value[eventID]?.let { return it }
+        // No answerer wired: show the card, but don't offer buttons that cannot
+        // resolve it.
+        return if (agentChat == null) AgentChatCardState.Expired else AgentChatCardState.Idle
+    }
+
+    /// Answers a consent card. The ONLY path that resolves one — a reply into
+    /// the room never reaches the parked row.
+    ///
+    /// A `Conflict` means the row stopped awaiting an answer between the card
+    /// being drawn and the tap (answered on another device, or 24h expired);
+    /// that is not an error the user can act on, so it settles the card as
+    /// expired rather than showing a failure they'd only retry.
+    suspend fun answerAgentChat(
+        eventID: String,
+        request: AgentChatRequest,
+        decision: AgentChatDecision,
+        alwaysAllow: Boolean,
+    ) {
+        val answerer = agentChat ?: return
+        if (agentChatAnswers.containsKey(eventID)) return
+        if (_agentChatStates.value[eventID] is AgentChatCardState.Sending) return
+        setAgentChatState(eventID, AgentChatCardState.Sending)
+        try {
+            answerer.answerAgentChat(request.roomID, request.targetDeviceID, decision, alwaysAllow)
+            rememberAgentChatAnswer(eventID, decision.wire)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (conflict: JournalApiError.Conflict) {
+            rememberAgentChatAnswer(eventID, EXPIRED_ANSWER)
+        } catch (error: Throwable) {
+            setAgentChatState(eventID, AgentChatCardState.Failed(describeAgentChatError(error)))
+        }
+    }
+
+    private fun setAgentChatState(eventID: String, state: AgentChatCardState) {
+        _agentChatStates.value = _agentChatStates.value + (eventID to state)
+    }
+
+    private fun rememberAgentChatAnswer(eventID: String, value: String) {
+        agentChatAnswers[eventID] = value
+        answeredPromptStore.setStringList(
+            agentChatAnswersKey,
+            agentChatAnswers.map { (id, decision) -> "$id:$decision" },
+        )
+        // Drop the transient entry AFTER the persisted one lands, so the state
+        // read never falls through to Idle in between.
+        _agentChatStates.value = _agentChatStates.value - eventID
+    }
+
 
     // MARK: - Snapshot → derived state
 
@@ -712,6 +809,18 @@ class ChatViewModel(
     companion object {
         /// Cap for both [resolvedImages] and [failedRequests].
         const val MEDIA_CACHE_LIMIT = 100
+
+        /// Persisted marker for a consent card the server said was no longer
+        /// awaiting an answer. Not a decision, so it can't collide with
+        /// [AgentChatDecision]'s wire values.
+        private const val EXPIRED_ANSWER = "expired"
+
+        internal fun describeAgentChatError(error: Throwable): String = when (error) {
+            is JournalApiError.Transport ->
+                "Couldn't reach the server — check your connection and try again."
+            is JournalApiError.NotFound -> "That request is no longer on the server."
+            else -> "The server refused that answer."
+        }
 
         private const val DEFAULT_WINDOW_SIZE = 120
         private const val WINDOW_GROWTH_STEP = 120

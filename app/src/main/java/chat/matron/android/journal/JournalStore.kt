@@ -456,7 +456,16 @@ class JournalStore(
         JournalEventType.TEXT -> (event.body() ?: "").take(120)
         JournalEventType.PROMPT -> "? " + (event.payload.stringOrNull("question") ?: "").take(110)
         JournalEventType.PERMISSION_REQUEST ->
-            "permission: " + (event.payload.stringOrNull("description") ?: "").take(100)
+            // The agent-chat consent card carries no `description`, so the
+            // generic branch produced a bare "permission: " in the chat list —
+            // and disagreed with the server, whose snippetOf returns this
+            // string for the same event. A snapshot and a live frame must not
+            // render the same row two different ways.
+            if (event.payload.stringOrNull("kind") == "agent_chat") {
+                "🤝 Agent chat request"
+            } else {
+                "permission: " + (event.payload.stringOrNull("description") ?: "").take(100)
+            }
         else -> event.snippet()?.take(120) ?: "[${event.type}]"
     }
 

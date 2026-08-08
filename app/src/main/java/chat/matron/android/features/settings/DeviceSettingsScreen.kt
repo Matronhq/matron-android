@@ -52,6 +52,8 @@ fun DeviceSettingsScreen(
     onAppearanceChange: (MatronAppearance) -> Unit,
     onManageDevices: () -> Unit,
     onLinkDevice: (() -> Unit)? = null,
+    /// Settings → Agent Chats. `null` in hosts without the surface (previews).
+    onAgentChats: (() -> Unit)? = null,
     /// `null` in hosts that have no lock (and in previews); the Privacy section
     /// then doesn't render at all.
     appLock: AppLockController? = null,
@@ -100,6 +102,18 @@ fun DeviceSettingsScreen(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text("Link a Device", modifier = Modifier.weight(1f))
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+                        }
+                    }
+                    if (onAgentChats != null) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(onClick = onAgentChats)
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Agent Chats", modifier = Modifier.weight(1f))
                             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
                         }
                     }
