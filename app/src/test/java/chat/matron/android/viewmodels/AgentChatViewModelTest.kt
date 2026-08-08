@@ -19,6 +19,7 @@ private class FakeAgentChatApi : AgentChatProviding {
     var pending: List<AgentChatPendingDTO> = emptyList()
     var allowances: List<AgentChatAllowanceDTO> = emptyList()
     var pendingError: Throwable? = null
+    var allowancesError: Throwable? = null
     var answerError: Throwable? = null
     var revokeError: Throwable? = null
     val answers = mutableListOf<Quad>()
@@ -40,6 +41,7 @@ private class FakeAgentChatApi : AgentChatProviding {
 
     override suspend fun agentChatAllowances(): List<AgentChatAllowanceDTO> {
         pendingError?.let { throw it }
+        allowancesError?.let { throw it }
         return allowances
     }
 
@@ -215,4 +217,42 @@ class AgentChatViewModelTest {
         )
         assertEquals("Device 4", row.requesterLabel)
     }
+
+    /// A partial failure must not leave one list fresh beside the other's
+    /// stale contents, next to an error saying the load failed.
+    @Test
+    fun refresh_halfFailedLeavesBothListsAsTheyWere() = runBlocking {
+        val api = FakeAgentChatApi()
+        api.pending = listOf(pendingRow(room = "first"))
+        api.allowances = listOf(allowanceRow())
+        val vm = AgentChatViewModel(api)
+        vm.refresh()
+
+        api.pending = listOf(pendingRow(room = "second"))
+        api.allowancesError = JournalApiError.Transport("offline")
+        vm.refresh()
+
+        assertEquals(listOf("first"), vm.pending.value.map { it.roomID })
+        assertEquals(1, vm.allowances.value.size)
+        assertNotNull(vm.errorMessage.value)
+    }
+
+    /// `refresh()` runs from a LaunchedEffect, i.e. after the first frame — an
+    /// unguarded empty list tells the user they have no pending requests a
+    /// beat before their pending requests appear.
+    @Test
+    fun hasLoaded_isFalseUntilTheFirstLoadSettles() = runBlocking {
+        val api = FakeAgentChatApi()
+        val vm = AgentChatViewModel(api)
+        assertFalse(vm.hasLoaded.value)
+
+        api.pendingError = JournalApiError.Transport("offline")
+        vm.refresh()
+        assertFalse("a failed load has not established that the lists are empty", vm.hasLoaded.value)
+
+        api.pendingError = null
+        vm.refresh()
+        assertTrue(vm.hasLoaded.value)
+    }
+
 }

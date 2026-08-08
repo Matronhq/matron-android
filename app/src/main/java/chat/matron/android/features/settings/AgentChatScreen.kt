@@ -60,6 +60,7 @@ fun AgentChatScreen(
     val allowances by viewModel.allowances.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val isSupported by viewModel.isSupported.collectAsStateWithLifecycle()
+    val hasLoaded by viewModel.hasLoaded.collectAsStateWithLifecycle()
     val busyIDs by viewModel.busyIDs.collectAsStateWithLifecycle()
 
     var confirmingRevoke by remember { mutableStateOf<AgentChatAllowanceDTO?>(null) }
@@ -102,7 +103,9 @@ fun AgentChatScreen(
             }
 
             item { SectionHeader("Waiting for you") }
-            if (pending.isEmpty()) {
+            if (!hasLoaded) {
+                item { Hint("Loading…") }
+            } else if (pending.isEmpty()) {
                 item { Hint("No requests waiting.") }
             } else {
                 items(pending, key = { it.id }) { row ->
@@ -123,7 +126,9 @@ fun AgentChatScreen(
             }
 
             item { SectionHeader("Always allowed") }
-            if (allowances.isEmpty()) {
+            if (!hasLoaded) {
+                item { Hint("Loading…") }
+            } else if (allowances.isEmpty()) {
                 item { Hint("None — every request asks you first.") }
             } else {
                 items(allowances, key = { it.id }) { allowance ->

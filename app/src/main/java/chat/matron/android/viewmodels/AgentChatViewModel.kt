@@ -73,6 +73,13 @@ class AgentChatViewModel(private val api: AgentChatProviding) {
     private val _isSupported = MutableStateFlow(true)
     val isSupported: StateFlow<Boolean> = _isSupported.asStateFlow()
 
+    /// `false` until the first successful load. The screens gate their
+    /// "nothing here" copy on it: [refresh] runs from a LaunchedEffect, i.e.
+    /// after the first frame, so an unguarded empty list tells the user they
+    /// have no pending requests a beat before their pending requests appear.
+    private val _hasLoaded = MutableStateFlow(false)
+    val hasLoaded: StateFlow<Boolean> = _hasLoaded.asStateFlow()
+
     /// Rows with a call in flight, so one row's spinner doesn't disable the
     /// whole screen.
     private val _busyIDs = MutableStateFlow<Set<String>>(emptySet())
@@ -81,11 +88,15 @@ class AgentChatViewModel(private val api: AgentChatProviding) {
     suspend fun refresh() {
         _isLoading.value = true
         try {
-            // Sequential, not concurrent: two round trips on screen entry is
-            // nothing, and a partial failure that left one list stale beside a
-            // fresh one would be worse than one clear error.
-            _pending.value = api.agentChatPending().sortedByDescending { it.createdAt }
-            _allowances.value = api.agentChatAllowances().sortedByDescending { it.createdAt }
+            // Both calls first, both assignments after: a partial failure must
+            // not leave one list fresh beside the other's stale contents, next
+            // to an error saying the load failed. Sequential rather than
+            // concurrent because two round trips on screen entry is nothing.
+            val freshPending = api.agentChatPending()
+            val freshAllowances = api.agentChatAllowances()
+            _pending.value = freshPending.sortedByDescending { it.createdAt }
+            _allowances.value = freshAllowances.sortedByDescending { it.createdAt }
+            _hasLoaded.value = true
             _isSupported.value = true
             _errorMessage.value = null
         } catch (cancel: CancellationException) {
@@ -95,6 +106,7 @@ class AgentChatViewModel(private val api: AgentChatProviding) {
             // rather than showing two permanently empty lists as if the user
             // simply had nothing pending.
             _isSupported.value = false
+            _hasLoaded.value = true
             _pending.value = emptyList()
             _allowances.value = emptyList()
             _errorMessage.value = null
