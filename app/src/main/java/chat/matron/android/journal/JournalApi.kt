@@ -98,6 +98,11 @@ data class AgentChatPendingDTO(
     val requesterLabel: String
         get() = initiatorName?.trim()?.takeIf { it.isNotEmpty() } ?: "Device $initiatorDeviceID"
 
+    /// Same fallback for the far end. Only meaningful on an invite: a join
+    /// self-targets, so this would name the joiner twice.
+    val targetLabel: String
+        get() = targetName?.trim()?.takeIf { it.isNotEmpty() } ?: "Device $targetDeviceID"
+
     /// One line stating what is being asked. A join self-targets (the
     /// requester IS the target), which is what tells the two apart without a
     /// separate field.
@@ -105,7 +110,7 @@ data class AgentChatPendingDTO(
         get() = if (initiatorDeviceID == targetDeviceID) {
             "$requesterLabel wants to join a chat."
         } else {
-            "$requesterLabel wants to start a chat with another agent."
+            "$requesterLabel wants to start a chat with $targetLabel."
         }
 }
 

@@ -202,7 +202,7 @@ class AgentChatViewModelTest {
     @Test
     fun headline_distinguishesJoinFromInvite() {
         assertEquals(
-            "dev-2 wants to start a chat with another agent.",
+            "dev-2 wants to start a chat with dev-3.",
             pendingRow(target = 7, initiator = 4).headline,
         )
         assertEquals("dev-2 wants to join a chat.", pendingRow(target = 4, initiator = 4).headline)

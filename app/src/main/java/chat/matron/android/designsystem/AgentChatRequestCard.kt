@@ -72,6 +72,12 @@ fun AgentChatRequestCard(
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurface,
         )
+        // Both ends spelled out. The headline names the two devices, but a box
+        // can be running a dozen sessions — these say which one asked and
+        // which one is being asked. They fall back to the device name alone
+        // when the journal named no session, never to an empty row.
+        Detail("From", request.fromLabel)
+        Detail("To", request.toLabel)
         request.topic?.let { Detail("About", it) }
         request.justification?.let { Detail("Why", it) }
 
