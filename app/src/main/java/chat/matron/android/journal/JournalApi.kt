@@ -64,6 +64,69 @@ data class DeviceDTO(
     val connected: Boolean = false,
 )
 
+/// The user's answer to an agent-chat consent card. Mirrors the `decision`
+/// field of `POST /agent-chat/answer`.
+enum class AgentChatDecision(val wire: String) {
+    APPROVE("approve"),
+    DENY("deny"),
+}
+
+/// One row of `GET /agent-chat/pending` — an agent's request to chat that is
+/// parked waiting on this user. The durable form of the consent card, for asks
+/// that arrived while no client was connected.
+///
+/// `roomID` + `targetDeviceID` are the answer key; the two names are the
+/// devices', already sanitised server-side and null when a device has since
+/// been revoked.
+data class AgentChatPendingDTO(
+    val roomID: String,
+    val targetDeviceID: Long,
+    val initiatorDeviceID: Long,
+    val initiatorName: String?,
+    val targetName: String?,
+    val topic: String?,
+    val justification: String?,
+    val roomTitle: String,
+    val createdAt: Long,
+) {
+    /// Unique per parked row: the server's own primary key for one
+    /// (`convo_agents.convo_id`, `agent_device_id`).
+    val id: String get() = "$roomID/$targetDeviceID"
+
+    /// Who to name on the card. Falls back to the device id rather than going
+    /// blank when the requesting device has been revoked mid-ask.
+    val requesterLabel: String
+        get() = initiatorName?.trim()?.takeIf { it.isNotEmpty() } ?: "Device $initiatorDeviceID"
+
+    /// One line stating what is being asked. A join self-targets (the
+    /// requester IS the target), which is what tells the two apart without a
+    /// separate field.
+    val headline: String
+        get() = if (initiatorDeviceID == targetDeviceID) {
+            "$requesterLabel wants to join a chat."
+        } else {
+            "$requesterLabel wants to start a chat with another agent."
+        }
+}
+
+/// One row of `GET /agent-chat/allowances` — a directed pair the user chose to
+/// trust with "always allow", which skips the consent card entirely from then
+/// on. Directed: A→B says nothing about B→A.
+data class AgentChatAllowanceDTO(
+    val fromDeviceID: Long,
+    val targetDeviceID: Long,
+    val fromName: String?,
+    val targetName: String?,
+    val createdAt: Long,
+) {
+    val id: String get() = "$fromDeviceID->$targetDeviceID"
+    val fromLabel: String get() = label(fromName, fromDeviceID)
+    val targetLabel: String get() = label(targetName, targetDeviceID)
+
+    private fun label(name: String?, id: Long): String =
+        name?.trim()?.takeIf { it.isNotEmpty() } ?: "Device $id"
+}
+
 /// `POST /pair/preview` — who is asking to join, shown before approve.
 data class PairPreview(val requesterIP: String, val expiresIn: Int)
 
@@ -283,6 +346,97 @@ class JournalApi(
     suspend fun revokeDevice(id: Long) {
         request(path = "/devices/$id/revoke", method = "POST", jsonBody = buildJsonObject { })
     }
+
+    // MARK: Agent chat consent
+
+    /// Asks parked waiting on this user, across every room. The durable
+    /// counterpart to the live consent card — an ask minted while no client was
+    /// connected is only ever visible here.
+    suspend fun agentChatPending(): List<AgentChatPendingDTO> {
+        val obj = request(path = "/agent-chat/pending")
+        return (obj.arrayOrNull("pending")?.objects() ?: emptyList()).mapNotNull { p ->
+            val roomID = p.stringOrNull("convo_id") ?: return@mapNotNull null
+            val target = p.longOrNull("agent_device_id") ?: return@mapNotNull null
+            val initiator = p.longOrNull("initiator_device_id") ?: return@mapNotNull null
+            AgentChatPendingDTO(
+                roomID = roomID,
+                targetDeviceID = target,
+                initiatorDeviceID = initiator,
+                initiatorName = p.stringOrNull("initiator_name"),
+                targetName = p.stringOrNull("agent_name"),
+                topic = nonEmpty(p.stringOrNull("topic")),
+                justification = nonEmpty(p.stringOrNull("justification")),
+                roomTitle = p.stringOrNull("title") ?: "",
+                createdAt = p.longOrNull("created_at") ?: 0,
+            )
+        }
+    }
+
+    /// Answers one parked ask. The ONLY path that resolves a consent card — a
+    /// `prompt_reply` into the room never touches the parked row.
+    ///
+    /// `alwaysAllow` on an approval records a standing allowance for the
+    /// directed pair, so future asks between those two agents skip the card. It
+    /// is also the only way to create one; [revokeAgentChatAllowance] is the
+    /// way back.
+    ///
+    /// Returns the server's `delivered` flag: whether the approved invite
+    /// reached the target's socket right now, or is still owed to it. Throws
+    /// `Conflict` if the row is no longer awaiting an answer (already answered
+    /// here or elsewhere, or expired) and `NotFound` if the room isn't this
+    /// user's.
+    suspend fun answerAgentChat(
+        roomID: String,
+        targetDeviceID: Long,
+        decision: AgentChatDecision,
+        alwaysAllow: Boolean = false,
+    ): Boolean {
+        val obj = request(
+            path = "/agent-chat/answer", method = "POST",
+            jsonBody = buildJsonObject {
+                put("room_id", roomID)
+                put("target_device_id", targetDeviceID)
+                put("decision", decision.wire)
+                // Sent only when true: the server treats `always_allow` as
+                // strictly `=== true`, and a denial has no allowance to record
+                // either way.
+                if (alwaysAllow && decision == AgentChatDecision.APPROVE) put("always_allow", true)
+            },
+        )
+        return obj.boolOrNull("delivered") ?: false
+    }
+
+    /// Directed pairs the user has granted "always allow".
+    suspend fun agentChatAllowances(): List<AgentChatAllowanceDTO> {
+        val obj = request(path = "/agent-chat/allowances")
+        return (obj.arrayOrNull("allowances")?.objects() ?: emptyList()).mapNotNull { a ->
+            val from = a.longOrNull("from_device_id") ?: return@mapNotNull null
+            val target = a.longOrNull("target_device_id") ?: return@mapNotNull null
+            AgentChatAllowanceDTO(
+                fromDeviceID = from,
+                targetDeviceID = target,
+                fromName = a.stringOrNull("from_name"),
+                targetName = a.stringOrNull("target_name"),
+                createdAt = a.longOrNull("created_at") ?: 0,
+            )
+        }
+    }
+
+    /// Withdraws a standing allowance, so that pair has to ask again.
+    /// Idempotent server-side — revoking one that is already gone succeeds.
+    suspend fun revokeAgentChatAllowance(fromDeviceID: Long, targetDeviceID: Long) {
+        request(
+            path = "/agent-chat/allowances/revoke", method = "POST",
+            jsonBody = buildJsonObject {
+                put("from_device_id", fromDeviceID)
+                put("target_device_id", targetDeviceID)
+            },
+        )
+    }
+
+    /// The journal defaults an absent topic/justification to `""` rather than
+    /// omitting the key, so "absent" and "empty" arrive identically.
+    private fun nonEmpty(raw: String?): String? = raw?.trim()?.takeIf { it.isNotEmpty() }
 
     /// Previews a pairing code before approval. 404 = unknown/expired/approved.
     suspend fun pairPreview(code: String): PairPreview {

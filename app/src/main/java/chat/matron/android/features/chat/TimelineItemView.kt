@@ -21,7 +21,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.chat.TimelineItem
+import chat.matron.android.events.AgentChatCardState
+import chat.matron.android.events.AgentChatRequest
 import chat.matron.android.designsystem.ActivityIndicatorRow
+import chat.matron.android.designsystem.AgentChatRequestCard
 import chat.matron.android.designsystem.AskUserCard
 import chat.matron.android.designsystem.AttachmentFile
 import chat.matron.android.designsystem.AttachmentImage
@@ -59,10 +62,25 @@ fun TimelineItemView(
     askViewModel: ((String) -> AskUserSheetViewModel?)? = null,
     isPromptAnswered: ((String) -> Boolean)? = null,
     answerSummary: ((String) -> String?)? = null,
+    /// Render state for an agent-chat consent card. `null` (previews, tests)
+    /// renders the card read-only rather than offering buttons with nothing
+    /// behind them.
+    agentChatState: ((String) -> AgentChatCardState)? = null,
+    /// Answers a consent card: approve (optionally always-allowing the pair) or
+    /// decline. Goes to `POST /agent-chat/answer`, not into the timeline.
+    onAnswerAgentChat: ((
+        eventID: String,
+        request: AgentChatRequest,
+        approve: Boolean,
+        alwaysAllow: Boolean,
+    ) -> Unit)? = null,
 ) {
     if (item.isOwn && item.sendState != TimelineSendState.Sent) {
         Column(horizontalAlignment = Alignment.End) {
-            RenderedBody(item, resolveImage, onTapImage, onTapFile, askViewModel, isPromptAnswered, answerSummary)
+            RenderedBody(
+                item, resolveImage, onTapImage, onTapFile, askViewModel, isPromptAnswered,
+                answerSummary, agentChatState, onAnswerAgentChat,
+            )
             SendStateIndicator(
                 state = sendStateGlyphFrom(item.sendState),
                 onRetry = onRetry?.let { handler -> { handler(item.id) } },
@@ -70,7 +88,10 @@ fun TimelineItemView(
             )
         }
     } else {
-        RenderedBody(item, resolveImage, onTapImage, onTapFile, askViewModel, isPromptAnswered, answerSummary)
+        RenderedBody(
+            item, resolveImage, onTapImage, onTapFile, askViewModel, isPromptAnswered,
+            answerSummary, agentChatState, onAnswerAgentChat,
+        )
     }
 }
 
@@ -83,6 +104,13 @@ private fun RenderedBody(
     askViewModel: ((String) -> AskUserSheetViewModel?)?,
     isPromptAnswered: ((String) -> Boolean)?,
     answerSummary: ((String) -> String?)?,
+    agentChatState: ((String) -> AgentChatCardState)?,
+    onAnswerAgentChat: ((
+        eventID: String,
+        request: AgentChatRequest,
+        approve: Boolean,
+        alwaysAllow: Boolean,
+    ) -> Unit)?,
 ) {
     val style = if (item.isOwn) MessageAuthorStyle.Me else MessageAuthorStyle.Bot
     when (val kind = item.kind) {
@@ -139,6 +167,18 @@ private fun RenderedBody(
                     askViewModel = askViewModel,
                     isPromptAnswered = isPromptAnswered,
                     answerSummary = answerSummary,
+                )
+            }
+
+        is TimelineItem.Kind.AgentChatRequestCard ->
+            CappedCard(maxWidth = 360.dp) {
+                AgentChatRequestCard(
+                    request = kind.request,
+                    state = agentChatState?.invoke(kind.eventID) ?: AgentChatCardState.Expired,
+                    onApprove = { alwaysAllow ->
+                        onAnswerAgentChat?.invoke(kind.eventID, kind.request, true, alwaysAllow)
+                    },
+                    onDeny = { onAnswerAgentChat?.invoke(kind.eventID, kind.request, false, false) },
                 )
             }
 

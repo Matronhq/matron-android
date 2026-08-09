@@ -3,7 +3,10 @@ package chat.matron.android.viewmodels
 import chat.matron.android.chat.FakeMediaService
 import chat.matron.android.chat.FakeTimelineService
 import chat.matron.android.chat.TimelineItem
+import chat.matron.android.events.AgentChatCardState
+import chat.matron.android.events.AgentChatRequest
 import chat.matron.android.events.AskUserEvent
+import chat.matron.android.journal.AgentChatDecision
 import chat.matron.android.models.SessionStatus
 import chat.matron.android.models.SessionStatusUpdate
 import chat.matron.android.models.SyncConnectionState
@@ -13,6 +16,7 @@ import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.ZoneOffset
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
@@ -1124,5 +1128,54 @@ class ChatViewModelTest {
         fake.snapshotsToEmit = listOf(emptyList())
         vm.start().join()
         assertNull(vm.sessionStatus.value)
+    }
+
+    // MARK: - agent-chat consent
+
+    /// Suspends until [gate] opens, standing in for an answer still on the wire.
+    private class GatedAnswerer(private val gate: CompletableDeferred<Unit>) : AgentChatAnswering {
+        var calls = 0
+            private set
+
+        override suspend fun answerAgentChat(
+            roomID: String,
+            targetDeviceID: Long,
+            decision: AgentChatDecision,
+            alwaysAllow: Boolean,
+        ): Boolean {
+            calls += 1
+            gate.await()
+            return true
+        }
+    }
+
+    /// The consent card is a row in a lazy list. Answering used to run on that
+    /// row's coroutine scope, so scrolling the card off-screen — or leaving the
+    /// chat — cancelled the request in flight and left the card holding the
+    /// `Sending` marker that blocks retries: permanently unanswerable. The
+    /// answer belongs to the view model, which outlives any one row.
+    @Test
+    fun answerAgentChat_outlivesTheRowThatTriggeredIt() = vmTest { scope ->
+        val gate = CompletableDeferred<Unit>()
+        val answerer = GatedAnswerer(gate)
+        val vm = ChatViewModel(
+            "!r:s", FakeTimelineService(), FakeMediaService(), scope,
+            InMemoryKeyValueStore(), Haptics.None, answerer,
+        )
+        val request = AgentChatRequest(
+            ask = AgentChatRequest.Ask.INVITE, roomID = "!room:s", fromDeviceID = 4,
+            fromName = "dev-2", targetDeviceID = 7, topic = null, justification = null,
+        )
+        val rowScope = CoroutineScope(coroutineContext + Job())
+
+        rowScope.launch {
+            vm.answerAgentChat("42", request, AgentChatDecision.APPROVE, alwaysAllow = false)
+        }.join()
+        rowScope.cancel() // the card scrolls out of view, mid-request
+        gate.complete(Unit)
+
+        waitUntil { vm.agentChatState("42") is AgentChatCardState.Answered }
+        assertEquals(1, answerer.calls)
+        assertTrue((vm.agentChatState("42") as AgentChatCardState.Answered).approved)
     }
 }

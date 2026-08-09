@@ -32,6 +32,8 @@ import chat.matron.android.storage.TimelineCacheKey
 import chat.matron.android.sync.SyncService
 import chat.matron.android.viewmodels.AgentRPCProviding
 import chat.matron.android.viewmodels.DeviceLinking
+import chat.matron.android.viewmodels.AgentChatProviding
+import chat.matron.android.viewmodels.JournalAgentChatService
 import chat.matron.android.viewmodels.DevicesProviding
 import chat.matron.android.viewmodels.JournalAgentRPCService
 import chat.matron.android.viewmodels.JournalDeviceLinkService
@@ -260,6 +262,13 @@ class AppDependencies(
     /** Devices/pairing surface (Settings → Manage Devices). */
     fun devicesService(session: UserSession): DevicesProviding =
         JournalDevicesService(core(session).api)
+
+    /**
+     * Agent-chat consent surface: answering the cards inline in a chat, and the
+     * Settings screen listing parked requests and standing allowances.
+     */
+    fun agentChatService(session: UserSession): AgentChatProviding =
+        JournalAgentChatService(core(session).api)
 
     /** Show-QR surface (Settings → Link a Device). */
     fun deviceLinkService(session: UserSession): DeviceLinking =

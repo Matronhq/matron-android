@@ -1,5 +1,6 @@
 package chat.matron.android.chat
 
+import chat.matron.android.events.AgentChatRequest
 import chat.matron.android.events.AskUserEvent
 import chat.matron.android.events.DiffEvent
 import chat.matron.android.events.LiveOutputEvent
@@ -66,29 +67,40 @@ object JournalTimelineMapper {
                 TimelineItem.Kind.AskUser(event.seq.toString(), askUserEvent(payload))
 
             JournalEventType.PERMISSION_REQUEST -> {
-                val description = payload.stringOrNull("description") ?: "Permission request"
-                val arr = payload.arrayOrNull("options")
-                val optionValues = if (arr != null && arr.all { it is JsonPrimitive && it.isString }) {
-                    arr.map { (it as JsonPrimitive).content }
+                // The agent-chat consent card first: it carries none of the
+                // keys the generic branch reads, so it used to render as the
+                // literal string "Permission request" with Allow/Deny buttons
+                // that answered over `prompt_reply` — a channel that never
+                // reaches the parked row. The tap did nothing and the ask
+                // expired 24h later.
+                val agentChat = AgentChatRequest.parse(payload)
+                if (agentChat != null) {
+                    TimelineItem.Kind.AgentChatRequestCard(event.seq.toString(), agentChat)
                 } else {
-                    listOf("Allow", "Deny")
-                }
-                TimelineItem.Kind.AskUser(
-                    event.seq.toString(),
-                    AskUserEvent(
-                        prompt = description,
-                        kind = AskUserEvent.InputKind.Choice(
-                            optionValues.map { AskUserEvent.Option(it, it) },
-                            allowOther = false,
+                    val description = payload.stringOrNull("description") ?: "Permission request"
+                    val arr = payload.arrayOrNull("options")
+                    val optionValues = if (arr != null && arr.all { it is JsonPrimitive && it.isString }) {
+                        arr.map { (it as JsonPrimitive).content }
+                    } else {
+                        listOf("Allow", "Deny")
+                    }
+                    TimelineItem.Kind.AskUser(
+                        event.seq.toString(),
+                        AskUserEvent(
+                            prompt = description,
+                            kind = AskUserEvent.InputKind.Choice(
+                                optionValues.map { AskUserEvent.Option(it, it) },
+                                allowOther = false,
+                            ),
+                            // The journal protocol carries no expiry on
+                            // permission_request/prompt payloads — always null
+                            // here (same as AskUserEvent.swift; expiry is a
+                            // legacy Matrix-era field the VMs still honor).
+                            expiresAt = null,
+                            replyChannel = AskUserEvent.ReplyChannel.CHOICE_REPLY,
                         ),
-                        // The journal protocol carries no expiry on
-                        // permission_request/prompt payloads — always null here
-                        // (same as AskUserEvent.swift; expiry is a legacy
-                        // Matrix-era field the downstream VMs still honor).
-                        expiresAt = null,
-                        replyChannel = AskUserEvent.ReplyChannel.CHOICE_REPLY,
-                    ),
-                )
+                    )
+                }
             }
 
             JournalEventType.PROMPT_REPLY -> {

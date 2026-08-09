@@ -398,4 +398,51 @@ class JournalTimelineMapperTest {
         }))!!
         assertEquals("review this before Friday", (item.kind as TimelineItem.Kind.File).caption)
     }
+
+    // MARK: Agent-chat consent card
+
+    @Test fun agentChatPermissionRequestMapsToItsOwnKind() {
+        val item = map(ev(31, "permission_request", payload = buildJsonObject {
+            put("kind", "agent_chat")
+            put("request", "invite")
+            put("room_id", "room-1")
+            put("from_device_id", 4)
+            put("from_name", "dev-2")
+            put("target_device_id", 7)
+            put("topic", "ci triage")
+            put("justification", "need the build log")
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.AgentChatRequestCard
+        assertEquals("31", kind.eventID)
+        assertEquals("room-1", kind.request.roomID)
+        assertEquals(7L, kind.request.targetDeviceID)
+    }
+
+    /// The regression this whole kind exists for: the agent-chat card has no
+    /// `description`/`options`, so the generic branch rendered it as the literal
+    /// words "Permission request" with Allow/Deny buttons that answered over
+    /// `prompt_reply` — a channel that never reaches the parked row, so the tap
+    /// did nothing at all.
+    @Test fun agentChatCardNoLongerFallsBackToAGenericPrompt() {
+        val item = map(ev(32, "permission_request", payload = buildJsonObject {
+            put("kind", "agent_chat")
+            put("request", "join")
+            put("room_id", "r")
+            put("from_device_id", 4)
+            put("target_device_id", 4)
+        }))!!
+        assertFalse(item.kind is TimelineItem.Kind.AskUser)
+    }
+
+    /// A card whose payload is missing something the answer call needs is
+    /// unanswerable — better a generic card than buttons that would 400.
+    @Test fun unanswerableAgentChatPayloadFallsBackToTheGenericCard() {
+        val item = map(ev(33, "permission_request", payload = buildJsonObject {
+            put("kind", "agent_chat")
+            put("request", "invite")
+            put("from_device_id", 4)
+        }))!!
+        assertTrue(item.kind is TimelineItem.Kind.AskUser)
+    }
+
 }
