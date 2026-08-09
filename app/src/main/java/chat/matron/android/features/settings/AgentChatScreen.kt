@@ -61,6 +61,7 @@ fun AgentChatScreen(
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val isSupported by viewModel.isSupported.collectAsStateWithLifecycle()
     val hasLoaded by viewModel.hasLoaded.collectAsStateWithLifecycle()
+    val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val busyIDs by viewModel.busyIDs.collectAsStateWithLifecycle()
 
     var confirmingRevoke by remember { mutableStateOf<AgentChatAllowanceDTO?>(null) }
@@ -88,7 +89,20 @@ fun AgentChatScreen(
                         modifier = Modifier.padding(16.dp),
                     )
                 }
+                item {
+                    TextButton(
+                        onClick = { scope.launch { viewModel.refresh() } },
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                    ) { Text("Try Again") }
+                }
             }
+
+            // The first load failed and nothing is in flight: the error above,
+            // with its retry, is the whole screen. Section headers over two
+            // "Loading…" lines would claim we were still fetching. (Before the
+            // first attempt there is no error yet, so the sections still show
+            // their loading state.)
+            if (!hasLoaded && !isLoading && errorMessage != null) return@LazyColumn
 
             if (!isSupported) {
                 item {

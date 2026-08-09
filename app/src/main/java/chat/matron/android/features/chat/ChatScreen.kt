@@ -390,7 +390,6 @@ private fun TimelineRowView(
     // answer is an HTTP call with no journal event behind it, so nothing in the
     // timeline snapshot would otherwise change.
     val agentChatStates by chatVM.agentChatStates.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
     when (row) {
         is TimelineRow.Separator -> DateSeparator(label = DateSeparatorLabel.format(row.date))
         is TimelineRow.Message -> {
@@ -420,14 +419,15 @@ private fun TimelineRowView(
                         agentChatStates.let { chatVM.agentChatState(id) }
                     },
                     onAnswerAgentChat = { eventID, request, approve, alwaysAllow ->
-                        scope.launch {
-                            chatVM.answerAgentChat(
-                                eventID = eventID,
-                                request = request,
-                                decision = if (approve) AgentChatDecision.APPROVE else AgentChatDecision.DENY,
-                                alwaysAllow = alwaysAllow,
-                            )
-                        }
+                        // Deliberately NOT wrapped in this row's coroutine
+                        // scope — the view model owns the call so scrolling the
+                        // card away can't cancel an answer in flight.
+                        chatVM.answerAgentChat(
+                            eventID = eventID,
+                            request = request,
+                            decision = if (approve) AgentChatDecision.APPROVE else AgentChatDecision.DENY,
+                            alwaysAllow = alwaysAllow,
+                        )
                     },
                 )
             }

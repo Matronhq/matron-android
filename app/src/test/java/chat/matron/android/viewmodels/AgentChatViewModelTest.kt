@@ -255,4 +255,19 @@ class AgentChatViewModelTest {
         assertTrue(vm.hasLoaded.value)
     }
 
+    /// The state the screen reads to tell "still fetching" from "tried and
+    /// failed". Both look like `hasLoaded == false`, and "Loading…" shown for
+    /// the second one claims we are still trying when we have already given up.
+    @Test
+    fun failedFirstLoad_isNotStillLoading() = runBlocking {
+        val api = FakeAgentChatApi()
+        api.pendingError = JournalApiError.Transport("offline")
+        val vm = AgentChatViewModel(api)
+
+        vm.refresh()
+
+        assertFalse(vm.hasLoaded.value)
+        assertFalse("a spinner here would outlive the attempt it stands for", vm.isLoading.value)
+        assertNotNull("which leaves the error and its retry as the whole screen", vm.errorMessage.value)
+    }
 }

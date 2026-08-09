@@ -235,11 +235,17 @@ class ChatViewModel(
     /// Answers a consent card. The ONLY path that resolves one — a reply into
     /// the room never reaches the parked row.
     ///
+    /// Runs on the view model's own [scope] rather than the caller's, and that
+    /// is load-bearing: the card is a row in a lazy list, so a row-scoped
+    /// coroutine is cancelled the moment the card scrolls out of view or the
+    /// user leaves the chat. Cancelled mid-request, the card would keep the
+    /// `Sending` marker that blocks retries — permanently unanswerable.
+    ///
     /// A `Conflict` means the row stopped awaiting an answer between the card
     /// being drawn and the tap (answered on another device, or 24h expired);
     /// that is not an error the user can act on, so it settles the card as
     /// expired rather than showing a failure they'd only retry.
-    suspend fun answerAgentChat(
+    fun answerAgentChat(
         eventID: String,
         request: AgentChatRequest,
         decision: AgentChatDecision,
@@ -249,15 +255,20 @@ class ChatViewModel(
         if (agentChatAnswers.containsKey(eventID)) return
         if (_agentChatStates.value[eventID] is AgentChatCardState.Sending) return
         setAgentChatState(eventID, AgentChatCardState.Sending)
-        try {
-            answerer.answerAgentChat(request.roomID, request.targetDeviceID, decision, alwaysAllow)
-            rememberAgentChatAnswer(eventID, decision.wire)
-        } catch (cancel: CancellationException) {
-            throw cancel
-        } catch (conflict: JournalApiError.Conflict) {
-            rememberAgentChatAnswer(eventID, EXPIRED_ANSWER)
-        } catch (error: Throwable) {
-            setAgentChatState(eventID, AgentChatCardState.Failed(describeAgentChatError(error)))
+        scope.launch {
+            try {
+                answerer.answerAgentChat(request.roomID, request.targetDeviceID, decision, alwaysAllow)
+                rememberAgentChatAnswer(eventID, decision.wire)
+            } catch (cancel: CancellationException) {
+                // Whole chat is going away. Drop the in-flight marker so the
+                // card comes back answerable rather than stuck mid-send.
+                _agentChatStates.value = _agentChatStates.value - eventID
+                throw cancel
+            } catch (conflict: JournalApiError.Conflict) {
+                rememberAgentChatAnswer(eventID, EXPIRED_ANSWER)
+            } catch (error: Throwable) {
+                setAgentChatState(eventID, AgentChatCardState.Failed(describeAgentChatError(error)))
+            }
         }
     }
 
