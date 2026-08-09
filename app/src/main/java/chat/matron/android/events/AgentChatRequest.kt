@@ -31,6 +31,19 @@ data class AgentChatRequest(
     /// The device the parked row is filed under — the other half of the answer
     /// key. For a join this is the joiner itself, not the room owner.
     val targetDeviceID: Long,
+    /// The device on the far end of the ask, for display only. For an invite
+    /// that is [targetDeviceID]; for a join it is the room's *owner*, which
+    /// [targetDeviceID] is emphatically not. Never follow [targetDeviceID] to
+    /// label the far end.
+    val toName: String = "",
+    /// The two sessions, id and title each. The id is the stable handle —
+    /// titles are agent-written and change — and the title is what the user
+    /// recognises from their conversation list. Empty when the requesting
+    /// bridge named no conversation.
+    val fromConvoID: String = "",
+    val fromConvoTitle: String = "",
+    val toConvoID: String = "",
+    val toConvoTitle: String = "",
     val topic: String?,
     val justification: String?,
 ) {
@@ -48,10 +61,29 @@ data class AgentChatRequest(
     val requesterLabel: String
         get() = fromName.ifEmpty { "Device $fromDeviceID" }
 
-    /// One line stating what is being asked, in the user's terms.
+    /// The name to show for the far end, same fallback as [requesterLabel].
+    /// For a join the far end is the room's owner, so this deliberately does
+    /// not fall back to [targetDeviceID] — that id is the joiner.
+    val targetLabel: String
+        get() = when {
+            toName.isNotEmpty() -> toName
+            ask == Ask.INVITE -> "Device $targetDeviceID"
+            else -> "the room's owner"
+        }
+
+    /// "dan-mac — 2:69 text carry and fitting parity", or just the device name
+    /// when no session was named.
+    val fromLabel: String
+        get() = endpointLabel(requesterLabel, fromConvoID, fromConvoTitle)
+
+    val toLabel: String
+        get() = endpointLabel(targetLabel, toConvoID, toConvoTitle)
+
+    /// One line stating what is being asked, in the user's terms. Names the
+    /// far end: "another agent" is not something a user can consent to.
     val headline: String
         get() = when (ask) {
-            Ask.INVITE -> "$requesterLabel wants to start a chat with another agent."
+            Ask.INVITE -> "$requesterLabel wants to start a chat with $targetLabel."
             Ask.JOIN -> "$requesterLabel wants to join this chat."
         }
 
@@ -73,6 +105,13 @@ data class AgentChatRequest(
                 fromDeviceID = from,
                 fromName = payload.stringOrNull("from_name") ?: "",
                 targetDeviceID = target,
+                // Display-only, and all optional: a journal that predates them
+                // still yields an answerable card, just a less specific one.
+                toName = payload.stringOrNull("to_name") ?: "",
+                fromConvoID = payload.stringOrNull("from_convo_id") ?: "",
+                fromConvoTitle = payload.stringOrNull("from_convo_title") ?: "",
+                toConvoID = payload.stringOrNull("to_convo_id") ?: "",
+                toConvoTitle = payload.stringOrNull("to_convo_title") ?: "",
                 topic = nonEmpty(payload.stringOrNull("topic")),
                 justification = nonEmpty(payload.stringOrNull("justification")),
             )
@@ -83,6 +122,34 @@ data class AgentChatRequest(
         /// collapse both to null so the card can drop the row instead of
         /// drawing an empty quote.
         private fun nonEmpty(raw: String?): String? = raw?.trim()?.takeIf { it.isNotEmpty() }
+
+        /// A session rendered the way the conversation list renders it: the
+        /// first two characters of its id, then its title.
+        ///
+        /// Bridges seed a session title as `"<box>:<first two of the id>
+        /// words"`, which is the string the list shows — so when the title
+        /// already opens with those two characters this returns the title
+        /// untouched rather than stuttering ("69 · 2:69 text carry…"). Rooms
+        /// and sub-chats carry no such prefix, which is why the id is sent
+        /// alongside and the short form is derived from it rather than
+        /// trusted to be in the words.
+        ///
+        /// Null when the journal named no conversation — the card drops the
+        /// row rather than showing an empty one.
+        fun sessionLabel(id: String, title: String): String? {
+            val short = id.take(2)
+            val trimmed = title.trim()
+            if (short.isEmpty()) return trimmed.ifEmpty { null }
+            if (trimmed.isEmpty()) return short
+            val firstWord = trimmed.takeWhile { !it.isWhitespace() }
+            val carriesShortID = firstWord == short || firstWord.endsWith(":$short")
+            return if (carriesShortID) trimmed else "$short · $trimmed"
+        }
+
+        private fun endpointLabel(device: String, convoID: String, convoTitle: String): String {
+            val session = sessionLabel(convoID, convoTitle) ?: return device
+            return "$device — $session"
+        }
     }
 }
 
