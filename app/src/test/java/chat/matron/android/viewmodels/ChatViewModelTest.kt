@@ -1141,7 +1141,6 @@ class ChatViewModelTest {
             roomID: String,
             targetDeviceID: Long,
             decision: AgentChatDecision,
-            alwaysAllow: Boolean,
         ): Boolean {
             calls += 1
             gate.await()
@@ -1169,7 +1168,7 @@ class ChatViewModelTest {
         val rowScope = CoroutineScope(coroutineContext + Job())
 
         rowScope.launch {
-            vm.answerAgentChat("42", request, AgentChatDecision.APPROVE, alwaysAllow = false)
+            vm.answerAgentChat("42", request, AgentChatDecision.APPROVE)
         }.join()
         rowScope.cancel() // the card scrolls out of view, mid-request
         gate.complete(Unit)

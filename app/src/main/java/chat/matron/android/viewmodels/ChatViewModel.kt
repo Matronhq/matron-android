@@ -249,7 +249,6 @@ class ChatViewModel(
         eventID: String,
         request: AgentChatRequest,
         decision: AgentChatDecision,
-        alwaysAllow: Boolean,
     ) {
         val answerer = agentChat ?: return
         if (agentChatAnswers.containsKey(eventID)) return
@@ -257,7 +256,7 @@ class ChatViewModel(
         setAgentChatState(eventID, AgentChatCardState.Sending)
         scope.launch {
             try {
-                answerer.answerAgentChat(request.roomID, request.targetDeviceID, decision, alwaysAllow)
+                answerer.answerAgentChat(request.roomID, request.targetDeviceID, decision)
                 rememberAgentChatAnswer(eventID, decision.wire)
             } catch (cancel: CancellationException) {
                 // Whole chat is going away. Drop the in-flight marker so the

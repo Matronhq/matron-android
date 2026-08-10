@@ -15,13 +15,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -42,16 +37,12 @@ import chat.matron.android.events.AgentChatRequest
 fun AgentChatRequestCard(
     request: AgentChatRequest,
     state: AgentChatCardState,
-    /// Carries the "always allow" switch, because approving with it on is one
-    /// decision, not two — and it is the only way to create a standing
-    /// allowance at all.
-    onApprove: (alwaysAllow: Boolean) -> Unit,
+    /// Answers this one request. There is no standing consent to grant: the
+    /// next ask from the same pair gets its own card.
+    onApprove: () -> Unit,
     onDeny: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // Card-local: nothing outside needs to observe the switch, and keeping it
-    // here means a recycled row can't inherit a stale value from another card.
-    var alwaysAllow by remember(request.roomID, request.targetDeviceID) { mutableStateOf(false) }
     val busy = state is AgentChatCardState.Sending
 
     Column(
@@ -113,19 +104,8 @@ fun AgentChatRequestCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Switch(checked = alwaysAllow, onCheckedChange = { alwaysAllow = it }, enabled = !busy)
-                    Text(
-                        "Always allow ${request.requesterLabel} to do this",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                }
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
                     OutlinedButton(onClick = onDeny, enabled = !busy) { Text("Decline") }
-                    Button(onClick = { onApprove(alwaysAllow) }, enabled = !busy) { Text("Approve") }
+                    Button(onClick = onApprove, enabled = !busy) { Text("Approve") }
                     if (busy) CircularProgressIndicator(Modifier.size(18.dp))
                 }
             }

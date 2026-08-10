@@ -1,6 +1,5 @@
 package chat.matron.android.viewmodels
 
-import chat.matron.android.journal.AgentChatAllowanceDTO
 import chat.matron.android.journal.AgentChatDecision
 import chat.matron.android.journal.AgentChatPendingDTO
 import chat.matron.android.journal.JournalApiError
@@ -17,20 +16,15 @@ import org.junit.Test
 /// old path reached the wrong endpoint entirely.
 private class FakeAgentChatApi : AgentChatProviding {
     var pending: List<AgentChatPendingDTO> = emptyList()
-    var allowances: List<AgentChatAllowanceDTO> = emptyList()
     var pendingError: Throwable? = null
-    var allowancesError: Throwable? = null
     var answerError: Throwable? = null
-    var revokeError: Throwable? = null
-    val answers = mutableListOf<Quad>()
-    val revokes = mutableListOf<Pair<Long, Long>>()
+    val answers = mutableListOf<Answer>()
     var refreshCount = 0
 
-    data class Quad(
+    data class Answer(
         val roomID: String,
         val targetDeviceID: Long,
         val decision: AgentChatDecision,
-        val alwaysAllow: Boolean,
     )
 
     override suspend fun agentChatPending(): List<AgentChatPendingDTO> {
@@ -39,26 +33,14 @@ private class FakeAgentChatApi : AgentChatProviding {
         return pending
     }
 
-    override suspend fun agentChatAllowances(): List<AgentChatAllowanceDTO> {
-        pendingError?.let { throw it }
-        allowancesError?.let { throw it }
-        return allowances
-    }
-
     override suspend fun answerAgentChat(
         roomID: String,
         targetDeviceID: Long,
         decision: AgentChatDecision,
-        alwaysAllow: Boolean,
     ): Boolean {
-        answers.add(Quad(roomID, targetDeviceID, decision, alwaysAllow))
+        answers.add(Answer(roomID, targetDeviceID, decision))
         answerError?.let { throw it }
         return true
-    }
-
-    override suspend fun revokeAgentChatAllowance(fromDeviceID: Long, targetDeviceID: Long) {
-        revokes.add(fromDeviceID to targetDeviceID)
-        revokeError?.let { throw it }
     }
 }
 
@@ -79,34 +61,24 @@ private fun pendingRow(
     createdAt = createdAt,
 )
 
-private fun allowanceRow(from: Long = 4, target: Long = 7) = AgentChatAllowanceDTO(
-    fromDeviceID = from,
-    targetDeviceID = target,
-    fromName = "dev-2",
-    targetName = "dev-3",
-    createdAt = 1_000,
-)
-
 /// Ported from matron-apple's `AgentChatViewModelTests`.
 class AgentChatViewModelTest {
 
     @Test
-    fun refresh_loadsBothListsNewestFirst() = runBlocking {
+    fun refresh_loadsPendingNewestFirst() = runBlocking {
         val api = FakeAgentChatApi()
         api.pending = listOf(pendingRow(room = "old", createdAt = 1), pendingRow(room = "new", createdAt = 9))
-        api.allowances = listOf(allowanceRow(from = 1), allowanceRow(from = 2))
         val vm = AgentChatViewModel(api)
 
         vm.refresh()
 
         assertEquals(listOf("new", "old"), vm.pending.value.map { it.roomID })
-        assertEquals(2, vm.allowances.value.size)
         assertTrue(vm.isSupported.value)
         assertNull(vm.errorMessage.value)
     }
 
-    /// A journal that predates agent chat 404s the route. Two permanently empty
-    /// lists would read as "you have nothing pending", which is a different and
+    /// A journal that predates agent chat 404s the route. A permanently empty
+    /// list would read as "you have nothing pending", which is a different and
     /// misleading claim.
     @Test
     fun refresh_serverWithoutAgentChatIsReportedAsUnsupported() = runBlocking {
@@ -133,7 +105,6 @@ class AgentChatViewModelTest {
         assertEquals("room-9", api.answers[0].roomID)
         assertEquals(12L, api.answers[0].targetDeviceID)
         assertEquals(AgentChatDecision.APPROVE, api.answers[0].decision)
-        assertFalse(api.answers[0].alwaysAllow)
         assertEquals("the list must re-read after a decision", 2, api.refreshCount)
     }
 
@@ -167,36 +138,6 @@ class AgentChatViewModelTest {
         assertNotNull(vm.errorMessage.value)
     }
 
-    @Test
-    fun revoke_sendsTheDirectedPairAndDropsTheRowLocallyFirst() = runBlocking {
-        val api = FakeAgentChatApi()
-        api.allowances = listOf(allowanceRow(from = 4, target = 7))
-        val vm = AgentChatViewModel(api)
-        vm.refresh()
-        // The server has dropped it; a refetch that fails must not leave the
-        // revoked row on screen looking live.
-        api.allowances = emptyList()
-
-        vm.revoke(vm.allowances.value[0])
-
-        assertEquals(1, api.revokes.size)
-        assertEquals(4L to 7L, api.revokes[0])
-        assertTrue(vm.allowances.value.isEmpty())
-    }
-
-    @Test
-    fun revoke_failureKeepsTheRowAndSaysSo() = runBlocking {
-        val api = FakeAgentChatApi()
-        api.allowances = listOf(allowanceRow())
-        val vm = AgentChatViewModel(api)
-        vm.refresh()
-        api.revokeError = JournalApiError.Transport("offline")
-
-        vm.revoke(vm.allowances.value[0])
-
-        assertNotNull(vm.errorMessage.value)
-    }
-
     /// A join request self-targets, which is the only thing that tells the two
     /// shapes apart in the pending list — there is no `request` field.
     @Test
@@ -218,28 +159,26 @@ class AgentChatViewModelTest {
         assertEquals("Device 4", row.requesterLabel)
     }
 
-    /// A partial failure must not leave one list fresh beside the other's
-    /// stale contents, next to an error saying the load failed.
+    /// A failed refresh must leave the last good list standing rather than
+    /// clearing it beside an error saying the load failed.
     @Test
-    fun refresh_halfFailedLeavesBothListsAsTheyWere() = runBlocking {
+    fun refresh_failedLeavesTheLastGoodListStanding() = runBlocking {
         val api = FakeAgentChatApi()
         api.pending = listOf(pendingRow(room = "first"))
-        api.allowances = listOf(allowanceRow())
         val vm = AgentChatViewModel(api)
         vm.refresh()
 
         api.pending = listOf(pendingRow(room = "second"))
-        api.allowancesError = JournalApiError.Transport("offline")
+        api.pendingError = JournalApiError.Transport("offline")
         vm.refresh()
 
         assertEquals(listOf("first"), vm.pending.value.map { it.roomID })
-        assertEquals(1, vm.allowances.value.size)
         assertNotNull(vm.errorMessage.value)
     }
 
     /// `refresh()` runs from a LaunchedEffect, i.e. after the first frame — an
     /// unguarded empty list tells the user they have no pending requests a
-    /// beat before their pending requests appear.
+    /// beat before their pending requests arrive.
     @Test
     fun hasLoaded_isFalseUntilTheFirstLoadSettles() = runBlocking {
         val api = FakeAgentChatApi()

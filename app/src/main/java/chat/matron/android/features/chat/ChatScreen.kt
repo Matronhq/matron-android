@@ -418,7 +418,7 @@ private fun TimelineRowView(
                         // `agentChatStates` above is what makes this recompose.
                         agentChatStates.let { chatVM.agentChatState(id) }
                     },
-                    onAnswerAgentChat = { eventID, request, approve, alwaysAllow ->
+                    onAnswerAgentChat = { eventID, request, approve ->
                         // Deliberately NOT wrapped in this row's coroutine
                         // scope — the view model owns the call so scrolling the
                         // card away can't cancel an answer in flight.
@@ -426,7 +426,6 @@ private fun TimelineRowView(
                             eventID = eventID,
                             request = request,
                             decision = if (approve) AgentChatDecision.APPROVE else AgentChatDecision.DENY,
-                            alwaysAllow = alwaysAllow,
                         )
                     },
                 )

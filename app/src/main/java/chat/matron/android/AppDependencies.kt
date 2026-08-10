@@ -265,7 +265,7 @@ class AppDependencies(
 
     /**
      * Agent-chat consent surface: answering the cards inline in a chat, and the
-     * Settings screen listing parked requests and standing allowances.
+     * Settings screen listing the parked requests.
      */
     fun agentChatService(session: UserSession): AgentChatProviding =
         JournalAgentChatService(core(session).api)
