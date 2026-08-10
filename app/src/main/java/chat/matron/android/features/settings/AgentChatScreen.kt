@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -22,15 +21,12 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import chat.matron.android.journal.AgentChatAllowanceDTO
 import chat.matron.android.journal.AgentChatDecision
 import chat.matron.android.journal.AgentChatPendingDTO
 import chat.matron.android.viewmodels.AgentChatProviding
@@ -38,15 +34,13 @@ import chat.matron.android.viewmodels.AgentChatViewModel
 import kotlinx.coroutines.launch
 
 /**
- * Settings → Agent Chats. Ports Features/Settings/AgentChatView.swift: requests
- * still waiting on a decision, and the standing allowances that let future
- * requests through without asking.
+ * Settings → Agent Chats. Ports Features/Settings/AgentChatView.swift: the
+ * requests still waiting on a decision.
  *
  * The consent card in a conversation is the primary surface; this screen is the
- * two things a card can't be. A request that arrived while no client was
- * connected has no card to tap, and an allowance granted with "always allow" is
- * otherwise invisible and permanent — this is where it can be seen and taken
- * back.
+ * one thing a card can't be. A request that arrived while no client was
+ * connected has no card to tap, and would otherwise sit unanswered until it
+ * expired.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -57,14 +51,11 @@ fun AgentChatScreen(
     val scope = rememberCoroutineScope()
     val viewModel = remember { AgentChatViewModel(api) }
     val pending by viewModel.pending.collectAsStateWithLifecycle()
-    val allowances by viewModel.allowances.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val isSupported by viewModel.isSupported.collectAsStateWithLifecycle()
     val hasLoaded by viewModel.hasLoaded.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val busyIDs by viewModel.busyIDs.collectAsStateWithLifecycle()
-
-    var confirmingRevoke by remember { mutableStateOf<AgentChatAllowanceDTO?>(null) }
 
     LaunchedEffect(Unit) { viewModel.refresh() }
 
@@ -98,10 +89,10 @@ fun AgentChatScreen(
             }
 
             // The first load failed and nothing is in flight: the error above,
-            // with its retry, is the whole screen. Section headers over two
-            // "Loading…" lines would claim we were still fetching. (Before the
-            // first attempt there is no error yet, so the sections still show
-            // their loading state.)
+            // with its retry, is the whole screen. A section header over a
+            // "Loading…" line would claim we were still fetching. (Before the
+            // first attempt there is no error yet, so the section still shows
+            // its loading state.)
             if (!hasLoaded && !isLoading && errorMessage != null) return@LazyColumn
 
             if (!isSupported) {
@@ -135,53 +126,11 @@ fun AgentChatScreen(
             item {
                 Hint(
                     "An agent asking to talk to another agent waits here until you decide. " +
+                        "Every request asks — approving one says nothing about the next. " +
                         "Unanswered requests expire after 24 hours.",
                 )
             }
-
-            item { SectionHeader("Always allowed") }
-            if (!hasLoaded) {
-                item { Hint("Loading…") }
-            } else if (allowances.isEmpty()) {
-                item { Hint("None — every request asks you first.") }
-            } else {
-                items(allowances, key = { it.id }) { allowance ->
-                    AllowanceRow(
-                        allowance = allowance,
-                        isBusy = allowance.id in busyIDs,
-                        onRevoke = { confirmingRevoke = allowance },
-                    )
-                }
-            }
-            item {
-                Hint(
-                    "These pairs skip the request entirely. Each one is one-way: allowing A to " +
-                        "reach B says nothing about B reaching A.",
-                )
-            }
         }
-    }
-
-    confirmingRevoke?.let { allowance ->
-        AlertDialog(
-            onDismissRequest = { confirmingRevoke = null },
-            title = { Text("Stop always allowing this?") },
-            text = {
-                Text(
-                    "${allowance.fromLabel} will have to ask you again before talking to " +
-                        "${allowance.targetLabel}.",
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmingRevoke = null
-                    scope.launch { viewModel.revoke(allowance) }
-                }) { Text("Stop Allowing") }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmingRevoke = null }) { Text("Cancel") }
-            },
-        )
     }
 }
 
@@ -215,36 +164,6 @@ private fun PendingRow(
             }
             if (isBusy) CircularProgressIndicator(Modifier.size(18.dp))
         }
-        // "Always allow" is deliberately not offered here. It is a standing
-        // grant, and this screen shows asks stripped of the conversation they
-        // belong to — the consent card in the chat, where the surrounding
-        // context is visible, is the place to make a decision that outlives the
-        // one request.
-    }
-}
-
-@Composable
-private fun AllowanceRow(
-    allowance: AgentChatAllowanceDTO,
-    isBusy: Boolean,
-    onRevoke: () -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                "${allowance.fromLabel} → ${allowance.targetLabel}",
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            Text(
-                "Can start a chat without asking",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        TextButton(onClick = onRevoke, enabled = !isBusy) { Text("Stop Allowing") }
     }
 }
 

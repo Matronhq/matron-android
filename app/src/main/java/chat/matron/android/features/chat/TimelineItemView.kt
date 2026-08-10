@@ -66,13 +66,12 @@ fun TimelineItemView(
     /// renders the card read-only rather than offering buttons with nothing
     /// behind them.
     agentChatState: ((String) -> AgentChatCardState)? = null,
-    /// Answers a consent card: approve (optionally always-allowing the pair) or
-    /// decline. Goes to `POST /agent-chat/answer`, not into the timeline.
+    /// Answers a consent card: approve or decline, for this request only.
+    /// Goes to `POST /agent-chat/answer`, not into the timeline.
     onAnswerAgentChat: ((
         eventID: String,
         request: AgentChatRequest,
         approve: Boolean,
-        alwaysAllow: Boolean,
     ) -> Unit)? = null,
 ) {
     if (item.isOwn && item.sendState != TimelineSendState.Sent) {
@@ -109,7 +108,6 @@ private fun RenderedBody(
         eventID: String,
         request: AgentChatRequest,
         approve: Boolean,
-        alwaysAllow: Boolean,
     ) -> Unit)?,
 ) {
     val style = if (item.isOwn) MessageAuthorStyle.Me else MessageAuthorStyle.Bot
@@ -175,10 +173,8 @@ private fun RenderedBody(
                 AgentChatRequestCard(
                     request = kind.request,
                     state = agentChatState?.invoke(kind.eventID) ?: AgentChatCardState.Expired,
-                    onApprove = { alwaysAllow ->
-                        onAnswerAgentChat?.invoke(kind.eventID, kind.request, true, alwaysAllow)
-                    },
-                    onDeny = { onAnswerAgentChat?.invoke(kind.eventID, kind.request, false, false) },
+                    onApprove = { onAnswerAgentChat?.invoke(kind.eventID, kind.request, true) },
+                    onDeny = { onAnswerAgentChat?.invoke(kind.eventID, kind.request, false) },
                 )
             }
 

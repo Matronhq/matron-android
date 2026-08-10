@@ -114,24 +114,6 @@ data class AgentChatPendingDTO(
         }
 }
 
-/// One row of `GET /agent-chat/allowances` — a directed pair the user chose to
-/// trust with "always allow", which skips the consent card entirely from then
-/// on. Directed: A→B says nothing about B→A.
-data class AgentChatAllowanceDTO(
-    val fromDeviceID: Long,
-    val targetDeviceID: Long,
-    val fromName: String?,
-    val targetName: String?,
-    val createdAt: Long,
-) {
-    val id: String get() = "$fromDeviceID->$targetDeviceID"
-    val fromLabel: String get() = label(fromName, fromDeviceID)
-    val targetLabel: String get() = label(targetName, targetDeviceID)
-
-    private fun label(name: String?, id: Long): String =
-        name?.trim()?.takeIf { it.isNotEmpty() } ?: "Device $id"
-}
-
 /// `POST /pair/preview` — who is asking to join, shown before approve.
 data class PairPreview(val requesterIP: String, val expiresIn: Int)
 
@@ -380,10 +362,8 @@ class JournalApi(
     /// Answers one parked ask. The ONLY path that resolves a consent card — a
     /// `prompt_reply` into the room never touches the parked row.
     ///
-    /// `alwaysAllow` on an approval records a standing allowance for the
-    /// directed pair, so future asks between those two agents skip the card. It
-    /// is also the only way to create one; [revokeAgentChatAllowance] is the
-    /// way back.
+    /// One answer, one request: there is no standing consent to grant, so
+    /// approving here says nothing about the next ask from the same pair.
     ///
     /// Returns the server's `delivered` flag: whether the approved invite
     /// reached the target's socket right now, or is still owed to it. Throws
@@ -394,7 +374,6 @@ class JournalApi(
         roomID: String,
         targetDeviceID: Long,
         decision: AgentChatDecision,
-        alwaysAllow: Boolean = false,
     ): Boolean {
         val obj = request(
             path = "/agent-chat/answer", method = "POST",
@@ -402,41 +381,9 @@ class JournalApi(
                 put("room_id", roomID)
                 put("target_device_id", targetDeviceID)
                 put("decision", decision.wire)
-                // Sent only when true: the server treats `always_allow` as
-                // strictly `=== true`, and a denial has no allowance to record
-                // either way.
-                if (alwaysAllow && decision == AgentChatDecision.APPROVE) put("always_allow", true)
             },
         )
         return obj.boolOrNull("delivered") ?: false
-    }
-
-    /// Directed pairs the user has granted "always allow".
-    suspend fun agentChatAllowances(): List<AgentChatAllowanceDTO> {
-        val obj = request(path = "/agent-chat/allowances")
-        return (obj.arrayOrNull("allowances")?.objects() ?: emptyList()).mapNotNull { a ->
-            val from = a.longOrNull("from_device_id") ?: return@mapNotNull null
-            val target = a.longOrNull("target_device_id") ?: return@mapNotNull null
-            AgentChatAllowanceDTO(
-                fromDeviceID = from,
-                targetDeviceID = target,
-                fromName = a.stringOrNull("from_name"),
-                targetName = a.stringOrNull("target_name"),
-                createdAt = a.longOrNull("created_at") ?: 0,
-            )
-        }
-    }
-
-    /// Withdraws a standing allowance, so that pair has to ask again.
-    /// Idempotent server-side — revoking one that is already gone succeeds.
-    suspend fun revokeAgentChatAllowance(fromDeviceID: Long, targetDeviceID: Long) {
-        request(
-            path = "/agent-chat/allowances/revoke", method = "POST",
-            jsonBody = buildJsonObject {
-                put("from_device_id", fromDeviceID)
-                put("target_device_id", targetDeviceID)
-            },
-        )
     }
 
     /// The journal defaults an absent topic/justification to `""` rather than
