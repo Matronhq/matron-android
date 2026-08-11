@@ -1,9 +1,11 @@
 package chat.matron.android.chat
 
 import chat.matron.android.events.AgentChatRequest
+import chat.matron.android.events.AgentSpawnRequest
 import chat.matron.android.events.AskUserEvent
 import chat.matron.android.events.DiffEvent
 import chat.matron.android.events.LiveOutputEvent
+import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.journal.ActivityUpdate
 import chat.matron.android.journal.JournalEvent
@@ -74,8 +76,11 @@ object JournalTimelineMapper {
                 // reaches the parked row. The tap did nothing and the ask
                 // expired 24h later.
                 val agentChat = AgentChatRequest.parse(payload)
+                val agentSpawn = if (agentChat == null) AgentSpawnRequest.parse(payload) else null
                 if (agentChat != null) {
                     TimelineItem.Kind.AgentChatRequestCard(event.seq.toString(), agentChat)
+                } else if (agentSpawn != null) {
+                    TimelineItem.Kind.AgentSpawnRequestCard(event.seq.toString(), agentSpawn)
                 } else {
                     val description = payload.stringOrNull("description") ?: "Permission request"
                     val arr = payload.arrayOrNull("options")
@@ -126,6 +131,15 @@ object JournalTimelineMapper {
                     // `name`, not `filename`: the key the media-send contract
                     // defines and both producers emit.
                     TimelineItem.Kind.File(url, payload.stringOrNull("name") ?: "file", caption, size)
+                }
+            }
+
+            JournalEventType.SPAWN_OUTCOME -> {
+                val outcome = SpawnOutcome.parse(payload)
+                if (outcome != null) {
+                    TimelineItem.Kind.SpawnOutcomeRow(event.seq.toString(), outcome)
+                } else {
+                    TimelineItem.Kind.Unknown(event.type)
                 }
             }
 

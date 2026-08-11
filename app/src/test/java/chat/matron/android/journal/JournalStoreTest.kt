@@ -82,6 +82,61 @@ class JournalStoreTest {
     }
 
     @Test
+    fun agentSpawnPermissionRequestSnippetIsItsOwnString() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(
+            ev(
+                1, type = "permission_request",
+                payload = buildJsonObject {
+                    put("kind", "agent_spawn")
+                    put("request_id", "spawn-1")
+                    put("task", "fix the build")
+                },
+            )
+        )
+        assertEquals("🤝 Agent spawn request", store.conversations().first().snippet)
+    }
+
+    @Test
+    fun spawnOutcomeSnippetsMirrorTheDisplayLineMapping() = runBlocking {
+        val store = makeStore()
+        for ((seq, outcome, expected) in listOf(
+            Triple(1L, "started", "🚀 Spawned session started"),
+            Triple(2L, "declined", "🚫 Spawn declined"),
+            Triple(3L, "expired", "⌛ Spawn request expired"),
+            Triple(4L, "failed", "❌ Spawn failed"),
+        )) {
+            val convo = "c-$seq"
+            store.applyJournal(
+                ev(
+                    seq, convo = convo, sender = "journal", type = "spawn_outcome",
+                    payload = buildJsonObject {
+                        put("request_id", "spawn-$seq")
+                        put("outcome", outcome)
+                    },
+                )
+            )
+            val snippet = store.conversations().first { it.id == convo }.snippet
+            assertEquals("outcome $outcome", expected, snippet)
+        }
+    }
+
+    /// `spawn_outcome` joins MESSAGE_TYPES (matron-journal spec): a resolved
+    /// spawn card must bump unread the same as any other message-type event,
+    /// not stay silently absent from the badge.
+    @Test
+    fun spawnOutcomeBumpsUnreadLikeAnyOtherMessageType() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(
+            ev(
+                1, sender = "journal", type = "spawn_outcome",
+                payload = buildJsonObject { put("request_id", "spawn-1"); put("outcome", "expired") },
+            )
+        )
+        assertEquals(1, store.conversations().first().unreadCount)
+    }
+
+    @Test
     fun ensureConversationCreatesPlaceholderOnce() = runBlocking {
         val store = makeStore()
         store.ensureConversation("c-new", "New chat")

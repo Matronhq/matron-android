@@ -445,4 +445,72 @@ class JournalTimelineMapperTest {
         assertTrue(item.kind is TimelineItem.Kind.AskUser)
     }
 
+    // MARK: Agent-spawn consent card
+
+    @Test fun agentSpawnPermissionRequestMapsToItsOwnKind() {
+        val item = map(ev(40, "permission_request", payload = buildJsonObject {
+            put("kind", "agent_spawn")
+            put("request_id", "spawn-1")
+            put("from_device_id", 4)
+            put("from_name", "dev-2")
+            put("target_device_id", 7)
+            put("workdir", "/home/dev/project")
+            put("task", "Fix the failing build")
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.AgentSpawnRequestCard
+        assertEquals("40", kind.eventID)
+        assertEquals("spawn-1", kind.request.requestId)
+        assertEquals(7L, kind.request.targetDeviceId)
+    }
+
+    /// The dispatch order matters: agent-chat is tried first, so a payload
+    /// carrying `kind: "agent_chat"` must keep mapping to
+    /// `AgentChatRequestCard` even though `AgentSpawnRequest.parse` is now
+    /// also in the branch.
+    @Test fun agentSpawnDispatchDoesNotShadowAgentChatPriority() {
+        val item = map(ev(41, "permission_request", payload = buildJsonObject {
+            put("kind", "agent_chat")
+            put("request", "invite")
+            put("room_id", "room-1")
+            put("from_device_id", 4)
+            put("target_device_id", 7)
+        }))!!
+        assertTrue(item.kind is TimelineItem.Kind.AgentChatRequestCard)
+    }
+
+    /// A spawn card missing what the answer call needs (`task`) is
+    /// unanswerable — falls back to the generic card, same stance as
+    /// agent-chat.
+    @Test fun unanswerableAgentSpawnPayloadFallsBackToTheGenericCard() {
+        val item = map(ev(42, "permission_request", payload = buildJsonObject {
+            put("kind", "agent_spawn")
+            put("request_id", "spawn-1")
+            put("from_device_id", 4)
+        }))!!
+        assertTrue(item.kind is TimelineItem.Kind.AskUser)
+    }
+
+    @Test fun spawnOutcomeEventMapsToItsOwnKind() {
+        val item = map(ev(43, "spawn_outcome", sender = "journal", payload = buildJsonObject {
+            put("request_id", "spawn-1")
+            put("outcome", "started")
+            put("room_id", "room-9")
+            put("child_convo_id", "child-1")
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.SpawnOutcomeRow
+        assertEquals("43", kind.eventID)
+        assertEquals("spawn-1", kind.outcome.requestId)
+        assertEquals("room-9", kind.outcome.roomId)
+    }
+
+    /// A malformed spawn_outcome (missing what's needed to correlate it back
+    /// to a card) falls back to the generic unknown-type rendering rather
+    /// than crashing.
+    @Test fun unparseableSpawnOutcomeFallsBackToUnknown() {
+        val item = map(ev(44, "spawn_outcome", sender = "journal", payload = buildJsonObject {
+            put("outcome", "started")
+        }))!!
+        assertEquals(TimelineItem.Kind.Unknown("spawn_outcome"), item.kind)
+    }
+
 }

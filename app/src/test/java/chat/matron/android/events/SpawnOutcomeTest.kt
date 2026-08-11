@@ -1,0 +1,77 @@
+package chat.matron.android.events
+
+import chat.matron.android.journal.parseJsonObjectOrNull
+import kotlinx.serialization.json.JsonObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+
+/// The journal's durable resolution event for an agent-spawn card
+/// (matron-journal `docs/superpowers/specs/2026-08-11-spawn-outcome-events-design.md`).
+class SpawnOutcomeTest {
+    private fun payload(json: String): JsonObject = parseJsonObjectOrNull(json)!!
+
+    @Test
+    fun parsesStartedWithRoomAndChildConvo() {
+        val outcome = SpawnOutcome.parse(
+            payload("""{"request_id":"spawn-1","outcome":"started","room_id":"room-9","child_convo_id":"child-1"}"""),
+        )!!
+        assertEquals("spawn-1", outcome.requestId)
+        assertEquals("started", outcome.outcome)
+        assertEquals("room-9", outcome.roomId)
+        assertEquals("child-1", outcome.childConvoId)
+        assertNull(outcome.errorCode)
+        assertEquals("🚀 Spawned session started", outcome.displayLine)
+    }
+
+    @Test
+    fun parsesDeclined() {
+        val outcome = SpawnOutcome.parse(payload("""{"request_id":"spawn-1","outcome":"declined"}"""))!!
+        assertEquals("🚫 Spawn declined", outcome.displayLine)
+        assertNull(outcome.roomId)
+    }
+
+    @Test
+    fun parsesExpired() {
+        val outcome = SpawnOutcome.parse(payload("""{"request_id":"spawn-1","outcome":"expired"}"""))!!
+        assertEquals("⌛ Spawn request expired", outcome.displayLine)
+    }
+
+    @Test
+    fun parsesFailedWithErrorCode() {
+        val outcome = SpawnOutcome.parse(
+            payload("""{"request_id":"spawn-1","outcome":"failed","error_code":"agent_unreachable"}"""),
+        )!!
+        assertEquals("agent_unreachable", outcome.errorCode)
+        assertEquals("❌ Spawn failed — agent_unreachable", outcome.displayLine)
+    }
+
+    @Test
+    fun parsesFailedWithoutAnErrorCode() {
+        val outcome = SpawnOutcome.parse(payload("""{"request_id":"spawn-1","outcome":"failed"}"""))!!
+        assertNull(outcome.errorCode)
+        assertEquals("❌ Spawn failed", outcome.displayLine)
+    }
+
+    /// A journal running ahead of this client must not crash on an outcome
+    /// string it doesn't recognise — it resolves the card with generic copy
+    /// instead.
+    @Test
+    fun unknownOutcomeParsesWithGenericDisplayLine() {
+        val outcome = SpawnOutcome.parse(payload("""{"request_id":"spawn-1","outcome":"orphaned"}"""))!!
+        assertEquals("orphaned", outcome.outcome)
+        assertEquals("Spawn request resolved", outcome.displayLine)
+    }
+
+    @Test
+    fun rejectsMissingRequestId() {
+        assertNull(SpawnOutcome.parse(payload("""{"outcome":"started"}""")))
+        assertNull(SpawnOutcome.parse(payload("""{"request_id":"","outcome":"started"}""")))
+    }
+
+    @Test
+    fun rejectsMissingOutcome() {
+        assertNull(SpawnOutcome.parse(payload("""{"request_id":"spawn-1"}""")))
+        assertNull(SpawnOutcome.parse(payload("""{"request_id":"spawn-1","outcome":""}""")))
+    }
+}

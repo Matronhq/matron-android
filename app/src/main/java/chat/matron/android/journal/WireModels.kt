@@ -28,12 +28,22 @@ object JournalEventType {
     /// Conversation metadata (title, etc.). Carries no message body.
     const val CONVO_META = "convo_meta"
 
+    /// The durable resolution of an `agent_spawn` consent card — journal
+    /// -authored, appended into the parent's own conversation (see
+    /// `chat.matron.android.events.SpawnOutcome`).
+    const val SPAWN_OUTCOME = "spawn_outcome"
+
     /// Infix in a subagent child's convo id: `<parent>:sub:<agentId>`.
     const val CHILD_CONVO_INFIX = ":sub:"
 
     /// Types that bump unread counts and set the conversation snippet.
+    /// `SPAWN_OUTCOME` joins the set for the same reason the card
+    /// (`PERMISSION_REQUEST`) is in it: the chat-list row must stop
+    /// advertising "🤝 Agent spawn request" once the ask is settled, and an
+    /// unresolved-then-expired card should surface as unread (mirrors the
+    /// journal server's `MESSAGE_TYPES`, matron-journal `src/journal.js`).
     val MESSAGE_TYPES: Set<String> = setOf(
-        TEXT, TOOL_OUTPUT, DIFF, PROMPT, PERMISSION_REQUEST, FILE, IMAGE,
+        TEXT, TOOL_OUTPUT, DIFF, PROMPT, PERMISSION_REQUEST, FILE, IMAGE, SPAWN_OUTCOME,
     )
 }
 

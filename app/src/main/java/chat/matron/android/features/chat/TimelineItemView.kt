@@ -180,6 +180,14 @@ private fun RenderedBody(
 
         is TimelineItem.Kind.AskUserAnswer -> Unit // bookkeeping, never rendered
 
+        // Placeholder rendering only — Task 1 of the agent-spawn-card plan is
+        // pure logic (model + mapper + snippets); the real consent-card
+        // composable, VM-derived state, and answer wiring land in Task 2.
+        // Kept here only so the exhaustive `when` compiles.
+        is TimelineItem.Kind.AgentSpawnRequestCard -> AmbientNotice(kind.request.headline)
+
+        is TimelineItem.Kind.SpawnOutcomeRow -> AmbientNotice(kind.outcome.displayLine)
+
         is TimelineItem.Kind.ActivityIndicator -> ActivityIndicatorRow(label = kind.label)
 
         is TimelineItem.Kind.Unknown -> AmbientNotice(
