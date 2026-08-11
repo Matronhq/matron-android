@@ -74,4 +74,19 @@ class SpawnOutcomeTest {
         assertNull(SpawnOutcome.parse(payload("""{"request_id":"spawn-1"}""")))
         assertNull(SpawnOutcome.parse(payload("""{"request_id":"spawn-1","outcome":""}""")))
     }
+
+    /// `baseSnippet` is the journal server's own `snippetOf` string, byte
+    /// -exact: no errorCode suffix on `failed`, `"[spawn_outcome]"` (not
+    /// `displayLine`'s neutral "resolved") for an outcome it doesn't
+    /// recognise. `JournalStore`'s chat-list snippet must use this, not
+    /// `displayLine`, so a snapshot row (server-minted) and a live-mapped
+    /// frame never disagree.
+    @Test
+    fun baseSnippetIsTheServersBareMappingNotDisplayLine() {
+        assertEquals("🚀 Spawned session started", SpawnOutcome.baseSnippet("started"))
+        assertEquals("🚫 Spawn declined", SpawnOutcome.baseSnippet("declined"))
+        assertEquals("⌛ Spawn request expired", SpawnOutcome.baseSnippet("expired"))
+        assertEquals("❌ Spawn failed", SpawnOutcome.baseSnippet("failed"))
+        assertEquals("[spawn_outcome]", SpawnOutcome.baseSnippet("orphaned"))
+    }
 }

@@ -97,8 +97,15 @@ class JournalStoreTest {
         assertEquals("🤝 Agent spawn request", store.conversations().first().snippet)
     }
 
+    /// The store's snippet must be a byte-exact mirror of the journal
+    /// server's own `snippetOf` (matron-journal `src/journal.js`) — a
+    /// snapshot row's snippet was minted server-side, so a local snippet
+    /// path that disagrees would flip-flop the chat-list row between a
+    /// live-mapped render and a post-snapshot one. This is `SpawnOutcome
+    /// .baseSnippet`, deliberately NOT `displayLine` (which adds the
+    /// errorCode suffix and neutral "resolved" copy for the timeline row).
     @Test
-    fun spawnOutcomeSnippetsMirrorTheDisplayLineMapping() = runBlocking {
+    fun spawnOutcomeSnippetsMirrorTheServersBareStrings() = runBlocking {
         val store = makeStore()
         for ((seq, outcome, expected) in listOf(
             Triple(1L, "started", "🚀 Spawned session started"),
@@ -119,6 +126,41 @@ class JournalStoreTest {
             val snippet = store.conversations().first { it.id == convo }.snippet
             assertEquals("outcome $outcome", expected, snippet)
         }
+    }
+
+    /// The server's `snippetOf` never appends the error code to a `failed`
+    /// outcome's snippet — only `SpawnOutcome.displayLine` (the timeline
+    /// row) does that. The store snippet must stay bare even when the event
+    /// carries one.
+    @Test
+    fun failedOutcomeSnippetStaysBareEvenWithAnErrorCode() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(
+            ev(
+                1, sender = "journal", type = "spawn_outcome",
+                payload = buildJsonObject {
+                    put("request_id", "spawn-1")
+                    put("outcome", "failed")
+                    put("error_code", "agent_unreachable")
+                },
+            )
+        )
+        assertEquals("❌ Spawn failed", store.conversations().first().snippet)
+    }
+
+    /// An outcome string this client (or the server) doesn't recognise mirrors
+    /// the server's own placeholder, not `SpawnOutcome.displayLine`'s neutral
+    /// "resolved" copy — the store snippet must match the server byte-exact.
+    @Test
+    fun unknownOutcomeSnippetMatchesTheServersPlaceholder() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(
+            ev(
+                1, sender = "journal", type = "spawn_outcome",
+                payload = buildJsonObject { put("request_id", "spawn-1"); put("outcome", "orphaned") },
+            )
+        )
+        assertEquals("[spawn_outcome]", store.conversations().first().snippet)
     }
 
     /// `spawn_outcome` joins MESSAGE_TYPES (matron-journal spec): a resolved

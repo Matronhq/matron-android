@@ -467,11 +467,15 @@ class JournalStore(
                 "agent_spawn" -> "🤝 Agent spawn request"
                 else -> "permission: " + (event.payload.stringOrNull("description") ?: "").take(100)
             }
-        // Reuses SpawnOutcome's own outcome->copy mapping rather than a
-        // second copy of it here, so the card and the chat-list row can never
-        // disagree on what an outcome says.
+        // baseSnippet, NOT displayLine: this path also renders snapshot rows
+        // whose snippet the server itself minted via its byte-exact
+        // snippetOf (bare "❌ Spawn failed", "[spawn_outcome]" for an
+        // unrecognised outcome) — displayLine's errorCode suffix and neutral
+        // "resolved" copy are for the live-mapped timeline row only, and
+        // would flip-flop this row between renders if used here.
         JournalEventType.SPAWN_OUTCOME ->
-            SpawnOutcome.parse(event.payload)?.displayLine ?: (event.snippet()?.take(120) ?: "[${event.type}]")
+            SpawnOutcome.parse(event.payload)?.let { SpawnOutcome.baseSnippet(it.outcome) }
+                ?: (event.snippet()?.take(120) ?: "[${event.type}]")
         else -> event.snippet()?.take(120) ?: "[${event.type}]"
     }
 

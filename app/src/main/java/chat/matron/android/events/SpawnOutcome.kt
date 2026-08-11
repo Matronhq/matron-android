@@ -25,31 +25,56 @@ data class SpawnOutcome(
     /// with generic copy (see [displayLine]).
     val outcome: String,
     /// The new room the child session runs in. Present only for `started`.
-    val roomId: String?,
+    val roomId: String? = null,
     /// The child session's own conversation id. Present only for `started`.
-    val childConvoId: String?,
+    val childConvoId: String? = null,
     /// Sanitised failure code. Present only for `failed`.
-    val errorCode: String?,
+    val errorCode: String? = null,
 ) {
-    /// The one-line resolution copy a resolved card or timeline row shows.
-    /// Mirrors the journal server's own `snippetOf` mapping
-    /// (matron-journal `src/journal.js`) for the four known outcomes, plus
-    /// the [errorCode] suffix a `failed` outcome carries when the journal
-    /// sent one.
+    /// The one-line resolution copy the timeline row (`SpawnOutcomeRow`) and
+    /// a resolved card show. Starts from [baseLine] — the journal server's
+    /// own `snippetOf` string for the outcome — then layers the
+    /// [errorCode] suffix a `failed` outcome carries when the journal sent
+    /// one, and a neutral "resolved" line for an outcome this client
+    /// doesn't recognise (`baseLine` has no entry for it).
+    ///
+    /// Deliberately NOT what `JournalStore`'s chat-list snippet uses — that
+    /// path must stay a byte-exact mirror of the server's `snippetOf`
+    /// (`baseSnippet`), because it also renders snapshot-sourced rows the
+    /// server itself produced; this line only ever backs a live-mapped
+    /// timeline row.
     val displayLine: String
-        get() = when (outcome) {
-            "started" -> "🚀 Spawned session started"
-            "declined" -> "🚫 Spawn declined"
-            "expired" -> "⌛ Spawn request expired"
-            "failed" -> "❌ Spawn failed" + (errorCode?.let { " — $it" } ?: "")
-            else -> "Spawn request resolved"
+        get() {
+            val base = baseLines[outcome] ?: return "Spawn request resolved"
+            return if (outcome == "failed") base + (errorCode?.let { " — $it" } ?: "") else base
         }
 
     companion object {
+        /// The journal server's own outcome→copy mapping, byte-exact
+        /// (matron-journal `src/journal.js` `snippetOf`) — no error-code
+        /// suffix, no "resolved" fallback. The single source of truth both
+        /// [displayLine] and [baseSnippet] build from, so the two can never
+        /// silently drift apart.
+        private val baseLines: Map<String, String> = mapOf(
+            "started" to "🚀 Spawned session started",
+            "declined" to "🚫 Spawn declined",
+            "expired" to "⌛ Spawn request expired",
+            "failed" to "❌ Spawn failed",
+        )
+
+        /// The server-mirror snippet for [outcome] — `"[spawn_outcome]"` for
+        /// anything [baseLines] has no entry for, exactly like an agent
+        /// publishing an outcome string the server doesn't recognise either.
+        /// `JournalStore`'s snippet path must call this, never [displayLine]:
+        /// a snapshot row's snippet was minted server-side, so a locally
+        /// computed string that disagrees with it would flip-flop the
+        /// chat-list row between a live-mapped render and a post-snapshot one.
+        fun baseSnippet(outcome: String): String = baseLines[outcome] ?: "[spawn_outcome]"
+
         /// Parses a `spawn_outcome` payload, or null if it carries neither a
         /// [requestId] nor an [outcome] — the two fields a card cannot be
         /// resolved without. An unrecognised [outcome] string still parses;
-        /// only [displayLine] falls back to generic copy for it.
+        /// only [displayLine]/[baseSnippet] fall back to generic copy for it.
         fun parse(payload: JsonObject): SpawnOutcome? {
             val requestId = payload.stringOrNull("request_id")?.takeIf { it.isNotEmpty() } ?: return null
             val outcome = payload.stringOrNull("outcome")?.takeIf { it.isNotEmpty() } ?: return null

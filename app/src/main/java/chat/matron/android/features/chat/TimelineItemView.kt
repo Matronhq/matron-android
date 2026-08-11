@@ -184,7 +184,8 @@ private fun RenderedBody(
         // pure logic (model + mapper + snippets); the real consent-card
         // composable, VM-derived state, and answer wiring land in Task 2.
         // Kept here only so the exhaustive `when` compiles.
-        is TimelineItem.Kind.AgentSpawnRequestCard -> AmbientNotice(kind.request.headline)
+        is TimelineItem.Kind.AgentSpawnRequestCard ->
+            AmbientNotice("🤝 Agent spawn request — ${kind.request.headline}")
 
         is TimelineItem.Kind.SpawnOutcomeRow -> AmbientNotice(kind.outcome.displayLine)
 

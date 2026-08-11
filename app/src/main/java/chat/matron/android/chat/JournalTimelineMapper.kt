@@ -74,37 +74,41 @@ object JournalTimelineMapper {
                 // literal string "Permission request" with Allow/Deny buttons
                 // that answered over `prompt_reply` — a channel that never
                 // reaches the parked row. The tap did nothing and the ask
-                // expired 24h later.
+                // expired 24h later. Agent-spawn is tried next, same reasoning.
                 val agentChat = AgentChatRequest.parse(payload)
-                val agentSpawn = if (agentChat == null) AgentSpawnRequest.parse(payload) else null
-                if (agentChat != null) {
-                    TimelineItem.Kind.AgentChatRequestCard(event.seq.toString(), agentChat)
-                } else if (agentSpawn != null) {
-                    TimelineItem.Kind.AgentSpawnRequestCard(event.seq.toString(), agentSpawn)
-                } else {
-                    val description = payload.stringOrNull("description") ?: "Permission request"
-                    val arr = payload.arrayOrNull("options")
-                    val optionValues = if (arr != null && arr.all { it is JsonPrimitive && it.isString }) {
-                        arr.map { (it as JsonPrimitive).content }
-                    } else {
-                        listOf("Allow", "Deny")
-                    }
-                    TimelineItem.Kind.AskUser(
-                        event.seq.toString(),
-                        AskUserEvent(
-                            prompt = description,
-                            kind = AskUserEvent.InputKind.Choice(
-                                optionValues.map { AskUserEvent.Option(it, it) },
-                                allowOther = false,
+                val agentSpawn = AgentSpawnRequest.parse(payload)
+                when {
+                    agentChat != null ->
+                        TimelineItem.Kind.AgentChatRequestCard(event.seq.toString(), agentChat)
+
+                    agentSpawn != null ->
+                        TimelineItem.Kind.AgentSpawnRequestCard(event.seq.toString(), agentSpawn)
+
+                    else -> {
+                        val description = payload.stringOrNull("description") ?: "Permission request"
+                        val arr = payload.arrayOrNull("options")
+                        val optionValues = if (arr != null && arr.all { it is JsonPrimitive && it.isString }) {
+                            arr.map { (it as JsonPrimitive).content }
+                        } else {
+                            listOf("Allow", "Deny")
+                        }
+                        TimelineItem.Kind.AskUser(
+                            event.seq.toString(),
+                            AskUserEvent(
+                                prompt = description,
+                                kind = AskUserEvent.InputKind.Choice(
+                                    optionValues.map { AskUserEvent.Option(it, it) },
+                                    allowOther = false,
+                                ),
+                                // The journal protocol carries no expiry on
+                                // permission_request/prompt payloads — always null
+                                // here (same as AskUserEvent.swift; expiry is a
+                                // legacy Matrix-era field the VMs still honor).
+                                expiresAt = null,
+                                replyChannel = AskUserEvent.ReplyChannel.CHOICE_REPLY,
                             ),
-                            // The journal protocol carries no expiry on
-                            // permission_request/prompt payloads — always null
-                            // here (same as AskUserEvent.swift; expiry is a
-                            // legacy Matrix-era field the VMs still honor).
-                            expiresAt = null,
-                            replyChannel = AskUserEvent.ReplyChannel.CHOICE_REPLY,
-                        ),
-                    )
+                        )
+                    }
                 }
             }
 

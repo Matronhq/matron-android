@@ -103,7 +103,9 @@ class AgentSpawnRequestTest {
     }
 
     /// A journal that predates the device-id fields must still produce a
-    /// parseable (if anonymous) card rather than crash.
+    /// parseable (if anonymous) card rather than crash. Pinned as a decision:
+    /// the fallback device id is 0, which reads as "Device 0" — not pretty,
+    /// but never nonsensical, and never blocks the card from answering.
     @Test
     fun degradesWithoutDeviceIds() {
         val request = AgentSpawnRequest.parse(
@@ -112,5 +114,7 @@ class AgentSpawnRequestTest {
         assertEquals(0L, request.fromDeviceId)
         assertEquals(0L, request.targetDeviceId)
         assertEquals("", request.workdir)
+        assertEquals("Device 0", request.requesterLabel)
+        assertEquals("Device 0", request.targetLabel)
     }
 }
