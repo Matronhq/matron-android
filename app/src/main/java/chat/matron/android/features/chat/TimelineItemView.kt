@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -25,6 +26,7 @@ import chat.matron.android.events.AgentChatCardState
 import chat.matron.android.events.AgentChatRequest
 import chat.matron.android.events.AgentSpawnCardState
 import chat.matron.android.events.AgentSpawnRequest
+import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.journal.AgentSpawnDecision
 import chat.matron.android.designsystem.ActivityIndicatorRow
 import chat.matron.android.designsystem.AgentChatRequestCard
@@ -88,9 +90,12 @@ fun TimelineItemView(
         decision: AgentSpawnDecision,
     ) -> Unit)? = null,
     /// Jumps to a spawned session's room, from either the card's own
-    /// resolved state or a later [TimelineItem.Kind.SpawnOutcomeRow]. No-op
-    /// default until the nav host wires it (agent-spawn-card plan Task 3).
-    onOpenSpawnedRoom: (roomId: String) -> Unit = {},
+    /// resolved state or a later [TimelineItem.Kind.SpawnOutcomeRow] — the
+    /// nav host's `prepareConversation` → `navigate` callback, threaded down
+    /// as `onOpenConversation` from [chat.matron.android.features.chat.ChatScreen]
+    /// (agent-spawn-card plan Task 3). Required, not defaulted: a caller that
+    /// forgets to wire it should fail to compile, not fail silently.
+    onOpenSpawnedRoom: (roomId: String) -> Unit,
 ) {
     if (item.isOwn && item.sendState != TimelineSendState.Sent) {
         Column(horizontalAlignment = Alignment.End) {
@@ -221,9 +226,13 @@ private fun RenderedBody(
         // A modest, centered status line — the same ambient-notice treatment
         // as a state-change row, not a card: the durable resolution is
         // rendered inline on the card itself (above) via agentSpawnState;
-        // this row exists so the outcome is visible even after its card has
-        // scrolled out of the visible window.
-        is TimelineItem.Kind.SpawnOutcomeRow -> AmbientNotice(kind.outcome.displayLine)
+        // this row exists so the outcome — and, for a `started` outcome, the
+        // Open action — is still visible after its card has scrolled out of
+        // the visible window.
+        is TimelineItem.Kind.SpawnOutcomeRow -> SpawnOutcomeNotice(
+            outcome = kind.outcome,
+            onOpen = onOpenSpawnedRoom,
+        )
 
         is TimelineItem.Kind.ActivityIndicator -> ActivityIndicatorRow(label = kind.label)
 
@@ -251,6 +260,33 @@ private fun AmbientNotice(text: String) {
         textAlign = TextAlign.Center,
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
     )
+}
+
+/**
+ * The [TimelineItem.Kind.SpawnOutcomeRow] treatment: [AmbientNotice]'s status
+ * line, plus an "Open" action underneath when [SpawnOutcome.openRoomId] says
+ * this outcome carries one — the one place besides the card's own
+ * `ResolvedRow` ([chat.matron.android.designsystem.AgentSpawnRequestCard])
+ * that a `started` outcome's room id is reachable from.
+ */
+@Composable
+private fun SpawnOutcomeNotice(outcome: SpawnOutcome, onOpen: (roomId: String) -> Unit) {
+    val text = outcome.displayLine
+    if (text.isEmpty()) return
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        outcome.openRoomId?.let { roomId ->
+            TextButton(onClick = { onOpen(roomId) }) { Text("Open") }
+        }
+    }
 }
 
 /**

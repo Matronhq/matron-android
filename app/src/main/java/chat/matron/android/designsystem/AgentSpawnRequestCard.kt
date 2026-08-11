@@ -47,9 +47,10 @@ fun AgentSpawnRequestCard(
     /// next ask from the same pair gets its own card.
     onApprove: () -> Unit,
     onDeny: () -> Unit,
-    /// Jumps to the spawned session's room. No-op by default — wired once
-    /// the app has somewhere to navigate to (agent-spawn-card plan Task 3).
-    onOpen: (roomId: String) -> Unit = {},
+    /// Jumps to the spawned session's room — `prepareConversation` then
+    /// `navigate`, wired all the way from the nav host (agent-spawn-card
+    /// plan Task 3; see `MainActivity.openConversationCallback`).
+    onOpen: (roomId: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val busy = state is AgentSpawnCardState.Sending
@@ -140,8 +141,7 @@ private fun ResolvedRow(outcome: SpawnOutcome, onOpen: (roomId: String) -> Unit)
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        val roomId = outcome.roomId
-        if (outcome.outcome == "started" && roomId != null) {
+        outcome.openRoomId?.let { roomId ->
             TextButton(onClick = { onOpen(roomId) }) { Text("Open") }
         }
     }

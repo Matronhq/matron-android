@@ -75,6 +75,28 @@ class SpawnOutcomeTest {
         assertNull(SpawnOutcome.parse(payload("""{"request_id":"spawn-1","outcome":""}""")))
     }
 
+    /// [SpawnOutcome.openRoomId] backs the "Open" action on both the
+    /// resolved card (`AgentSpawnRequestCard`'s `ResolvedRow`) and the
+    /// `SpawnOutcomeRow` timeline row — present only for `started`, even
+    /// though `roomId` is a plain nullable field that could in principle
+    /// carry a value alongside any outcome string.
+    @Test
+    fun openRoomIdIsPresentOnlyForStarted() {
+        val started = SpawnOutcome.parse(
+            payload("""{"request_id":"spawn-1","outcome":"started","room_id":"room-9"}"""),
+        )!!
+        assertEquals("room-9", started.openRoomId)
+
+        val declined = SpawnOutcome.parse(payload("""{"request_id":"spawn-1","outcome":"declined"}"""))!!
+        assertNull(declined.openRoomId)
+    }
+
+    @Test
+    fun openRoomIdIsNullWhenStartedCarriesNoRoomId() {
+        val outcome = SpawnOutcome.parse(payload("""{"request_id":"spawn-1","outcome":"started"}"""))!!
+        assertNull(outcome.openRoomId)
+    }
+
     /// `baseSnippet` is the journal server's own `snippetOf` string, byte
     /// -exact: no errorCode suffix on `failed`, `"[spawn_outcome]"` (not
     /// `displayLine`'s neutral "resolved") for an outcome it doesn't

@@ -82,6 +82,10 @@ fun ChatScreen(
     chatTitle: String,
     onBack: () -> Unit,
     onOpenChild: (String) -> Unit,
+    /// Opens a spawned session's room from an agent-spawn card or its
+    /// `SpawnOutcomeRow` — the nav host's `prepareConversation` → `navigate`
+    /// callback (`MainActivity.openConversationCallback`).
+    onOpenConversation: (String) -> Unit,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val children by stripVM.children.collectAsStateWithLifecycle()
@@ -154,6 +158,7 @@ fun ChatScreen(
                     isTurnRunning = isTurnRunning,
                     onStopTurn = { compactScope.launch { chatVM.sendCommand("!esc") } },
                     onOpenChild = onOpenChild,
+                    onOpenConversation = onOpenConversation,
                     onPreviewImage = { previewModel = it },
                     modifier = Modifier.weight(1f),
                 )
@@ -206,6 +211,11 @@ fun TimelineList(
     stripVM: SubChatStripViewModel,
     activityLabel: String?,
     onOpenChild: (String) -> Unit,
+    /// Opens a spawned session's room from an agent-spawn card or its
+    /// `SpawnOutcomeRow`. Threaded straight through to [TimelineItemView] via
+    /// [TimelineRowView] — shared by both [ChatScreen] and [SubChatView], so
+    /// the deep link works from a sub-chat's timeline too.
+    onOpenConversation: (String) -> Unit,
     onPreviewImage: (Any) -> Unit,
     modifier: Modifier = Modifier,
     // Floating stop button — supplied only by the main chat pane (sub-chat
@@ -307,6 +317,7 @@ fun TimelineList(
                         chatVM = chatVM,
                         children = children,
                         onOpenChild = onOpenChild,
+                        onOpenConversation = onOpenConversation,
                         onPreviewImage = onPreviewImage,
                         onTapFile = onTapFile,
                     )
@@ -383,6 +394,7 @@ private fun TimelineRowView(
     chatVM: ChatViewModel,
     children: List<chat.matron.android.chat.SubChatSummary>,
     onOpenChild: (String) -> Unit,
+    onOpenConversation: (String) -> Unit,
     onPreviewImage: (Any) -> Unit,
     onTapFile: (url: String, filename: String) -> Unit,
 ) {
@@ -446,6 +458,7 @@ private fun TimelineRowView(
                         // card away can't cancel an answer in flight.
                         chatVM.answerAgentSpawn(eventID = eventID, request = request, decision = decision)
                     },
+                    onOpenSpawnedRoom = onOpenConversation,
                 )
             }
         }

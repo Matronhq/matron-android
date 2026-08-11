@@ -49,6 +49,15 @@ data class SpawnOutcome(
             return if (outcome == "failed") base + (errorCode?.let { " — $it" } ?: "") else base
         }
 
+    /// The room to jump to via a resolved card's or `SpawnOutcomeRow`'s
+    /// "Open" action — present only for a `started` outcome, the only one
+    /// [roomId] is ever non-null for. The single source both call sites
+    /// (`AgentSpawnRequestCard`'s `ResolvedRow` and `TimelineItemView`'s
+    /// `SpawnOutcomeRow` branch) read, so they can never disagree about when
+    /// to show the button.
+    val openRoomId: String?
+        get() = roomId.takeIf { outcome == "started" }
+
     companion object {
         /// The journal server's own outcome→copy mapping, byte-exact
         /// (matron-journal `src/journal.js` `snippetOf`) — no error-code
