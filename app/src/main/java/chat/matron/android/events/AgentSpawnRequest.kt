@@ -65,6 +65,12 @@ data class AgentSpawnRequest(
     val headline: String
         get() = topic ?: task.substringBefore('\n')
 
+    /// "dev-2 — CI triage", or just [requesterLabel] when the journal named
+    /// no parent conversation. Mirrors `AgentChatRequest.fromLabel`'s
+    /// name-plus-session convention for the card's "From" detail row.
+    val fromLabel: String
+        get() = fromConvoTitle?.let { "$requesterLabel — $it" } ?: requesterLabel
+
     companion object {
         /// Parses a `permission_request` payload, or null if this is not an
         /// agent-spawn card. Strict only about the two fields

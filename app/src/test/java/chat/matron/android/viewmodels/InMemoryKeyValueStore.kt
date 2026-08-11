@@ -25,4 +25,9 @@ class InMemoryKeyValueStore : KeyValueStore {
     override fun setInt(key: String, value: Int) {
         integers[key] = value
     }
+
+    /// Every key ever written across all three maps — lets a test assert
+    /// nothing was persisted at all (e.g. agent-spawn resolution, which is
+    /// derived from timeline items, never the store).
+    val allKeys: Set<String> get() = storage.keys + booleans.keys + integers.keys
 }

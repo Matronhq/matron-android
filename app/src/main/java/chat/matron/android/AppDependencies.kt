@@ -12,6 +12,7 @@ import chat.matron.android.chat.JournalMediaService
 import chat.matron.android.chat.JournalTimelineService
 import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineService
+import chat.matron.android.journal.AgentSpawnAnswering
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.JournalSyncEngine
@@ -269,6 +270,14 @@ class AppDependencies(
      */
     fun agentChatService(session: UserSession): AgentChatProviding =
         JournalAgentChatService(core(session).api)
+
+    /**
+     * Agent-spawn consent surface: answering the card inline in a chat.
+     * Unlike [agentChatService] there is no parked-list screen to back —
+     * [JournalApi] implements [AgentSpawnAnswering] directly, so this is
+     * just the session's existing API client.
+     */
+    fun agentSpawnService(session: UserSession): AgentSpawnAnswering = core(session).api
 
     /** Show-QR surface (Settings → Link a Device). */
     fun deviceLinkService(session: UserSession): DeviceLinking =

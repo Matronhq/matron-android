@@ -390,6 +390,12 @@ private fun TimelineRowView(
     // answer is an HTTP call with no journal event behind it, so nothing in the
     // timeline snapshot would otherwise change.
     val agentChatStates by chatVM.agentChatStates.collectAsStateWithLifecycle()
+    // Same idea for agent-spawn cards, but two sources: the durable
+    // resolution (a `spawn_outcome` event arriving IS a snapshot change, but
+    // the card is a different row than the outcome row it resolves) and the
+    // transient in-flight/failed state (an HTTP call, no journal event).
+    val spawnOutcomes by chatVM.spawnOutcomes.collectAsStateWithLifecycle()
+    val agentSpawnStates by chatVM.agentSpawnStates.collectAsStateWithLifecycle()
     when (row) {
         is TimelineRow.Separator -> DateSeparator(label = DateSeparatorLabel.format(row.date))
         is TimelineRow.Message -> {
@@ -427,6 +433,18 @@ private fun TimelineRowView(
                             request = request,
                             decision = if (approve) AgentChatDecision.APPROVE else AgentChatDecision.DENY,
                         )
+                    },
+                    agentSpawnState = { eventID, request ->
+                        // Read through the view model (derived-outcome
+                        // precedence wins); spawnOutcomes/agentSpawnStates
+                        // above are what make this recompose.
+                        spawnOutcomes.let { agentSpawnStates }.let { chatVM.agentSpawnState(eventID, request) }
+                    },
+                    onAnswerAgentSpawn = { eventID, request, decision ->
+                        // Same VM-scope rationale as onAnswerAgentChat above:
+                        // NOT this row's coroutine scope, so scrolling the
+                        // card away can't cancel an answer in flight.
+                        chatVM.answerAgentSpawn(eventID = eventID, request = request, decision = decision)
                     },
                 )
             }

@@ -5,8 +5,14 @@ import chat.matron.android.chat.FakeTimelineService
 import chat.matron.android.chat.TimelineItem
 import chat.matron.android.events.AgentChatCardState
 import chat.matron.android.events.AgentChatRequest
+import chat.matron.android.events.AgentSpawnCardState
+import chat.matron.android.events.AgentSpawnRequest
 import chat.matron.android.events.AskUserEvent
+import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.journal.AgentChatDecision
+import chat.matron.android.journal.AgentSpawnAnswering
+import chat.matron.android.journal.AgentSpawnDecision
+import chat.matron.android.journal.JournalApiError
 import chat.matron.android.models.SessionStatus
 import chat.matron.android.models.SessionStatusUpdate
 import chat.matron.android.models.SyncConnectionState
@@ -1176,5 +1182,275 @@ class ChatViewModelTest {
         waitUntil { vm.agentChatState("42") is AgentChatCardState.Answered }
         assertEquals(1, answerer.calls)
         assertTrue((vm.agentChatState("42") as AgentChatCardState.Answered).approved)
+    }
+
+    // MARK: - agent-spawn consent
+
+    private fun spawnRequest(requestId: String, fromConvoTitle: String? = null) = AgentSpawnRequest(
+        requestId = requestId, fromDeviceId = 4, fromName = "dev-2", fromConvoId = null,
+        fromConvoTitle = fromConvoTitle, targetDeviceId = 7, targetName = "dev-9",
+        workdir = "/w", task = "do it", topic = null,
+    )
+
+    private fun spawnCardItem(id: String, request: AgentSpawnRequest) = TimelineItem(
+        id = id, sender = "@bot:s", timestamp = Instant.now(),
+        kind = TimelineItem.Kind.AgentSpawnRequestCard(id, request), isOwn = false,
+    )
+
+    private fun spawnOutcomeItem(id: String, outcome: SpawnOutcome) = TimelineItem(
+        id = id, sender = "@bot:s", timestamp = Instant.now(),
+        kind = TimelineItem.Kind.SpawnOutcomeRow(id, outcome), isOwn = false,
+    )
+
+    /// Records every call; optionally suspends on [gate] (standing in for an
+    /// answer still on the wire) and/or throws [error] once released.
+    private class RecordingSpawnAnswerer(
+        private val error: Throwable? = null,
+        private val gate: CompletableDeferred<Unit>? = null,
+    ) : AgentSpawnAnswering {
+        val calls = mutableListOf<Pair<String, AgentSpawnDecision>>()
+
+        override suspend fun answerAgentSpawn(requestId: String, decision: AgentSpawnDecision) {
+            calls.add(requestId to decision)
+            gate?.await()
+            error?.let { throw it }
+        }
+    }
+
+    /// Throws once, then succeeds — pins the "a failure leaves the card
+    /// answerable again" contract.
+    private class FlakyOnceSpawnAnswerer : AgentSpawnAnswering {
+        var callCount = 0
+            private set
+
+        override suspend fun answerAgentSpawn(requestId: String, decision: AgentSpawnDecision) {
+            callCount += 1
+            if (callCount == 1) throw JournalApiError.Transport("boom")
+        }
+    }
+
+    @Test
+    fun agentSpawnState_idleWhenAnswererWiredAndNothingResolvedOrInFlight() = vmTest { scope ->
+        val vm = ChatViewModel(
+            "!r:s", FakeTimelineService(), FakeMediaService(), scope,
+            InMemoryKeyValueStore(), Haptics.None, null, RecordingSpawnAnswerer(),
+        )
+        assertEquals(AgentSpawnCardState.Idle, vm.agentSpawnState("10", spawnRequest("spawn-1")))
+    }
+
+    /// No answerer wired (previews, tests, or a screen that never wires one):
+    /// the card renders read-only rather than offering buttons that would do
+    /// nothing — same convention as `agentChatState`'s nil-resolver case.
+    @Test
+    fun agentSpawnState_readOnlyResolvedDefaultWhenNoAnswererWired() = vmTest { scope ->
+        val vm = ChatViewModel("!r:s", FakeTimelineService(), FakeMediaService(), scope, InMemoryKeyValueStore())
+        val state = vm.agentSpawnState("10", spawnRequest("spawn-1"))
+        assertTrue(state is AgentSpawnCardState.Resolved)
+        assertEquals("expired", (state as AgentSpawnCardState.Resolved).outcome.outcome)
+    }
+
+    /// The durable `spawn_outcome` event wins over everything, including a
+    /// still in-flight `Sending` transient for the same card — once the
+    /// journal record lands there is nothing left to answer.
+    @Test
+    fun agentSpawnState_derivedOutcomeWinsOverAnInFlightTransient() = vmTest { scope ->
+        val request = spawnRequest("spawn-1")
+        val gate = CompletableDeferred<Unit>()
+        val answerer = RecordingSpawnAnswerer(gate = gate)
+        val fake = FakeTimelineService().apply {
+            snapshotsToEmit = listOf(listOf(spawnCardItem("10", request)))
+        }
+        val vm = ChatViewModel("!r:s", fake, FakeMediaService(), scope, InMemoryKeyValueStore(), Haptics.None, null, answerer)
+        vm.start().join()
+
+        vm.answerAgentSpawn("10", request, AgentSpawnDecision.APPROVE)
+        assertTrue(vm.agentSpawnState("10", request) is AgentSpawnCardState.Sending)
+
+        // The outcome event lands on a later snapshot while the answer is
+        // still in flight.
+        fake.snapshotsToEmit = listOf(
+            listOf(spawnCardItem("10", request)),
+            listOf(spawnCardItem("10", request), spawnOutcomeItem("11", SpawnOutcome(requestId = "spawn-1", outcome = "started", roomId = "room-9"))),
+        )
+        vm.start().join()
+
+        val state = vm.agentSpawnState("10", request)
+        assertTrue(state is AgentSpawnCardState.Resolved)
+        assertEquals("started", (state as AgentSpawnCardState.Resolved).outcome.outcome)
+        assertEquals("room-9", state.outcome.roomId)
+        gate.complete(Unit) // release the still-pending answerer coroutine
+    }
+
+    @Test
+    fun answerAgentSpawn_conflictBecomesSyntheticResolvedExpiredAndBlocksReanswer() = vmTest { scope ->
+        val request = spawnRequest("spawn-1")
+        val answerer = RecordingSpawnAnswerer(error = JournalApiError.Conflict)
+        val vm = ChatViewModel("!r:s", FakeTimelineService(), FakeMediaService(), scope, InMemoryKeyValueStore(), Haptics.None, null, answerer)
+
+        vm.answerAgentSpawn("10", request, AgentSpawnDecision.APPROVE)
+        waitUntil { vm.agentSpawnState("10", request) is AgentSpawnCardState.Resolved }
+        val resolved = vm.agentSpawnState("10", request) as AgentSpawnCardState.Resolved
+        assertEquals("expired", resolved.outcome.outcome)
+        assertEquals(1, answerer.calls.size)
+
+        // Already resolved (even synthetically) — a second tap is a no-op.
+        vm.answerAgentSpawn("10", request, AgentSpawnDecision.DENY)
+        assertEquals(1, answerer.calls.size)
+    }
+
+    @Test
+    fun answerAgentSpawn_notFoundBecomesFailedWithServerGoneCopy() = vmTest { scope ->
+        val request = spawnRequest("spawn-1")
+        val answerer = RecordingSpawnAnswerer(error = JournalApiError.NotFound)
+        val vm = ChatViewModel("!r:s", FakeTimelineService(), FakeMediaService(), scope, InMemoryKeyValueStore(), Haptics.None, null, answerer)
+
+        vm.answerAgentSpawn("10", request, AgentSpawnDecision.APPROVE)
+        waitUntil { vm.agentSpawnState("10", request) is AgentSpawnCardState.Failed }
+        assertEquals(
+            "That request is no longer on the server.",
+            (vm.agentSpawnState("10", request) as AgentSpawnCardState.Failed).message,
+        )
+    }
+
+    /// A transport failure leaves the card `Failed`, not stuck — retrying
+    /// answers it again, and the retry can succeed.
+    @Test
+    fun answerAgentSpawn_transportFailureIsAnswerableAgainOnRetry() = vmTest { scope ->
+        val request = spawnRequest("spawn-1")
+        val answerer = FlakyOnceSpawnAnswerer()
+        val vm = ChatViewModel("!r:s", FakeTimelineService(), FakeMediaService(), scope, InMemoryKeyValueStore(), Haptics.None, null, answerer)
+
+        vm.answerAgentSpawn("10", request, AgentSpawnDecision.APPROVE)
+        waitUntil { vm.agentSpawnState("10", request) is AgentSpawnCardState.Failed }
+        assertEquals(
+            "Couldn't reach the server — check your connection and try again.",
+            (vm.agentSpawnState("10", request) as AgentSpawnCardState.Failed).message,
+        )
+
+        vm.answerAgentSpawn("10", request, AgentSpawnDecision.APPROVE)
+        waitUntil { answerer.callCount == 2 }
+        assertTrue(vm.agentSpawnState("10", request) is AgentSpawnCardState.Sending)
+    }
+
+    /// The `Sending` marker set synchronously before the call is dispatched
+    /// (not inside the launched coroutine) is what makes a second tap while
+    /// the first is still on the wire a guaranteed no-op, not a race.
+    @Test
+    fun answerAgentSpawn_doubleSendGuarded() = vmTest { scope ->
+        val gate = CompletableDeferred<Unit>()
+        val answerer = RecordingSpawnAnswerer(gate = gate)
+        val vm = ChatViewModel("!r:s", FakeTimelineService(), FakeMediaService(), scope, InMemoryKeyValueStore(), Haptics.None, null, answerer)
+        val request = spawnRequest("spawn-1")
+
+        vm.answerAgentSpawn("10", request, AgentSpawnDecision.APPROVE)
+        vm.answerAgentSpawn("10", request, AgentSpawnDecision.APPROVE) // tapped again mid-send
+        gate.complete(Unit)
+
+        waitUntil { answerer.calls.isNotEmpty() }
+        assertEquals(1, answerer.calls.size)
+    }
+
+    /// A card already resolved by a real journal event must never be
+    /// answered — the row rendering it is about to disappear as an
+    /// AmbientNotice/resolved card, not offer buttons.
+    @Test
+    fun answerAgentSpawn_noOpWhenAlreadyResolvedByOutcomeEvent() = vmTest { scope ->
+        val request = spawnRequest("spawn-1")
+        val answerer = RecordingSpawnAnswerer()
+        val fake = FakeTimelineService().apply {
+            snapshotsToEmit = listOf(
+                listOf(spawnCardItem("10", request), spawnOutcomeItem("11", SpawnOutcome(requestId = "spawn-1", outcome = "declined"))),
+            )
+        }
+        val vm = ChatViewModel("!r:s", fake, FakeMediaService(), scope, InMemoryKeyValueStore(), Haptics.None, null, answerer)
+        vm.start().join()
+
+        vm.answerAgentSpawn("10", request, AgentSpawnDecision.APPROVE)
+        assertTrue(answerer.calls.isEmpty())
+        val state = vm.agentSpawnState("10", request) as AgentSpawnCardState.Resolved
+        assertEquals("declined", state.outcome.outcome)
+    }
+
+    /// Same VM-scope rationale as `answerAgentChat_outlivesTheRowThatTriggeredIt`:
+    /// the card is a row in a lazy list, so answering must not run on that
+    /// row's own coroutine scope — scrolling it away or leaving the chat
+    /// would cancel the request in flight and leave the card stuck on
+    /// `Sending` forever, permanently unanswerable.
+    @Test
+    fun answerAgentSpawn_outlivesTheRowThatTriggeredIt() = vmTest { scope ->
+        val gate = CompletableDeferred<Unit>()
+        val answerer = RecordingSpawnAnswerer(gate = gate)
+        val vm = ChatViewModel("!r:s", FakeTimelineService(), FakeMediaService(), scope, InMemoryKeyValueStore(), Haptics.None, null, answerer)
+        val request = spawnRequest("spawn-1")
+        val rowScope = CoroutineScope(coroutineContext + Job())
+
+        rowScope.launch {
+            vm.answerAgentSpawn("10", request, AgentSpawnDecision.APPROVE)
+        }.join()
+        rowScope.cancel() // the card scrolls out of view, mid-request
+        gate.complete(Unit)
+
+        waitUntil { answerer.calls.size == 1 }
+        // The call ran to completion on the VM's own scope: still `Sending`
+        // (no journal event has resolved it yet), not dropped.
+        assertTrue(vm.agentSpawnState("10", request) is AgentSpawnCardState.Sending)
+    }
+
+    /// The whole chat going away (the VM's own scope is cancelled) mid-send
+    /// drops the transient marker instead of leaving it stuck on `Sending` —
+    /// contrast with the row-scope cancellation above, which must NOT affect
+    /// the in-flight call at all.
+    @Test
+    fun answerAgentSpawn_cancellationOfTheVMsOwnScopeDropsTransientAndRethrows() = vmTest { scope ->
+        val gate = CompletableDeferred<Unit>()
+        val answerer = RecordingSpawnAnswerer(gate = gate)
+        val vm = ChatViewModel("!r:s", FakeTimelineService(), FakeMediaService(), scope, InMemoryKeyValueStore(), Haptics.None, null, answerer)
+        val request = spawnRequest("spawn-1")
+
+        vm.answerAgentSpawn("10", request, AgentSpawnDecision.APPROVE)
+        assertTrue(vm.agentSpawnState("10", request) is AgentSpawnCardState.Sending)
+        // Let the launched coroutine actually start and reach `gate.await()`
+        // before cancelling — cancelling a not-yet-dispatched coroutine skips
+        // its body (and so its catch block) entirely, which would pass this
+        // test for the wrong reason.
+        waitUntil { answerer.calls.isNotEmpty() }
+
+        scope.cancel() // the whole chat/session is going away — cancels the
+        // launched answer coroutine directly, since it's a child of this
+        // scope (that's the whole point of running on it).
+        gate.complete(Unit)
+
+        waitUntil { vm.agentSpawnState("10", request) !is AgentSpawnCardState.Sending }
+        // Dropped transient falls back to Idle (an answerer is still wired),
+        // not stuck forever on the marker that blocks retries.
+        assertEquals(AgentSpawnCardState.Idle, vm.agentSpawnState("10", request))
+    }
+
+    /// THE key divergence from agent-chat: resolution is derived purely from
+    /// timeline items, never persisted. A brand-new view model for the same
+    /// room — same [InMemoryKeyValueStore], never touched by either
+    /// instance — resolves the very same card from the replayed snapshot
+    /// alone.
+    @Test
+    fun spawnCardResolution_isDerivedFromItemsNotPersisted_freshVMAlsoResolves() = vmTest { scope ->
+        val store = InMemoryKeyValueStore()
+        val request = spawnRequest("spawn-1")
+        val cardItem = spawnCardItem("10", request)
+        val outcomeItem = spawnOutcomeItem("11", SpawnOutcome(requestId = "spawn-1", outcome = "started", roomId = "room-9"))
+
+        val fake1 = FakeTimelineService().apply { snapshotsToEmit = listOf(listOf(cardItem, outcomeItem)) }
+        val vm1 = ChatViewModel("!r:s", fake1, FakeMediaService(), scope, store)
+        vm1.start().join()
+        val state1 = vm1.agentSpawnState("10", request) as AgentSpawnCardState.Resolved
+        assertEquals("started", state1.outcome.outcome)
+
+        // A brand-new instance, same room, same store.
+        val fake2 = FakeTimelineService().apply { snapshotsToEmit = listOf(listOf(cardItem, outcomeItem)) }
+        val vm2 = ChatViewModel("!r:s", fake2, FakeMediaService(), scope, store)
+        vm2.start().join()
+        val state2 = vm2.agentSpawnState("10", request) as AgentSpawnCardState.Resolved
+        assertEquals("started", state2.outcome.outcome)
+
+        assertTrue("spawn resolution must never write to KeyValueStore", store.allKeys.isEmpty())
     }
 }

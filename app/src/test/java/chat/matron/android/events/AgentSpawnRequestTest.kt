@@ -36,6 +36,19 @@ class AgentSpawnRequestTest {
         assertEquals("ci triage", request.headline)
         assertEquals("dev-2", request.requesterLabel)
         assertEquals("dev-9", request.targetLabel)
+        assertEquals("dev-2 — CI triage", request.fromLabel)
+    }
+
+    @Test
+    fun fromLabelFallsBackToRequesterLabelWithNoConvoTitle() {
+        val request = AgentSpawnRequest.parse(
+            payload(
+                """{"kind":"agent_spawn","request_id":"spawn-1","from_device_id":4,"from_name":"dev-2",
+                    "target_device_id":7,"workdir":"/w","task":"do it"}""",
+            ),
+        )!!
+        assertNull(request.fromConvoTitle)
+        assertEquals("dev-2", request.fromLabel)
     }
 
     @Test

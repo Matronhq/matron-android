@@ -23,8 +23,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.chat.TimelineItem
 import chat.matron.android.events.AgentChatCardState
 import chat.matron.android.events.AgentChatRequest
+import chat.matron.android.events.AgentSpawnCardState
+import chat.matron.android.events.AgentSpawnRequest
+import chat.matron.android.events.SpawnOutcome
+import chat.matron.android.journal.AgentSpawnDecision
 import chat.matron.android.designsystem.ActivityIndicatorRow
 import chat.matron.android.designsystem.AgentChatRequestCard
+import chat.matron.android.designsystem.AgentSpawnRequestCard
 import chat.matron.android.designsystem.AskUserCard
 import chat.matron.android.designsystem.AttachmentFile
 import chat.matron.android.designsystem.AttachmentImage
@@ -73,12 +78,27 @@ fun TimelineItemView(
         request: AgentChatRequest,
         approve: Boolean,
     ) -> Unit)? = null,
+    /// Render state for an agent-spawn consent card. `null` (previews, tests)
+    /// renders the card read-only, same convention as [agentChatState].
+    agentSpawnState: ((eventID: String, request: AgentSpawnRequest) -> AgentSpawnCardState)? = null,
+    /// Answers a spawn consent card. Goes to `POST /agent-spawn/answer`, not
+    /// into the timeline.
+    onAnswerAgentSpawn: ((
+        eventID: String,
+        request: AgentSpawnRequest,
+        decision: AgentSpawnDecision,
+    ) -> Unit)? = null,
+    /// Jumps to a spawned session's room, from either the card's own
+    /// resolved state or a later [TimelineItem.Kind.SpawnOutcomeRow]. No-op
+    /// default until the nav host wires it (agent-spawn-card plan Task 3).
+    onOpenSpawnedRoom: (roomId: String) -> Unit = {},
 ) {
     if (item.isOwn && item.sendState != TimelineSendState.Sent) {
         Column(horizontalAlignment = Alignment.End) {
             RenderedBody(
                 item, resolveImage, onTapImage, onTapFile, askViewModel, isPromptAnswered,
                 answerSummary, agentChatState, onAnswerAgentChat,
+                agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom,
             )
             SendStateIndicator(
                 state = sendStateGlyphFrom(item.sendState),
@@ -90,6 +110,7 @@ fun TimelineItemView(
         RenderedBody(
             item, resolveImage, onTapImage, onTapFile, askViewModel, isPromptAnswered,
             answerSummary, agentChatState, onAnswerAgentChat,
+            agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom,
         )
     }
 }
@@ -109,6 +130,13 @@ private fun RenderedBody(
         request: AgentChatRequest,
         approve: Boolean,
     ) -> Unit)?,
+    agentSpawnState: ((eventID: String, request: AgentSpawnRequest) -> AgentSpawnCardState)?,
+    onAnswerAgentSpawn: ((
+        eventID: String,
+        request: AgentSpawnRequest,
+        decision: AgentSpawnDecision,
+    ) -> Unit)?,
+    onOpenSpawnedRoom: (roomId: String) -> Unit,
 ) {
     val style = if (item.isOwn) MessageAuthorStyle.Me else MessageAuthorStyle.Bot
     when (val kind = item.kind) {
@@ -180,13 +208,25 @@ private fun RenderedBody(
 
         is TimelineItem.Kind.AskUserAnswer -> Unit // bookkeeping, never rendered
 
-        // Placeholder rendering only — Task 1 of the agent-spawn-card plan is
-        // pure logic (model + mapper + snippets); the real consent-card
-        // composable, VM-derived state, and answer wiring land in Task 2.
-        // Kept here only so the exhaustive `when` compiles.
         is TimelineItem.Kind.AgentSpawnRequestCard ->
-            AmbientNotice("🤝 Agent spawn request — ${kind.request.headline}")
+            CappedCard(maxWidth = 360.dp) {
+                AgentSpawnRequestCard(
+                    request = kind.request,
+                    state = agentSpawnState?.invoke(kind.eventID, kind.request)
+                        ?: AgentSpawnCardState.Resolved(
+                            SpawnOutcome(requestId = kind.request.requestId, outcome = "expired"),
+                        ),
+                    onApprove = { onAnswerAgentSpawn?.invoke(kind.eventID, kind.request, AgentSpawnDecision.APPROVE) },
+                    onDeny = { onAnswerAgentSpawn?.invoke(kind.eventID, kind.request, AgentSpawnDecision.DENY) },
+                    onOpen = onOpenSpawnedRoom,
+                )
+            }
 
+        // A modest, centered status line — the same ambient-notice treatment
+        // as a state-change row, not a card: the durable resolution is
+        // rendered inline on the card itself (above) via agentSpawnState;
+        // this row exists so the outcome is visible even after its card has
+        // scrolled out of the visible window.
         is TimelineItem.Kind.SpawnOutcomeRow -> AmbientNotice(kind.outcome.displayLine)
 
         is TimelineItem.Kind.ActivityIndicator -> ActivityIndicatorRow(label = kind.label)
