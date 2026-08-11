@@ -10,9 +10,11 @@ import chat.matron.android.journal.longOrNull
 import chat.matron.android.journal.objects
 import chat.matron.android.journal.stringOrNull
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -71,6 +73,21 @@ class NewChatViewModel(
     private val _isStarting = MutableStateFlow(false)
     val isStarting: StateFlow<Boolean> = _isStarting.asStateFlow()
 
+    /// Capacity per connected agent device id, filled by the roster fan-out.
+    /// A box with no entry simply has no capacity to show (never asked, or its
+    /// `recent_folders` failed) — the row still renders and stays pickable.
+    private val _capacities = MutableStateFlow<Map<Long, BoxCapacity>>(emptyMap())
+    val capacities: StateFlow<Map<Long, BoxCapacity>> = _capacities.asStateFlow()
+
+    /// Agent device ids whose fan-out request is still in flight, so a row can
+    /// say "Checking…" instead of looking capacity-less.
+    private val _capacityPending = MutableStateFlow<Set<Long>>(emptySet())
+    val capacityPending: StateFlow<Set<Long>> = _capacityPending.asStateFlow()
+
+    /// Folders harvested from the fan-out replies, so picking a box that already
+    /// answered skips a second `recent_folders` round trip.
+    private val folderCache = mutableMapOf<Long, List<RecentFolder>>()
+
     var customPath: String = ""
     var browserEnabled: Boolean = false
 
@@ -79,9 +96,18 @@ class NewChatViewModel(
             val agents = api.devices().filter { it.kind == "agent" }
             val connected = agents.filter { it.connected }
             if (connected.size == 1) {
+                // Auto-skip straight to the folder step: there's no roster to
+                // decorate, so no fan-out.
                 select(connected[0])
             } else {
                 _phase.value = Phase.Agents(sorted(agents))
+                // The roster is already on screen (the phase flow was set
+                // first); this only fills in the capacity lines behind it.
+                val connectedIDs = connected.map { it.id }
+                _capacityPending.value = connectedIDs.toSet()
+                coroutineScope {
+                    for (id in connectedIDs) launch { fetchCapacity(id) }
+                }
             }
         } catch (cancel: CancellationException) {
             throw cancel
@@ -95,6 +121,10 @@ class NewChatViewModel(
         _phase.value = Phase.Folders(agent)
         _folders.value = emptyList()
         _foldersError.value = null
+        folderCache[agent.id]?.let {
+            _folders.value = it
+            return
+        }
         try {
             val reply = api.agentRequest(agent.id, "recent_folders", "{}")
             if (!sameFolderAgent(agent)) return // switched away meanwhile
@@ -153,6 +183,26 @@ class NewChatViewModel(
 
     /// Back from the folder step to the roster.
     suspend fun backToAgents() = load()
+
+    /// One box's slice of the roster fan-out. The reply carries both the
+    /// capacity blocks and the folder list, so a success warms both caches; a
+    /// failure leaves no capacity entry and the folder step falls back to its
+    /// own live RPC.
+    private suspend fun fetchCapacity(agentID: Long) {
+        try {
+            val reply = api.agentRequest(agentID, "recent_folders", "{}")
+            if (reply is RPCReply.Ok) {
+                _capacities.value = _capacities.value + (agentID to BoxCapacity.parse(reply.result))
+                folderCache[agentID] = parseFolders(reply.result)
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            // Capacity is a convenience — the row just stays plain.
+        } finally {
+            _capacityPending.value = _capacityPending.value - agentID
+        }
+    }
 
     private fun sameFolderAgent(agent: DeviceDTO): Boolean {
         val phaseNow = _phase.value

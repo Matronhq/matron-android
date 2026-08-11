@@ -23,6 +23,10 @@ import org.junit.Test
 private class FakeAgentRPCProvider : AgentRPCProviding {
     var devicesResult: Result<List<DeviceDTO>> = Result.success(emptyList())
     var replies: MutableMap<String, RPCReply> = mutableMapOf()
+
+    /// Per-box `recent_folders` scripting for the fan-out tests; consulted before
+    /// [replies] so one box can answer while another fails.
+    var repliesByDevice: MutableMap<Long, RPCReply> = mutableMapOf()
     var rpcError: RPCRequestError? = null
 
     data class Request(val method: String, val agentDeviceID: Long, val params: JsonObject)
@@ -36,6 +40,9 @@ private class FakeAgentRPCProvider : AgentRPCProviding {
             .getOrDefault(JsonObject(emptyMap()))
         requests.add(Request(method, agentDeviceID, params))
         rpcError?.let { throw it }
+        if (method == "recent_folders") {
+            repliesByDevice[agentDeviceID]?.let { return it }
+        }
         return replies[method] ?: RPCReply.Failure("unknown_method", null)
     }
 }
@@ -209,5 +216,74 @@ class NewChatViewModelTest {
         assertTrue(folders is NewChatViewModel.Phase.Folders)
         assertEquals(list[1].id, (folders as NewChatViewModel.Phase.Folders).agent.id)
         assertEquals(list[1].id, fake.requests.last().agentDeviceID)
+    }
+
+    @Test
+    fun load_fansOutToConnectedAgentsOnly() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        fake.devicesResult = Result.success(
+            listOf(
+                agent(1, name = "a", connected = true),
+                agent(2, name = "b", connected = true),
+                agent(3, name = "c", connected = false),
+            ),
+        )
+        fake.repliesByDevice[1] =
+            foldersReply("""{"folders":[],"account":{"email":"pat@yearbook.com"},"activity":{"live_sessions":2}}""")
+        fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
+        val vm = NewChatViewModel(fake)
+        vm.load()
+        assertEquals(
+            listOf(1L, 2L),
+            fake.requests.filter { it.method == "recent_folders" }.map { it.agentDeviceID }.sorted(),
+        )
+        assertEquals("pat@yearbook.com", vm.capacities.value[1L]?.accountEmail)
+        assertEquals(2, vm.capacities.value[1L]?.liveSessions)
+        assertEquals(BoxCapacity(null, emptyList(), null), vm.capacities.value[2L])
+        assertTrue(vm.capacityPending.value.isEmpty())
+    }
+
+    @Test
+    fun fanOut_oneFailingBoxDegradesAlone() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        fake.devicesResult = Result.success(
+            listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true)),
+        )
+        fake.repliesByDevice[1] = foldersReply("""{"folders":[],"activity":{"live_sessions":1}}""")
+        fake.repliesByDevice[2] = RPCReply.Failure("agent_unreachable", null)
+        val vm = NewChatViewModel(fake)
+        vm.load()
+        assertEquals(1, vm.capacities.value[1L]?.liveSessions)
+        assertNull(vm.capacities.value[2L])
+        assertTrue(vm.capacityPending.value.isEmpty())
+    }
+
+    @Test
+    fun select_usesFannedFoldersWithoutSecondRPC() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
+        fake.devicesResult = Result.success(agents)
+        fake.repliesByDevice[1] = foldersReply("""{"folders":[{"path":"/w/app","last_used":100}]}""")
+        fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
+        val vm = NewChatViewModel(fake)
+        vm.load()
+        val callsBefore = fake.requests.count { it.method == "recent_folders" }
+        vm.select(agents[0])
+        assertEquals(listOf("/w/app"), vm.folders.value.map { it.path })
+        assertEquals(callsBefore, fake.requests.count { it.method == "recent_folders" })
+    }
+
+    @Test
+    fun select_fallsBackToLiveRPCWhenFanOutFailed() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
+        fake.devicesResult = Result.success(agents)
+        fake.repliesByDevice[1] = RPCReply.Failure("agent_unreachable", null)
+        fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
+        val vm = NewChatViewModel(fake)
+        vm.load()
+        fake.repliesByDevice[1] = foldersReply("""{"folders":[{"path":"/late","last_used":1}]}""")
+        vm.select(agents[0])
+        assertEquals(listOf("/late"), vm.folders.value.map { it.path })
     }
 }
