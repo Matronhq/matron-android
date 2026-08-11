@@ -25,7 +25,6 @@ import chat.matron.android.events.AgentChatCardState
 import chat.matron.android.events.AgentChatRequest
 import chat.matron.android.events.AgentSpawnCardState
 import chat.matron.android.events.AgentSpawnRequest
-import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.journal.AgentSpawnDecision
 import chat.matron.android.designsystem.ActivityIndicatorRow
 import chat.matron.android.designsystem.AgentChatRequestCard
@@ -212,10 +211,7 @@ private fun RenderedBody(
             CappedCard(maxWidth = 360.dp) {
                 AgentSpawnRequestCard(
                     request = kind.request,
-                    state = agentSpawnState?.invoke(kind.eventID, kind.request)
-                        ?: AgentSpawnCardState.Resolved(
-                            SpawnOutcome(requestId = kind.request.requestId, outcome = "expired"),
-                        ),
+                    state = agentSpawnState?.invoke(kind.eventID, kind.request) ?: AgentSpawnCardState.Unavailable,
                     onApprove = { onAnswerAgentSpawn?.invoke(kind.eventID, kind.request, AgentSpawnDecision.APPROVE) },
                     onDeny = { onAnswerAgentSpawn?.invoke(kind.eventID, kind.request, AgentSpawnDecision.DENY) },
                     onOpen = onOpenSpawnedRoom,

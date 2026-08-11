@@ -88,6 +88,15 @@ fun AgentSpawnRequestCard(
         when (state) {
             is AgentSpawnCardState.Resolved -> ResolvedRow(outcome = state.outcome, onOpen = onOpen)
 
+            // Stopped waiting with no durable outcome behind it (a 409, or no
+            // answerer wired) — never the journal's own "expired" copy, which
+            // is reserved for a real spawn_outcome event.
+            AgentSpawnCardState.Unavailable -> Text(
+                "This request is no longer waiting for an answer.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
             else -> {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,

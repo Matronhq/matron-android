@@ -1241,12 +1241,13 @@ class ChatViewModelTest {
     /// No answerer wired (previews, tests, or a screen that never wires one):
     /// the card renders read-only rather than offering buttons that would do
     /// nothing — same convention as `agentChatState`'s nil-resolver case.
+    /// `Unavailable`, not a synthetic `Resolved("expired")`: no durable
+    /// journal event backs this, so it must not show the journal's own
+    /// "expired" copy (Global Constraint: "request no longer waiting").
     @Test
     fun agentSpawnState_readOnlyResolvedDefaultWhenNoAnswererWired() = vmTest { scope ->
         val vm = ChatViewModel("!r:s", FakeTimelineService(), FakeMediaService(), scope, InMemoryKeyValueStore())
-        val state = vm.agentSpawnState("10", spawnRequest("spawn-1"))
-        assertTrue(state is AgentSpawnCardState.Resolved)
-        assertEquals("expired", (state as AgentSpawnCardState.Resolved).outcome.outcome)
+        assertEquals(AgentSpawnCardState.Unavailable, vm.agentSpawnState("10", spawnRequest("spawn-1")))
     }
 
     /// The durable `spawn_outcome` event wins over everything, including a
@@ -1281,19 +1282,23 @@ class ChatViewModelTest {
         gate.complete(Unit) // release the still-pending answerer coroutine
     }
 
+    /// 409 -> `Unavailable`, not a synthetic `Resolved("expired")` — the
+    /// Global Constraint's copy for this transient is "request no longer
+    /// waiting", not the journal's own "expired" outcome copy, which stays
+    /// reserved for a real `spawn_outcome` event (M1 in the task-2 review).
     @Test
-    fun answerAgentSpawn_conflictBecomesSyntheticResolvedExpiredAndBlocksReanswer() = vmTest { scope ->
+    fun answerAgentSpawn_conflictBecomesUnavailableAndBlocksReanswer() = vmTest { scope ->
         val request = spawnRequest("spawn-1")
         val answerer = RecordingSpawnAnswerer(error = JournalApiError.Conflict)
         val vm = ChatViewModel("!r:s", FakeTimelineService(), FakeMediaService(), scope, InMemoryKeyValueStore(), Haptics.None, null, answerer)
 
         vm.answerAgentSpawn("10", request, AgentSpawnDecision.APPROVE)
-        waitUntil { vm.agentSpawnState("10", request) is AgentSpawnCardState.Resolved }
-        val resolved = vm.agentSpawnState("10", request) as AgentSpawnCardState.Resolved
-        assertEquals("expired", resolved.outcome.outcome)
+        waitUntil { vm.agentSpawnState("10", request) == AgentSpawnCardState.Unavailable }
+        assertEquals(AgentSpawnCardState.Unavailable, vm.agentSpawnState("10", request))
         assertEquals(1, answerer.calls.size)
+        assertEquals("spawn-1" to AgentSpawnDecision.APPROVE, answerer.calls.single())
 
-        // Already resolved (even synthetically) — a second tap is a no-op.
+        // Already settled (even without a durable event) — a second tap is a no-op.
         vm.answerAgentSpawn("10", request, AgentSpawnDecision.DENY)
         assertEquals(1, answerer.calls.size)
     }
@@ -1329,6 +1334,10 @@ class ChatViewModelTest {
 
         vm.answerAgentSpawn("10", request, AgentSpawnDecision.APPROVE)
         waitUntil { answerer.callCount == 2 }
+        // `waitUntil` returns silently on timeout — without this, a retry that
+        // never dispatches would still read `Sending` from the synchronous
+        // marker and pass for the wrong reason.
+        assertEquals(2, answerer.callCount)
         assertTrue(vm.agentSpawnState("10", request) is AgentSpawnCardState.Sending)
     }
 
@@ -1348,6 +1357,35 @@ class ChatViewModelTest {
 
         waitUntil { answerer.calls.isNotEmpty() }
         assertEquals(1, answerer.calls.size)
+    }
+
+    /// Pins the VM -> API argument mapping directly: `request.requestId`
+    /// (not `eventID`) and the exact tapped decision must reach the
+    /// answerer. The tap -> decision half of this path
+    /// (`TimelineItemView`'s `onApprove`/`onDeny` closures) is untested by
+    /// the Compose-is-logic-free rule, so this is the only place either
+    /// direction can be caught (task-2 review finding I2).
+    @Test
+    fun answerAgentSpawn_sendsTheTappedDecisionAndTheRequestIdNotTheEventId() = vmTest { scope ->
+        val request = spawnRequest("spawn-1")
+
+        val approveAnswerer = RecordingSpawnAnswerer()
+        val approveVM = ChatViewModel(
+            "!r:s", FakeTimelineService(), FakeMediaService(), scope,
+            InMemoryKeyValueStore(), Haptics.None, null, approveAnswerer,
+        )
+        approveVM.answerAgentSpawn("event-id-not-request-id", request, AgentSpawnDecision.APPROVE)
+        waitUntil { approveAnswerer.calls.isNotEmpty() }
+        assertEquals("spawn-1" to AgentSpawnDecision.APPROVE, approveAnswerer.calls.single())
+
+        val denyAnswerer = RecordingSpawnAnswerer()
+        val denyVM = ChatViewModel(
+            "!r:s", FakeTimelineService(), FakeMediaService(), scope,
+            InMemoryKeyValueStore(), Haptics.None, null, denyAnswerer,
+        )
+        denyVM.answerAgentSpawn("event-id-not-request-id", request, AgentSpawnDecision.DENY)
+        waitUntil { denyAnswerer.calls.isNotEmpty() }
+        assertEquals("spawn-1" to AgentSpawnDecision.DENY, denyAnswerer.calls.single())
     }
 
     /// A card already resolved by a real journal event must never be
@@ -1391,6 +1429,12 @@ class ChatViewModelTest {
         gate.complete(Unit)
 
         waitUntil { answerer.calls.size == 1 }
+        // `waitUntil` returns silently on timeout, and `Sending` alone is set
+        // synchronously before the coroutine ever dispatches — so the call
+        // count must be asserted explicitly, or a coroutine cancelled before
+        // it started (the exact bug this test exists to catch) would still
+        // read `Sending` and pass.
+        assertEquals(1, answerer.calls.size)
         // The call ran to completion on the VM's own scope: still `Sending`
         // (no journal event has resolved it yet), not dropped.
         assertTrue(vm.agentSpawnState("10", request) is AgentSpawnCardState.Sending)

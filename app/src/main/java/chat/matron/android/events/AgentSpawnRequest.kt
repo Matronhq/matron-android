@@ -112,13 +112,25 @@ data class AgentSpawnRequest(
 /// storage: the journal's `spawn_outcome` event is the durable,
 /// cross-device record of the outcome (started/declined/expired/failed), so
 /// there is nothing for the client to remember between launches — a fresh
-/// snapshot replay reconstructs it. `Resolved` also covers the transient
-/// 409 case (request answered/expired elsewhere) with a synthetic
-/// `SpawnOutcome(outcome = "expired")`-shaped value until the durable event
-/// arrives and takes over.
+/// snapshot replay reconstructs it. `Resolved` is reserved for that real,
+/// journal-sent event — see [Unavailable] for the two cases that stop the
+/// card waiting WITHOUT one.
 sealed class AgentSpawnCardState {
     data object Idle : AgentSpawnCardState()
     data object Sending : AgentSpawnCardState()
     data class Resolved(val outcome: SpawnOutcome) : AgentSpawnCardState()
     data class Failed(val message: String) : AgentSpawnCardState()
+
+    /// The card stopped waiting for an answer with no durable [SpawnOutcome]
+    /// behind it: a 409 from `POST /agent-spawn/answer` (answered/expired on
+    /// another device — the real `spawn_outcome` event, once it arrives,
+    /// supersedes this via `ChatViewModel.agentSpawnState`'s precedence), or
+    /// no answerer wired at all (previews, tests, a screen that never wires
+    /// one). Kept distinct from `Resolved` — reusing a synthetic
+    /// `SpawnOutcome(outcome = "expired")` here would show the journal's own
+    /// "Spawn request expired" copy for a case the journal never actually
+    /// resolved; the plan's Global Constraint reserves that copy for a real
+    /// `expired` outcome and calls for "request no longer waiting" here
+    /// instead (matching agent-chat's `AgentChatCardState.Expired`).
+    data object Unavailable : AgentSpawnCardState()
 }

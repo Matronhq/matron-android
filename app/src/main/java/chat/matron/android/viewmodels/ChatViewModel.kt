@@ -319,19 +319,15 @@ class ChatViewModel(
     /// [SpawnOutcome] (a journaled `spawn_outcome` event, [_spawnOutcomes])
     /// always wins — once it lands there is nothing left to answer, no
     /// matter what a stale transient state says; then the transient
-    /// in-flight/failed state ([_agentSpawnStates]); then
-    /// [AgentSpawnCardState.Idle] if an answerer is wired, else a read-only
-    /// synthetic-resolved default — mirrors [agentChatState]'s nil-answerer
-    /// -> `Expired` convention: a card with no answerer must not offer
-    /// buttons that do nothing.
+    /// in-flight/failed/[AgentSpawnCardState.Unavailable] state
+    /// ([_agentSpawnStates]); then [AgentSpawnCardState.Idle] if an answerer
+    /// is wired, else [AgentSpawnCardState.Unavailable] — mirrors
+    /// [agentChatState]'s nil-answerer -> `Expired` convention: a card with
+    /// no answerer must not offer buttons that do nothing.
     fun agentSpawnState(eventID: String, request: AgentSpawnRequest): AgentSpawnCardState {
         _spawnOutcomes.value[request.requestId]?.let { return AgentSpawnCardState.Resolved(it) }
         _agentSpawnStates.value[eventID]?.let { return it }
-        return if (agentSpawn == null) {
-            AgentSpawnCardState.Resolved(syntheticExpiredOutcome(request.requestId))
-        } else {
-            AgentSpawnCardState.Idle
-        }
+        return if (agentSpawn == null) AgentSpawnCardState.Unavailable else AgentSpawnCardState.Idle
     }
 
     /// Answers an agent-spawn card. Unlike [answerAgentChat] there is no
@@ -354,7 +350,9 @@ class ChatViewModel(
     ) {
         val answerer = agentSpawn ?: return
         when (agentSpawnState(eventID, request)) {
-            is AgentSpawnCardState.Resolved, is AgentSpawnCardState.Sending -> return
+            is AgentSpawnCardState.Resolved, is AgentSpawnCardState.Sending,
+            AgentSpawnCardState.Unavailable,
+            -> return
             else -> {}
         }
         setAgentSpawnState(eventID, AgentSpawnCardState.Sending)
@@ -369,11 +367,12 @@ class ChatViewModel(
             } catch (conflict: JournalApiError.Conflict) {
                 // The row stopped awaiting an answer between the card being
                 // drawn and the tap (answered on another device, or
-                // expired). Settle it as resolved-expired rather than a
-                // failure the user would only retry; the real spawn_outcome
-                // event, once it lands, supersedes this synthetic one
-                // regardless (see [agentSpawnState]'s precedence).
-                setAgentSpawnState(eventID, AgentSpawnCardState.Resolved(syntheticExpiredOutcome(request.requestId)))
+                // expired). Settle it as Unavailable — "no longer waiting for
+                // an answer" — rather than a failure the user would only
+                // retry; the real spawn_outcome event, once it lands,
+                // supersedes this regardless (see [agentSpawnState]'s
+                // precedence).
+                setAgentSpawnState(eventID, AgentSpawnCardState.Unavailable)
             } catch (error: Throwable) {
                 setAgentSpawnState(eventID, AgentSpawnCardState.Failed(describeAgentSpawnError(error)))
             }
@@ -938,13 +937,6 @@ class ChatViewModel(
             is JournalApiError.NotFound -> "That request is no longer on the server."
             else -> "The server refused that answer."
         }
-
-        /// Synthetic [SpawnOutcome] used both for the 409-conflict transient
-        /// and the "no answerer wired" read-only default — same copy as a
-        /// real `spawn_outcome` event's `expired`, and superseded by one the
-        /// moment it lands.
-        private fun syntheticExpiredOutcome(requestId: String) =
-            SpawnOutcome(requestId = requestId, outcome = "expired")
 
         private const val DEFAULT_WINDOW_SIZE = 120
         private const val WINDOW_GROWTH_STEP = 120
