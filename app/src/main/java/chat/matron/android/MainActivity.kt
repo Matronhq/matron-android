@@ -266,12 +266,28 @@ private fun SignedInApp(
     val groups by chatListVM.groups.collectAsStateWithLifecycle()
     val allChats = remember(groups) { groups.flatMap { it.summaries } }
 
-    // Agent-spawn card / SpawnOutcomeRow "Open" deep link.
-    val onOpenConversation = openConversationCallback(
-        scope = sessionScope,
-        prepareConversation = { id -> deps.prepareConversation(session, id) },
-        navigate = { id -> nav.navigate("chat/$id") },
-    )
+    // Agent-spawn card / SpawnOutcomeRow "Open" deep link. remembered (keyed
+    // on session.userID, matching vmCache/chatListVM above) because
+    // openConversationCallback is a plain function, not @Composable — its
+    // returned lambda is NOT compiler-memoised, so calling it unremembered
+    // would allocate a fresh instance on every SignedInApp recomposition
+    // (e.g. every `groups` emission) and, as the only unstable parameter in
+    // the ChatRoute -> ChatScreen/SubChatView -> TimelineList ->
+    // TimelineRowView chain, force every visible timeline row to recompose
+    // under strong skipping.
+    val onOpenConversation = remember(session.userID) {
+        openConversationCallback(
+            scope = sessionScope,
+            prepareConversation = { id -> deps.prepareConversation(session, id) },
+            // launchSingleTop: a repeat tap (no immediate feedback — the
+            // navigation is deferred behind the suspend placeholder write,
+            // which invites a double-tap) or an Open for the room already on
+            // screen must no-op rather than push a duplicate back-stack
+            // entry — matches the port source's explicit
+            // `path.wrappedValue.last != roomID` guard (ChatView.swift).
+            navigate = { id -> nav.navigate("chat/$id") { launchSingleTop = true } },
+        )
+    }
 
     LaunchedEffect(session.userID) { chatListVM.start() }
     LaunchedEffect(session.userID) {
