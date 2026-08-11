@@ -37,7 +37,7 @@ import chat.matron.android.events.SpawnOutcome
 /// Mirrors [AgentChatRequestCard] with one difference downstream of
 /// [AgentSpawnCardState]'s own doc: [state]'s `Resolved` case is never a
 /// locally-remembered decision, only the journal's own `spawn_outcome` event
-/// (or a synthetic stand-in) — so a `started` outcome carries the spawned
+/// — so a `started` outcome carries the spawned
 /// room's id, and the resolved row offers an [onOpen] deep link to it.
 @Composable
 fun AgentSpawnRequestCard(

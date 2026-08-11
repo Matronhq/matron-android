@@ -230,7 +230,7 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController) {
  * row to render against, rather than racing the journal's own snapshot.
  *
  * A plain top-level function — not a `@Composable` — so the ordering is unit
- * -testable without Compose: pass a [TestScope] and fakes for the two
+ * -testable without Compose: pass a test scope and fakes for the two
  * effects.
  */
 fun openConversationCallback(

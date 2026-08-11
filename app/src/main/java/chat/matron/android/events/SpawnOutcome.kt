@@ -32,11 +32,11 @@ data class SpawnOutcome(
     val errorCode: String? = null,
 ) {
     /// The one-line resolution copy the timeline row (`SpawnOutcomeRow`) and
-    /// a resolved card show. Starts from [baseLine] — the journal server's
+    /// a resolved card show. Starts from [baseLines] — the journal server's
     /// own `snippetOf` string for the outcome — then layers the
     /// [errorCode] suffix a `failed` outcome carries when the journal sent
     /// one, and a neutral "resolved" line for an outcome this client
-    /// doesn't recognise (`baseLine` has no entry for it).
+    /// doesn't recognise (`baseLines` has no entry for it).
     ///
     /// Deliberately NOT what `JournalStore`'s chat-list snippet uses — that
     /// path must stay a byte-exact mirror of the server's `snippetOf`
