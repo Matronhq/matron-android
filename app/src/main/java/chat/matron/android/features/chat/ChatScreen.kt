@@ -45,11 +45,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import chat.matron.android.chat.SessionTag
 import chat.matron.android.chat.TimelineItem
+import chat.matron.android.designsystem.SessionTagText
 import chat.matron.android.journal.AgentChatDecision
 import chat.matron.android.designsystem.ActivityIndicatorRow
 import chat.matron.android.designsystem.AttachmentFullscreenViewer
@@ -92,6 +98,16 @@ fun ChatScreen(
     /// than two boxes. Threaded from the list's ChatSummary (same source as
     /// the row chip) so header and row can never disagree.
     boxName: String? = null,
+    /// The `A:bc` tag halves, threaded from the list summary like [boxName]
+    /// (see ChatSummary.sessionShort / .boxShort). Composed ahead of the
+    /// title so the in-chat header matches the row.
+    sessionShort: String? = null,
+    boxShort: String? = null,
+    /// Multi-agent room participants (ChatSummary.roomBoxNames /
+    /// .roomBoxShorts, parallel arrays), threaded like the halves above so
+    /// a room's header shows the same colored `A↔B` tag as its row.
+    roomBoxNames: List<String> = emptyList(),
+    roomBoxShorts: List<String> = emptyList(),
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val children by stripVM.children.collectAsStateWithLifecycle()
@@ -118,7 +134,40 @@ fun ChatScreen(
                 // the info sheet.
                 title = {
                     Column {
-                        Text(chatTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        // `A:bc Title` (or `A↔B:bc Title` for a multi-agent
+                        // room) as one styled line — same composition and
+                        // fallbacks as ChatRow's titleLine (apple #152). The
+                        // visible header leads with the styled tag, so the
+                        // accessibility label spells the same information
+                        // out — box name(s) and session short ahead of the
+                        // clean title.
+                        val darkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+                        val secondary = MaterialTheme.colorScheme.onSurfaceVariant
+                        val roomTag = SessionTagText.room(
+                            letters = roomBoxShorts,
+                            names = roomBoxNames,
+                            sessionShort = sessionShort,
+                            darkTheme = darkTheme,
+                            secondary = secondary,
+                        )
+                        val titleText = when {
+                            roomTag != null ->
+                                roomTag + AnnotatedString(" " + SessionTag.titleBesideRoomTag(chatTitle))
+                            else -> SessionTagText.run(
+                                boxLetter = boxShort,
+                                boxName = boxName,
+                                sessionShort = sessionShort,
+                                darkTheme = darkTheme,
+                                secondary = secondary,
+                            )?.let { it + AnnotatedString(" $chatTitle") } ?: AnnotatedString(chatTitle)
+                        }
+                        val a11yTitle = chatAccessibilityTitle(chatTitle, boxName, sessionShort, roomBoxNames)
+                        Text(
+                            titleText,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.semantics { contentDescription = a11yTitle },
+                        )
                         chatContextLine(boxName, sessionStatus?.workdir)?.let { context ->
                             Text(
                                 context,
@@ -251,6 +300,28 @@ fun ChatScreen(
 fun chatContextLine(boxName: String?, workdir: String?): String? {
     val parts = listOfNotNull(boxName, workdir?.let(UsageMetersFormat::homeAbbreviated))
     return if (parts.isEmpty()) null else parts.joinToString(" · ")
+}
+
+/// What TalkBack reads for the header title: the visible tag's meaning
+/// spelled out (box names, session short), not just the clean title —
+/// sighted users see the `A:bc` tag, so the label must carry it too. Pure
+/// for unit-testability (ports matron-apple's `ChatView.accessibilityTitle`,
+/// apple #152).
+fun chatAccessibilityTitle(
+    chatTitle: String,
+    boxName: String?,
+    sessionShort: String?,
+    roomBoxNames: List<String>,
+): String {
+    val parts = mutableListOf<String>()
+    if (roomBoxNames.size >= 2) {
+        parts.add(roomBoxNames.joinToString(" and "))
+    } else if (boxName != null) {
+        parts.add(boxName)
+    }
+    if (sessionShort != null) parts.add("session $sessionShort")
+    parts.add(SessionTag.titleBesideRoomTag(chatTitle))
+    return parts.joinToString(", ")
 }
 
 /**

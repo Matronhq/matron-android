@@ -1,5 +1,6 @@
 package chat.matron.android.features
 
+import chat.matron.android.features.chat.chatAccessibilityTitle
 import chat.matron.android.features.chat.chatContextLine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -24,5 +25,35 @@ class ChatHeaderTest {
         assertEquals("mac-mini", chatContextLine("mac-mini", null))
         assertEquals("~/apps/web", chatContextLine(null, "/home/dan/apps/web"))
         assertNull(chatContextLine(null, null))
+    }
+
+    /// Ports matron-apple's `test_accessibilityTitle_spellsOutTheVisibleTag`:
+    /// the visible header leads with the styled `A:bc` / `A↔B:bc` tag, so
+    /// TalkBack's label must spell the same information out — box name(s) and
+    /// session short ahead of the clean title, with the room marker dropped
+    /// exactly where the visible composition drops it.
+    @Test
+    fun accessibilityTitleSpellsOutTheVisibleTag() {
+        assertEquals(
+            "dev-y, session b5, css token migration",
+            chatAccessibilityTitle(
+                chatTitle = "css token migration",
+                boxName = "dev-y", sessionShort = "b5", roomBoxNames = emptyList(),
+            ),
+        )
+        assertEquals(
+            "dev-y and dev-z, session ab, mac ↔ dev-z",
+            chatAccessibilityTitle(
+                chatTitle = "🔗 mac ↔ dev-z",
+                boxName = "dev-y", sessionShort = "ab", roomBoxNames = listOf("dev-y", "dev-z"),
+            ),
+        )
+        assertEquals(
+            "plain title",
+            chatAccessibilityTitle(
+                chatTitle = "plain title",
+                boxName = null, sessionShort = null, roomBoxNames = emptyList(),
+            ),
+        )
     }
 }

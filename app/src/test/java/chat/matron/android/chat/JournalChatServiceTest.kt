@@ -214,27 +214,63 @@ class JournalChatServiceTest {
         val local = store.conversation("local")!!
         val ghost = store.conversation("ghost")!!
         val two = mapOf(7L to "dev-y", 9L to "dev-z")
+        val letters = SessionTag.boxLetters(two)
 
-        // A genuine multi-box room tags every box, journal order, and the
-        // row-facing `chips` renders exactly that strip.
-        val multi = JournalChatService.summary(room, two)
+        // A genuine multi-box room tags every box — names for the hue,
+        // letters for the glyphs, journal order — and the room short comes
+        // off the `🔗 [ab] ` title prefix with the marker kept.
+        val multi = JournalChatService.summary(room, two, letters)
         assertEquals(listOf("dev-y", "dev-z"), multi.roomBoxNames)
-        assertEquals(listOf("dev-y", "dev-z"), multi.chips)
+        assertEquals(listOf("Y", "Z"), multi.roomBoxShorts)
+        assertEquals("ab", multi.sessionShort)
+        assertEquals("🔗 mac ↔ dev-z", multi.title)
 
-        // Single-box user: same gate as the owner chip — no tags at all.
-        assertEquals(emptyList<String>(), JournalChatService.summary(room, mapOf(7L to "dev-y")).chips)
+        // Single-box user: same gate as the single-box tag — no letters.
+        val gated = JournalChatService.summary(room, mapOf(7L to "dev-y"))
+        assertEquals(emptyList<String>(), gated.roomBoxNames)
+        assertNull(gated.boxName)
 
         // A local room's two ends share one box: fall back to the single
-        // owner chip rather than a redundant one-entry "strip".
-        val solo = JournalChatService.summary(local, two)
+        // owning-box tag rather than a redundant one-entry "pair".
+        val solo = JournalChatService.summary(local, two, letters)
         assertEquals(emptyList<String>(), solo.roomBoxNames)
-        assertEquals(listOf("dev-y"), solo.chips)
+        assertEquals("dev-y", solo.boxName)
+        assertEquals("Y", solo.boxShort)
 
         // A participant whose box was revoked resolves to nothing — with
-        // only one name left the strip collapses to the owner-chip fallback.
-        val revoked = JournalChatService.summary(ghost, two)
+        // only one name left the room tag collapses to the same fallback.
+        val revoked = JournalChatService.summary(ghost, two, letters)
         assertEquals(emptyList<String>(), revoked.roomBoxNames)
-        assertEquals(listOf("dev-y"), revoked.chips)
+        assertEquals("dev-y", revoked.boxName)
+    }
+
+    /// Ports matron-apple's `testSummaryStripsTheShortAndGatesTheLetter`
+    /// (from SessionTagTests — store-backed, so it lives here under
+    /// Robolectric): the fields rows actually consume.
+    @Test fun summaryStripsTheShortAndGatesTheLetter() = runBlocking {
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(
+                ConvoSummaryDTO("c1", "[b5] css token migration", "running", 1, "", 1, agentDeviceID = 7),
+            ),
+            headSeq = 1,
+        )
+        val record = store.conversation("c1")!!
+
+        // Two boxes: title is cleaned, short peeled, letter derived.
+        val two = mapOf(7L to "dev-y", 9L to "dev-z")
+        val tagged = JournalChatService.summary(record, two, SessionTag.boxLetters(two))
+        assertEquals("css token migration", tagged.title)
+        assertEquals("b5", tagged.sessionShort)
+        assertEquals("Y", tagged.boxShort)
+
+        // One box: the session short still shows (it tells SESSIONS apart),
+        // but the letter obeys the chip gate.
+        val one = mapOf(7L to "dev-y")
+        val solo = JournalChatService.summary(record, one, SessionTag.boxLetters(one))
+        assertEquals("b5", solo.sessionShort)
+        assertNull(solo.boxShort)
+        assertNull(solo.boxName)
     }
 
     /// Ports matron-apple's `testRenamingABoxRelabelsAnOpenChatList`: a rename

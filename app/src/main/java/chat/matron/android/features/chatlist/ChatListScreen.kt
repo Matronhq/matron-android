@@ -39,10 +39,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.text.AnnotatedString
 import chat.matron.android.chat.ChatService
 import chat.matron.android.chat.ChatSummary
-import chat.matron.android.designsystem.BoxChip
+import chat.matron.android.chat.SessionTag
 import chat.matron.android.designsystem.RelativeMinuteTimeView
+import chat.matron.android.designsystem.SessionTagText
 import chat.matron.android.designsystem.SyncBannerState
 import chat.matron.android.designsystem.UnreadBadge
 import chat.matron.android.models.MatronDebug
@@ -204,27 +208,20 @@ private fun ChatRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        summary.title,
-                        style = MaterialTheme.typography.bodyLarge,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        // fill = false so a long title truncates and the chip
-                        // stays visible (the iOS HStack shrinks Text the same
-                        // way).
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    // Which box(es) this conversation involves: every
-                    // participant of a multi-agent room, else the single
-                    // owning box. Empty unless the user has two or more
-                    // boxes — every gate lives in JournalChatService, so
-                    // this row just renders. Names are deduped upstream.
-                    summary.chips.forEach { BoxChip(it) }
-                }
+                // `A:bc Title` as ONE text so the tag leads the eye scan
+                // (colored box letter + session short — the trailing BoxChip
+                // capsule this replaces put the machine at the END and cost
+                // a capsule of width) and the whole line truncates together.
+                // Tag halves are gated upstream (JournalChatService): no
+                // letter for single-box users, no short for titles the
+                // bridge never prefixed.
+                val darkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+                Text(
+                    titleLine(summary, darkTheme, MaterialTheme.colorScheme.onSurfaceVariant),
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Text(
                     summary.snippet.ifEmpty { " " },
                     style = MaterialTheme.typography.bodySmall,
@@ -249,6 +246,32 @@ private fun ChatRow(
             DropdownMenuItem(text = { Text("Leave") }, onClick = { menuOpen = false; onLeave() })
         }
     }
+}
+
+/// `A:bc Title` (or `A↔B:bc Title` for a multi-agent room) as one styled
+/// string — a multi-agent room leads with every participating box as a
+/// colored letter (`A↔B`, `A,B,C`); the tag already says "room", so the
+/// bridge's 🔗 title marker is dropped beside it. Falls through to the
+/// single-box `A:bc` tag, then to the bare title. Ports the iOS ChatRow's
+/// `titleLine` composition (apple #152).
+private fun titleLine(summary: ChatSummary, darkTheme: Boolean, secondary: Color): AnnotatedString {
+    SessionTagText.room(
+        letters = summary.roomBoxShorts,
+        names = summary.roomBoxNames,
+        sessionShort = summary.sessionShort,
+        darkTheme = darkTheme,
+        secondary = secondary,
+    )?.let { tag ->
+        return tag + AnnotatedString(" " + SessionTag.titleBesideRoomTag(summary.title))
+    }
+    val tag = SessionTagText.run(
+        boxLetter = summary.boxShort,
+        boxName = summary.boxName,
+        sessionShort = summary.sessionShort,
+        darkTheme = darkTheme,
+        secondary = secondary,
+    ) ?: return AnnotatedString(summary.title)
+    return tag + AnnotatedString(" " + summary.title)
 }
 
 @Composable
