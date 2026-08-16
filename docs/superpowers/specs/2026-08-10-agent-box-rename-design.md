@@ -43,6 +43,8 @@ and no rename affordance existed for either.
 - `agent_device_id` in each conversation row (null when never recorded).
 - A top-level `agents` array: `[{ device_id, name }]` for the user's
   `kind='agent'` devices, so clients resolve id → name from the snapshot alone.
+  Clients decode it presence-aware: absent (a server predating the field) ≠
+  present-but-empty (the user has no boxes).
 
 ### 1.3 Live events
 
@@ -69,7 +71,10 @@ place of GRDB, Compose in place of SwiftUI):
 - `ConvoSummaryDTO` + `ConversationEntity` gain `agentDeviceID: Long?`
   (column `agent_device_id`); Room migration v3 adds the column.
 - New Room table `agent` (`id INTEGER PRIMARY KEY`, `name TEXT NOT NULL`),
-  replaced wholesale on each snapshot apply (`JournalStore.replaceAgents`)
+  replaced wholesale on each snapshot apply (`JournalStore.replaceAgents` —
+  presence-aware, diverging from matron-apple: a null roster [absent field,
+  old server] retains the mirror so chips don't vanish, an empty roster
+  [present-but-empty] clears it so revoking the last box drops stale chips)
   and patched by `device_meta` (`renameAgent`, update-only — the frame fans
   out for any device kind, so an upsert would let a renamed phone join the
   agent roster; unknown ids wait for the next snapshot. Divergence from

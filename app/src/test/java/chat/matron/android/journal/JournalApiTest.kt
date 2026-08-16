@@ -90,7 +90,10 @@ class JournalApiTest {
 
     /// Ports the snapshot-parsing slice of matron-apple #131: each convo row
     /// carries its owning box, and a top-level `agents` list resolves id →
-    /// name. Absent fields (an older server) degrade to null/empty — no chips.
+    /// name. Presence-aware (diverging from the Swift original): an ABSENT
+    /// field (an older server) decodes to null so the store keeps its roster,
+    /// while a PRESENT-but-empty list decodes to an empty list so revoking
+    /// the last box clears stale chips.
     @Test
     fun snapshotParsesAgentDeviceIDAndAgentsList() = runBlocking {
         server.enqueue(
@@ -107,7 +110,10 @@ class JournalApiTest {
         server.enqueue(json(200, """{"conversations":[{"id":"c1","title":"T","session_state":"running","last_seq":1,"snippet":"","created_at":0}],"seq":1}"""))
         val old = api(token = "t").snapshot()
         assertNull(old.conversations.first().agentDeviceID)
-        assertTrue(old.agents.isEmpty())
+        assertNull("absent agents field must decode to null, not empty", old.agents)
+
+        server.enqueue(json(200, """{"conversations":[],"agents":[],"seq":1}"""))
+        assertEquals(emptyList<AgentDTO>(), api(token = "t").snapshot().agents)
     }
 
     @Test

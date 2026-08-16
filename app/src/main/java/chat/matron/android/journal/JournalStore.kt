@@ -391,11 +391,14 @@ class JournalStore(
     // MARK: Agent roster
 
     /// Mirrors `GET /snapshot`'s `agents` list. Wholesale replace so a box
-    /// revoked server-side stops resolving here too. An EMPTY list is
-    /// ignored: a server predating the field sends nothing, and wiping the
-    /// roster would silently drop every chip.
-    suspend fun replaceAgents(agents: List<AgentDTO>) {
-        if (agents.isEmpty()) return
+    /// revoked server-side stops resolving here too. Presence-aware
+    /// (diverging from the Swift original, which ignores an empty list):
+    /// `null` means the server predates the field — keep what we have,
+    /// wiping would silently drop every chip; an EMPTY list is the server
+    /// saying the user has no boxes — clear the roster, or revoking the
+    /// last box would leave stale chips forever.
+    suspend fun replaceAgents(agents: List<AgentDTO>?) {
+        if (agents == null) return
         db.withTransaction {
             agentDao.deleteAll()
             for (a in agents) agentDao.upsert(AgentEntity(id = a.id, name = a.name))

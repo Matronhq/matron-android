@@ -24,13 +24,16 @@ data class LoginResponse(val token: String, val deviceID: Long, val userID: Long
 /// from `GET /devices`. Ported from matron-apple's `AgentDTO`.
 data class AgentDTO(val id: Long, val name: String)
 
-/// [agents] is the user's agent boxes, id → name. Empty on a server predating
-/// the field, which simply means no chips. Defaulted last (unlike the Swift
-/// original's middle position) so existing positional constructions compile.
+/// [agents] is the user's agent boxes, id → name. Presence-aware, diverging
+/// from the Swift original (which conflates): `null` = the server predates
+/// the field ("this server doesn't say" — the store keeps what it has),
+/// empty = the server said the user has NO boxes (revoking the last box must
+/// clear stale chips). Defaulted last (unlike the Swift original's middle
+/// position) so existing positional constructions compile.
 data class SnapshotResponse(
     val conversations: List<ConvoSummaryDTO>,
     val seq: Long,
-    val agents: List<AgentDTO> = emptyList(),
+    val agents: List<AgentDTO>? = null,
 )
 
 /// The narrow slice of [JournalApi] the sync engine depends on: the WebSocket
@@ -260,7 +263,9 @@ class JournalApi(
                 agentDeviceID = c.longOrNull("agent_device_id"),
             )
         }
-        val agents = (obj.arrayOrNull("agents")?.objects() ?: emptyList()).mapNotNull { a ->
+        // Absent field (old server) → null, present-but-empty → empty list:
+        // the store keeps its roster on null and clears it on empty.
+        val agents = obj.arrayOrNull("agents")?.objects()?.mapNotNull { a ->
             val id = a.longOrNull("device_id") ?: return@mapNotNull null
             val name = a.stringOrNull("name") ?: return@mapNotNull null
             AgentDTO(id, name)

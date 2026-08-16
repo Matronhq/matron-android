@@ -641,9 +641,16 @@ class JournalStoreTest {
         store.replaceAgents(listOf(AgentDTO(7, "dev-y")))
         assertEquals(mapOf(7L to "dev-y"), store.agentNames())
 
-        // An empty list is "this server doesn't say", not "you have no boxes".
-        store.replaceAgents(emptyList())
+        // Null is "this server doesn't say" (a server predating the field) —
+        // the roster is retained.
+        store.replaceAgents(null)
         assertEquals(mapOf(7L to "dev-y"), store.agentNames())
+
+        // An EMPTY list is the server saying "you have no boxes" — revoking
+        // the last box must clear the roster, not leave stale chips.
+        store.replaceAgents(emptyList())
+        assertTrue(store.agentNames().isEmpty())
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y")))
 
         // A live rename patches one row without a re-snapshot.
         store.renameAgent(7, "dev-yellow")
