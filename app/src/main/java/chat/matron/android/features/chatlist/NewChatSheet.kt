@@ -248,6 +248,14 @@ private fun AgentRow(
                 // Every line the bridge sent, in its order — the box's own
                 // reading of its limits, not a summary.
                 capacity.limitLines.forEach { line ->
+                    // One clock reading per line so the caption and the
+                    // stale check can't disagree about "now".
+                    val nowMs = System.currentTimeMillis()
+                    // A percent from before the line's own reset moment is
+                    // stale — render it in the caption's muted colour (with
+                    // the "reset" caption) rather than the usual
+                    // green/orange/red, which would vouch for a dead number.
+                    val expired = BoxCapacity.hasReset(line.resetsAt, nowMs)
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
                             line.label,
@@ -258,9 +266,10 @@ private fun AgentRow(
                             "${line.percent}%",
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.Medium,
-                            color = UsageMetersFormat.barColor(line.percent),
+                            color = if (expired) MaterialTheme.colorScheme.outline
+                            else UsageMetersFormat.barColor(line.percent),
                         )
-                        BoxCapacity.resetText(line.resetsAt)?.let {
+                        BoxCapacity.resetText(line.resetsAt, nowMs)?.let {
                             Text(
                                 "· $it",
                                 style = MaterialTheme.typography.bodySmall,
