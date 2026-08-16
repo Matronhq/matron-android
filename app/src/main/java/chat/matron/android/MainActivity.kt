@@ -56,6 +56,8 @@ import chat.matron.android.platform.AndroidBiometricAuthenticator
 import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.ChatListViewModel
 import chat.matron.android.viewmodels.LinkSignInViewModel
+import chat.matron.android.viewmodels.MediaBrowserViewModel
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import chat.matron.android.viewmodels.RendezvousSignInViewModel
 import chat.matron.android.viewmodels.SearchViewModel
 import chat.matron.android.viewmodels.SignInViewModel
@@ -431,6 +433,17 @@ private fun ChatRoute(
             chatTitle = title,
             onBack = onBack,
             onOpenChild = onOpenChild,
+            // Deferred: built when the browser sheet opens, on the sheet's own
+            // scope, over the same store the sync engine writes (apple #142).
+            mediaBrowser = { scope ->
+                MediaBrowserViewModel(
+                    store = deps.journalStore(session),
+                    convoID = convoID,
+                    serverURL = session.homeserverURL.toHttpUrl(),
+                    media = deps.mediaService(session),
+                    scope = scope,
+                )
+            },
         )
     }
 }
