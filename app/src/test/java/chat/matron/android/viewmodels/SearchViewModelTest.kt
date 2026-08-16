@@ -73,6 +73,47 @@ class SearchViewModelTest {
         assertEquals("an unrelated short matches nothing", emptyList<String>(), vm.chatHits.map { it.id })
     }
 
+    /// Guard mirrored from matron-apple #157: a query that IS one of a
+    /// chat's box letters never TAG-matches that chat — `contains` on the
+    /// rendered `y:b5` would otherwise let a bare `y` light up every chat
+    /// on that box and drown real hits. The guard is per-chat: `y` still
+    /// title-matches, and each letter of a room's pair is guarded alone.
+    @Test
+    fun chatHits_bareBoxLetterNeverTagMatchesItsChats() {
+        val tagged = ChatSummary(
+            id = "!1:s", title = "Auth bug", bot = claude,
+            lastActivity = null, unreadCount = 0,
+            boxName = "dev-y", sessionShort = "b5", boxShort = "Y",
+        )
+        val titled = ChatSummary(
+            id = "!2:s", title = "Sync history", bot = claude,
+            lastActivity = null, unreadCount = 0,
+            boxName = "dev-y", sessionShort = "c7", boxShort = "Y",
+        )
+        val room = ChatSummary(
+            id = "!3:s", title = "mac pair", bot = claude,
+            lastActivity = null, unreadCount = 0,
+            sessionShort = "ab",
+            roomBoxNames = listOf("dev-y", "dev-z"), roomBoxShorts = listOf("Y", "Z"),
+        )
+        val vm = SearchViewModel(FakeSearchService(), listOf(tagged, titled, room))
+
+        vm.query = "y"
+        assertEquals(
+            "a bare box letter tag-matches nothing; only the title hit survives",
+            listOf("!2:s"), vm.chatHits.map { it.id },
+        )
+
+        vm.query = "Y"
+        assertEquals("the guard is case-insensitive", listOf("!2:s"), vm.chatHits.map { it.id })
+
+        vm.query = "z"
+        assertEquals(
+            "each letter of a room's pair is guarded alone",
+            emptyList<String>(), vm.chatHits.map { it.id },
+        )
+    }
+
     @Test
     fun chatTitle_resolvesViaAllChats() {
         val chats = listOf(chat("!a:s", "Auth bug"), chat("!b:s", "Refactor"))

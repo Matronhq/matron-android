@@ -63,18 +63,25 @@ class SearchViewModel(
     /// visible session tag: the bare short (`b5`) or the displayed
     /// letter:short form — `y:b5` for a single box, `y↔z:ab` / `y,z,w:ab`
     /// for a room, mirroring `SessionTagText`'s glyph order so what renders
-    /// is what matches. A chat with no short has no tag to match (a bare
-    /// box letter with no short renders too, but one letter matching every
-    /// chat on that box would be noise, not search).
+    /// is what matches. A chat with no short has no tag to match, and a
+    /// query that IS one of the chat's box letters never tag-matches it
+    /// either — `y` substring-matching the rendered `y:b5` would light up
+    /// every chat on that box, noise rather than search (the guard mirrors
+    /// matron-apple #157; title/bot clauses are untouched, so `y` still
+    /// title-matches). Accepted corner: a letter equal to the short's first
+    /// character (`b` with short `b5`) is swallowed by the guard too.
     private fun tagMatches(chat: ChatSummary, lower: String): Boolean {
         val short = chat.sessionShort ?: return false
-        if (short.lowercase().contains(lower)) return true
         val letters = if (chat.roomBoxShorts.size >= 2) {
-            chat.roomBoxShorts.joinToString(if (chat.roomBoxShorts.size == 2) "↔" else ",")
+            chat.roomBoxShorts
         } else {
-            chat.boxShort ?: return false
+            listOfNotNull(chat.boxShort)
         }
-        return "$letters:$short".lowercase().contains(lower)
+        if (letters.any { it.lowercase() == lower }) return false
+        if (short.lowercase().contains(lower)) return true
+        if (letters.isEmpty()) return false
+        val joined = letters.joinToString(if (letters.size == 2) "↔" else ",")
+        return "$joined:$short".lowercase().contains(lower)
     }
 
     /// Resolves a room ID to its display title, falling back to the raw room ID
