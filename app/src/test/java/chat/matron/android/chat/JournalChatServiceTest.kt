@@ -188,6 +188,55 @@ class JournalChatServiceTest {
         assertNull(JournalChatService.summary(stale, two).boxName)
     }
 
+    /// Ports matron-apple's `testRoomBoxNamesTagEveryParticipatingBox`. Same
+    /// store-backed setup as the boxName test: participants round-trip through
+    /// the real snapshot path into the record the summary reads.
+    @Test fun roomBoxNamesTagEveryParticipatingBox() = runBlocking {
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(
+                ConvoSummaryDTO(
+                    "room", "🔗 [ab] mac ↔ dev-z", "waiting", 1, "", 1,
+                    agentDeviceID = 7, participants = listOf(7, 9),
+                ),
+                ConvoSummaryDTO(
+                    "local", "🔗 [cd] mac ↔ mac", "waiting", 1, "", 1,
+                    agentDeviceID = 7, participants = listOf(7),
+                ),
+                ConvoSummaryDTO(
+                    "ghost", "🔗 [ef] mac ↔ gone", "waiting", 1, "", 1,
+                    agentDeviceID = 7, participants = listOf(7, 999),
+                ),
+            ),
+            headSeq = 1,
+        )
+        val room = store.conversation("room")!!
+        val local = store.conversation("local")!!
+        val ghost = store.conversation("ghost")!!
+        val two = mapOf(7L to "dev-y", 9L to "dev-z")
+
+        // A genuine multi-box room tags every box, journal order, and the
+        // row-facing `chips` renders exactly that strip.
+        val multi = JournalChatService.summary(room, two)
+        assertEquals(listOf("dev-y", "dev-z"), multi.roomBoxNames)
+        assertEquals(listOf("dev-y", "dev-z"), multi.chips)
+
+        // Single-box user: same gate as the owner chip — no tags at all.
+        assertEquals(emptyList<String>(), JournalChatService.summary(room, mapOf(7L to "dev-y")).chips)
+
+        // A local room's two ends share one box: fall back to the single
+        // owner chip rather than a redundant one-entry "strip".
+        val solo = JournalChatService.summary(local, two)
+        assertEquals(emptyList<String>(), solo.roomBoxNames)
+        assertEquals(listOf("dev-y"), solo.chips)
+
+        // A participant whose box was revoked resolves to nothing — with
+        // only one name left the strip collapses to the owner-chip fallback.
+        val revoked = JournalChatService.summary(ghost, two)
+        assertEquals(emptyList<String>(), revoked.roomBoxNames)
+        assertEquals(listOf("dev-y"), revoked.chips)
+    }
+
     /// Ports matron-apple's `testRenamingABoxRelabelsAnOpenChatList`: a rename
     /// arrives as `device_meta`, which writes the `agent` table and nothing
     /// else — the conversations flow alone never re-fires for it, so the

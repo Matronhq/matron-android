@@ -89,7 +89,28 @@ class JournalChatService(
                 snippet = record.snippet,
                 parentConvoID = record.parentConvoID,
                 boxName = boxName(record, boxNames),
+                roomBoxNames = roomBoxNames(record, boxNames),
             )
+        }
+
+        /// The tag strip for a multi-agent room: every participant id resolved
+        /// to a box name, deduped in journal order. Same two-box gate as
+        /// [boxName] — one box means nothing to disambiguate. Empty unless at
+        /// least two DISTINCT boxes resolve (a local room's two ends share one
+        /// box, and a participant whose device was revoked resolves to
+        /// nothing), so rows can fall back to the single owner chip. Ported
+        /// from matron-apple's `JournalChatService.roomBoxNames(for:boxNames:)`.
+        fun roomBoxNames(record: ConversationEntity?, boxNames: Map<Long, String>): List<String> {
+            if (boxNames.size < 2) return emptyList()
+            val ids = record?.participantIDs ?: return emptyList()
+            if (ids.size < 2) return emptyList()
+            val seen = mutableSetOf<String>()
+            val names = mutableListOf<String>()
+            for (id in ids) {
+                val name = boxNames[id] ?: continue
+                if (seen.add(name)) names.add(name)
+            }
+            return if (names.size >= 2) names else emptyList()
         }
 
         /// The chip rule for a single conversation: named only when the user

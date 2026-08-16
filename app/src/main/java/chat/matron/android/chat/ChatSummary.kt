@@ -26,7 +26,18 @@ data class ChatSummary(
     /// the gate upstream (in `JournalChatService`) keeps every row view a
     /// dumb renderer.
     val boxName: String? = null,
-)
+    /// Every participating box of a multi-agent room, resolved and deduped
+    /// upstream (`JournalChatService`), or empty when this is not a known
+    /// multi-box room. Two or more entries by construction — a room whose
+    /// members collapse to one box falls back to the single [boxName] chip.
+    val roomBoxNames: List<String> = emptyList(),
+) {
+    /// What the row actually renders: the full tag strip for a multi-agent
+    /// room, else the single owning box, else nothing. Rows just iterate —
+    /// every gate already resolved upstream.
+    val chips: List<String>
+        get() = if (roomBoxNames.size >= 2) roomBoxNames else listOfNotNull(boxName)
+}
 
 /// A subagent child conversation as surfaced in its parent's running-subagent
 /// strip and the sub-chat switcher menu. Deliberately smaller than

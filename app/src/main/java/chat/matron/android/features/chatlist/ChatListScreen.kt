@@ -218,10 +218,12 @@ private fun ChatRow(
                         // way).
                         modifier = Modifier.weight(1f, fill = false),
                     )
-                    // Which box owns this conversation. Null unless the user
-                    // has two or more boxes — the gate lives in
-                    // JournalChatService, so this row just renders.
-                    summary.boxName?.let { BoxChip(it) }
+                    // Which box(es) this conversation involves: every
+                    // participant of a multi-agent room, else the single
+                    // owning box. Empty unless the user has two or more
+                    // boxes — every gate lives in JournalChatService, so
+                    // this row just renders. Names are deduped upstream.
+                    summary.chips.forEach { BoxChip(it) }
                 }
                 Text(
                     summary.snippet.ifEmpty { " " },
