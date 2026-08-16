@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.asStateFlow
 interface DevicesProviding {
     suspend fun devices(): List<DeviceDTO>
     suspend fun revokeDevice(id: Long)
+    suspend fun renameDevice(id: Long, name: String): DeviceDTO
     suspend fun pairPreview(code: String): PairPreview
     suspend fun pairApprove(code: String, agentName: String)
 }
@@ -23,6 +24,7 @@ interface DevicesProviding {
 class JournalDevicesService(private val api: JournalApi) : DevicesProviding {
     override suspend fun devices(): List<DeviceDTO> = api.devices()
     override suspend fun revokeDevice(id: Long) = api.revokeDevice(id)
+    override suspend fun renameDevice(id: Long, name: String): DeviceDTO = api.renameDevice(id, name)
     override suspend fun pairPreview(code: String): PairPreview = api.pairPreview(code)
     override suspend fun pairApprove(code: String, agentName: String) = api.pairApprove(code, agentName)
 }
@@ -84,7 +86,42 @@ class DevicesViewModel(
         }
     }
 
+    /// Renames [device]. The roster is re-fetched on success rather than
+    /// patched, so a name the server sanitised (control characters flattened)
+    /// is what the user ends up seeing.
+    suspend fun rename(device: DeviceDTO, to: String) {
+        val trimmed = to.trim()
+        val problem = validate(trimmed)
+        if (problem != null) {
+            _errorMessage.value = problem
+            return
+        }
+        try {
+            api.renameDevice(device.id, trimmed)
+            _errorMessage.value = null
+            refresh()
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            _errorMessage.value = "Couldn't rename ${device.name} — ${describe(error)}"
+        }
+    }
+
     companion object {
+        /// Server-side cap on a device name, mirrored here so the field can
+        /// refuse before a round-trip.
+        const val NAME_CAP = 40
+
+        /// Name rules, mirrored from the server: non-empty after trimming, at
+        /// most [NAME_CAP] characters. Returns null when acceptable, else the
+        /// reason to show.
+        fun validate(name: String): String? {
+            val trimmed = name.trim()
+            if (trimmed.isEmpty()) return "Give the device a name."
+            if (trimmed.length > NAME_CAP) return "Names are at most $NAME_CAP characters."
+            return null
+        }
+
         /// Clients first, then agents, each newest-first.
         fun sorted(devices: List<DeviceDTO>): List<DeviceDTO> =
             devices.sortedWith(

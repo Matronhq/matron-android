@@ -231,6 +231,29 @@ class JournalApiTest {
         assertEquals("POST", req.method)
     }
 
+    /// Ports the `renameDevice` slice of matron-apple #131: POST to the
+    /// scoped rename path with the name as body, parsing the partial device
+    /// echo (identity + new name only — callers re-fetch the roster).
+    @Test
+    fun renameDevicePostsAndParses() = runBlocking {
+        server.enqueue(json(200, """{"ok":true,"device":{"device_id":7,"name":"dev-y"}}"""))
+        val renamed = api(token = "t").renameDevice(7, "dev-y")
+        val req = server.takeRequest()
+        assertEquals("/devices/7/rename", req.path)
+        assertEquals("POST", req.method)
+        assertEquals("""{"name":"dev-y"}""", req.body.readUtf8())
+        assertEquals(7L, renamed.id)
+        assertEquals("dev-y", renamed.name)
+
+        // A malformed echo (no device object) throws rather than fabricating.
+        server.enqueue(json(200, """{"ok":true}"""))
+        try {
+            api(token = "t").renameDevice(7, "dev-y"); fail("expected throw")
+        } catch (e: JournalApiError) {
+            assertTrue(e is JournalApiError.Transport)
+        }
+    }
+
     @Test
     fun revokeDeviceMapsNotFound() = runBlocking {
         server.enqueue(json(404, """{"error":"not_found"}"""))

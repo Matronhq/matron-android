@@ -15,6 +15,7 @@ class FakeDevicesProvider : DevicesProviding {
     var rosters: MutableList<List<DeviceDTO>> = mutableListOf(emptyList())
     var devicesError: JournalApiError? = null
     var revokeError: JournalApiError? = null
+    var renameError: JournalApiError? = null
     var previewResult: Result<PairPreview> = Result.failure(JournalApiError.NotFound)
     var approveError: JournalApiError? = null
     var previewDelay: Duration = Duration.ZERO
@@ -38,6 +39,7 @@ class FakeDevicesProvider : DevicesProviding {
     var devicesCalls = 0
         private set
     val revokedIDs = mutableListOf<Long>()
+    val renamed = mutableListOf<Pair<Long, String>>()
     val previewedCodes = mutableListOf<String>()
     val approvals = mutableListOf<Pair<String, String>>()
 
@@ -50,6 +52,18 @@ class FakeDevicesProvider : DevicesProviding {
     override suspend fun revokeDevice(id: Long) {
         revokedIDs.add(id)
         revokeError?.let { throw it }
+    }
+
+    override suspend fun renameDevice(id: Long, name: String): DeviceDTO {
+        renamed.add(id to name)
+        renameError?.let { throw it }
+        // Echo the roster forward with the new name, so the view model's
+        // post-rename refresh sees what a real server would return.
+        rosters = rosters.map { roster ->
+            roster.map { d -> if (d.id == id) d.copy(name = name) else d }
+        }.toMutableList()
+        return rosters.first().firstOrNull { it.id == id }
+            ?: device(id, kind = "", name = name)
     }
 
     override suspend fun pairPreview(code: String): PairPreview {

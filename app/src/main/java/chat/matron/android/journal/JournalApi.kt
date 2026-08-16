@@ -360,6 +360,28 @@ class JournalApi(
         request(path = "/devices/$id/revoke", method = "POST", jsonBody = buildJsonObject { })
     }
 
+    /// Renames a device. Client tokens only (the server 403s an agent), and
+    /// 404 covers both "not yours" and "gone".
+    suspend fun renameDevice(id: Long, name: String): DeviceDTO {
+        val obj = request(
+            path = "/devices/$id/rename", method = "POST",
+            jsonBody = buildJsonObject { put("name", name) },
+        )
+        val d = obj.objectOrNull("device")
+        val deviceID = d?.longOrNull("device_id")
+        val newName = d?.stringOrNull("name")
+        if (deviceID == null || newName == null) {
+            throw JournalApiError.Transport("malformed rename response")
+        }
+        // Partial DTO: the rename response carries only identity and the new
+        // name. Callers re-fetch the roster for the full row rather than
+        // trusting these zeros — see DevicesViewModel.rename.
+        return DeviceDTO(
+            id = deviceID, kind = "", name = newName, createdAt = 0,
+            cursor = 0, lag = 0, lastSeenAt = null, isSelf = false,
+        )
+    }
+
     // MARK: Agent chat consent
 
     /// Asks parked waiting on this user, across every room. The durable
