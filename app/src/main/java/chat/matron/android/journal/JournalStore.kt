@@ -19,6 +19,16 @@ import kotlinx.serialization.json.put
 /// a disk-full / SQLite I/O error without a real failing backend.
 class JournalStoreWriteException : Exception("simulated write failure")
 
+/// The two [JournalStore] reads the per-chat media & links browser needs, as
+/// an interface so tests fake the store. Port of apple #142's
+/// `MediaBrowserStoreReading` (a retroactive protocol conformance there;
+/// Kotlin has no retroactive conformance, so [JournalStore] implements it
+/// directly).
+interface MediaBrowserStoreReading {
+    suspend fun attachmentEvents(convoID: String): List<JournalEvent>
+    suspend fun linkCandidateEvents(convoID: String): List<JournalEvent>
+}
+
 /// Local mirror of the user's journal. The UI reads ONLY this store; the sync
 /// engine is the only writer. `cursor` advances inside the same transaction as
 /// the event insert — the wedge-proof property. Ported method-for-method from
@@ -29,7 +39,7 @@ class JournalStoreWriteException : Exception("simulated write failure")
 class JournalStore(
     private val db: MatronDatabase,
     private val ownSender: String,
-) {
+) : MediaBrowserStoreReading {
     private val conversationDao = db.conversationDao()
     private val eventDao = db.eventDao()
     private val metaDao = db.metaDao()
@@ -255,6 +265,20 @@ class JournalStore(
 
     suspend fun events(convoID: String): List<JournalEvent> =
         eventDao.forConversation(convoID).map { it.toJournalEvent() }
+
+    /// `image`/`file` events for one conversation, newest first — the
+    /// media & links browser's Media and Files tabs. Reads the full local
+    /// history: the timeline's 120-row window cannot see older attachments.
+    /// Port of apple #142's `attachmentEvents`.
+    override suspend fun attachmentEvents(convoID: String): List<JournalEvent> =
+        eventDao.ofTypesNewestFirst(convoID, listOf(JournalEventType.IMAGE, JournalEventType.FILE))
+            .map { it.toJournalEvent() }
+
+    /// `text` events that plausibly contain a URL, newest first — a cheap
+    /// SQL prefilter; precise extraction happens in Kotlin (`LinkExtractor`).
+    /// Port of apple #142's `linkCandidateEvents`.
+    override suspend fun linkCandidateEvents(convoID: String): List<JournalEvent> =
+        eventDao.textEventsContainingNewestFirst(convoID, "http").map { it.toJournalEvent() }
 
     suspend fun conversationExists(convoID: String): Boolean = conversationDao.exists(convoID)
 
