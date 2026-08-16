@@ -19,7 +19,19 @@ import okio.buffer
 
 data class LoginResponse(val token: String, val deviceID: Long, val userID: Long)
 
-data class SnapshotResponse(val conversations: List<ConvoSummaryDTO>, val seq: Long)
+/// One of the user's agent boxes, as listed by `GET /snapshot`. Just identity
+/// and label — the full device row (lag, cursor, last seen) is [DeviceDTO]
+/// from `GET /devices`. Ported from matron-apple's `AgentDTO`.
+data class AgentDTO(val id: Long, val name: String)
+
+/// [agents] is the user's agent boxes, id → name. Empty on a server predating
+/// the field, which simply means no chips. Defaulted last (unlike the Swift
+/// original's middle position) so existing positional constructions compile.
+data class SnapshotResponse(
+    val conversations: List<ConvoSummaryDTO>,
+    val seq: Long,
+    val agents: List<AgentDTO> = emptyList(),
+)
 
 /// The narrow slice of [JournalApi] the sync engine depends on: the WebSocket
 /// URL and the cold-start / refresh snapshot fetch. Extracted as an interface
@@ -45,6 +57,12 @@ data class ConvoSummaryDTO(
     val lastTS: Long? = null,
     /// Parent conversation id for a subagent child, else `null`.
     val parentConvoID: String? = null,
+    /// Which agent box (journal device id) currently manages this
+    /// conversation, or `null` when the server has never recorded one (a row
+    /// predating the column, or a server predating this field). Unlike
+    /// [parentConvoID] this is mutable — resuming a session on another box
+    /// legitimately repoints it.
+    val agentDeviceID: Long? = null,
 )
 
 /// One row of `GET /devices`. Timestamps are epoch ms; `lastSeenAt` is null for
@@ -237,9 +255,17 @@ class JournalApi(
                 createdAt = c.longOrNull("created_at") ?: 0,
                 lastTS = c.longOrNull("last_ts"),
                 parentConvoID = c.stringOrNull("parent_convo_id"),
+                // Which box manages this conversation. Absent on older
+                // servers -> null -> no chip.
+                agentDeviceID = c.longOrNull("agent_device_id"),
             )
         }
-        return SnapshotResponse(conversations, obj.longOrNull("seq") ?: 0)
+        val agents = (obj.arrayOrNull("agents")?.objects() ?: emptyList()).mapNotNull { a ->
+            val id = a.longOrNull("device_id") ?: return@mapNotNull null
+            val name = a.stringOrNull("name") ?: return@mapNotNull null
+            AgentDTO(id, name)
+        }
+        return SnapshotResponse(conversations, obj.longOrNull("seq") ?: 0, agents)
     }
 
     suspend fun messages(convoID: String, beforeSeq: Long?, limit: Int): List<JournalEvent> {

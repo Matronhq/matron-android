@@ -1,6 +1,7 @@
 package chat.matron.android.journal
 
 import androidx.room.withTransaction
+import chat.matron.android.journal.db.AgentEntity
 import chat.matron.android.journal.db.ConversationEntity
 import chat.matron.android.journal.db.EventEntity
 import chat.matron.android.journal.db.MatronDatabase
@@ -34,6 +35,7 @@ class JournalStore(
     private val eventDao = db.eventDao()
     private val metaDao = db.metaDao()
     private val outboxDao = db.outboxDao()
+    private val agentDao = db.agentDao()
 
     /// Test-only failure injection, checked before the transaction opens so the
     /// cursor is left untouched on a simulated failure — the same shape a real
@@ -68,6 +70,12 @@ class JournalStore(
             if (updated.parentConvoID == null && c.parentConvoID != null) {
                 updated = updated.copy(parentConvoID = c.parentConvoID)
             }
+            // Absent means "this server/row doesn't say", never "clear it" —
+            // same discipline as parent_convo_id. Unlike parent, a PRESENT
+            // value always wins: ownership legitimately moves between boxes.
+            if (c.agentDeviceID != null) {
+                updated = updated.copy(agentDeviceID = c.agentDeviceID)
+            }
             if (c.lastSeq > updated.lastSeq) {
                 updated = updated.copy(lastSeq = c.lastSeq, snippet = c.snippet)
             }
@@ -86,6 +94,7 @@ class JournalStore(
                     lastActivityTS = c.lastTS, muted = false, hidden = false,
                     readUpToSeq = if (resetLocalState) c.lastSeq else 0,
                     unreadCount = 0, parentConvoID = c.parentConvoID,
+                    agentDeviceID = c.agentDeviceID,
                 )
             )
         }
@@ -154,6 +163,12 @@ class JournalStore(
                     payload.stringOrNull("parent_convo_id")?.takeIf { it.isNotEmpty() }?.let {
                         convo = convo.copy(parentConvoID = it)
                     }
+                }
+                // Which box owns this conversation, learned live so a
+                // brand-new convo chips immediately. Re-pointed freely: a
+                // session resumed on another box changes owner.
+                payload.longOrNull("agent_device_id")?.let {
+                    convo = convo.copy(agentDeviceID = it)
                 }
             }
             event.type == JournalEventType.SESSION_STATUS -> {
@@ -255,6 +270,11 @@ class JournalStore(
 
     suspend fun events(convoID: String): List<JournalEvent> =
         eventDao.forConversation(convoID).map { it.toJournalEvent() }
+
+    /// One conversation by id, or null when this device has never seen it.
+    /// (Port of matron-apple's `conversation(id:)`, added for the box-name
+    /// resolution tests — the list reads go through [conversations].)
+    suspend fun conversation(id: String): ConversationEntity? = conversationDao.byId(id)
 
     suspend fun conversationExists(convoID: String): Boolean = conversationDao.exists(convoID)
 
@@ -367,6 +387,37 @@ class JournalStore(
     /// Sign-out hygiene: the next account on this database file must not
     /// inherit (or send) the previous user's queued messages.
     suspend fun wipeOutbox() = outboxDao.deleteAll()
+
+    // MARK: Agent roster
+
+    /// Mirrors `GET /snapshot`'s `agents` list. Wholesale replace so a box
+    /// revoked server-side stops resolving here too. An EMPTY list is
+    /// ignored: a server predating the field sends nothing, and wiping the
+    /// roster would silently drop every chip.
+    suspend fun replaceAgents(agents: List<AgentDTO>) {
+        if (agents.isEmpty()) return
+        db.withTransaction {
+            agentDao.deleteAll()
+            for (a in agents) agentDao.upsert(AgentEntity(id = a.id, name = a.name))
+        }
+    }
+
+    /// Applies one live `device_meta` rename. Upsert, not update: the rename
+    /// may name a box this device has not snapshotted yet.
+    suspend fun renameAgent(id: Long, name: String) = agentDao.upsert(AgentEntity(id = id, name = name))
+
+    /// id → name for every known box. The chat list joins against this to
+    /// label rows, and its COUNT is the "does this user have ≥2 boxes" gate.
+    suspend fun agentNames(): Map<Long, String> = agentDao.all().associate { it.id to it.name }
+
+    /// Live id → name map of the user's agent boxes. Deliberately separate
+    /// from [conversationsFlow]: Room's invalidation tracker only re-fires a
+    /// Flow for the tables its query reads, and the conversations query never
+    /// touches `agent` — so a `device_meta` rename landing mid-session would
+    /// otherwise leave every open chip on the old label until some unrelated
+    /// conversation write happened to re-fire the list.
+    fun agentNamesFlow(): Flow<Map<Long, String>> =
+        agentDao.allFlow().map { list -> list.associate { it.id to it.name } }
 
     // MARK: Observation
     //

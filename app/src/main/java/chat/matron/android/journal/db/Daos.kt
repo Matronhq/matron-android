@@ -64,6 +64,23 @@ interface ConversationDao {
 }
 
 @Dao
+interface AgentDao {
+    /// Upsert (REPLACE on `id`): a live `device_meta` rename may name a box
+    /// this device has not snapshotted yet.
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(agent: AgentEntity)
+
+    @Query("SELECT * FROM agent")
+    suspend fun all(): List<AgentEntity>
+
+    @Query("SELECT * FROM agent")
+    fun allFlow(): Flow<List<AgentEntity>>
+
+    @Query("DELETE FROM agent")
+    suspend fun deleteAll()
+}
+
+@Dao
 interface EventDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertReplace(event: EventEntity)

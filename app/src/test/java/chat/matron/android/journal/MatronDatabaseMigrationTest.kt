@@ -63,4 +63,60 @@ class MatronDatabaseMigrationTest {
             file.delete()
         }
     }
+
+    /// MIGRATION_2_3 (agent-box attribution, port of matron-apple's GRDB v5):
+    /// a hand-built v2 file gains `conversation.agent_device_id` and the
+    /// `agent` table, existing rows keep NULL (no chip until the next
+    /// snapshot), and both new surfaces are fully usable after open.
+    @Test
+    fun migratesV2FileToV3AndAgentRosterWorks() = runBlocking {
+        val file = File.createTempFile("migration-test-v2", ".sqlite").also { it.delete() }
+        // The exact v2 schema Room generated (v1 tables + outbox, no agent
+        // table, no agent_device_id column), stamped user_version = 2.
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL(
+                "CREATE TABLE `conversation` (`id` TEXT NOT NULL, `title` TEXT NOT NULL, " +
+                    "`session_state` TEXT NOT NULL, `last_seq` INTEGER NOT NULL, `snippet` TEXT NOT NULL, " +
+                    "`created_at` INTEGER NOT NULL, `last_activity_ts` INTEGER, `muted` INTEGER NOT NULL, " +
+                    "`hidden` INTEGER NOT NULL, `read_up_to_seq` INTEGER NOT NULL, `unread_count` INTEGER NOT NULL, " +
+                    "`parent_convo_id` TEXT, PRIMARY KEY(`id`))"
+            )
+            db.execSQL("CREATE INDEX `index_conversation_parent_convo_id` ON `conversation` (`parent_convo_id`)")
+            db.execSQL(
+                "CREATE TABLE `event` (`seq` INTEGER NOT NULL, `convo_id` TEXT NOT NULL, `ts` INTEGER NOT NULL, " +
+                    "`sender` TEXT NOT NULL, `type` TEXT NOT NULL, `payload` TEXT NOT NULL, PRIMARY KEY(`seq`))"
+            )
+            db.execSQL("CREATE INDEX `index_event_convo_id` ON `event` (`convo_id`)")
+            db.execSQL("CREATE TABLE `meta` (`key` TEXT NOT NULL, `value` TEXT NOT NULL, PRIMARY KEY(`key`))")
+            db.execSQL(
+                "CREATE TABLE `outbox` (`local_id` TEXT NOT NULL, `convo_id` TEXT NOT NULL, " +
+                    "`body` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `state` TEXT NOT NULL, " +
+                    "`attempts` INTEGER NOT NULL, `last_error` TEXT, PRIMARY KEY(`local_id`))"
+            )
+            db.execSQL("CREATE INDEX `index_outbox_convo_id` ON `outbox` (`convo_id`)")
+            db.execSQL("CREATE TABLE room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)")
+            db.execSQL(
+                "INSERT INTO conversation VALUES ('c1', 'Fix the parser', 'running', 3, 's', 1, NULL, 0, 0, 0, 0, NULL)"
+            )
+            db.version = 2
+        }
+
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:dan")
+            // The pre-migration row survives with a NULL box (no chip).
+            assertEquals(null, store.conversation("c1")?.agentDeviceID)
+            // The new column is writable…
+            store.refreshSummaries(
+                listOf(ConvoSummaryDTO("c1", "Fix the parser", "running", 4, "s", 1, agentDeviceID = 7)),
+            )
+            assertEquals(7L, store.conversation("c1")?.agentDeviceID)
+            // …and the migrated agent table is fully usable.
+            store.replaceAgents(listOf(AgentDTO(7, "dev-y")))
+            assertEquals(mapOf(7L to "dev-y"), store.agentNames())
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
 }

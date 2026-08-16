@@ -19,6 +19,13 @@ data class ChatSummary(
     /// `null`. Immutable server-side. Children never appear in the main chat
     /// list — reachable only through their parent's running-subagent strip.
     val parentConvoID: String? = null,
+    /// Display name of the agent box that owns this conversation, or `null`
+    /// when no chip should be shown — which covers all three of: the user
+    /// has fewer than two boxes (nothing to disambiguate), the conversation
+    /// has no recorded box, and the recorded box no longer exists. Resolving
+    /// the gate upstream (in `JournalChatService`) keeps every row view a
+    /// dumb renderer.
+    val boxName: String? = null,
 )
 
 /// A subagent child conversation as surfaced in its parent's running-subagent

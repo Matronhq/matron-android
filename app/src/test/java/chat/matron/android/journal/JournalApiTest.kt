@@ -88,6 +88,28 @@ class JournalApiTest {
         assertNull(api(token = "t").snapshot().conversations.first().parentConvoID)
     }
 
+    /// Ports the snapshot-parsing slice of matron-apple #131: each convo row
+    /// carries its owning box, and a top-level `agents` list resolves id →
+    /// name. Absent fields (an older server) degrade to null/empty — no chips.
+    @Test
+    fun snapshotParsesAgentDeviceIDAndAgentsList() = runBlocking {
+        server.enqueue(
+            json(
+                200,
+                """{"conversations":[{"id":"c1","title":"T","session_state":"running","last_seq":1,"snippet":"","created_at":0,"agent_device_id":7}],""" +
+                    """"agents":[{"device_id":7,"name":"dev-y"},{"device_id":9,"name":"dev-z"},{"name":"no-id-skipped"}],"seq":1}""",
+            )
+        )
+        val snap = api(token = "t").snapshot()
+        assertEquals(7L, snap.conversations.first().agentDeviceID)
+        assertEquals(listOf(AgentDTO(7, "dev-y"), AgentDTO(9, "dev-z")), snap.agents)
+
+        server.enqueue(json(200, """{"conversations":[{"id":"c1","title":"T","session_state":"running","last_seq":1,"snippet":"","created_at":0}],"seq":1}"""))
+        val old = api(token = "t").snapshot()
+        assertNull(old.conversations.first().agentDeviceID)
+        assertTrue(old.agents.isEmpty())
+    }
+
     @Test
     fun snapshotToleratesMissingLastTS() = runBlocking {
         server.enqueue(json(200, """{"conversations":[{"id":"c1","title":"T","session_state":"waiting","last_seq":9,"unread_count":2,"snippet":"s","created_at":5}],"seq":9}"""))

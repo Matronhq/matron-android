@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.chat.ChatService
 import chat.matron.android.chat.ChatSummary
+import chat.matron.android.designsystem.BoxChip
 import chat.matron.android.designsystem.RelativeMinuteTimeView
 import chat.matron.android.designsystem.SyncBannerState
 import chat.matron.android.designsystem.UnreadBadge
@@ -203,12 +204,25 @@ private fun ChatRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    summary.title,
-                    style = MaterialTheme.typography.bodyLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        summary.title,
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        // fill = false so a long title truncates and the chip
+                        // stays visible (the iOS HStack shrinks Text the same
+                        // way).
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    // Which box owns this conversation. Null unless the user
+                    // has two or more boxes — the gate lives in
+                    // JournalChatService, so this row just renders.
+                    summary.boxName?.let { BoxChip(it) }
+                }
                 Text(
                     summary.snippet.ifEmpty { " " },
                     style = MaterialTheme.typography.bodySmall,

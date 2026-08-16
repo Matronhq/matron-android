@@ -586,4 +586,87 @@ class JournalStoreTest {
         assertTrue(store.applyJournalBatch(emptyList()).isEmpty())
         assertEquals(0L, store.cursor())
     }
+
+    /// Ports matron-apple's `testSnapshotAndConvoMetaRecordTheOwningBox`.
+    @Test
+    fun snapshotAndConvoMetaRecordTheOwningBox() = runBlocking {
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(
+                ConvoSummaryDTO("c1", "Fix the parser", "running", 5, "", 1, agentDeviceID = 7),
+                ConvoSummaryDTO("c2", "No box", "running", 6, "", 1),
+            ),
+            headSeq = 6,
+        )
+
+        assertEquals(7L, store.conversation("c1")?.agentDeviceID)
+        assertNull(store.conversation("c2")?.agentDeviceID)
+
+        // A later snapshot that omits the field must not clear what we know.
+        store.refreshSummaries(
+            listOf(ConvoSummaryDTO("c1", "Fix the parser", "running", 7, "", 1)),
+        )
+        assertEquals(7L, store.conversation("c1")?.agentDeviceID)
+
+        // A live convo_meta teaches the linkage for a convo we have never seen.
+        store.applyJournal(
+            ev(
+                8, convo = "c3", type = "convo_meta",
+                payload = buildJsonObject { put("title", "Brand new"); put("agent_device_id", 9) },
+            )
+        )
+        assertEquals(9L, store.conversation("c3")?.agentDeviceID)
+
+        // Re-pointing IS allowed: a session resumed on another box legitimately
+        // changes owner, unlike parent_convo_id which is immutable.
+        store.applyJournal(
+            ev(
+                9, convo = "c3", type = "convo_meta",
+                payload = buildJsonObject { put("title", "Brand new"); put("agent_device_id", 11) },
+            )
+        )
+        assertEquals(11L, store.conversation("c3")?.agentDeviceID)
+    }
+
+    /// Ports matron-apple's `testAgentRosterMirrorsSnapshotAndLiveRenames`.
+    @Test
+    fun agentRosterMirrorsSnapshotAndLiveRenames() = runBlocking {
+        val store = makeStore()
+        assertTrue(store.agentNames().isEmpty())
+
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y"), AgentDTO(9, "dev-z")))
+        assertEquals(mapOf(7L to "dev-y", 9L to "dev-z"), store.agentNames())
+
+        // Wholesale replace: a box revoked server-side disappears here too.
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y")))
+        assertEquals(mapOf(7L to "dev-y"), store.agentNames())
+
+        // An empty list is "this server doesn't say", not "you have no boxes".
+        store.replaceAgents(emptyList())
+        assertEquals(mapOf(7L to "dev-y"), store.agentNames())
+
+        // A live rename patches one row without a re-snapshot.
+        store.renameAgent(7, "dev-yellow")
+        assertEquals(mapOf(7L to "dev-yellow"), store.agentNames())
+
+        // A rename for a box we have never seen inserts it.
+        store.renameAgent(12, "dev-new")
+        assertEquals("dev-new", store.agentNames()[12])
+    }
+
+    /// Ports matron-apple's `testAgentNamesStreamRefiresOnRename`: the roster
+    /// needs an observation of its own — Room only re-fires a Flow for the
+    /// tables its query reads, and `conversationsFlow()` never reads `agent`,
+    /// so a `device_meta` rename has to reach chip labels through this flow.
+    @Test
+    fun agentNamesFlowRefiresOnRename() = runBlocking {
+        val store = makeStore()
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y"), AgentDTO(9, "dev-z")))
+        store.agentNamesFlow().test {
+            assertEquals(mapOf(7L to "dev-y", 9L to "dev-z"), awaitItem())
+            store.renameAgent(7, "dev-yellow")
+            assertEquals(mapOf(7L to "dev-yellow", 9L to "dev-z"), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
 }

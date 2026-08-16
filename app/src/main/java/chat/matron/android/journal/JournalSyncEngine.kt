@@ -461,6 +461,7 @@ class JournalSyncEngine(
         val snapshot = runCatching { api.snapshot() }.getOrNull() ?: return
         if (synchronized(lock) { storeEpoch } != epoch) return // store wiped mid-flight; stale
         runCatching { store.refreshSummaries(snapshot.conversations) }
+        runCatching { store.replaceAgents(snapshot.agents) }
     }
 
     /// Sends a structured request to one of the user's agent devices and awaits
@@ -916,6 +917,12 @@ class JournalSyncEngine(
                     .onFailure { MatronDebug.breadcrumb("snapshot_required: store.wipe failed: $it") }
                 throw SnapshotRequiredExit()
             }
+            is ServerFrame.DeviceMeta -> {
+                // A device was renamed elsewhere — patch the local roster so
+                // open chat lists relabel their chips without waiting for the
+                // next snapshot.
+                runCatching { store.renameAgent(frame.id, frame.name) }
+            }
             is ServerFrame.HelloOK, is ServerFrame.UnknownControl -> Unit // post-hello control frames are advisory
         }
         return appliedSinceAck
@@ -926,6 +933,7 @@ class JournalSyncEngine(
         if (!(store.cursor() == 0L && emptyConvos)) return
         val snapshot = api.snapshot()
         store.applyColdSnapshot(snapshot.conversations, snapshot.seq)
+        store.replaceAgents(snapshot.agents)
     }
 
     /// Production liveness rides OkHttp's protocol-level `pingInterval`
