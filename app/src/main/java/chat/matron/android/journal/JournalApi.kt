@@ -375,7 +375,8 @@ class JournalApi(
         val d = obj.objectOrNull("device")
         val deviceID = d?.longOrNull("device_id")
         val newName = d?.stringOrNull("name")
-        if (deviceID == null || newName == null) {
+        // An echo naming a DIFFERENT device is as malformed as a missing one.
+        if (deviceID == null || newName == null || deviceID != id) {
             throw JournalApiError.Transport("malformed rename response")
         }
         // Partial DTO: the rename response carries only identity and the new

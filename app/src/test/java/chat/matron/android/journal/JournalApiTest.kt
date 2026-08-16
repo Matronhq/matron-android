@@ -258,6 +258,14 @@ class JournalApiTest {
         } catch (e: JournalApiError) {
             assertTrue(e is JournalApiError.Transport)
         }
+
+        // So does an echo naming a different device than the one renamed.
+        server.enqueue(json(200, """{"ok":true,"device":{"device_id":8,"name":"dev-y"}}"""))
+        try {
+            api(token = "t").renameDevice(7, "dev-y"); fail("expected throw")
+        } catch (e: JournalApiError) {
+            assertTrue(e is JournalApiError.Transport)
+        }
     }
 
     @Test
