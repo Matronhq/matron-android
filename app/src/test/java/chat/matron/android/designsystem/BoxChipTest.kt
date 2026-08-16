@@ -1,5 +1,7 @@
 package chat.matron.android.designsystem
 
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
@@ -67,5 +69,67 @@ class BoxChipTest {
         assertEquals(BoxChipColors.palette[2], BoxChipColors.tint("greg"))
         assertNotEquals(BoxChipColors.tint("eric"), BoxChipColors.tint("greg"))
         assertEquals(10, BoxChipColors.palette.size)
+    }
+
+    /// Ports `testContrastingForegroundClearsWCAG_AA_forEveryPaletteEntry`
+    /// (apple #141): `contrastingForeground` (used by `SenderAvatar`'s
+    /// initials, drawn on the RAW full-opacity fill — unlike this chip's own
+    /// `textTint`, which is for text beside a pale ~18%-opacity capsule)
+    /// must clear WCAG AA (4.5:1) against every palette entry's raw hue.
+    /// Fixture names chosen so each pins a distinct index (mirrors
+    /// `fullPaletteFixturesPinEveryIndexInOrder`). Contrast ratios use
+    /// Compose's WCAG relative luminance (`Color.luminance()`), the same
+    /// function the implementation reads — Apple carries its own
+    /// `relativeLuminance` because SwiftUI has none.
+    @Test
+    fun contrastingForegroundClearsWCAG_AA_forEveryPaletteEntry() {
+        val names = listOf(
+            "dev-7", "romeo", "india", "charlie", "quebec",
+            "delta", "lima", "alpha", "echo", "foxtrot",
+        )
+        for ((index, name) in names.withIndex()) {
+            assertEquals("$name must pin palette index $index", index, BoxChipColors.paletteIndex(name))
+            val luminance = BoxChipColors.tint(name).luminance()
+            val contrastWithWhite = 1.05f / (luminance + 0.05f)
+            val contrastWithBlack = (luminance + 0.05f) / 0.05f
+            val bestRatio = maxOf(contrastWithWhite, contrastWithBlack)
+            assertTrue(
+                "palette index $index can't clear WCAG AA (4.5:1) with either white or black text — best available is $bestRatio",
+                bestRatio >= 4.5f,
+            )
+
+            val expected = if (contrastWithBlack > contrastWithWhite) Color.Black else Color.White
+            assertEquals(
+                "index $index must pick the higher-contrast option",
+                expected,
+                BoxChipColors.contrastingForeground(name),
+            )
+        }
+    }
+
+    /// Ports `testContrastingForegroundIsDeterministic`: deterministic
+    /// per-name, matching `paletteIndex`'s own contract — same name always
+    /// resolves to the same foreground choice.
+    @Test
+    fun contrastingForegroundIsDeterministic() {
+        for (name in listOf("eric", "dan-mac", "build-7", "", "🦊 box")) {
+            assertEquals(
+                BoxChipColors.contrastingForeground(name),
+                BoxChipColors.contrastingForeground(name),
+            )
+        }
+    }
+
+    /// Ports `testContrastingForeground_cyanAndMint_resolveToBlack`: pins
+    /// the two hues the Apple review explicitly flagged as failing WCAG with
+    /// white text (≈2.5:1 cyan, ≈2.1:1 mint) — both must resolve to black.
+    @Test
+    fun contrastingForeground_cyanAndMint_resolveToBlack() {
+        // "echo" pins palette index 8 (cyan), "foxtrot" index 9 (mint) — per
+        // the full-palette fixture list's mapping.
+        assertEquals(8, BoxChipColors.paletteIndex("echo"))
+        assertEquals(9, BoxChipColors.paletteIndex("foxtrot"))
+        assertEquals(Color.Black, BoxChipColors.contrastingForeground("echo"))
+        assertEquals(Color.Black, BoxChipColors.contrastingForeground("foxtrot"))
     }
 }

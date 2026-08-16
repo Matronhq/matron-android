@@ -394,6 +394,9 @@ private fun TimelineRowView(
     // answer is an HTTP call with no journal event behind it, so nothing in the
     // timeline snapshot would otherwise change.
     val agentChatStates by chatVM.agentChatStates.collectAsStateWithLifecycle()
+    // Memoised in the VM's derived-recompute pass (apple #141) — reading the
+    // flag here is a plain state read, never an O(N) timeline scan per row.
+    val hasMultipleSenders by chatVM.hasMultipleSenders.collectAsStateWithLifecycle()
     when (row) {
         is TimelineRow.Separator -> DateSeparator(label = DateSeparatorLabel.format(row.date))
         is TimelineRow.Message -> {
@@ -432,6 +435,7 @@ private fun TimelineRowView(
                             decision = if (approve) AgentChatDecision.APPROVE else AgentChatDecision.DENY,
                         )
                     },
+                    hasMultipleSenders = hasMultipleSenders,
                 )
             }
         }

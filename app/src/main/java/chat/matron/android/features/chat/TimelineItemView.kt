@@ -73,12 +73,17 @@ fun TimelineItemView(
         request: AgentChatRequest,
         approve: Boolean,
     ) -> Unit)? = null,
+    /// `ChatViewModel.hasMultipleSenders` — whether this room has ≥2
+    /// distinct non-own senders. Gates [timelineAvatarSender]: default
+    /// `false` keeps every existing preview/test/1:1-chat call site
+    /// rendering exactly as before (no avatar).
+    hasMultipleSenders: Boolean = false,
 ) {
     if (item.isOwn && item.sendState != TimelineSendState.Sent) {
         Column(horizontalAlignment = Alignment.End) {
             RenderedBody(
                 item, resolveImage, onTapImage, onTapFile, askViewModel, isPromptAnswered,
-                answerSummary, agentChatState, onAnswerAgentChat,
+                answerSummary, agentChatState, onAnswerAgentChat, hasMultipleSenders,
             )
             SendStateIndicator(
                 state = sendStateGlyphFrom(item.sendState),
@@ -89,7 +94,7 @@ fun TimelineItemView(
     } else {
         RenderedBody(
             item, resolveImage, onTapImage, onTapFile, askViewModel, isPromptAnswered,
-            answerSummary, agentChatState, onAnswerAgentChat,
+            answerSummary, agentChatState, onAnswerAgentChat, hasMultipleSenders,
         )
     }
 }
@@ -109,19 +114,21 @@ private fun RenderedBody(
         request: AgentChatRequest,
         approve: Boolean,
     ) -> Unit)?,
+    hasMultipleSenders: Boolean,
 ) {
     val style = if (item.isOwn) MessageAuthorStyle.Me else MessageAuthorStyle.Bot
+    val avatarSender = timelineAvatarSender(item, hasMultipleSenders)
     when (val kind = item.kind) {
         is TimelineItem.Kind.Text ->
             // copyText carries the raw markdown body — what the sender actually
             // wrote — so a copied message pastes as text, not styled spans.
-            MessageBubble(style = style, timestamp = item.timestamp, copyText = kind.body) {
+            MessageBubble(style = style, timestamp = item.timestamp, sender = avatarSender, copyText = kind.body) {
                 MarkdownText(kind.body)
             }
 
         is TimelineItem.Kind.Image -> {
             val model = kind.url?.let { url -> resolveImage?.invoke(url) }
-            MessageBubble(style = style, timestamp = item.timestamp) {
+            MessageBubble(style = style, timestamp = item.timestamp, sender = avatarSender) {
                 AttachmentImage(
                     model = model,
                     caption = kind.caption,
@@ -131,7 +138,7 @@ private fun RenderedBody(
         }
 
         is TimelineItem.Kind.File ->
-            MessageBubble(style = style, timestamp = item.timestamp) {
+            MessageBubble(style = style, timestamp = item.timestamp, sender = avatarSender) {
                 AttachmentFile(
                     filename = kind.filename,
                     sizeBytes = kind.sizeBytes,
@@ -302,6 +309,30 @@ fun timelineItemShouldRender(item: TimelineItem): Boolean = when (item.kind) {
     is TimelineItem.Kind.StateChange -> false
     is TimelineItem.Kind.AskUserAnswer -> false
     else -> true
+}
+
+/**
+ * Sender name to pass into `MessageBubble`'s `sender` param for this row, or
+ * `null` for no avatar — the port of `TimelineItemView.avatarSender(for:
+ * hasMultipleSenders:)` (apple #141). Own messages never get one; non-own
+ * messages only get one in a multi-sender room
+ * (`ChatViewModel.hasMultipleSenders`) — 1:1 chats render unchanged.
+ * `item.sender` is already the clean display name by this point
+ * (`JournalTimelineMapper.displayName(sender)` stripped the `agent:`/`user:`
+ * prefix), so no further processing is needed here.
+ *
+ * Also excludes the mid-turn streaming placeholder row
+ * (`TimelineItem.isEphemeralStreamingPlaceholder`) even when
+ * [hasMultipleSenders] is true — it hardcodes `sender = "agent"`, which is
+ * not a real sender identity, so drawing an avatar for it would flash the
+ * wrong-coloured circle on the in-flight bubble before the durable row lands
+ * and it jumps to the real one (Cursor Bugbot on apple #141 — the
+ * render-side twin of the `hasMultipleSenders` count fix; both read the same
+ * `TimelineItem` property so they can't drift apart again).
+ */
+fun timelineAvatarSender(item: TimelineItem, hasMultipleSenders: Boolean): String? {
+    if (item.isOwn || !hasMultipleSenders || item.isEphemeralStreamingPlaceholder) return null
+    return item.sender
 }
 
 /**
