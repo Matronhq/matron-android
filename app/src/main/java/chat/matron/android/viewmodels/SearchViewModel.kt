@@ -41,16 +41,41 @@ class SearchViewModel(
         _allChats.value = chats
     }
 
-    /// Chat hits: title/bot-name substring matches on the current snapshot.
+    /// Chat hits: title/bot-name/session-tag substring matches on the current
+    /// snapshot. The tag clause is an Android addition: this branch peels the
+    /// bridge's `[bc] ` prefix into [ChatSummary.sessionShort] and stores the
+    /// CLEAN title, so without it a short the user can SEE in the row (`b5`,
+    /// rendered as `A:b5`) would no longer find the chat. matron-apple's
+    /// `chatHits` still matches only title + bot name and has the same gap
+    /// (unfixed there as of apple #156).
     val chatHits: List<ChatSummary>
         get() {
             if (query.isEmpty()) return emptyList()
             val lower = query.lowercase()
             return _allChats.value.filter {
                 it.title.lowercase().contains(lower) ||
-                    it.bot.displayName.lowercase().contains(lower)
+                    it.bot.displayName.lowercase().contains(lower) ||
+                    tagMatches(it, lower)
             }
         }
+
+    /// Whether [lower] (an already-lowercased query) matches the chat's
+    /// visible session tag: the bare short (`b5`) or the displayed
+    /// letter:short form — `y:b5` for a single box, `y↔z:ab` / `y,z,w:ab`
+    /// for a room, mirroring `SessionTagText`'s glyph order so what renders
+    /// is what matches. A chat with no short has no tag to match (a bare
+    /// box letter with no short renders too, but one letter matching every
+    /// chat on that box would be noise, not search).
+    private fun tagMatches(chat: ChatSummary, lower: String): Boolean {
+        val short = chat.sessionShort ?: return false
+        if (short.lowercase().contains(lower)) return true
+        val letters = if (chat.roomBoxShorts.size >= 2) {
+            chat.roomBoxShorts.joinToString(if (chat.roomBoxShorts.size == 2) "↔" else ",")
+        } else {
+            chat.boxShort ?: return false
+        }
+        return "$letters:$short".lowercase().contains(lower)
+    }
 
     /// Resolves a room ID to its display title, falling back to the raw room ID
     /// when the chat isn't in the snapshot (e.g. a hit from a left room).

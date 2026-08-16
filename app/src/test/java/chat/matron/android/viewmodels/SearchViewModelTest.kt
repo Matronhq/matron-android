@@ -36,6 +36,43 @@ class SearchViewModelTest {
         assertEquals(listOf("!1:s"), vm.chatHits.map { it.id })
     }
 
+    /// The session short is VISIBLE in the row (`b5` rendered as `Y:b5`), so
+    /// it must stay searchable even though the branch peels it out of the
+    /// stored title. Diverges from matron-apple, whose `chatHits` matches
+    /// only title + bot name (gap unfixed there as of apple #156).
+    @Test
+    fun chatHits_matchTheVisibleSessionShortAndTagForm() {
+        val tagged = ChatSummary(
+            id = "!1:s", title = "Auth bug", bot = claude,
+            lastActivity = null, unreadCount = 0,
+            boxName = "dev-y", sessionShort = "b5", boxShort = "Y",
+        )
+        val other = ChatSummary(
+            id = "!2:s", title = "Refactor", bot = claude,
+            lastActivity = null, unreadCount = 0,
+            boxName = "dev-z", sessionShort = "c7", boxShort = "Z",
+        )
+        val room = ChatSummary(
+            id = "!3:s", title = "mac ↔ dev-z", bot = claude,
+            lastActivity = null, unreadCount = 0,
+            sessionShort = "ab",
+            roomBoxNames = listOf("dev-y", "dev-z"), roomBoxShorts = listOf("Y", "Z"),
+        )
+        val vm = SearchViewModel(FakeSearchService(), listOf(tagged, other, room))
+
+        vm.query = "b5"
+        assertEquals("the bare short finds its chat", listOf("!1:s"), vm.chatHits.map { it.id })
+
+        vm.query = "y:b5"
+        assertEquals("the displayed letter:short form matches too", listOf("!1:s"), vm.chatHits.map { it.id })
+
+        vm.query = "y↔z:ab"
+        assertEquals("the displayed room tag matches too", listOf("!3:s"), vm.chatHits.map { it.id })
+
+        vm.query = "d4"
+        assertEquals("an unrelated short matches nothing", emptyList<String>(), vm.chatHits.map { it.id })
+    }
+
     @Test
     fun chatTitle_resolvesViaAllChats() {
         val chats = listOf(chat("!a:s", "Auth bug"), chat("!b:s", "Refactor"))
