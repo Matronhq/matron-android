@@ -211,7 +211,9 @@ private fun ChatRow(
                 // `A:bc Title` as ONE text so the tag leads the eye scan
                 // (colored box letter + session short — the trailing BoxChip
                 // capsule this replaces put the machine at the END and cost
-                // a capsule of width) and the whole line truncates together.
+                // a capsule of width) and the whole line truncates together,
+                // which also retires the capsule's 144dp width cap: there is
+                // no unweighted sibling left to starve the title.
                 // Tag halves are gated upstream (JournalChatService): no
                 // letter for single-box users, no short for titles the
                 // bridge never prefixed.

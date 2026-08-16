@@ -86,9 +86,11 @@ class DevicesViewModel(
         }
     }
 
-    /// Renames [device]. The roster is re-fetched on success rather than
-    /// patched, so a name the server sanitised (control characters flattened)
-    /// is what the user ends up seeing.
+    /// Renames [device]. The rename echo's name (already server-sanitised —
+    /// control characters flattened) is applied to the local roster first, so
+    /// a follow-up refresh that fails to load can't leave the old name on
+    /// screen (mirrors [revoke]'s remove-locally-then-refetch discipline);
+    /// the re-fetch then supplies the full fresh row.
     suspend fun rename(device: DeviceDTO, to: String) {
         val trimmed = to.trim()
         val problem = validate(trimmed)
@@ -97,7 +99,10 @@ class DevicesViewModel(
             return
         }
         try {
-            api.renameDevice(device.id, trimmed)
+            val renamed = api.renameDevice(device.id, trimmed)
+            _devices.value = _devices.value.map {
+                if (it.id == device.id) it.copy(name = renamed.name) else it
+            }
             _errorMessage.value = null
             refresh()
         } catch (cancel: CancellationException) {
