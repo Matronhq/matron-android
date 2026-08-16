@@ -1,10 +1,12 @@
 package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.TimelineService
+import chat.matron.android.models.AttachmentBatchTag
 import chat.matron.android.models.BotCommand
 import chat.matron.android.models.BotCommandCatalog
 import chat.matron.android.models.StagedAttachment
 import java.io.File
+import java.util.UUID
 import kotlin.time.Duration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -276,13 +278,29 @@ class ComposerViewModel(
     }
 
     /// Uploads staged attachments in order, hanging the caption on the first.
+    ///
+    /// The caption goes on ONE attachment because the bridge injects each
+    /// media event as its own prompt (or, when the frames carry a batch tag,
+    /// folds them into one prompt — either way a repeated caption would make
+    /// claude read the same sentence once per photo). First rather than last
+    /// matches every other chat client, and means claude has the context
+    /// before it sees the pictures.
+    ///
     /// Stops at the first failure instead of pressing on.
     private suspend fun sendAttachments(attachments: List<StagedAttachment>, caption: String) {
         var captionDelivered = false
+        // One batch id for the whole send, but only when there IS a batch: a
+        // single attachment goes untagged, so its journal frame is
+        // byte-identical to what an older bridge already understands. The
+        // bridge uses the tag to gather these sequential uploads back into
+        // the one message the user wrote, instead of starting a turn on the
+        // first image and busy-queueing the rest.
+        val batchID = if (attachments.size > 1) UUID.randomUUID().toString() else null
         try {
             attachments.forEachIndexed { index, attachment ->
                 val itemCaption = if (index == 0 && caption.isNotEmpty()) caption else null
                 val batchIndex = index + 1
+                val batch = batchID?.let { AttachmentBatchTag(id = it, index = batchIndex, total = attachments.size) }
                 _uploadProgress.value = UploadProgress(
                     filename = attachment.filename, index = batchIndex,
                     count = attachments.size, fraction = 0.0,
@@ -302,9 +320,13 @@ class ComposerViewModel(
                     // for visible fractions of a second.
                     val data = withContext(Dispatchers.IO) { attachment.file.readBytes() }
                     if (attachment.isImage) {
-                        timeline.sendImage(data, attachment.filename, attachment.mimeType, itemCaption, onProgress)
+                        timeline.sendImage(
+                            data, attachment.filename, attachment.mimeType, itemCaption, batch, onProgress,
+                        )
                     } else {
-                        timeline.sendFile(data, attachment.filename, attachment.mimeType, itemCaption, onProgress)
+                        timeline.sendFile(
+                            data, attachment.filename, attachment.mimeType, itemCaption, batch, onProgress,
+                        )
                     }
                 } catch (cancel: CancellationException) {
                     throw cancel

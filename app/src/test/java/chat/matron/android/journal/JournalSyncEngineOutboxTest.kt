@@ -204,7 +204,7 @@ class JournalSyncEngineOutboxTest {
         engine.sendOp(
             ClientOp.SendMedia(
                 convoID = "c1", type = MediaKind.IMAGE, blobRef = "b1", name = "pic.png",
-                contentType = "image/png", size = 3, caption = null, localID = "M1",
+                contentType = "image/png", size = 3, caption = null, batch = null, localID = "M1",
             )
         )
         engine.sendMessage("c1", "hello", "T1")
@@ -238,7 +238,7 @@ class JournalSyncEngineOutboxTest {
         engine.sendOp(
             ClientOp.SendMedia(
                 convoID = "c1", type = MediaKind.IMAGE, blobRef = "b1", name = "pic.png",
-                contentType = "image/png", size = 3, caption = null, localID = "M1",
+                contentType = "image/png", size = 3, caption = null, batch = null, localID = "M1",
             )
         )
         engine.sendMessage("c1", "hello", "T1")

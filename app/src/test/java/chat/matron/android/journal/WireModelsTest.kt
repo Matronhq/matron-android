@@ -1,5 +1,6 @@
 package chat.matron.android.journal
 
+import chat.matron.android.models.AttachmentBatchTag
 import chat.matron.android.models.SessionStatus
 import java.time.Instant
 import kotlinx.serialization.json.JsonObject
@@ -141,7 +142,8 @@ class WireModelsTest {
         assertEquals("hi", send.objectOrNull("payload")?.stringOrNull("body"))
         assertEquals("L1", send.stringOrNull("local_id"))
 
-        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42, null, "L2"))
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42, null,
+            null, "L2"))
         assertEquals("send", media.stringOrNull("op"))
         assertEquals("image", media.stringOrNull("type"))
         assertEquals("b9", media.stringOrNull("blob_ref"))
@@ -172,14 +174,45 @@ class WireModelsTest {
     @Test
     fun encodeSendMediaCarriesCaptionInsideThePayload() {
         val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42,
-            "what breed is this?", "L2"))
+            "what breed is this?", null, "L2"))
         assertEquals("what breed is this?", media.objectOrNull("payload")?.stringOrNull("caption"))
     }
 
     @Test
     fun encodeSendMediaTreatsEmptyCaptionAsAbsent() {
-        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42, "", "L2"))
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42, "",
+            null, "L2"))
         assertNull(media.objectOrNull("payload")?.stringOrNull("caption"))
+    }
+
+    /// Ported from matron-apple's `WireModelsTests.
+    /// testEncodeSendMediaCarriesTheBatchTagInsideThePayload`. The batch tag
+    /// rides inside `payload` for the same reason the caption does — that's
+    /// the only part of a media send the server stores verbatim and replays
+    /// to the bridge, which gathers frames sharing a `batch_id` into one
+    /// prompt.
+    @Test
+    fun encodeSendMediaCarriesTheBatchTagInsideThePayload() {
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42,
+            null, AttachmentBatchTag(id = "B7", index = 2, total = 3), "L2"))
+        val payload = media.objectOrNull("payload")
+        assertEquals("B7", payload?.stringOrNull("batch_id"))
+        assertEquals(2, payload?.intOrNull("batch_index"))
+        assertEquals(3, payload?.intOrNull("batch_total"))
+    }
+
+    /// Ported from matron-apple's `WireModelsTests.
+    /// testEncodeSendMediaOmitsBatchKeysWhenUntagged`. An untagged send omits
+    /// the batch keys entirely — a lone attachment's frame stays
+    /// byte-identical to what an older bridge understands.
+    @Test
+    fun encodeSendMediaOmitsBatchKeysWhenUntagged() {
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42,
+            null, null, "L2"))
+        val payload = media.objectOrNull("payload")
+        assertNull(payload?.stringOrNull("batch_id"))
+        assertNull(payload?.intOrNull("batch_index"))
+        assertNull(payload?.intOrNull("batch_total"))
     }
 
     @Test
@@ -296,7 +329,7 @@ class WireModelsTest {
     @Test
     fun encodeSendMediaFileKindUsesFileWireString() {
         val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.FILE, "b9", "report.pdf", "application/pdf",
-            42, null, "L2"))
+            42, null, null, "L2"))
         assertEquals("file", media.stringOrNull("type"))
     }
 

@@ -414,6 +414,42 @@ class ComposerViewModelTest {
         assertNull(fake.sentImages.last().caption)
     }
 
+    /// Ported from matron-apple's `ComposerViewModelTests.
+    /// test_send_withSeveralAttachments_stampsOneSharedBatchTag`. A
+    /// multi-attachment send stamps every upload with the same batch id and
+    /// its 1-based place, so the bridge can gather the frames back into the
+    /// one message the user wrote instead of injecting the first image and
+    /// busy-queueing the rest.
+    @Test
+    fun send_withSeveralAttachments_stampsOneSharedBatchTag() = runBlocking {
+        val fake = FakeTimelineService()
+        val vm = makeVM(timeline = fake)
+        vm.attachFiles(listOf(makeTempFile("a.png"), makeTempFile("b.png"), makeTempFile("c.png")))
+
+        vm.send()
+
+        val tags = fake.mediaSendBatchTags.filterNotNull()
+        assertEquals("every attachment of a batch send must carry the tag", 3, tags.size)
+        assertEquals("one send = one batch id", 1, tags.map { it.id }.toSet().size)
+        assertEquals(listOf(1, 2, 3), tags.map { it.index })
+        assertEquals(listOf(3, 3, 3), tags.map { it.total })
+    }
+
+    /// Ported from matron-apple's `ComposerViewModelTests.
+    /// test_send_withOneAttachment_carriesNoBatchTag`. A single attachment
+    /// goes untagged — its frame must stay byte-identical to what an older
+    /// bridge already understands.
+    @Test
+    fun send_withOneAttachment_carriesNoBatchTag() = runBlocking {
+        val fake = FakeTimelineService()
+        val vm = makeVM(timeline = fake)
+        vm.attachFiles(listOf(makeTempFile("shot.png")))
+
+        vm.send()
+
+        assertEquals(listOf<chat.matron.android.models.AttachmentBatchTag?>(null), fake.mediaSendBatchTags)
+    }
+
     @Test
     fun send_withTextOnly_stillSendsPlainText() = runBlocking {
         val fake = FakeTimelineService()
