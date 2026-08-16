@@ -1,5 +1,6 @@
 package chat.matron.android.viewmodels
 
+import chat.matron.android.chat.ConversationSummaryEntry
 import chat.matron.android.chat.FakeMediaService
 import chat.matron.android.chat.FakeTimelineService
 import chat.matron.android.chat.TimelineItem
@@ -24,6 +25,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -1177,4 +1179,171 @@ class ChatViewModelTest {
         assertEquals(1, answerer.calls)
         assertTrue((vm.agentChatState("42") as AgentChatCardState.Answered).approved)
     }
+
+    // MARK: - Summary TOC entries (matron-apple #124 port)
+
+    /// Port of matron-apple `ChatViewModelTests
+    /// .testSummaryEntriesFlowFromServiceToViewModel`: `summaryEntriesStream()`
+    /// frames flow through to published state unchanged (order, newest-first,
+    /// preserved from the service).
+    @Test
+    fun summaryEntriesFlowFromServiceToViewModel() = vmTest { scope ->
+        val fake = FakeTimelineService()
+        fake.summaryEntriesToEmit = listOf(
+            listOf(
+                ConversationSummaryEntry(seq = 40, toc = "Newer", detail = "d2", date = Instant.ofEpochSecond(2)),
+                ConversationSummaryEntry(seq = 10, toc = "Older", detail = "d1", date = Instant.ofEpochSecond(1)),
+            ),
+        )
+        val vm = makeVM(scope, fake)
+        vm.start()
+        waitUntil { vm.summaryEntries.value.size == 2 }
+        assertEquals(listOf(40L, 10L), vm.summaryEntries.value.map { it.seq })
+        vm.stop()
+    }
+
+    // MARK: - focus(seq) jump-to-message (matron-apple #124 port)
+
+    /// Seeds a VM with one fully-loaded snapshot of text messages whose ids
+    /// are `seq.toString()` for each seq (ascending, matching
+    /// `JournalTimelineMapper`'s convention) — the plain case, no pagination.
+    private suspend fun makeVMWithMessages(scope: CoroutineScope, seqs: List<Int>): ChatViewModel {
+        val fake = FakeTimelineService()
+        fake.snapshotsToEmit = listOf(seqs.map { textItem(it.toString()) })
+        val vm = makeVM(scope, fake)
+        vm.start()
+        return vm
+    }
+
+    /// Seeds a VM on [PagingFakeTimelineService]: [loaded] is the initially-
+    /// available window, [olderPages] the queue of pages a `paginateBackward()`
+    /// call reveals one at a time. Every seq across every range becomes a text
+    /// message row with id `seq.toString()`.
+    private suspend fun makeVMWithPagedHistory(
+        scope: CoroutineScope,
+        loaded: List<IntRange>,
+        olderPages: List<List<IntRange>>,
+    ): ChatViewModel {
+        fun items(ranges: List<IntRange>) = ranges.flatMap { range -> range.map { textItem(it.toString()) } }
+        val fake = PagingFakeTimelineService(
+            loaded = items(loaded),
+            olderPages = olderPages.map { items(it) }.toMutableList(),
+        )
+        val vm = makeVM(scope, timeline = fake)
+        vm.snapshotWaitMs = 200
+        vm.start()
+        return vm
+    }
+
+    private fun makeVM(scope: CoroutineScope, timeline: PagingFakeTimelineService) =
+        ChatViewModel("!r:s", timeline, FakeMediaService(), scope, InMemoryKeyValueStore(), Haptics.None)
+
+    /// Port of matron-apple `ChatViewModelTests.testFocusPicksNearestRowAtOrBeforeSeq`.
+    @Test
+    fun focusPicksNearestRowAtOrBeforeSeq() = vmTest { scope ->
+        val vm = makeVMWithMessages(scope, listOf(10, 20, 30, 40))
+        vm.focus(35)
+        assertEquals("30", vm.pendingFocusID.value)   // nearest message with seq <= 35
+        vm.clearPendingFocus()
+        assertNull(vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// Port of matron-apple `ChatViewModelTests.testFocusPaginatesBackwardUntilTargetLoaded`:
+    /// seq 150 only appears after two paginateBackward calls (page 200..299,
+    /// then page 100..199).
+    @Test
+    fun focusPaginatesBackwardUntilTargetLoaded() = vmTest { scope ->
+        val vm = makeVMWithPagedHistory(
+            scope, loaded = listOf(300..340), olderPages = listOf(listOf(200..299), listOf(100..199)),
+        )
+        vm.focus(150)
+        assertEquals("150", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// Port of matron-apple `ChatViewModelTests.testFocusLandsOnOldestWhenRegionUnavailable`:
+    /// no older pages queued, so every paginateBackward() call is a genuine
+    /// (uncontended) no-growth no-op. focus()'s loop bails to the oldest-row
+    /// fallback on the first such call rather than waiting out
+    /// `reachedHistoryStart`'s full 2-consecutive-call latch.
+    @Test
+    fun focusLandsOnOldestWhenRegionUnavailable() = vmTest { scope ->
+        val vm = makeVMWithPagedHistory(scope, loaded = listOf(300..340), olderPages = emptyList())
+        vm.focus(5)
+        assertEquals("300", vm.pendingFocusID.value)   // oldest available row
+        vm.stop()
+    }
+
+    /// Port of matron-apple `ChatViewModelTests.testFocusSingleFlight_secondCallSupersedesFirst`:
+    /// a second focus() call must supersede an in-flight first call rather
+    /// than race it — seq 150 needs two paginateBackward() calls to load
+    /// (exercising the loop this test wants cancelled mid-flight); seq 320 is
+    /// already in the initial window, so its call resolves immediately.
+    /// Whichever was requested LAST must win, not whichever finished last.
+    @Test
+    fun focusSingleFlight_secondCallSupersedesFirst() = vmTest { scope ->
+        val vm = makeVMWithPagedHistory(
+            scope, loaded = listOf(300..340), olderPages = listOf(listOf(200..299), listOf(100..199)),
+        )
+        val first = launch { vm.focus(150) }
+        val second = launch { vm.focus(320) }
+        first.join()
+        second.join()
+        assertEquals("320", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// Port of matron-apple `ChatViewModelTests
+    /// .testFocusSingleFlight_cancelledBreakPath_doesNotLandFallback`: the
+    /// paginate loop can also exit via the uncontended `break` (no growth,
+    /// nothing else in flight) — that path must re-check cancellation before
+    /// the `pendingFocusID` write, or a superseded call's fallback target
+    /// lands over the newer call's. Seq 150 sits outside the loaded window
+    /// with NO older pages queued, so the first call's paginateBackward()
+    /// makes no progress and its loop exits via `break`. The yield() gives it
+    /// a chance to actually begin before the second call cancels it.
+    @Test
+    fun focusSingleFlight_cancelledBreakPathDoesNotLandFallback() = vmTest { scope ->
+        val vm = makeVMWithPagedHistory(scope, loaded = listOf(300..340), olderPages = emptyList())
+        val first = launch { vm.focus(150) }
+        yield()
+        val second = launch { vm.focus(320) }
+        first.join()
+        second.join()
+        assertEquals("320", vm.pendingFocusID.value)
+        vm.stop()
+    }
+}
+
+/// Paged-history [TimelineService] fake for the focus(seq) tests: [items]
+/// re-emits the loaded window, and each [paginateBackward] call prepends the
+/// next queued page and re-emits, mirroring the Apple suites'
+/// `PagingFakeTimelineService`. Hand-written like every other fake here.
+private class PagingFakeTimelineService(
+    loaded: List<TimelineItem>,
+    private val olderPages: MutableList<List<TimelineItem>>,
+) : chat.matron.android.chat.TimelineService {
+    private val snapshots =
+        kotlinx.coroutines.flow.MutableSharedFlow<List<TimelineItem>>(replay = 1)
+    private var current: List<TimelineItem> = loaded
+
+    init {
+        snapshots.tryEmit(current)
+    }
+
+    override fun items(): kotlinx.coroutines.flow.Flow<List<TimelineItem>> = snapshots
+
+    override suspend fun paginateBackward(requestSize: Int): Boolean {
+        if (olderPages.isEmpty()) return false
+        current = olderPages.removeAt(0) + current
+        snapshots.tryEmit(current)
+        return true
+    }
+
+    override suspend fun sendText(body: String, inReplyTo: String?) {}
+    override suspend fun sendButtonResponse(selectedValues: List<String>, inReplyTo: String) {}
+    override suspend fun sendImage(data: ByteArray, filename: String, mimeType: String, caption: String?) {}
+    override suspend fun sendFile(data: ByteArray, filename: String, mimeType: String, caption: String?) {}
+    override suspend fun markAsRead() {}
 }
