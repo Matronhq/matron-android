@@ -6,6 +6,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import chat.matron.android.journal.JournalEventType
 import java.io.File
 
 /// Room database backing the journal mirror. Schema v1 already includes
@@ -20,6 +21,8 @@ import java.io.File
 ///
 /// v3 adds the summaries-TOC table (matron-apple's v4): one row per bridge
 /// `summary` journal event; the event's seq doubles as the transcript anchor.
+/// Unlike the Apple migration, it also backfills the table from `summary`
+/// events already stored in `event` (see MIGRATION_2_3).
 @Database(
     entities = [
         ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
@@ -67,6 +70,34 @@ abstract class MatronDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_summary_entry_convo_id` ON `summary_entry` (`convo_id`)"
                 )
+                // Backfill from `summary` events already in the mirror: they
+                // sit at/below the sync cursor, so no ingest path will ever
+                // re-process them — without this pass, summaries received
+                // before the upgrade never appear in the TOC (bugbot
+                // "Migration skips existing summaries"). Reuses the live
+                // ingest path's accept/skip contract ([SummaryEntryEntity.from]:
+                // only `summary` frames with a non-empty `toc`), parsing the
+                // payload in Kotlin rather than SQLite's json_extract (JSON1
+                // availability varies by API level). Diverges from
+                // matron-apple's v4 migration, which creates the table empty
+                // and has the same gap.
+                db.query(
+                    "SELECT `seq`, `convo_id`, `ts`, `sender`, `type`, `payload` FROM `event` WHERE `type` = ?",
+                    arrayOf(JournalEventType.SUMMARY),
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val event = EventEntity(
+                            seq = cursor.getLong(0), convoID = cursor.getString(1), ts = cursor.getLong(2),
+                            sender = cursor.getString(3), type = cursor.getString(4), payload = cursor.getString(5),
+                        ).toJournalEvent()
+                        val entry = SummaryEntryEntity.from(event) ?: continue
+                        db.execSQL(
+                            "INSERT OR IGNORE INTO `summary_entry` " +
+                                "(`convo_id`, `seq`, `toc`, `detail`, `created_at`) VALUES (?, ?, ?, ?, ?)",
+                            arrayOf(entry.convoID, entry.seq, entry.toc, entry.detail, entry.createdAt),
+                        )
+                    }
+                }
             }
         }
 

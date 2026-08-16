@@ -115,4 +115,39 @@ class MatronDatabaseMigrationTest {
             file.delete()
         }
     }
+
+    /// MIGRATION_2_3's backfill (bugbot "Migration skips existing summaries"):
+    /// `summary` events already in the mirror sit at/below the sync cursor, so
+    /// no ingest path ever re-processes them — the migration itself must
+    /// project them into `summary_entry`, applying the live path's accept/skip
+    /// contract (only `summary` frames with a non-empty `toc`).
+    @Test
+    fun migrationBackfillsSummaryEntriesFromStoredEvents() = runBlocking {
+        val file = File.createTempFile("migration-test", ".sqlite").also { it.delete() }
+        buildV2(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            // Valid summary → backfilled.
+            db.execSQL(
+                "INSERT INTO event VALUES (3, 'c1', 3000, 'agent:a', 'summary', " +
+                    "'{\"toc\": \"Fixed the build\", \"detail\": \"Pinned the toolchain\"}')"
+            )
+            // Empty toc → skipped, exactly like the live ingest path.
+            db.execSQL("INSERT INTO event VALUES (4, 'c1', 4000, 'agent:a', 'summary', '{\"toc\": \"\"}')")
+            // Non-summary → skipped.
+            db.execSQL("INSERT INTO event VALUES (5, 'c1', 5000, 'user:dan', 'text', '{\"body\": \"hi\"}')")
+        }
+
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:dan")
+            val entries = store.summaryEntries("c1")
+            assertEquals(listOf(3L), entries.map { it.seq })
+            assertEquals("Fixed the build", entries.single().toc)
+            assertEquals("Pinned the toolchain", entries.single().detail)
+            assertEquals(3000L, entries.single().createdAt)
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
 }
