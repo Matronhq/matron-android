@@ -106,6 +106,25 @@ interface EventDao {
 }
 
 @Dao
+interface SummaryEntryDao {
+    /// Idempotent on the (convo_id, seq) key: replay/pagination can hand the
+    /// same summary event to the store more than once.
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIgnore(entry: SummaryEntryEntity)
+
+    /// TOC entries for one conversation, newest first — the summaries sheet's
+    /// display order.
+    @Query("SELECT * FROM summary_entry WHERE convo_id = :convoID ORDER BY seq DESC")
+    suspend fun forConversation(convoID: String): List<SummaryEntryEntity>
+
+    @Query("SELECT * FROM summary_entry WHERE convo_id = :convoID ORDER BY seq DESC")
+    fun forConversationFlow(convoID: String): Flow<List<SummaryEntryEntity>>
+
+    @Query("DELETE FROM summary_entry")
+    suspend fun deleteAll()
+}
+
+@Dao
 interface OutboxDao {
     /// Idempotent on `local_id` so a retry racing the original insert can't
     /// duplicate the row.

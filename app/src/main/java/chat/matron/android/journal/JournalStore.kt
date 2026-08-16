@@ -6,6 +6,7 @@ import chat.matron.android.journal.db.EventEntity
 import chat.matron.android.journal.db.MatronDatabase
 import chat.matron.android.journal.db.MetaEntity
 import chat.matron.android.journal.db.OutboxEntity
+import chat.matron.android.journal.db.SummaryEntryEntity
 import kotlin.math.max
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -34,6 +35,7 @@ class JournalStore(
     private val eventDao = db.eventDao()
     private val metaDao = db.metaDao()
     private val outboxDao = db.outboxDao()
+    private val summaryEntryDao = db.summaryEntryDao()
 
     /// Test-only failure injection, checked before the transaction opens so the
     /// cursor is left untouched on a simulated failure — the same shape a real
@@ -126,6 +128,7 @@ class JournalStore(
         val current = metaDao.value(CURSOR_KEY)?.toLongOrNull() ?: 0
         if (event.seq <= current) return false
         eventDao.insertReplace(EventEntity.from(event))
+        SummaryEntryEntity.from(event)?.let { summaryEntryDao.insertIgnore(it) }
 
         var convo = conversationDao.byId(event.convoID) ?: ConversationEntity(
             id = event.convoID, title = "", sessionState = SessionState.RUNNING, lastSeq = 0,
@@ -196,7 +199,10 @@ class JournalStore(
 
     suspend fun insertHistory(events: List<JournalEvent>) {
         db.withTransaction {
-            for (e in events) eventDao.insertIgnore(EventEntity.from(e))
+            for (e in events) {
+                eventDao.insertIgnore(EventEntity.from(e))
+                SummaryEntryEntity.from(e)?.let { summaryEntryDao.insertIgnore(it) }
+            }
             // A post-snapshot refill can contain the frames that confirm
             // pre-wipe outbox sends: applyColdSnapshot jumps the cursor past
             // them, so applyJournal will never see them again and the rows
@@ -258,6 +264,11 @@ class JournalStore(
 
     suspend fun conversationExists(convoID: String): Boolean = conversationDao.exists(convoID)
 
+    /// TOC entries for one conversation, newest first — the summaries sheet's
+    /// one-shot read. Port of the Apple `summaryEntries(convoID:)`.
+    suspend fun summaryEntries(convoID: String): List<SummaryEntryEntity> =
+        summaryEntryDao.forConversation(convoID)
+
     suspend fun minSeq(convoID: String): Long? = eventDao.minSeq(convoID)
 
     suspend fun maxSeq(convoID: String): Long? = eventDao.maxSeq(convoID)
@@ -291,6 +302,7 @@ class JournalStore(
             eventDao.deleteAll()
             conversationDao.deleteAll()
             metaDao.deleteAll()
+            summaryEntryDao.deleteAll()
         }
     }
 
@@ -392,6 +404,11 @@ class JournalStore(
     /// first). The timeline renders these as pending/failed echoes; re-fires on
     /// enqueue, state change, and delivery-confirmed delete.
     fun outboxFlow(convoID: String): Flow<List<OutboxEntity>> = outboxDao.forConversationFlow(convoID)
+
+    /// Live stream of one conversation's TOC entries, newest first. Port of the
+    /// Apple `summaryEntriesStream(convoID:)` (ValueObservation → Room Flow).
+    fun summaryEntriesFlow(convoID: String): Flow<List<SummaryEntryEntity>> =
+        summaryEntryDao.forConversationFlow(convoID)
 
     // MARK: Tool-output TTL
 

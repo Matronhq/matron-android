@@ -17,9 +17,15 @@ import java.io.File
 /// reach the server yet persist here (surviving relaunch and the
 /// `snapshot_required` mirror wipe — see `JournalStore.wipe`) and flush FIFO
 /// on reconnect.
+///
+/// v3 adds the summaries-TOC table (matron-apple's v4): one row per bridge
+/// `summary` journal event; the event's seq doubles as the transcript anchor.
 @Database(
-    entities = [ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class],
-    version = 2,
+    entities = [
+        ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
+        SummaryEntryEntity::class,
+    ],
+    version = 3,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -27,6 +33,7 @@ abstract class MatronDatabase : RoomDatabase() {
     abstract fun eventDao(): EventDao
     abstract fun metaDao(): MetaDao
     abstract fun outboxDao(): OutboxDao
+    abstract fun summaryEntryDao(): SummaryEntryDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -46,10 +53,27 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `summary_entry` (" +
+                        "`convo_id` TEXT NOT NULL, " +
+                        "`seq` INTEGER NOT NULL, " +
+                        "`toc` TEXT NOT NULL, " +
+                        "`detail` TEXT NOT NULL, " +
+                        "`created_at` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`convo_id`, `seq`))"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_summary_entry_convo_id` ON `summary_entry` (`convo_id`)"
+                )
+            }
+        }
+
         /// Production, file-backed at the given path.
         fun open(context: Context, file: File): MatronDatabase =
             Room.databaseBuilder(context.applicationContext, MatronDatabase::class.java, file.absolutePath)
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
 
         /// Test/ephemeral, memory-backed. Cleared when the last connection closes.

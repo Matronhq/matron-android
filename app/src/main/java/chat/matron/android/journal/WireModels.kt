@@ -28,6 +28,11 @@ object JournalEventType {
     /// Conversation metadata (title, etc.). Carries no message body.
     const val CONVO_META = "convo_meta"
 
+    /// One bridge summary pass — a TOC entry anchored at its own seq.
+    /// Deliberately NOT in [MESSAGE_TYPES]: no snippet, no unread bump, no
+    /// activity timestamp (the journal server applies the same exclusion).
+    const val SUMMARY = "summary"
+
     /// Infix in a subagent child's convo id: `<parent>:sub:<agentId>`.
     const val CHILD_CONVO_INFIX = ":sub:"
 

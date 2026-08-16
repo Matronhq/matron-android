@@ -586,4 +586,68 @@ class JournalStoreTest {
         assertTrue(store.applyJournalBatch(emptyList()).isEmpty())
         assertEquals(0L, store.cursor())
     }
+
+    // MARK: Summary TOC entries (matron-apple #124 port)
+
+    private fun summaryEv(seq: Long, convo: String = "c1") = ev(
+        seq, convo = convo, type = "summary",
+        payload = buildJsonObject {
+            put("toc", "Did thing $seq"); put("detail", "Detail $seq"); put("model", "gpt-5.6-luna")
+        },
+    )
+
+    /// Port of matron-apple `JournalStoreTests.testSummaryEventPopulatesSummaryEntryTable`.
+    @Test
+    fun summaryEventPopulatesSummaryEntryTable() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(ev(1))
+        store.applyJournal(summaryEv(2))
+        val entries = store.summaryEntries("c1")
+        assertEquals(listOf(2L), entries.map { it.seq })
+        assertEquals("Did thing 2", entries[0].toc)
+        assertEquals("Detail 2", entries[0].detail)
+    }
+
+    /// Port of matron-apple `JournalStoreTests.testSummaryLandsViaBatchAndHistoryPaths`.
+    @Test
+    fun summaryLandsViaBatchAndHistoryPaths() = runBlocking {
+        val store = makeStore()
+        store.applyJournalBatch(listOf(ev(1), summaryEv(2)))
+        store.insertHistory(listOf(summaryEv(0)))                    // pagination backfill, older seq
+        assertEquals(listOf(2L, 0L), store.summaryEntries("c1").map { it.seq }) // newest first
+    }
+
+    /// Port of matron-apple `JournalStoreTests.testSummaryDoesNotTouchSnippetOrUnread`:
+    /// summary is not a MESSAGE_TYPE, so the chat list must not move on one.
+    @Test
+    fun summaryDoesNotTouchSnippetOrUnread() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(ev(1))                                    // text, sets snippet
+        val before = store.conversations().first { it.id == "c1" }
+        store.applyJournal(summaryEv(2))
+        val after = store.conversations().first { it.id == "c1" }
+        assertEquals(before.snippet, after.snippet)
+        assertEquals(before.unreadCount, after.unreadCount)
+    }
+
+    /// A payload without a usable `toc` publishes no TOC row (the Apple
+    /// `SummaryEntryRecord(event:)` failable-init contract) — but the event
+    /// itself still lands and advances the cursor.
+    @Test
+    fun summaryWithoutTocIsStoredButNotIndexed() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(ev(1, type = "summary", payload = buildJsonObject { put("detail", "d") }))
+        assertTrue(store.summaryEntries("c1").isEmpty())
+        assertEquals(1L, store.cursor())
+        assertEquals(listOf(1L), store.events("c1").map { it.seq })
+    }
+
+    /// Port of matron-apple `JournalStoreTests.testWipeClearsSummaryEntries`.
+    @Test
+    fun wipeClearsSummaryEntries() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(summaryEv(2))
+        store.wipe()
+        assertTrue(store.summaryEntries("c1").isEmpty())
+    }
 }
