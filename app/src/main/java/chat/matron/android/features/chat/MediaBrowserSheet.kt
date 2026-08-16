@@ -35,7 +35,8 @@ import kotlinx.coroutines.launch
 /// and routes taps into the same paths the timeline uses —
 ///
 /// - images: fetch (spinner while in flight, re-taps join the running fetch)
-///   → [AttachmentFullscreenViewer];
+///   → [AttachmentFullscreenViewer]; a transient fetch failure surfaces the
+///   shared error banner (`writeTempFile`'s contract, applied to media);
 /// - files: `ChatViewModel.writeTempFile` (shared digest-namespaced temp
 ///   cache + `downloadingFiles` spinner) → [openAttachment]. Where iOS
 ///   previews in-app via QuickLook (apple #143/#144), Android has no
@@ -73,6 +74,10 @@ fun MediaBrowserSheet(
     // Surfaced here because the timeline's banner (TimelineList) sits behind
     // this sheet — a failed download would otherwise be a silent dead tap.
     val attachmentError by chatVM.attachmentError.collectAsStateWithLifecycle()
+    // The sheet's own media-open failures — a media-cell tap whose fetch
+    // failed transiently would otherwise clear its spinner and read as dead,
+    // exactly the hazard the file path's writeTempFile contract covers.
+    val browserError by vm.attachmentError.collectAsStateWithLifecycle()
 
     /// Media URLs whose full-size fetch is currently in flight — guards the
     /// image tap against re-entrant taps and drives the grid cell's spinner.
@@ -122,8 +127,10 @@ fun MediaBrowserSheet(
                             try {
                                 // Same bytes/cache as the grid thumbnail (the
                                 // VM caches the full fetch); the viewer's Coil
-                                // load decodes them at screen size.
-                                vm.thumbnail(url)?.let { preview = it }
+                                // load decodes them at screen size. A transient
+                                // failure sets the VM's attachmentError (the
+                                // banner below) so the tap isn't a dead one.
+                                vm.openMedia(url)?.let { preview = it }
                             } finally {
                                 openingMedia = openingMedia - url
                             }
@@ -147,7 +154,7 @@ fun MediaBrowserSheet(
             )
         }
 
-        attachmentError?.let { message ->
+        (attachmentError ?: browserError)?.let { message ->
             androidx.compose.material3.Surface(
                 color = MaterialTheme.colorScheme.errorContainer,
                 modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),

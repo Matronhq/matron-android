@@ -229,6 +229,40 @@ class MediaBrowserViewModelTest {
         assertEquals("second ask must hit the cache", 1, media.requestCount)
     }
 
+    /// Bugbot (PR #45): a media-cell tap that hit a transient fetch failure
+    /// used to clear its spinner and stop — no viewer, no error. [openMedia]
+    /// must surface the failure the way `writeTempFile` does for file taps.
+    @Test
+    fun openMedia_transientFailure_setsAttachmentError() = vmTest { scope ->
+        val vm = makeVM(scope, media = FixedOutcomeMedia(MediaFetchOutcome.Failure))
+        assertNull(vm.attachmentError.value)
+        assertNull(vm.openMedia(mediaURL))
+        assertEquals(
+            "Couldn't open image — check your connection and try again.",
+            vm.attachmentError.value,
+        )
+        vm.dismissAttachmentError()
+        assertNull(vm.attachmentError.value)
+    }
+
+    /// A 404 is not a banner case: the cell flips to Expired and that is the
+    /// feedback — the same permanent/transient split as `writeTempFile`'s.
+    @Test
+    fun openMedia_notFound_expiresWithoutError() = vmTest { scope ->
+        val vm = makeVM(scope, media = FixedOutcomeMedia(MediaFetchOutcome.NotFound))
+        assertNull(vm.openMedia(mediaURL))
+        assertTrue(vm.isUnavailable(mediaURL))
+        assertNull("a permanent expiry must not raise the transient banner", vm.attachmentError.value)
+    }
+
+    @Test
+    fun openMedia_success_returnsBytes_withoutError() = vmTest { scope ->
+        val media = FixedOutcomeMedia(MediaFetchOutcome.Data("png-bytes".toByteArray()))
+        val vm = makeVM(scope, media = media)
+        assertNotNull(vm.openMedia(mediaURL))
+        assertNull(vm.attachmentError.value)
+    }
+
     /// Ports apple #142 `test_thumbnail_overlappingCalls_coalesceToOneFetch_data`.
     @Test
     fun thumbnail_overlappingCalls_coalesceToOneFetch_data() = vmTest { scope ->

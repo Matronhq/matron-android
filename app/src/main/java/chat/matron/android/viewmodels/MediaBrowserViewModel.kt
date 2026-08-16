@@ -82,6 +82,18 @@ class MediaBrowserViewModel(
     private val _unavailableMedia = MutableStateFlow<Set<String>>(emptySet())
     val unavailableMedia: StateFlow<Set<String>> = _unavailableMedia.asStateFlow()
 
+    /// Error copy for a tapped open that failed transiently — the sheet shows
+    /// it in the same banner surface as `ChatViewModel.attachmentError` (the
+    /// file-tap twin). Set only by [openMedia], never by the grid's passive
+    /// [thumbnail] loads: a background thumbnail miss renders as a
+    /// placeholder, not a banner.
+    private val _attachmentError = MutableStateFlow<String?>(null)
+    val attachmentError: StateFlow<String?> = _attachmentError.asStateFlow()
+
+    fun dismissAttachmentError() {
+        _attachmentError.value = null
+    }
+
     /// Fetched thumbnail bytes, bounded LRU (see the class doc note on the
     /// downscale adaptation).
     private val thumbnails = LRUCache<String, ByteArray>(THUMBNAIL_CACHE_LIMIT)
@@ -170,6 +182,20 @@ class MediaBrowserViewModel(
         }
         inFlight[url] = task
         return task.await()
+    }
+
+    /// Tap-path wrapper around [thumbnail] for opening a grid cell full-size:
+    /// same bytes/cache/coalescing, but a *transient* failure (`null` on a
+    /// still-available URL) sets [attachmentError] so the tap doesn't read as
+    /// dead — `ChatViewModel.writeTempFile`'s contract for file taps. A 404
+    /// stays banner-free: [markExpired] flips the cell and that is the
+    /// feedback (same split as `writeTempFile`).
+    suspend fun openMedia(url: String): ByteArray? {
+        val bytes = thumbnail(url)
+        if (bytes == null && url !in _unavailableMedia.value) {
+            _attachmentError.value = "Couldn't open image — check your connection and try again."
+        }
+        return bytes
     }
 
     /// A 404-discovered expiry: record the URL as gone and flip every entry
