@@ -29,6 +29,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -733,9 +734,14 @@ class ChatViewModel(
         // Re-tap while the (multi-second) download is still running: a no-op,
         // not a second parallel download. The chip's spinner (driven by
         // [isDownloadingFile]) is the "hold on" signal — deliberately no
-        // [attachmentError] here.
-        if (url in _downloadingFiles.value) return null
-        _downloadingFiles.value += url
+        // [attachmentError] here. `update` makes the check-and-claim atomic
+        // so two concurrent callers can't both pass the guard.
+        var claimed = false
+        _downloadingFiles.update { current ->
+            claimed = url !in current
+            if (claimed) current + url else current
+        }
+        if (!claimed) return null
         try {
             val bytes: ByteArray
             when (val outcome = media.fetchOutcome(url)) {
@@ -771,7 +777,7 @@ class ChatViewModel(
             }
             return written
         } finally {
-            _downloadingFiles.value -= url
+            _downloadingFiles.update { it - url }
         }
     }
 
@@ -931,14 +937,6 @@ class ChatViewModel(
             return null
         }
 
-        /// Strip path-traversal and directory-separator components from an
-        /// event-attached filename — it arrives from event metadata, which is
-        /// attacker-controllable, so a malicious sender must not be able to
-        /// craft `../../foo` to escape the attachments dir. Keeps the basename
-        /// for human-friendly open/share labels; inputs that reduce to an
-        /// empty or `.`/`..`-only string fall back to a UUID so the write
-        /// always lands inside the attachments dir. Test seam: `internal` so
-        /// tests can assert the contract without hitting disk.
         /// First 8 bytes of the URL's SHA-256, hex — the per-attachment temp
         /// subdirectory name (mirrors the Swift port's CryptoKit digest,
         /// apple #138). Test seam: `internal` so the keying contract can be
@@ -947,8 +945,16 @@ class ChatViewModel(
             java.security.MessageDigest.getInstance("SHA-256")
                 .digest(url.toByteArray(Charsets.UTF_8))
                 .take(8)
-                .joinToString("") { "%02x".format(it) }
+                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
+        /// Strip path-traversal and directory-separator components from an
+        /// event-attached filename — it arrives from event metadata, which is
+        /// attacker-controllable, so a malicious sender must not be able to
+        /// craft `../../foo` to escape the attachments dir. Keeps the basename
+        /// for human-friendly open/share labels; inputs that reduce to an
+        /// empty or `.`/`..`-only string fall back to a UUID so the write
+        /// always lands inside the attachments dir. Test seam: `internal` so
+        /// tests can assert the contract without hitting disk.
         internal fun sanitisedAttachmentFilename(raw: String): String {
             // Basename drops any directory tree the sender embedded; handle
             // both separator styles (Windows-style senders send `\`).

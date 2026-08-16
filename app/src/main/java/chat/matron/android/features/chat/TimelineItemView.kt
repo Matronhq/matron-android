@@ -153,6 +153,7 @@ private fun RenderedBody(
             // (apple #138/#139).
             val isExpired = attachmentIsExpired(kind.expired, kind.url, isMediaUnavailable)
             val isLoading = attachmentIsLoading(isExpired, kind.url, isDownloadingFile)
+            val fileURL = kind.url
             MessageBubble(style = style, timestamp = item.timestamp) {
                 AttachmentFile(
                     filename = kind.filename,
@@ -160,7 +161,7 @@ private fun RenderedBody(
                     caption = kind.caption,
                     isLoading = isLoading,
                     isExpired = isExpired,
-                    onTap = if (kind.url != null && onTapFile != null) ({ onTapFile(kind.url!!, kind.filename) }) else null,
+                    onTap = if (fileURL != null && onTapFile != null) ({ onTapFile(fileURL, kind.filename) }) else null,
                 )
             }
         }
