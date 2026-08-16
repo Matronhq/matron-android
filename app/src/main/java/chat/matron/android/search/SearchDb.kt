@@ -88,6 +88,9 @@ interface SearchDao {
     @Query("SELECT backfill_complete FROM indexed_rooms WHERE room_id = :roomId")
     suspend fun backfillComplete(roomId: String): Boolean?
 
+    @Query("SELECT backfill_oldest_event_id FROM indexed_rooms WHERE room_id = :roomId")
+    suspend fun backfillOldestEventId(roomId: String): String?
+
     @Query("DELETE FROM indexed_rooms")
     suspend fun deleteAllRooms()
 }

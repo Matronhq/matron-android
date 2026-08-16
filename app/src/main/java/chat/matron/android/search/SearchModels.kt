@@ -18,3 +18,14 @@ data class BackfillProgress(
     val eventsIndexed: Int,
     val isComplete: Boolean,
 )
+
+/// One row for [SearchService.indexBatch]. Ported from matron-apple's
+/// `SearchIndexEntry` (Apple PR #130): a value the backfill coordinator can
+/// assemble per page so the whole page lands in ONE write transaction.
+data class SearchIndexEntry(
+    val roomID: String,
+    val eventID: String,
+    val sender: String,
+    val timestamp: Instant,
+    val body: String,
+)

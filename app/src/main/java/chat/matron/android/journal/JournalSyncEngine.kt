@@ -68,6 +68,16 @@ sealed class RPCRequestError(message: String) : Exception(message) {
 /// [chat.matron.android.search.SearchServiceLive] indexes every applied event on the fly.
 interface SearchIndexer {
     suspend fun index(roomID: String, eventID: String, sender: String, timestamp: Instant, body: String)
+
+    /// Clears all backfill bookkeeping while keeping the indexed messages.
+    /// Called when the local journal mirror re-bootstraps from a snapshot
+    /// (`coldStartIfNeeded`): the unbridgeable replay gap means "complete"
+    /// flags may now hide head-side holes, so the backfill sweep must re-walk
+    /// every room from its newest page (cheap — already-indexed rows are
+    /// re-indexed idempotently). Ported from matron-apple's
+    /// `SearchService.resetBackfill`. Default no-op so indexing-only fakes
+    /// stay small; [chat.matron.android.search.SearchServiceLive] overrides.
+    suspend fun resetBackfill() {}
 }
 
 /// The single writer of the [JournalStore] and owner of the reconnect loop.
@@ -926,6 +936,14 @@ class JournalSyncEngine(
         if (!(store.cursor() == 0L && emptyConvos)) return
         val snapshot = api.snapshot()
         store.applyColdSnapshot(snapshot.conversations, snapshot.seq)
+        // Cold snapshot means the events between the old cursor and the
+        // snapshot head were never live-indexed, so any persisted "backfill
+        // complete" flags may now hide head-side holes. Reset the bookkeeping
+        // (messages stay indexed) so the backfill sweep re-walks every
+        // conversation from its head. Best-effort: a failed reset just leaves
+        // search coverage where it was. Ported from matron-apple's
+        // `JournalSyncEngine` cold-start reset.
+        search?.let { runCatching { it.resetBackfill() } }
     }
 
     /// Production liveness rides OkHttp's protocol-level `pingInterval`

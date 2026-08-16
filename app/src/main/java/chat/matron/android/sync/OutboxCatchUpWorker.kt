@@ -1,6 +1,5 @@
 package chat.matron.android.sync
 
-import android.app.ActivityManager
 import android.content.Context
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
@@ -44,14 +43,7 @@ class OutboxCatchUpWorker(
      * down would kill the socket under the live UI (its `sync.start()` call
      * was a no-op against the worker-started engine).
      */
-    private fun isAppInForeground(): Boolean {
-        val am = applicationContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-            ?: return false
-        val myPid = android.os.Process.myPid()
-        return am.runningAppProcesses?.any {
-            it.pid == myPid && it.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
-        } ?: false
-    }
+    private fun isAppInForeground(): Boolean = isAppProcessInForeground(applicationContext)
 
     companion object {
         /** Mirrors the iOS BGTaskScheduler identifier for grep-ability. */

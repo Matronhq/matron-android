@@ -34,6 +34,30 @@ class SearchServiceLive(private val db: SearchDatabase) : SearchService {
         }
     }
 
+    override suspend fun indexBatch(entries: List<SearchIndexEntry>) {
+        if (entries.isEmpty()) return
+        // ONE transaction (and one fsync) for the whole batch — the backfill
+        // coordinator hands over a full fetched page at a time, and per-row
+        // transactions made that hundreds of journal commits (Apple PR #130's
+        // 2026-08-10 disk-write blowup). Same delete-then-insert idempotency
+        // as [index], just amortised over one commit.
+        db.withTransaction {
+            for (entry in entries) {
+                dao.rowidFor(entry.eventID)?.let { dao.deleteByRowid(it) }
+                dao.insertMessage(
+                    MessageFtsEntity(
+                        rowid = null,
+                        roomId = entry.roomID,
+                        eventId = entry.eventID,
+                        sender = entry.sender,
+                        timestamp = entry.timestamp.epochSecond,
+                        body = entry.body,
+                    )
+                )
+            }
+        }
+    }
+
     override suspend fun remove(eventID: String) {
         dao.rowidFor(eventID)?.let { dao.deleteByRowid(it) }
     }
@@ -75,6 +99,13 @@ class SearchServiceLive(private val db: SearchDatabase) : SearchService {
     }
 
     override suspend fun backfillComplete(roomID: String): Boolean = dao.backfillComplete(roomID) ?: false
+
+    override suspend fun backfillOldestEventID(roomID: String): String? = dao.backfillOldestEventId(roomID)
+
+    /// Bookkeeping only — indexed messages stay (see [SearchIndexer.resetBackfill]).
+    override suspend fun resetBackfill() {
+        dao.deleteAllRooms()
+    }
 
     override suspend fun eventCount(roomID: String): Int = dao.countForRoom(roomID)
 
