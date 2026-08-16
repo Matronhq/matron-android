@@ -94,6 +94,15 @@ class MediaBrowserViewModel(
         _attachmentError.value = null
     }
 
+    /// Monotonic counter bumped whenever a fetch lands new bytes in the cache.
+    /// The grid keys its cell loaders on it, so a cell whose own fetch failed
+    /// transiently retries once any later fetch succeeds (a full-size open via
+    /// [openMedia], another cell's load) instead of sitting on the placeholder
+    /// until the cell happens to leave and re-enter composition. Never bumped
+    /// on failure — that would re-key the loaders into a retry loop.
+    private val _cacheVersion = MutableStateFlow(0)
+    val cacheVersion: StateFlow<Int> = _cacheVersion.asStateFlow()
+
     /// Fetched thumbnail bytes, bounded LRU (see the class doc note on the
     /// downscale adaptation).
     private val thumbnails = LRUCache<String, ByteArray>(THUMBNAIL_CACHE_LIMIT)
@@ -167,6 +176,7 @@ class MediaBrowserViewModel(
             val result: ByteArray? = when (val outcome = media.fetchOutcome(url)) {
                 is MediaFetchOutcome.Data -> {
                     thumbnails[url] = outcome.bytes
+                    _cacheVersion.value += 1
                     outcome.bytes
                 }
                 MediaFetchOutcome.NotFound -> {

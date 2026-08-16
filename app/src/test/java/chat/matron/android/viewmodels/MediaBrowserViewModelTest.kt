@@ -229,6 +229,27 @@ class MediaBrowserViewModelTest {
         assertEquals("second ask must hit the cache", 1, media.requestCount)
     }
 
+    /// Bugbot (PR #45): the grid keys its cell loaders on [MediaBrowserViewModel.cacheVersion]
+    /// so a transiently-failed cell retries once a later fetch succeeds.
+    /// Success bumps it; failures and cache hits must not (a failure bump
+    /// would re-key the loaders into a retry loop).
+    @Test
+    fun cacheVersion_bumpsOnNewBytesOnly() = vmTest { scope ->
+        val failing = makeVM(scope, media = FixedOutcomeMedia(MediaFetchOutcome.Failure))
+        assertNull(failing.thumbnail(mediaURL))
+        assertEquals("a transient failure must not bump the version", 0, failing.cacheVersion.value)
+
+        val reaped = makeVM(scope, media = FixedOutcomeMedia(MediaFetchOutcome.NotFound))
+        assertNull(reaped.thumbnail(mediaURL))
+        assertEquals("a 404 must not bump the version", 0, reaped.cacheVersion.value)
+
+        val succeeding = makeVM(scope, media = FixedOutcomeMedia(MediaFetchOutcome.Data("png".toByteArray())))
+        assertNotNull(succeeding.thumbnail(mediaURL))
+        assertEquals("new cache bytes bump the version", 1, succeeding.cacheVersion.value)
+        succeeding.thumbnail(mediaURL)
+        assertEquals("a cache hit lands no new bytes — no bump", 1, succeeding.cacheVersion.value)
+    }
+
     /// Bugbot (PR #45): a media-cell tap that hit a transient fetch failure
     /// used to clear its spinner and stop — no viewer, no error. [openMedia]
     /// must surface the failure the way `writeTempFile` does for file taps.

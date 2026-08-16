@@ -73,6 +73,10 @@ fun MediaBrowserSheet(
     // failed transiently would otherwise clear its spinner and read as dead,
     // exactly the hazard the file path's writeTempFile contract covers.
     val browserError by vm.attachmentError.collectAsStateWithLifecycle()
+    // Re-keys the grid's still-empty cells whenever a fetch lands new bytes,
+    // so a transiently-failed thumbnail refills after a later success (e.g.
+    // tapping the cell open) instead of staying a placeholder.
+    val thumbnailVersion by vm.cacheVersion.collectAsStateWithLifecycle()
 
     /// Media URLs whose full-size fetch is currently in flight — guards the
     /// image tap against re-entrant taps and drives the grid cell's spinner.
@@ -114,6 +118,7 @@ fun MediaBrowserSheet(
                 modifier = Modifier.fillMaxSize(),
                 loadFailed = loadFailed,
                 thumbnail = { url -> vm.thumbnail(url) },
+                thumbnailVersion = thumbnailVersion,
                 onMediaTap = { cell ->
                     val url = cell.url
                     if (url != null && !cell.expired && url !in openingMedia) {

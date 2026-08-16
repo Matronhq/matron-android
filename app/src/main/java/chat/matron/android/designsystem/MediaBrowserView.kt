@@ -29,9 +29,9 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -99,6 +99,10 @@ fun MediaBrowserView(
     loadFailed: Boolean = false,
     initialTab: MediaBrowserTab = MediaBrowserTab.Media,
     thumbnail: suspend (String) -> ByteArray? = { null },
+    /// Bumped by the caller when [thumbnail]'s backing cache gains new bytes —
+    /// re-keys the loaders of still-empty cells so a transiently-failed
+    /// placeholder retries after a later successful fetch.
+    thumbnailVersion: Int = 0,
     onMediaTap: (MediaBrowserMediaCell) -> Unit = {},
     onFileTap: (MediaBrowserFileRow) -> Unit = {},
     onLinkTap: (MediaBrowserLinkRow) -> Unit = {},
@@ -119,7 +123,7 @@ fun MediaBrowserView(
                 BrowserEmptyState(label = MEDIA_BROWSER_LOAD_FAILED_LABEL, icon = Icons.Filled.Warning)
             } else {
                 when (tab) {
-                    MediaBrowserTab.Media -> MediaGrid(media, thumbnail, onMediaTap)
+                    MediaBrowserTab.Media -> MediaGrid(media, thumbnail, thumbnailVersion, onMediaTap)
                     MediaBrowserTab.Files -> FileList(files, onFileTap)
                     MediaBrowserTab.Links -> LinkList(links, onLinkTap)
                 }
@@ -132,6 +136,7 @@ fun MediaBrowserView(
 private fun MediaGrid(
     media: List<MediaBrowserMediaCell>,
     thumbnail: suspend (String) -> ByteArray?,
+    thumbnailVersion: Int,
     onMediaTap: (MediaBrowserMediaCell) -> Unit,
 ) {
     if (media.isEmpty()) {
@@ -149,7 +154,12 @@ private fun MediaGrid(
         contentPadding = androidx.compose.foundation.layout.PaddingValues(2.dp),
     ) {
         items(media, key = { it.id }) { cell ->
-            MediaThumbCell(cell = cell, thumbnail = thumbnail, onTap = { onMediaTap(cell) })
+            MediaThumbCell(
+                cell = cell,
+                thumbnail = thumbnail,
+                thumbnailVersion = thumbnailVersion,
+                onTap = { onMediaTap(cell) },
+            )
         }
     }
 }
@@ -237,10 +247,17 @@ private fun LinkList(
 private fun MediaThumbCell(
     cell: MediaBrowserMediaCell,
     thumbnail: suspend (String) -> ByteArray?,
+    thumbnailVersion: Int,
     onTap: () -> Unit,
 ) {
-    val bytes by produceState<ByteArray?>(initialValue = null, cell.url, cell.expired) {
-        if (!cell.expired && cell.url != null) value = thumbnail(cell.url)
+    // Not produceState: a version bump must retry only still-empty cells (a
+    // one-shot transient failure otherwise pins the placeholder forever, even
+    // after the bytes land in the cache via a full-size open — Bugbot, PR
+    // #45), and restarting a producer would blank already-filled cells for a
+    // frame and refetch them.
+    var bytes by remember(cell.url) { mutableStateOf<ByteArray?>(null) }
+    LaunchedEffect(cell.url, cell.expired, thumbnailVersion) {
+        if (bytes == null && !cell.expired && cell.url != null) bytes = thumbnail(cell.url)
     }
     val description = mediaCellContentDescription(expired = cell.expired, isLoading = cell.isLoading)
     Box(
