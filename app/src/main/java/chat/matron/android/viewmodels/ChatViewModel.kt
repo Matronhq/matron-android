@@ -1,5 +1,6 @@
 package chat.matron.android.viewmodels
 
+import chat.matron.android.chat.MediaFetchOutcome
 import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineItem
 import chat.matron.android.chat.TimelineService
@@ -195,6 +196,17 @@ class ChatViewModel(
     /// Re-opening an attachment must not re-download a multi-MB blob the user
     /// just waited for.
     private val fileTempFiles = mutableMapOf<String, File>()
+
+    /// Media URLs (file OR image attachments) whose fetch returned a
+    /// definitive 404 — reaped server-side, permanently gone (apple #139).
+    /// Drives the chips' Expired rendering for events that synced BEFORE the
+    /// reap and so never carry the payload tombstone. Deliberately NOT cleared
+    /// when connectivity returns (unlike [failedRequests]) — blob ids are
+    /// immutable, so a 404 never becomes retryable. Unbounded like
+    /// [fileTempFiles], and bounded in practice by attachments this session
+    /// has actually tried to fetch.
+    private val _unavailableMedia = MutableStateFlow<Set<String>>(emptySet())
+    val unavailableMedia: StateFlow<Set<String>> = _unavailableMedia.asStateFlow()
 
     private val answeredPromptsKey = "matron.answeredPrompts.$roomID"
     private val answeredPromptIDs: MutableSet<String> =
@@ -660,12 +672,20 @@ class ChatViewModel(
     /// to [image] for that URL fetch again instead of short-circuiting.
     fun image(url: String): ByteArray? {
         resolvedImages[url]?.let { return it }
+        if (url in _unavailableMedia.value) return null
         if (failedRequests.contains(url)) return null
         if (inFlightRequests.contains(url)) return null
         inFlightRequests.add(url)
         scope.launch {
-            val bytes = media.image(url)
-            if (bytes != null) resolvedImages[url] = bytes else failedRequests[url] = Unit
+            // fetchOutcome, not image() — a reaped image's 404 must land in
+            // the permanent [unavailableMedia] set (drives the "Image expired"
+            // placeholder) rather than the retry-bounded [failedRequests] LRU
+            // that connectivity recovery clears (apple #139).
+            when (val outcome = media.fetchOutcome(url)) {
+                is MediaFetchOutcome.Data -> resolvedImages[url] = outcome.bytes
+                MediaFetchOutcome.NotFound -> _unavailableMedia.value += url
+                MediaFetchOutcome.Failure -> failedRequests[url] = Unit
+            }
             inFlightRequests.remove(url)
         }
         return null
@@ -678,6 +698,15 @@ class ChatViewModel(
     /// drives the timeline chip's spinner. [downloadingFiles] is the
     /// recomposition channel (the Swift port reads `@Observable` state here).
     fun isDownloadingFile(url: String): Boolean = url in _downloadingFiles.value
+
+    /// Whether a fetch for this attachment came back 404 — the blob was reaped
+    /// server-side (journal media reaper), which is permanent: blob ids are
+    /// immutable. Drives the chips' Expired state for events that synced
+    /// BEFORE the reap and so never carry the payload tombstone
+    /// ([TimelineItem.Kind.File.expired]) — the 404 on tap is how an
+    /// already-synced client learns. [unavailableMedia] is the recomposition
+    /// channel, same as [isDownloadingFile]'s (apple #139).
+    fun isMediaUnavailable(url: String): Boolean = url in _unavailableMedia.value
 
     /// Downloads a file attachment and writes it to
     /// `<directory>/matron-attachments/<url digest>/<sanitised filename>`,
@@ -694,6 +723,9 @@ class ChatViewModel(
     /// reaps the cache dir under storage pressure and the size cost is bounded
     /// by attachments the user has actively opened.
     suspend fun writeTempFile(url: String, filename: String, directory: File): File? {
+        // Known-reaped blob: no request — the server already said 404 and
+        // ids never come back. The chip's Expired state is the feedback.
+        if (url in _unavailableMedia.value) return null
         // Repeat open: serve the temp file written last time (the OS may have
         // reaped the cache dir between launches — fall through and re-download
         // if it's gone).
@@ -705,11 +737,22 @@ class ChatViewModel(
         if (url in _downloadingFiles.value) return null
         _downloadingFiles.value += url
         try {
-            val bytes = media.image(url)
-            if (bytes == null) {
-                MatronDebug.breadcrumb("writeTempFile: media fetch failed for $url")
-                _attachmentError.value = "Couldn't open \"$filename\" — check your connection and try again."
-                return null
+            val bytes: ByteArray
+            when (val outcome = media.fetchOutcome(url)) {
+                is MediaFetchOutcome.Data -> bytes = outcome.bytes
+                MediaFetchOutcome.NotFound -> {
+                    // Permanent: flip the chip to Expired and stop re-fetching
+                    // — no error banner, the chip itself says why (apple #139).
+                    MatronDebug.breadcrumb("writeTempFile: blob reaped (404) for $url")
+                    _unavailableMedia.value += url
+                    return null
+                }
+                MediaFetchOutcome.Failure -> {
+                    // Transient (network/auth): retryable, banner as before.
+                    MatronDebug.breadcrumb("writeTempFile: media fetch failed for $url")
+                    _attachmentError.value = "Couldn't open \"$filename\" — check your connection and try again."
+                    return null
+                }
             }
             val written = withContext(Dispatchers.IO) {
                 runCatching {

@@ -1,6 +1,7 @@
 package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.FakeTimelineService
+import chat.matron.android.chat.MediaFetchOutcome
 import chat.matron.android.chat.MediaService
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
@@ -52,6 +53,24 @@ private class GatedMediaService(private val result: ByteArray?) : MediaService {
 /// observation. Ported from apple #138's `DistinctBlobMediaService`.
 private class DistinctBlobMediaService(private val blobs: Map<String, ByteArray>) : MediaService {
     override suspend fun image(url: String): ByteArray? = blobs[url]
+}
+
+/// Test-only [MediaService] whose fetch outcome is fixed — for pinning how
+/// [ChatViewModel] maps a permanent 404 (reaped blob) vs a transient failure
+/// into the unavailable-media state. Ported from apple #139's
+/// `FixedOutcomeMediaService`.
+private class FixedOutcomeMediaService(private val outcome: MediaFetchOutcome) : MediaService {
+    var requestCount = 0
+        private set
+
+    // Unused after the attachment paths moved to fetchOutcome; kept minimal so
+    // the fake still satisfies the interface's designated requirement.
+    override suspend fun image(url: String): ByteArray? = null
+
+    override suspend fun fetchOutcome(url: String): MediaFetchOutcome {
+        synchronized(this) { requestCount++ }
+        return outcome
+    }
 }
 
 /// Pins the file-attachment download contract on [ChatViewModel]:
@@ -177,6 +196,71 @@ class FileAttachmentDownloadTest {
             "bytes-A".toByteArray().contentEquals(reopenedA!!.readBytes()),
         )
         assertTrue("bytes-B".toByteArray().contentEquals(pathB!!.readBytes()))
+    }
+
+    /// Ports apple #139 `test_writeTempFile_notFound_marksFileUnavailable_andStopsRefetching`.
+    @Test
+    fun writeTempFile_notFound_marksFileUnavailable_andStopsRefetching() = vmTest { scope ->
+        // A 404 means the blob was reaped server-side (journal media reaper) —
+        // permanent, since blob ids are immutable. The chip must flip to
+        // Expired (isMediaUnavailable) and later taps must not re-request.
+        val media = FixedOutcomeMediaService(MediaFetchOutcome.NotFound)
+        val vm = makeVM(scope, media)
+        assertFalse(vm.isMediaUnavailable(mxc))
+
+        assertNull(vm.writeTempFile(mxc, "a.pdf", tempRoot))
+        assertTrue("404 must mark the file unavailable", vm.isMediaUnavailable(mxc))
+        assertFalse(vm.isDownloadingFile(mxc))
+        // No banner either — the chip's Expired state is the feedback.
+        assertNull(vm.attachmentError.value)
+
+        assertNull(vm.writeTempFile(mxc, "a.pdf", tempRoot))
+        assertEquals("a permanently-gone blob must not be re-fetched", 1, media.requestCount)
+    }
+
+    /// Ports apple #139 `test_imageFetch404_marksMediaUnavailable_andStopsRefetching`.
+    @Test
+    fun imageFetch404_marksMediaUnavailable_andStopsRefetching() = vmTest { scope ->
+        // Images have their own resolution path (image(url) → resolved/failed
+        // LRUs) — a reaped image must reach the Expired state through it, not
+        // just via the file tap path (Bugbot on apple #139).
+        val media = FixedOutcomeMediaService(MediaFetchOutcome.NotFound)
+        val vm = makeVM(scope, media)
+
+        assertNull(vm.image(mxc))
+        waitUntil { vm.isMediaUnavailable(mxc) }
+        assertTrue("image 404 must mark the URL unavailable", vm.isMediaUnavailable(mxc))
+
+        assertNull(vm.image(mxc))
+        kotlinx.coroutines.delay(50)
+        assertEquals("a permanently-gone image must not be re-fetched", 1, media.requestCount)
+    }
+
+    /// Ports apple #139 `test_imageFetchTransientFailure_doesNotMarkMediaUnavailable`.
+    @Test
+    fun imageFetchTransientFailure_doesNotMarkMediaUnavailable() = vmTest { scope ->
+        val media = FixedOutcomeMediaService(MediaFetchOutcome.Failure)
+        val vm = makeVM(scope, media)
+        assertNull(vm.image(mxc))
+        waitUntil { media.requestCount == 1 }
+        kotlinx.coroutines.delay(50)
+        assertFalse("transient image failure must not read as expired", vm.isMediaUnavailable(mxc))
+        assertEquals(1, vm.failedRequestCount)
+    }
+
+    /// Ports apple #139 `test_writeTempFile_transientFailure_doesNotMarkUnavailable`.
+    @Test
+    fun writeTempFile_transientFailure_doesNotMarkUnavailable() = vmTest { scope ->
+        // Network blips must stay retryable — only a definitive 404 flips the
+        // permanent state.
+        val media = FixedOutcomeMediaService(MediaFetchOutcome.Failure)
+        val vm = makeVM(scope, media)
+
+        assertNull(vm.writeTempFile(mxc, "a.pdf", tempRoot))
+        assertFalse("transient failure must not read as expired", vm.isMediaUnavailable(mxc))
+
+        vm.writeTempFile(mxc, "a.pdf", tempRoot)
+        assertEquals("retry after transient failure must re-fetch", 2, media.requestCount)
     }
 
     /// Ports apple #138 `test_writeTempFile_failedFetch_returnsNil_andClearsDownloading`.

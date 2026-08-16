@@ -394,6 +394,9 @@ private fun TimelineRowView(
     // open/share fires — the download flips no timeline snapshot either
     // (port of apple #138).
     val downloadingFiles by chatVM.downloadingFiles.collectAsStateWithLifecycle()
+    // Collected so a 404 discovered at fetch time flips the chip/image to its
+    // Expired presentation without a timeline change (port of apple #139).
+    val unavailableMedia by chatVM.unavailableMedia.collectAsStateWithLifecycle()
     when (row) {
         is TimelineRow.Separator -> DateSeparator(label = DateSeparatorLabel.format(row.date))
         is TimelineRow.Message -> {
@@ -415,6 +418,7 @@ private fun TimelineRowView(
                     onTapImage = { model -> onPreviewImage(model) },
                     onTapFile = onTapFile,
                     isDownloadingFile = { url -> url in downloadingFiles },
+                    isMediaUnavailable = { url -> url in unavailableMedia },
                     askViewModel = { id -> chatVM.askViewModel(id) },
                     isPromptAnswered = { id -> chatVM.isPromptAnswered(id) },
                     answerSummary = { id -> chatVM.answerSummary(id) },

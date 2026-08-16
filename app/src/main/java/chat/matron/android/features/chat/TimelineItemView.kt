@@ -63,6 +63,10 @@ fun TimelineItemView(
     /// chip's spinner ([ChatViewModel.isDownloadingFile]). `null` keeps
     /// previews/tests compiling (port of apple #138).
     isDownloadingFile: ((String) -> Boolean)? = null,
+    /// Whether an attachment's blob came back 404 (reaped server-side) —
+    /// same lambda pattern as [isDownloadingFile], same recomposition channel
+    /// (port of apple #139).
+    isMediaUnavailable: ((String) -> Boolean)? = null,
     askViewModel: ((String) -> AskUserSheetViewModel?)? = null,
     isPromptAnswered: ((String) -> Boolean)? = null,
     answerSummary: ((String) -> String?)? = null,
@@ -81,8 +85,8 @@ fun TimelineItemView(
     if (item.isOwn && item.sendState != TimelineSendState.Sent) {
         Column(horizontalAlignment = Alignment.End) {
             RenderedBody(
-                item, resolveImage, onTapImage, onTapFile, isDownloadingFile, askViewModel,
-                isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
+                item, resolveImage, onTapImage, onTapFile, isDownloadingFile, isMediaUnavailable,
+                askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
             )
             SendStateIndicator(
                 state = sendStateGlyphFrom(item.sendState),
@@ -92,8 +96,8 @@ fun TimelineItemView(
         }
     } else {
         RenderedBody(
-            item, resolveImage, onTapImage, onTapFile, isDownloadingFile, askViewModel,
-            isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
+            item, resolveImage, onTapImage, onTapFile, isDownloadingFile, isMediaUnavailable,
+            askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
         )
     }
 }
@@ -105,6 +109,7 @@ private fun RenderedBody(
     onTapImage: ((Any) -> Unit)?,
     onTapFile: ((url: String, filename: String) -> Unit)?,
     isDownloadingFile: ((String) -> Boolean)?,
+    isMediaUnavailable: ((String) -> Boolean)?,
     askViewModel: ((String) -> AskUserSheetViewModel?)?,
     isPromptAnswered: ((String) -> Boolean)?,
     answerSummary: ((String) -> String?)?,
@@ -125,10 +130,17 @@ private fun RenderedBody(
             }
 
         is TimelineItem.Kind.Image -> {
-            val model = kind.url?.let { url -> resolveImage?.invoke(url) }
+            // Tombstone flag (fresh syncs) OR a 404 discovered at fetch time
+            // (already-synced clients never re-fetch the rewritten event) —
+            // apple #139.
+            val isExpired = attachmentIsExpired(kind.expired, kind.url, isMediaUnavailable)
+            // A reaped image never resolves — don't kick off fetches for it,
+            // and say so instead of showing a forever-loading placeholder.
+            val model = if (isExpired) null else kind.url?.let { url -> resolveImage?.invoke(url) }
             MessageBubble(style = style, timestamp = item.timestamp) {
                 AttachmentImage(
                     model = model,
+                    placeholder = if (isExpired) "Image expired" else "Image",
                     caption = kind.caption,
                     onTap = if (model != null && onTapImage != null) ({ onTapImage(model) }) else null,
                 )
@@ -136,15 +148,18 @@ private fun RenderedBody(
         }
 
         is TimelineItem.Kind.File -> {
-            // Read inside the row body so the collected downloadingFiles flow
-            // recomposes the row when the flag flips (apple #138).
-            val isLoading = kind.url?.let { isDownloadingFile?.invoke(it) } ?: false
+            // Read inside the row body so the collected downloadingFiles /
+            // unavailableMedia flows recompose the row when a flag flips
+            // (apple #138/#139).
+            val isExpired = attachmentIsExpired(kind.expired, kind.url, isMediaUnavailable)
+            val isLoading = attachmentIsLoading(isExpired, kind.url, isDownloadingFile)
             MessageBubble(style = style, timestamp = item.timestamp) {
                 AttachmentFile(
                     filename = kind.filename,
                     sizeBytes = kind.sizeBytes,
                     caption = kind.caption,
                     isLoading = isLoading,
+                    isExpired = isExpired,
                     onTap = if (kind.url != null && onTapFile != null) ({ onTapFile(kind.url!!, kind.filename) }) else null,
                 )
             }
@@ -302,6 +317,28 @@ private fun AskUserCardHost(
         error = error,
     )
 }
+
+/**
+ * Whether an attachment renders as Expired — the port of TimelineItemView.swift's
+ * per-row derivation (apple #139): the payload tombstone (fresh syncs) OR a 404
+ * discovered at fetch time ([ChatViewModel.isMediaUnavailable]; already-synced
+ * clients never re-fetch the rewritten event). Pure for testability.
+ */
+internal fun attachmentIsExpired(
+    tombstoned: Boolean,
+    url: String?,
+    isMediaUnavailable: ((String) -> Boolean)?,
+): Boolean = tombstoned || (url?.let { isMediaUnavailable?.invoke(it) } ?: false)
+
+/**
+ * Whether the file chip shows its downloading spinner — only while genuinely
+ * downloadable: an expired chip never spins (apple #139 tightened #138's rule).
+ */
+internal fun attachmentIsLoading(
+    isExpired: Boolean,
+    url: String?,
+    isDownloadingFile: ((String) -> Boolean)?,
+): Boolean = !isExpired && (url?.let { isDownloadingFile?.invoke(it) } ?: false)
 
 /**
  * Whether a [TimelineItem] should render at all — the port of

@@ -120,12 +120,17 @@ object JournalTimelineMapper {
                 }
                 val size = payload.longOrNull("size")
                 val caption = payload.stringOrNull("caption")
+                // Reaper tombstone (matron-journal#63): blob deleted
+                // server-side, payload rewritten in place with `expired: true`.
+                val expired = payload.boolOrNull("expired") ?: false
                 if (event.type == JournalEventType.IMAGE) {
-                    TimelineItem.Kind.Image(url, caption, size)
+                    TimelineItem.Kind.Image(url, caption, size, expired)
                 } else {
                     // `name`, not `filename`: the key the media-send contract
                     // defines and both producers emit.
-                    TimelineItem.Kind.File(url, payload.stringOrNull("name") ?: "file", caption, size)
+                    TimelineItem.Kind.File(
+                        url, payload.stringOrNull("name") ?: "file", caption, size, expired,
+                    )
                 }
             }
 
