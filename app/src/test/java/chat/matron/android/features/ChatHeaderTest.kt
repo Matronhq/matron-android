@@ -48,6 +48,16 @@ class ChatHeaderTest {
                 boxName = "dev-y", sessionShort = "ab", roomBoxNames = listOf("dev-y", "dev-z"),
             ),
         )
+        // A single-box user sees no room tag, so the visible header keeps
+        // the room marker — the label must match it (apple #154's
+        // marker-discipline fix, ported with SessionTag.accessibilityTitle).
+        assertEquals(
+            "session ab, ↔️ mac ↔ dev-z",
+            chatAccessibilityTitle(
+                chatTitle = "↔️ mac ↔ dev-z",
+                boxName = null, sessionShort = "ab", roomBoxNames = emptyList(),
+            ),
+        )
         assertEquals(
             "plain title",
             chatAccessibilityTitle(

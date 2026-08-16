@@ -349,6 +349,7 @@ private fun SignedInApp(
                 api = deps.devicesService(session),
                 onSelfRevoked = onSignOut,
                 onBack = { nav.popBackStack() },
+                overrides = deps.boxLetterOverrides,
             )
         }
 

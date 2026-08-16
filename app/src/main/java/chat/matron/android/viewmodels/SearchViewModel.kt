@@ -1,6 +1,7 @@
 package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.ChatSummary
+import chat.matron.android.chat.SessionTag
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.search.SearchHit
 import chat.matron.android.search.SearchService
@@ -55,6 +56,41 @@ class SearchViewModel(
     /// when the chat isn't in the snapshot (e.g. a hit from a left room).
     fun chatTitle(forRoomID: String): String =
         _allChats.value.firstOrNull { it.id == forRoomID }?.title ?: forRoomID
+
+    /// Row-ready pieces of a search hit's title line: the colored `A:bc`
+    /// tag halves plus the title to sit beside them, resolved HERE so the
+    /// call sites compose identically (the row itself lives in the design
+    /// system, which by design knows nothing of ChatSummary or the bridge's
+    /// title markers). Ports matron-apple's `SearchViewModel.hitTitle`
+    /// (apple #154).
+    data class HitTitle(
+        val title: String,
+        val sessionShort: String?,
+        val boxLetter: String?,
+        val boxName: String?,
+        val roomBoxNames: List<String>,
+        val roomBoxShorts: List<String>,
+    )
+
+    fun hitTitle(roomID: String): HitTitle {
+        val chat = _allChats.value.firstOrNull { it.id == roomID }
+            ?: return HitTitle(
+                title = roomID, sessionShort = null, boxLetter = null,
+                boxName = null, roomBoxNames = emptyList(), roomBoxShorts = emptyList(),
+            )
+        // Same marker discipline as the list rows: the room marker drops
+        // only when a room tag will actually render in its place.
+        val title = if (chat.roomBoxNames.size >= 2) {
+            SessionTag.titleBesideRoomTag(chat.title)
+        } else {
+            chat.title
+        }
+        return HitTitle(
+            title = title, sessionShort = chat.sessionShort,
+            boxLetter = chat.boxShort, boxName = chat.boxName,
+            roomBoxNames = chat.roomBoxNames, roomBoxShorts = chat.roomBoxShorts,
+        )
+    }
 
     /// Text shown when the query has no chat or message hits.
     val emptyResultsMessage: String get() = "No results."

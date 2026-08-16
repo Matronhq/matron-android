@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 
 /// Errors surfaced by the journal chat/timeline services. `data object`/
@@ -33,6 +34,10 @@ class JournalChatService(
     private val store: JournalStore,
     private val engine: JournalSyncEngine,
     private val coalesceInterval: Duration = 250.milliseconds,
+    /// The user's tag-character overrides (Settings → Devices). Optional so
+    /// tests that never touch tags need no store; null means "no overrides,
+    /// ever" — derived letters only.
+    private val overrides: BoxLetterOverrides? = null,
 ) : ChatService {
 
     override fun chatSummaries(): Flow<List<ChatSummary>> = flow {
@@ -54,10 +59,14 @@ class JournalChatService(
         // on either input, always over the newest pair, and both Room flows
         // deliver an initial value on collect so the very first paint already
         // carries its chips.
-        combine(store.conversationsFlow(), store.agentNamesFlow()) { records, boxNames ->
+        // A tag-character override (Settings → Devices) writes only the
+        // preference store — no journal record, no Room re-fire — so its
+        // change flow rides the same combine to re-derive letters live.
+        val overridesFlow = overrides?.flow ?: flowOf(emptyMap())
+        combine(store.conversationsFlow(), store.agentNamesFlow(), overridesFlow) { records, boxNames, letterOverrides ->
             // Derived once per snapshot, not per row — the letters depend on
             // the whole name set (common-prefix strip).
-            val boxLetters = SessionTag.boxLetters(boxNames)
+            val boxLetters = SessionTag.boxLetters(boxNames, letterOverrides)
             records.map { summary(it, boxNames, boxLetters) }
         }.conflate().collect { summaries ->
             emit(summaries)

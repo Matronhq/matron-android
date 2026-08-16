@@ -72,17 +72,49 @@ object SessionTag {
     /// unrelated names keep their initials (`mac-mini` / `dev-3` → `M` /
     /// `D`). A name that IS the common prefix (`dev` next to `dev-2`) falls
     /// back to its own initial. Deterministic — same names, same letters,
-    /// every platform — and renaming a box (already supported) is how you
-    /// change its letter. Collisions are tolerated: the letter is an aid,
+    /// every platform. Collisions are tolerated: the letter is an aid,
     /// the color and session short still disambiguate.
-    fun boxLetters(names: Map<Long, String>): Map<Long, String> {
+    ///
+    /// [overrides] (Settings → Devices → Tag Character, stored by
+    /// `BoxLetterOverrides`) replace the derived letter per box AFTER
+    /// derivation, so one override never shifts what the other boxes get
+    /// from the common-prefix strip.
+    fun boxLetters(
+        names: Map<Long, String>,
+        overrides: Map<Long, String> = emptyMap(),
+    ): Map<Long, String> {
         if (names.isEmpty()) return emptyMap()
         val values = names.values.toList()
         val prefix = if (values.size >= 2) commonPrefix(values) else ""
-        return names.mapValues { (_, name) ->
+        return names.mapValues { (id, name) ->
             val remainder = name.drop(prefix.length)
-            firstAlphanumeric(remainder) ?: firstAlphanumeric(name) ?: "?"
+            overrides[id]
+                ?: firstAlphanumeric(remainder) ?: firstAlphanumeric(name) ?: "?"
         }
+    }
+
+    /// What TalkBack reads for a tagged chat title: the visible tag's
+    /// meaning spelled out (box names, session short), then the clean
+    /// title. Shared so header call sites can never drift (ports
+    /// matron-apple's `SessionTag.accessibilityTitle`, apple #154).
+    fun accessibilityTitle(
+        chatTitle: String,
+        boxName: String?,
+        sessionShort: String?,
+        roomBoxNames: List<String>,
+    ): String {
+        val parts = mutableListOf<String>()
+        if (roomBoxNames.size >= 2) {
+            parts.add(roomBoxNames.joinToString(" and "))
+        } else if (boxName != null) {
+            parts.add(boxName)
+        }
+        if (sessionShort != null) parts.add("session $sessionShort")
+        // Marker discipline mirrors the visible title: the room marker
+        // drops only when a room tag renders (≥2 named participants) —
+        // a single-box user's header keeps it, so TalkBack must too.
+        parts.add(if (roomBoxNames.size >= 2) titleBesideRoomTag(chatTitle) else chatTitle)
+        return parts.joinToString(", ")
     }
 
     private fun firstAlphanumeric(s: String): String? {

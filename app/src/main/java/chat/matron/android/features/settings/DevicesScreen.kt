@@ -37,12 +37,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import chat.matron.android.chat.BoxLetterOverrides
 import chat.matron.android.journal.DeviceDTO
 import chat.matron.android.viewmodels.DevicesProviding
 import chat.matron.android.viewmodels.DevicesViewModel
 import chat.matron.android.viewmodels.isClient
 import chat.matron.android.viewmodels.lagText
 import chat.matron.android.viewmodels.lastSeenText
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 /**
@@ -56,11 +58,18 @@ fun DevicesScreen(
     api: DevicesProviding,
     onSelfRevoked: () -> Unit,
     onBack: () -> Unit,
+    /// The tag-character override store (apple #154). Null (previews/tests)
+    /// hides the Tag affordance entirely.
+    overrides: BoxLetterOverrides? = null,
 ) {
     val scope = rememberCoroutineScope()
     val viewModel = remember { DevicesViewModel(api = api, onSelfRevoked = onSelfRevoked) }
     val devices by viewModel.devices.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
+    // Live so a saved override re-renders the row caption immediately — the
+    // same flow the chat list's summaries stream observes.
+    val overrideLetters by (overrides?.flow ?: remember { MutableStateFlow(emptyMap<Long, String>()) })
+        .collectAsStateWithLifecycle()
 
     var confirming by remember { mutableStateOf<DeviceDTO?>(null) }
     // The device whose rename dialog is open, and the draft in its field.
@@ -68,6 +77,10 @@ fun DevicesScreen(
     // binding must survive the dialog's own recompositions).
     var renaming by remember { mutableStateOf<DeviceDTO?>(null) }
     var draftName by remember { mutableStateOf("") }
+    // The agent box whose tag-character dialog is open, and its draft —
+    // same two-piece pattern as `renaming`.
+    var letterEditing by remember { mutableStateOf<DeviceDTO?>(null) }
+    var draftLetter by remember { mutableStateOf("") }
     var showingAddAgent by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { viewModel.refresh() }
@@ -102,8 +115,22 @@ fun DevicesScreen(
             items(devices, key = { it.id }) { device ->
                 DeviceRow(
                     device = device,
+                    // The row's detail line surfaces an agent box's override
+                    // so the setting is discoverable and its current value
+                    // visible without opening the editor.
+                    tagLetter = if (device.kind == "agent") overrideLetters[device.id] else null,
                     onRevoke = { confirming = device },
                     onRename = { draftName = device.name; renaming = device },
+                    // Agent boxes only: the tag fronts chat titles and
+                    // clients have no box letter.
+                    onSetLetter = if (overrides != null && device.kind == "agent") {
+                        {
+                            draftLetter = overrides.letter(device.id) ?: ""
+                            letterEditing = device
+                        }
+                    } else {
+                        null
+                    },
                 )
             }
             item {
@@ -138,6 +165,38 @@ fun DevicesScreen(
                 }) { Text(if (device.isSelf) "Sign Out" else "Revoke") }
             },
             dismissButton = { TextButton(onClick = { confirming = null }) { Text("Cancel") } },
+        )
+    }
+
+    letterEditing?.let { device ->
+        AlertDialog(
+            onDismissRequest = { letterEditing = null },
+            title = { Text("Tag character") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "One character shown before chat titles to identify this machine. " +
+                            "Leave empty to derive it from the box name.",
+                    )
+                    OutlinedTextField(
+                        value = draftLetter,
+                        onValueChange = { draftLetter = it },
+                        label = { Text("Automatic") },
+                        singleLine = true,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val target = device
+                    val letter = draftLetter
+                    letterEditing = null
+                    // A blank draft clears the override — sanitize maps
+                    // empty to null, which means "back to automatic".
+                    overrides?.set(letter, target.id)
+                }) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { letterEditing = null }) { Text("Cancel") } },
         )
     }
 
@@ -190,7 +249,17 @@ fun DevicesScreen(
 }
 
 @Composable
-private fun DeviceRow(device: DeviceDTO, onRevoke: () -> Unit, onRename: () -> Unit) {
+private fun DeviceRow(
+    device: DeviceDTO,
+    /// The agent box's tag-character override, shown in the caption when
+    /// set; null for clients and for boxes on automatic letters.
+    tagLetter: String?,
+    onRevoke: () -> Unit,
+    onRename: () -> Unit,
+    /// Opens the tag-character editor — non-null for agent boxes only; the
+    /// tag fronts chat titles and clients have no box letter.
+    onSetLetter: (() -> Unit)?,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -219,13 +288,16 @@ private fun DeviceRow(device: DeviceDTO, onRevoke: () -> Unit, onRename: () -> U
                 }
             }
             Text(
-                "${device.kind.replaceFirstChar { it.uppercase() }} · Last seen ${device.lastSeenText()} · ${device.lagText}",
+                "${device.kind.replaceFirstChar { it.uppercase() }} · Last seen ${device.lastSeenText()} · ${device.lagText}" +
+                    (tagLetter?.let { " · Tag $it" } ?: ""),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        // Rename sits before the destructive action (the Mac row's button
-        // pair; iOS reaches the same alert via a leading swipe).
+        // Tag sits before Rename, which sits before the destructive action
+        // (the Mac row's button trio; iOS reaches the same editors via the
+        // row's context menu).
+        onSetLetter?.let { TextButton(onClick = it) { Text("Tag") } }
         TextButton(onClick = onRename) { Text("Rename") }
         TextButton(onClick = onRevoke) {
             Text(

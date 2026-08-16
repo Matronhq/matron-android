@@ -28,8 +28,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.graphics.luminance
 import chat.matron.android.chat.ChatSummary
 import chat.matron.android.designsystem.SearchResultRow
+import chat.matron.android.designsystem.SessionTagText
 import chat.matron.android.search.SearchHit
 import chat.matron.android.viewmodels.SearchViewModel
 import kotlinx.coroutines.launch
@@ -102,13 +104,30 @@ fun SearchScreen(
                 if (chatHits.isNotEmpty()) {
                     item { SectionHeader("Chats") }
                     items(chatHits, key = { "chat-${it.id}" }) { chat ->
+                        // Search rows carry the same colored `A:bc` tag as
+                        // the chat list (apple #154), resolved by the VM so
+                        // every call site composes identically.
+                        val line = viewModel.hitTitle(chat.id)
+                        val darkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable { onSelectChat(chat) }
                                 .padding(horizontal = 16.dp, vertical = 10.dp),
                         ) {
-                            Text(chat.title, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                SessionTagText.titleLine(
+                                    title = line.title,
+                                    boxLetter = line.boxLetter,
+                                    boxName = line.boxName,
+                                    sessionShort = line.sessionShort,
+                                    roomBoxNames = line.roomBoxNames,
+                                    roomBoxShorts = line.roomBoxShorts,
+                                    darkTheme = darkTheme,
+                                    secondary = MaterialTheme.colorScheme.onSurfaceVariant,
+                                ),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
                             Text(
                                 chat.bot.displayName,
                                 style = MaterialTheme.typography.bodySmall,
@@ -121,9 +140,15 @@ fun SearchScreen(
                 if (messageHits.isNotEmpty()) {
                     item { SectionHeader("Messages") }
                     items(messageHits, key = { "msg-${it.id}" }) { hit ->
+                        val line = viewModel.hitTitle(hit.roomID)
                         SearchResultRow(
                             hit = hit,
-                            chatTitle = viewModel.chatTitle(forRoomID = hit.roomID),
+                            chatTitle = line.title,
+                            sessionShort = line.sessionShort,
+                            boxLetter = line.boxLetter,
+                            boxName = line.boxName,
+                            roomBoxNames = line.roomBoxNames,
+                            roomBoxShorts = line.roomBoxShorts,
                             onTap = { onSelectMessage(hit) },
                         )
                     }

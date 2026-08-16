@@ -56,6 +56,41 @@ class SearchViewModelTest {
         assertEquals("Auth fix", vm.chatTitle("!1:s"))
     }
 
+    /// Ports matron-apple's
+    /// `test_hitTitle_carriesTagHalvesAndDropsRoomMarkerBesideTag`: the
+    /// search rows carry the same colored tag as the chat list — the
+    /// resolver hands the row the tag halves plus a title with the room
+    /// marker dropped exactly when a room tag will render in its place.
+    @Test
+    fun hitTitle_carriesTagHalvesAndDropsRoomMarkerBesideTag() {
+        val solo = ChatSummary(
+            id = "!1:s", title = "Auth bug", bot = claude,
+            lastActivity = null, unreadCount = 0,
+            boxName = "dev-y", sessionShort = "b5", boxShort = "Y",
+        )
+        val room = ChatSummary(
+            id = "!2:s", title = "↔️ mac ↔ dev-z", bot = claude,
+            lastActivity = null, unreadCount = 0,
+            sessionShort = "ab",
+            roomBoxNames = listOf("dev-y", "dev-z"), roomBoxShorts = listOf("Y", "Z"),
+        )
+        val vm = SearchViewModel(FakeSearchService(), listOf(solo, room))
+
+        val tagged = vm.hitTitle("!1:s")
+        assertEquals("Auth bug", tagged.title)
+        assertEquals("b5", tagged.sessionShort)
+        assertEquals("Y", tagged.boxLetter)
+        assertEquals("dev-y", tagged.boxName)
+
+        val roomLine = vm.hitTitle("!2:s")
+        assertEquals("marker drops beside a rendered room tag", "mac ↔ dev-z", roomLine.title)
+        assertEquals(listOf("Y", "Z"), roomLine.roomBoxShorts)
+
+        val unknown = vm.hitTitle("!gone:s")
+        assertEquals("!gone:s", unknown.title)
+        assertEquals(null, unknown.boxLetter)
+    }
+
     @Test
     fun emptyState_showsNoResults() = runBlocking {
         val vm = SearchViewModel(FakeSearchService(), emptyList())

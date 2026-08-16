@@ -74,4 +74,26 @@ object SessionTagText {
             sessionShort?.let { withStyle(SpanStyle(color = secondary)) { append(":$it") } }
         }
     }
+
+    /// The full title line: room tag first, single-box tag second, bare
+    /// title last — one composition shared by every place a tagged title
+    /// renders (list rows, chat headers, search results), so the fallback
+    /// order can't drift between them. [title] arrives ready to sit beside
+    /// whatever tag renders (callers drop the room marker only when they
+    /// pass ≥2 room participants — `SessionTag.titleBesideRoomTag`).
+    fun titleLine(
+        title: String,
+        boxLetter: String?,
+        boxName: String?,
+        sessionShort: String?,
+        roomBoxNames: List<String> = emptyList(),
+        roomBoxShorts: List<String> = emptyList(),
+        darkTheme: Boolean,
+        secondary: Color,
+    ): AnnotatedString {
+        val tag = room(roomBoxShorts, roomBoxNames, sessionShort, darkTheme, secondary)
+            ?: run(boxLetter, boxName, sessionShort, darkTheme, secondary)
+            ?: return AnnotatedString(title)
+        return tag + AnnotatedString(" $title")
+    }
 }

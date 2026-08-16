@@ -255,23 +255,23 @@ private fun ChatRow(
 /// single-box `A:bc` tag, then to the bare title. Ports the iOS ChatRow's
 /// `titleLine` composition (apple #152).
 private fun titleLine(summary: ChatSummary, darkTheme: Boolean, secondary: Color): AnnotatedString {
-    SessionTagText.room(
-        letters = summary.roomBoxShorts,
-        names = summary.roomBoxNames,
-        sessionShort = summary.sessionShort,
-        darkTheme = darkTheme,
-        secondary = secondary,
-    )?.let { tag ->
-        return tag + AnnotatedString(" " + SessionTag.titleBesideRoomTag(summary.title))
+    // Same marker discipline as every tagged surface: the room marker drops
+    // only when a room tag will actually render in its place.
+    val title = if (summary.roomBoxNames.size >= 2) {
+        SessionTag.titleBesideRoomTag(summary.title)
+    } else {
+        summary.title
     }
-    val tag = SessionTagText.run(
+    return SessionTagText.titleLine(
+        title = title,
         boxLetter = summary.boxShort,
         boxName = summary.boxName,
         sessionShort = summary.sessionShort,
+        roomBoxNames = summary.roomBoxNames,
+        roomBoxShorts = summary.roomBoxShorts,
         darkTheme = darkTheme,
         secondary = secondary,
-    ) ?: return AnnotatedString(summary.title)
-    return tag + AnnotatedString(" " + summary.title)
+    )
 }
 
 @Composable

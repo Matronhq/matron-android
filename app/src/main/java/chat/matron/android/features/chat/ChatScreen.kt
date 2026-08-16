@@ -49,7 +49,6 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -142,25 +141,22 @@ fun ChatScreen(
                         // out — box name(s) and session short ahead of the
                         // clean title.
                         val darkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
-                        val secondary = MaterialTheme.colorScheme.onSurfaceVariant
-                        val roomTag = SessionTagText.room(
-                            letters = roomBoxShorts,
-                            names = roomBoxNames,
+                        val titleText = SessionTagText.titleLine(
+                            // The room marker drops only when a room tag
+                            // will actually render in its place.
+                            title = if (roomBoxNames.size >= 2) {
+                                SessionTag.titleBesideRoomTag(chatTitle)
+                            } else {
+                                chatTitle
+                            },
+                            boxLetter = boxShort,
+                            boxName = boxName,
                             sessionShort = sessionShort,
+                            roomBoxNames = roomBoxNames,
+                            roomBoxShorts = roomBoxShorts,
                             darkTheme = darkTheme,
-                            secondary = secondary,
+                            secondary = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        val titleText = when {
-                            roomTag != null ->
-                                roomTag + AnnotatedString(" " + SessionTag.titleBesideRoomTag(chatTitle))
-                            else -> SessionTagText.run(
-                                boxLetter = boxShort,
-                                boxName = boxName,
-                                sessionShort = sessionShort,
-                                darkTheme = darkTheme,
-                                secondary = secondary,
-                            )?.let { it + AnnotatedString(" $chatTitle") } ?: AnnotatedString(chatTitle)
-                        }
                         val a11yTitle = chatAccessibilityTitle(chatTitle, boxName, sessionShort, roomBoxNames)
                         Text(
                             titleText,
@@ -304,25 +300,15 @@ fun chatContextLine(boxName: String?, workdir: String?): String? {
 
 /// What TalkBack reads for the header title: the visible tag's meaning
 /// spelled out (box names, session short), not just the clean title —
-/// sighted users see the `A:bc` tag, so the label must carry it too. Pure
-/// for unit-testability (ports matron-apple's `ChatView.accessibilityTitle`,
-/// apple #152).
+/// sighted users see the `A:bc` tag, so the label must carry it too.
+/// Delegates to the shared `SessionTag.accessibilityTitle` (apple #154) so
+/// the header can never drift from other tagged surfaces.
 fun chatAccessibilityTitle(
     chatTitle: String,
     boxName: String?,
     sessionShort: String?,
     roomBoxNames: List<String>,
-): String {
-    val parts = mutableListOf<String>()
-    if (roomBoxNames.size >= 2) {
-        parts.add(roomBoxNames.joinToString(" and "))
-    } else if (boxName != null) {
-        parts.add(boxName)
-    }
-    if (sessionShort != null) parts.add("session $sessionShort")
-    parts.add(SessionTag.titleBesideRoomTag(chatTitle))
-    return parts.joinToString(", ")
-}
+): String = SessionTag.accessibilityTitle(chatTitle, boxName, sessionShort, roomBoxNames)
 
 /**
  * Shared timeline list used by both [ChatScreen] and the sub-chat viewer. Renders

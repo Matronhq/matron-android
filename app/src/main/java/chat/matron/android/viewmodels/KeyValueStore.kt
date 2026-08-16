@@ -28,6 +28,16 @@ interface KeyValueStore {
 
     fun setBoolean(key: String, value: Boolean)
 
+    /// The string stored under [key], or `null` when unset.
+    fun getString(key: String): String?
+
+    fun setString(key: String, value: String)
+
+    /// Removes [key] entirely — `UserDefaults.removeObject(forKey:)`, so a
+    /// store whose last value was cleared reads as unset, not as an empty
+    /// serialisation.
+    fun remove(key: String)
+
     /// The integer stored under [key], or `null` when unset.
     ///
     /// Deliberately nullable rather than `getInt(key, default)`: the Swift
@@ -61,6 +71,16 @@ class SharedPreferencesKeyValueStore(
 
     override fun setBoolean(key: String, value: Boolean) {
         prefs.edit().putBoolean(key, value).apply()
+    }
+
+    override fun getString(key: String): String? = prefs.getString(key, null)
+
+    override fun setString(key: String, value: String) {
+        prefs.edit().putString(key, value).apply()
+    }
+
+    override fun remove(key: String) {
+        prefs.edit().remove(key).apply()
     }
 
     /// `contains` first, because `getInt`'s default can't be distinguished from
