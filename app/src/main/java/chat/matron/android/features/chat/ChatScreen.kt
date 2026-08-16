@@ -63,6 +63,7 @@ import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.ComposerViewModel
 import chat.matron.android.viewmodels.SubChatStripViewModel
 import chat.matron.android.viewmodels.TimelineRow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
@@ -92,6 +93,8 @@ fun ChatScreen(
 
     var showSessionStatus by remember { mutableStateOf(false) }
     var showSwitcher by remember { mutableStateOf(false) }
+    /// Tappable title → summaries TOC sheet (jump-to-point navigation).
+    var showSummaries by remember { mutableStateOf(false) }
     var previewModel by remember { mutableStateOf<Any?>(null) }
     val compactScope = rememberCoroutineScope()
 
@@ -100,7 +103,17 @@ fun ChatScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(chatTitle, maxLines = 1) },
+                // Tappable title → summaries TOC sheet, mirroring iOS's
+                // principal-item title button (apple #124).
+                title = {
+                    Text(
+                        chatTitle,
+                        maxLines = 1,
+                        modifier = Modifier.clickable(
+                            onClickLabel = "Show conversation summaries",
+                        ) { showSummaries = true },
+                    )
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -162,6 +175,20 @@ fun ChatScreen(
         }
     }
 
+    if (showSummaries) {
+        val sheetState = rememberModalBottomSheetState()
+        ModalBottomSheet(onDismissRequest = { showSummaries = false }, sheetState = sheetState) {
+            SummariesSheet(
+                viewModel = chatVM,
+                onSelect = { seq ->
+                    // Dismiss first, then jump — same order as the iOS sheet
+                    // (`dismiss(); Task { await viewModel.focus(seq:) }`).
+                    showSummaries = false
+                    compactScope.launch { chatVM.focus(seq) }
+                },
+            )
+        }
+    }
     if (showSessionStatus) {
         val sheetState = rememberModalBottomSheetState()
         ModalBottomSheet(onDismissRequest = { showSessionStatus = false }, sheetState = sheetState) {
@@ -267,6 +294,32 @@ fun TimelineList(
         if (followTail && rows.isNotEmpty()) {
             val lastIndex = rows.size + if (activityLabel != null) 1 else 0
             listState.scrollToItem(lastIndex)
+        }
+    }
+
+    // Summaries TOC jump target — same consumer shape as iOS ChatView's
+    // `pendingFocusID` observer (apple #124): disengage tail-follow (or the
+    // pin-to-tail effect would yank the viewport straight back), widen the
+    // window so the target is composed, scroll it to the top, clear. The
+    // 200ms re-assert covers the widened window's layout pass, guarded on
+    // still being the newest jump so a superseded jump's re-assert can't
+    // yank the viewport back to its old target.
+    var latestFocusTarget by remember { mutableStateOf<String?>(null) }
+    val reassertScope = rememberCoroutineScope()
+    LaunchedEffect(chatVM) {
+        chatVM.pendingFocusID.collect { target ->
+            if (target == null) return@collect
+            followTail = false
+            latestFocusTarget = target
+            chatVM.ensureWindowContains(target)
+            summaryScrollIndex(chatVM.windowedRows.value, target)?.let { listState.scrollToItem(it) }
+            chatVM.clearPendingFocus()
+            reassertScope.launch {
+                delay(200)
+                if (!followTail && latestFocusTarget == target) {
+                    summaryScrollIndex(chatVM.windowedRows.value, target)?.let { listState.scrollToItem(it) }
+                }
+            }
         }
     }
 
@@ -432,6 +485,16 @@ private fun TimelineRowView(
             }
         }
     }
+}
+
+/**
+ * Index of [targetItemID]'s row in the LazyColumn [TimelineList] renders, or
+ * `null` when it isn't in the window. Row i of [rows] sits at list index
+ * i + 1 — index 0 is the always-present "paginating" item.
+ */
+internal fun summaryScrollIndex(rows: List<TimelineRow>, targetItemID: String): Int? {
+    val index = rows.indexOfFirst { it is TimelineRow.Message && it.item.id == targetItemID }
+    return if (index >= 0) index + 1 else null
 }
 
 /**
