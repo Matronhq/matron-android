@@ -1,5 +1,8 @@
 package chat.matron.android.designsystem
 
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.luminance
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
@@ -67,5 +70,42 @@ class BoxChipTest {
         assertEquals(BoxChipColors.palette[2], BoxChipColors.tint("greg"))
         assertNotEquals(BoxChipColors.tint("eric"), BoxChipColors.tint("greg"))
         assertEquals(10, BoxChipColors.palette.size)
+    }
+
+    /// WCAG contrast ratio between two opaque colours; `Color.luminance()`
+    /// is the WCAG relative luminance for sRGB colours.
+    private fun contrastRatio(a: Color, b: Color): Double {
+        val la = a.luminance().toDouble()
+        val lb = b.luminance().toDouble()
+        return (maxOf(la, lb) + 0.05) / (minOf(la, lb) + 0.05)
+    }
+
+    /// Every palette entry's text must clear WCAG AA small-text contrast
+    /// (4.5:1) over the fill it actually renders on — the tint at
+    /// `FILL_ALPHA` composited over the chip's host surface
+    /// (`colorScheme.surface`: white in light, `MatronDarkColors.bubbleBot`
+    /// in dark; see MatronPalette.kt). Pure maths over the same Color values
+    /// the composable uses. The ten fixture names cover palette indices 0…9
+    /// (pinned by `fullPaletteFixturesPinEveryIndexInOrder`).
+    @Test
+    fun textTintMeetsWcagAAOnEveryPaletteEntry() {
+        val fixtures = listOf(
+            "dev-7", "romeo", "india", "charlie", "quebec",
+            "delta", "lima", "alpha", "echo", "foxtrot",
+        )
+        for (darkTheme in listOf(false, true)) {
+            val surface = if (darkTheme) MatronDarkColors.bubbleBot else Color.White
+            for (name in fixtures) {
+                val fill = BoxChipColors.tint(name)
+                    .copy(alpha = BoxChipColors.FILL_ALPHA)
+                    .compositeOver(surface)
+                val ratio = contrastRatio(BoxChipColors.textTint(name, darkTheme), fill)
+                assertTrue(
+                    "palette index ${BoxChipColors.paletteIndex(name)} " +
+                        "(${if (darkTheme) "dark" else "light"}) contrast $ratio < 4.5",
+                    ratio >= 4.5,
+                )
+            }
+        }
     }
 }

@@ -8,6 +8,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.semantics.contentDescription
@@ -62,18 +63,60 @@ object BoxChipColors {
     /// is an aid, the name is printed.
     fun tint(name: String): Color = palette[paletteIndex(name)]
 
+    /// Alpha of the chip's fill (the tint washed over the surface). Shared
+    /// between the composable and [textTint]'s contrast maths so the two can
+    /// never disagree about what the text actually sits on.
+    const val FILL_ALPHA = 0.18f
+
+    /// WCAG AA for small text; `labelSmall` is well under the 18pt/14pt-bold
+    /// large-text cutoff, so the chip label gets the strict floor.
+    private const val MIN_TEXT_CONTRAST = 4.5
+
+    /// WCAG contrast ratio between two opaque colours. `Color.luminance()`
+    /// is the WCAG relative luminance for sRGB colours.
+    private fun contrastRatio(a: Color, b: Color): Double {
+        val la = a.luminance().toDouble()
+        val lb = b.luminance().toDouble()
+        return (maxOf(la, lb) + 0.05) / (minOf(la, lb) + 0.05)
+    }
+
+    /// Text colour for one palette entry: start from the Apple-parity mix
+    /// (30% toward white in dark, 35% toward black in light), then deepen in
+    /// 5% steps until the label clears [MIN_TEXT_CONTRAST] against the fill
+    /// it actually renders on (tint at [FILL_ALPHA] composited over the
+    /// chip's host surface — `colorScheme.surface`: white in light,
+    /// `MatronDarkColors.bubbleBot` in dark, see MatronPalette.kt).
+    ///
+    /// Deepening the text shade does NOT break cross-app colour identity:
+    /// parity lives in the palette hues + the FNV-1a index (pinned above),
+    /// while Apple's own text mix goes through an OS-version-dependent mix
+    /// API — so the exact text shade was never pixel-identical across apps.
+    private fun readableTextTint(base: Color, darkTheme: Boolean): Color {
+        val towards = if (darkTheme) Color.White else Color.Black
+        val surface = if (darkTheme) MatronDarkColors.bubbleBot else Color.White
+        val fill = base.copy(alpha = FILL_ALPHA).compositeOver(surface)
+        var fraction = if (darkTheme) 0.3f else 0.35f
+        var text = lerp(base, towards, fraction)
+        while (contrastRatio(text, fill) < MIN_TEXT_CONTRAST && fraction < 1f) {
+            fraction = minOf(1f, fraction + 0.05f)
+            text = lerp(base, towards, fraction)
+        }
+        return text
+    }
+
+    /// Per-theme text tints, precomputed once per palette entry (the loop in
+    /// [readableTextTint] shouldn't run on every recomposition).
+    private val lightTextTints: List<Color> = palette.map { readableTextTint(it, darkTheme = false) }
+    private val darkTextTints: List<Color> = palette.map { readableTextTint(it, darkTheme = true) }
+
     /// The raw hues are accent colours tuned for white text ON them, not for
     /// being text — teal/cyan/mint captions on the pale fill land around 2:1
     /// contrast. Pull the text toward the label colour (darker in light mode,
-    /// lighter in dark) to clear readable contrast while keeping the hue.
-    /// (Apple gates this on an OS mix API; Compose's `lerp` has no floor, so
-    /// every device gets the readable variant.)
+    /// lighter in dark) to clear readable contrast while keeping the hue;
+    /// every entry is guaranteed ≥ 4.5:1 over its fill in both themes
+    /// (`textTintMeetsWcagAAOnEveryPaletteEntry` pins it).
     fun textTint(name: String, darkTheme: Boolean): Color =
-        if (darkTheme) {
-            lerp(tint(name), Color.White, 0.3f)
-        } else {
-            lerp(tint(name), Color.Black, 0.35f)
-        }
+        (if (darkTheme) darkTextTints else lightTextTints)[paletteIndex(name)]
 }
 
 /**
@@ -100,7 +143,7 @@ fun BoxChip(name: String, modifier: Modifier = Modifier) {
         color = BoxChipColors.textTint(name, darkTheme),
         modifier = modifier
             .background(
-                BoxChipColors.tint(name).copy(alpha = 0.18f),
+                BoxChipColors.tint(name).copy(alpha = BoxChipColors.FILL_ALPHA),
                 RoundedCornerShape(percent = 50),
             )
             .padding(horizontal = 6.dp, vertical = 1.dp)
