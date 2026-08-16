@@ -2,11 +2,7 @@ package chat.matron.android.features.chat
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -18,7 +14,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.AttachmentFullscreenViewer
 import chat.matron.android.designsystem.MediaBrowserFileRow
@@ -155,17 +150,18 @@ fun MediaBrowserSheet(
         }
 
         (attachmentError ?: browserError)?.let { message ->
-            androidx.compose.material3.Surface(
-                color = MaterialTheme.colorScheme.errorContainer,
-                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
-            ) {
-                Text(
-                    message,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                )
-            }
+            // The timeline's dismissible banner, not a bespoke Surface — the
+            // sheet's copy lacked any dismiss affordance (Bugbot, PR #45).
+            // Dismiss clears both sources; at most one is ever populated in
+            // practice (file taps set the chat VM's, media taps the sheet's).
+            AttachmentErrorBanner(
+                message = message,
+                onDismiss = {
+                    chatVM.dismissAttachmentError()
+                    vm.dismissAttachmentError()
+                },
+                modifier = Modifier.align(Alignment.BottomCenter),
+            )
         }
     }
 

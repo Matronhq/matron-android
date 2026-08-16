@@ -372,9 +372,11 @@ fun TimelineList(
  * that failed to download/write had no user-visible feedback (a dead button) —
  * this surfaces it, playing the analogous role to [ComposerView]'s
  * `ComposerErrorBanner` (its own Surface/errorContainer styling, not a copy).
+ * `internal` so [MediaBrowserSheet] shows the same banner (same package) for
+ * its attachment errors instead of a dismissless copy.
  */
 @Composable
-private fun AttachmentErrorBanner(message: String, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+internal fun AttachmentErrorBanner(message: String, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.errorContainer,
