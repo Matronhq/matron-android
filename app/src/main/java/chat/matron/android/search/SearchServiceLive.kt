@@ -2,6 +2,7 @@ package chat.matron.android.search
 
 import androidx.room.withTransaction
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicLong
 
 /// Room/FTS4-backed [SearchService]. Ported from matron-apple's
 /// `SearchServiceLive` (GRDB → Room). Idempotency and redaction are handled by
@@ -9,6 +10,9 @@ import java.time.Instant
 /// (see [MessageFtsEntity] for why).
 class SearchServiceLive(private val db: SearchDatabase) : SearchService {
     private val dao = db.searchDao()
+
+    /// See [chat.matron.android.journal.SearchIndexer.backfillGeneration].
+    private val generation = AtomicLong(0)
 
     override suspend fun index(
         roomID: String,
@@ -104,8 +108,21 @@ class SearchServiceLive(private val db: SearchDatabase) : SearchService {
 
     /// Bookkeeping only — indexed messages stay (see [SearchIndexer.resetBackfill]).
     override suspend fun resetBackfill() {
+        // Bump BEFORE the delete: a backfill walk that observes the new
+        // generation is guaranteed the delete is underway, so it discards its
+        // stale progress instead of racing to re-assert it. (A walk that read
+        // the old generation and commits its upsert in the sliver before the
+        // delete lands gets wiped BY the delete.) The residual window — check
+        // passes, then reset bumps+deletes, then the stale upsert commits — is
+        // microseconds against a sweep that idles 15 minutes between passes;
+        // closing it fully would need the generation inside the DB
+        // transaction, which isn't worth it for a self-healing background
+        // index (next cold start resets again).
+        generation.incrementAndGet()
         dao.deleteAllRooms()
     }
+
+    override suspend fun backfillGeneration(): Long = generation.get()
 
     override suspend fun eventCount(roomID: String): Int = dao.countForRoom(roomID)
 

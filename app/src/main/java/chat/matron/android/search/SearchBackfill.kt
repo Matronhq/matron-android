@@ -54,7 +54,7 @@ class SearchBackfillCoordinator(
         for (convoID in convoIDs) {
             if (!currentCoroutineContext().isActive) return false
             try {
-                backfill(convoID)
+                if (!backfill(convoID)) allComplete = false
             } catch (e: CancellationException) {
                 // Mirrors Apple's `catch is CancellationError { return false }`:
                 // the sweep reports "not complete" and stops doing work; the
@@ -69,8 +69,25 @@ class SearchBackfillCoordinator(
         return allComplete
     }
 
-    private suspend fun backfill(convoID: String) {
-        if (search.backfillComplete(convoID)) return
+    /// Returns `true` when the walk finished (or the room was already
+    /// complete); `false` when it was abandoned because a concurrent
+    /// `resetBackfill` invalidated it, so [run] reports the sweep incomplete
+    /// and the retry curve re-walks the room from its head.
+    private suspend fun backfill(convoID: String): Boolean {
+        if (search.backfillComplete(convoID)) return true
+        // A cold-start `resetBackfill` firing mid-walk (JournalSyncEngine.
+        // coldStartIfNeeded, on the engine's coroutine — this sweep is on
+        // appScope) deletes ALL bookkeeping so every room re-walks from its
+        // head. This walk's state predates that: writing progress afterwards
+        // would resurrect a resume point (or worse, `complete = true`) that
+        // hides the head-side gap the reset exists to close, and later sweeps
+        // would skip or resume-below the very page range that's missing. So:
+        // snapshot the generation here and drop our bookkeeping writes once it
+        // moves. (Deviation from Apple, which has this race unguarded — its
+        // coordinator actor doesn't help because the engine resets straight on
+        // the SearchService.) Message-row indexing needs no guard: reset keeps
+        // messages, and indexing is idempotent.
+        val generation = search.backfillGeneration()
         // Resume point: the oldest seq a previous walk reached. `null` starts
         // at the newest page — those events are usually live-indexed already,
         // but re-indexing is idempotent and the head page is what anchors the
@@ -107,11 +124,19 @@ class SearchBackfillCoordinator(
             // terminating (as complete) beats looping on it forever.
             val exhausted = events.size < pageSize || pageOldest == null
             val indexedCount = search.eventCount(convoID)
+            // Checked before EVERY progress write, not just the final
+            // `complete = true`: a mid-walk write is just as poisonous — it
+            // re-creates a downward resume point, so the next sweep never
+            // re-fetches the head page either.
+            if (search.backfillGeneration() != generation) {
+                MatronDebug.breadcrumb("SearchBackfill: reset during walk of $convoID — dropping stale progress")
+                return false
+            }
             search.recordBackfillProgress(
                 roomID = convoID, indexedCount = indexedCount,
                 oldestEventID = oldest?.toString(), complete = exhausted,
             )
-            if (exhausted) return
+            if (exhausted) return true
             delay(throttleMillis)
         }
     }

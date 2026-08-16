@@ -78,6 +78,19 @@ interface SearchIndexer {
     /// `SearchService.resetBackfill`. Default no-op so indexing-only fakes
     /// stay small; [chat.matron.android.search.SearchServiceLive] overrides.
     suspend fun resetBackfill() {}
+
+    /// Monotonic count of [resetBackfill] calls in this process. The backfill
+    /// walk snapshots it per room and refuses to write progress once it moved:
+    /// the walk's bookkeeping (resume point, complete flag) predates the reset,
+    /// and re-asserting it would resurrect exactly the head-side-hole-hiding
+    /// rows the reset just deleted (bugbot "Backfill races cold-start reset").
+    /// In-memory only — the race is in-process; a restart starts fresh walks.
+    /// Deviation from matron-apple, which has the same race unguarded (its
+    /// coordinator is an actor, but the engine's cold-start reset goes
+    /// straight to the SearchService, not through the coordinator). Default 0
+    /// pairs with the no-op [resetBackfill]: a fake that never resets never
+    /// moves the generation.
+    suspend fun backfillGeneration(): Long = 0
 }
 
 /// The single writer of the [JournalStore] and owner of the reconnect loop.

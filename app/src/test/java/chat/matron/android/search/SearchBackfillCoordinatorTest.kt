@@ -61,7 +61,12 @@ private class InMemorySearchService : SearchService {
 
     override suspend fun backfillComplete(roomID: String): Boolean = progress[roomID]?.complete ?: false
     override suspend fun backfillOldestEventID(roomID: String): String? = progress[roomID]?.oldestEventID
-    override suspend fun resetBackfill() { progress.clear() }
+
+    /// Mirrors [SearchServiceLive.resetBackfill]: bump the generation, then
+    /// clear the bookkeeping (messages stay).
+    var generation = 0L
+    override suspend fun resetBackfill() { generation += 1; progress.clear() }
+    override suspend fun backfillGeneration(): Long = generation
     override suspend fun eventCount(roomID: String): Int = indexed.values.count { it.roomID == roomID }
     override suspend fun contains(eventID: String): Boolean = indexed.containsKey(eventID)
 }
@@ -173,6 +178,50 @@ class SearchBackfillCoordinatorTest {
             "events applied while the index was shut must end up indexed",
             setOf("1", "2", "3"), search.indexed.keys,
         )
+    }
+
+    /// No Apple counterpart — regression test for bugbot "Backfill races
+    /// cold-start reset" (Android-only guard; Apple has the same race
+    /// unguarded). A cold-start `resetBackfill` lands mid-walk: the in-flight
+    /// walk must DROP its bookkeeping writes (a post-reset resume point or
+    /// `complete = true` would hide the head-side gap the reset exists to
+    /// close, and later sweeps would skip the room), report the sweep
+    /// incomplete, and the next pass must re-walk the room from its head.
+    @Test
+    fun resetDuringWalkDropsStaleProgressAndRoomIsResweptFromHead() = runTest {
+        val search = InMemorySearchService()
+        val events = (1L..5L).map { makeEvent(seq = it, payload = buildJsonObject { put("body", "msg $it") }) }
+        val pager = ScriptedPager(events)
+        val coordinator = SearchBackfillCoordinator(
+            search = search, pageSize = 2, throttleMillis = 0,
+        ) { convoID, beforeSeq, limit ->
+            val page = pager.page(convoID, beforeSeq, limit)
+            // The engine's cold-start reset fires while page 2 is in flight —
+            // after the walk snapshotted its generation and already recorded
+            // page 1's progress.
+            if (pager.calls.size == 2) search.resetBackfill()
+            page
+        }
+
+        val firstPass = coordinator.run(listOf("c1"))
+
+        assertFalse("a reset-invalidated walk must report the sweep incomplete", firstPass)
+        assertNull(
+            "the stale walk must not resurrect bookkeeping the reset deleted",
+            search.progress["c1"],
+        )
+        // The message rows themselves survive — reset only clears bookkeeping,
+        // and indexing is idempotent.
+        assertEquals(setOf("2", "3", "4", "5"), search.indexed.keys)
+
+        val secondPass = coordinator.run(listOf("c1"))
+
+        assertTrue(secondPass)
+        assertEquals(true, search.progress["c1"]?.complete)
+        assertEquals(setOf("1", "2", "3", "4", "5"), search.indexed.keys)
+        // The re-sweep started over at the newest page (calls 3+), not at the
+        // stale walk's resume point.
+        assertEquals(listOf<Long?>(null, 4, null, 4, 2), pager.calls.map { it.beforeSeq })
     }
 
     /// Port of Apple's `test_resume_startsFromRecordedOldest`.
