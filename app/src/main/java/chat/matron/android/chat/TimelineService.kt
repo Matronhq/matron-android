@@ -2,8 +2,24 @@ package chat.matron.android.chat
 
 import chat.matron.android.models.SessionStatusUpdate
 import chat.matron.android.models.SyncConnectionState
+import java.time.Instant
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
+
+/// One TOC entry from a bridge summary pass, as consumed by the Chat layer.
+/// Mirrors the journal module's `SummaryEntryEntity` but lives here so Chat
+/// consumers (view models, the summaries sheet) don't import the storage
+/// layer. Ported from matron-apple's `ConversationSummaryEntry`.
+data class ConversationSummaryEntry(
+    /// The summary event's own journal seq — the transcript anchor a
+    /// jump-to-point navigation scrolls to.
+    val seq: Long,
+    /// One-line "what just happened" (collapsed row text).
+    val toc: String,
+    /// The fuller rolling paragraph (expanded row text); may be empty.
+    val detail: String,
+    val date: Instant,
+)
 
 /// Per-room timeline access, one instance per open room. Ported from
 /// matron-apple's `TimelineService` protocol. `items()` is the read side (full
@@ -62,6 +78,11 @@ interface TimelineService {
     /// stop button. Default: an empty stream, same rationale as
     /// [sessionStatus].
     fun sessionState(): Flow<String> = emptyFlow()
+
+    /// TOC summary entries for this conversation, newest-first; re-yields on
+    /// every change. Default: an empty stream, same rationale as
+    /// [sessionStatus] (fakes and non-journal backends need no override).
+    fun summaryEntriesStream(): Flow<List<ConversationSummaryEntry>> = emptyFlow()
 
     /// The underlying sync engine's connection state. Default: an empty stream,
     /// so fakes without a connectivity source need no override. Lets a VM cheaply

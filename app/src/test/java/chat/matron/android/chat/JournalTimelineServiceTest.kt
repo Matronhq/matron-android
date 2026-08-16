@@ -825,6 +825,43 @@ class JournalTimelineServiceTest {
 
         task.cancel(); engine.endSync()
     }
+
+    // MARK: Summary TOC entries (matron-apple #124 port)
+
+    /// Port of matron-apple `JournalTimelineServiceTests`' summary-stream
+    /// coverage: stored `summary` events surface as [ConversationSummaryEntry]
+    /// values, newest first, with the store's epoch-ms `created_at` decoded to
+    /// an [Instant] — and never as timeline items.
+    @Test fun summaryEntriesStreamMapsStoredRowsNewestFirst() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(ev(1, payload = body("hello")))
+        store.applyJournal(
+            ev(2, type = "summary", payload = buildJsonObject { put("toc", "First pass"); put("detail", "d1") })
+        )
+        store.applyJournal(
+            ev(3, type = "summary", payload = buildJsonObject { put("toc", "Second pass"); put("detail", "") })
+        )
+        val socket = FakeWebSocketConnection().also { it.serve(helloOK(3)) }
+        val api = JournalApi("https://x")
+        val engine = makeEngine(store, FakeConnector(listOf(socket)), api)
+        val service = JournalTimelineService("c1", store, engine, api, makeSession())
+
+        val entries = Collections.synchronizedList(mutableListOf<List<ConversationSummaryEntry>>())
+        val job = launch { runCatching { service.summaryEntriesStream().collect { entries.add(it) } } }
+        waitUntil { synchronized(entries) { entries.lastOrNull()?.size == 2 } }
+        val latest = synchronized(entries) { entries.last() }
+        assertEquals(listOf(3L, 2L), latest.map { it.seq })                    // newest first
+        assertEquals(listOf("Second pass", "First pass"), latest.map { it.toc })
+        assertEquals(Instant.ofEpochMilli(2 * 1000), latest[1].date)          // created_at ms → Instant
+        job.cancel()
+
+        // The transcript stream excludes the summary rows entirely.
+        engine.beginSync(); engine.waitUntilReady()
+        val (collector, task) = collectItems(service.items())
+        waitUntil { collector.last() != null }
+        assertEquals(listOf("1"), collector.last()!!.map { it.id })
+        task.cancel(); engine.endSync()
+    }
 }
 
 /// Records every `index(...)` call so pagination tests can assert on the fed

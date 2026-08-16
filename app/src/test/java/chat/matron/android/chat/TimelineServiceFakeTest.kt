@@ -83,6 +83,15 @@ class FakeTimelineService : TimelineService {
         }
     }
 
+    /// Snapshots [summaryEntriesStream] yields (then finishes) — drives
+    /// `ChatViewModel.summaryEntries` tests. Ported from the Swift fake's
+    /// `summaryEntriesToEmit`.
+    var summaryEntriesToEmit: List<List<ConversationSummaryEntry>> = emptyList()
+
+    override fun summaryEntriesStream(): Flow<List<ConversationSummaryEntry>> = flow {
+        summaryEntriesToEmit.forEach { emit(it) }
+    }
+
     override suspend fun sendText(body: String, inReplyTo: String?) {
         if (sendDelayNanos > 0) kotlinx.coroutines.delay(sendDelayNanos / 1_000_000)
         sendGate?.let { it.markStarted(); it.await() }

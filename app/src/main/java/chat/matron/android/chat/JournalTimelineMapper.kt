@@ -43,7 +43,11 @@ object JournalTimelineMapper {
 
         val kind: TimelineItem.Kind = when (event.type) {
             JournalEventType.READ_MARKER, JournalEventType.EDIT,
-            JournalEventType.SESSION_STATUS, JournalEventType.CONVO_META -> return null
+            JournalEventType.SESSION_STATUS, JournalEventType.CONVO_META,
+            // Summary passes are TOC entries (the summaries sheet), never
+            // transcript rows — without this they'd render as
+            // "[unsupported event: summary]" noise.
+            JournalEventType.SUMMARY -> return null
 
             JournalEventType.TEXT ->
                 TimelineItem.Kind.Text(event.body() ?: "", null)
