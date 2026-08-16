@@ -390,6 +390,10 @@ private fun TimelineRowView(
     // answer is an HTTP call with no journal event behind it, so nothing in the
     // timeline snapshot would otherwise change.
     val agentChatStates by chatVM.agentChatStates.collectAsStateWithLifecycle()
+    // Collected so a file chip's spinner appears on tap and clears when the
+    // open/share fires — the download flips no timeline snapshot either
+    // (port of apple #138).
+    val downloadingFiles by chatVM.downloadingFiles.collectAsStateWithLifecycle()
     when (row) {
         is TimelineRow.Separator -> DateSeparator(label = DateSeparatorLabel.format(row.date))
         is TimelineRow.Message -> {
@@ -410,6 +414,7 @@ private fun TimelineRowView(
                     onRetry = { id -> chatVM.retrySend(id) },
                     onTapImage = { model -> onPreviewImage(model) },
                     onTapFile = onTapFile,
+                    isDownloadingFile = { url -> url in downloadingFiles },
                     askViewModel = { id -> chatVM.askViewModel(id) },
                     isPromptAnswered = { id -> chatVM.isPromptAnswered(id) },
                     answerSummary = { id -> chatVM.answerSummary(id) },

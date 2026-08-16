@@ -183,6 +183,19 @@ class ChatViewModel(
     private val failedRequests = LRUCache<String, Unit>(MEDIA_CACHE_LIMIT)
     private val inFlightRequests = mutableSetOf<String>()
 
+    /// File-attachment URLs whose blob download is currently in flight. A
+    /// StateFlow (the Kotlin analogue of the Swift port's `@Observable` set)
+    /// so the timeline's file chip recomposes to draw a spinner — a large PDF
+    /// takes double-digit seconds to pull through the journal server and a tap
+    /// with no visible reaction reads as a dead tap. Port of apple #138.
+    private val _downloadingFiles = MutableStateFlow<Set<String>>(emptySet())
+    val downloadingFiles: StateFlow<Set<String>> = _downloadingFiles.asStateFlow()
+
+    /// Attachment URL → temp file already written by [writeTempFile].
+    /// Re-opening an attachment must not re-download a multi-MB blob the user
+    /// just waited for.
+    private val fileTempFiles = mutableMapOf<String, File>()
+
     private val answeredPromptsKey = "matron.answeredPrompts.$roomID"
     private val answeredPromptIDs: MutableSet<String> =
         answeredPromptStore.getStringList(answeredPromptsKey)?.toMutableSet() ?: mutableSetOf()
@@ -661,33 +674,62 @@ class ChatViewModel(
     /// Non-fetching read of the resolved-media cache for a single URL.
     fun resolvedImage(url: String): ByteArray? = resolvedImages[url]
 
+    /// Whether a file attachment's blob download is currently in flight —
+    /// drives the timeline chip's spinner. [downloadingFiles] is the
+    /// recomposition channel (the Swift port reads `@Observable` state here).
+    fun isDownloadingFile(url: String): Boolean = url in _downloadingFiles.value
+
     /// Downloads a file attachment and writes it to
-    /// `<directory>/matron-attachments/<sanitised filename>`, returning the
-    /// written file or `null` on fetch/write failure — either failure also
-    /// breadcrumbs and sets [attachmentError] so the file-tap affordance isn't a
-    /// silent dead button. The temp filename preserves the original [filename]
-    /// so the downstream open/share UI shows a sensible label instead of a UUID.
-    /// Files written here are *not* cleaned up — the OS reaps the cache dir under
-    /// storage pressure and the size cost is bounded by attachments the user has
-    /// actively opened.
+    /// `<directory>/matron-attachments/<url digest>/<sanitised filename>`,
+    /// returning the written file or `null` on fetch/write failure — either
+    /// failure also breadcrumbs and sets [attachmentError] so the file-tap
+    /// affordance isn't a silent dead button. The temp filename preserves the
+    /// original [filename] so the downstream open/share UI shows a sensible
+    /// label instead of a UUID; uniqueness lives in the digest parent
+    /// directory, because distinct attachments routinely share a display
+    /// filename ("report.pdf" from two rooms) and a shared flat directory
+    /// would let the second download clobber the first — after which the
+    /// temp-file cache serves the wrong attachment's bytes (Bugbot on the
+    /// Apple PR, apple #138). Files written here are *not* cleaned up — the OS
+    /// reaps the cache dir under storage pressure and the size cost is bounded
+    /// by attachments the user has actively opened.
     suspend fun writeTempFile(url: String, filename: String, directory: File): File? {
-        val bytes = media.image(url)
-        if (bytes == null) {
-            MatronDebug.breadcrumb("writeTempFile: media fetch failed for $url")
-            _attachmentError.value = "Couldn't open \"$filename\" — check your connection and try again."
-            return null
+        // Repeat open: serve the temp file written last time (the OS may have
+        // reaped the cache dir between launches — fall through and re-download
+        // if it's gone).
+        fileTempFiles[url]?.takeIf { it.exists() }?.let { return it }
+        // Re-tap while the (multi-second) download is still running: a no-op,
+        // not a second parallel download. The chip's spinner (driven by
+        // [isDownloadingFile]) is the "hold on" signal — deliberately no
+        // [attachmentError] here.
+        if (url in _downloadingFiles.value) return null
+        _downloadingFiles.value += url
+        try {
+            val bytes = media.image(url)
+            if (bytes == null) {
+                MatronDebug.breadcrumb("writeTempFile: media fetch failed for $url")
+                _attachmentError.value = "Couldn't open \"$filename\" — check your connection and try again."
+                return null
+            }
+            val written = withContext(Dispatchers.IO) {
+                runCatching {
+                    val dir = File(File(directory, "matron-attachments"), attachmentURLDigest(url))
+                        .apply { mkdirs() }
+                    val dest = File(dir, sanitisedAttachmentFilename(filename))
+                    dest.writeBytes(bytes)
+                    dest
+                }.onFailure { MatronDebug.breadcrumb("writeTempFile: disk write failed for $filename: $it") }
+                    .getOrNull()
+            }
+            if (written == null) {
+                _attachmentError.value = "Couldn't open \"$filename\"."
+            } else {
+                fileTempFiles[url] = written
+            }
+            return written
+        } finally {
+            _downloadingFiles.value -= url
         }
-        val written = withContext(Dispatchers.IO) {
-            runCatching {
-                val dir = File(directory, "matron-attachments").apply { mkdirs() }
-                val dest = File(dir, sanitisedAttachmentFilename(filename))
-                dest.writeBytes(bytes)
-                dest
-            }.onFailure { MatronDebug.breadcrumb("writeTempFile: disk write failed for $filename: $it") }
-                .getOrNull()
-        }
-        if (written == null) _attachmentError.value = "Couldn't open \"$filename\"."
-        return written
     }
 
     val resolvedImageCount: Int get() = resolvedImages.count
@@ -854,6 +896,16 @@ class ChatViewModel(
         /// empty or `.`/`..`-only string fall back to a UUID so the write
         /// always lands inside the attachments dir. Test seam: `internal` so
         /// tests can assert the contract without hitting disk.
+        /// First 8 bytes of the URL's SHA-256, hex — the per-attachment temp
+        /// subdirectory name (mirrors the Swift port's CryptoKit digest,
+        /// apple #138). Test seam: `internal` so the keying contract can be
+        /// pinned without reading the VM's private cache.
+        internal fun attachmentURLDigest(url: String): String =
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest(url.toByteArray(Charsets.UTF_8))
+                .take(8)
+                .joinToString("") { "%02x".format(it) }
+
         internal fun sanitisedAttachmentFilename(raw: String): String {
             // Basename drops any directory tree the sender embedded; handle
             // both separator styles (Windows-style senders send `\`).

@@ -8,8 +8,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -26,12 +28,19 @@ import java.util.Locale
 /// formatted [sizeBytes]. Tapping the chip invokes [onTap] (e.g. to
 /// share/export). An optional [caption] renders underneath, outside the chip —
 /// it's the message, not a handle for opening the file.
+///
+/// While [isLoading] the icon becomes a spinner and the subtitle reads
+/// "Downloading…" — a large attachment takes double-digit seconds to pull
+/// through the journal server, and a tap with no visible reaction reads as a
+/// dead tap (port of apple #138). The icon slot keeps its 32dp frame so the
+/// chip doesn't reflow when the state flips.
 @Composable
 fun AttachmentFile(
     filename: String,
     sizeBytes: Long?,
     modifier: Modifier = Modifier,
     caption: String? = null,
+    isLoading: Boolean = false,
     onTap: (() -> Unit)? = null,
 ) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -44,12 +53,21 @@ fun AttachmentFile(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Icon(
-                Icons.Filled.InsertDriveFile,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(32.dp),
-            )
+            Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                if (isLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(
+                        Icons.Filled.InsertDriveFile,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(32.dp),
+                    )
+                }
+            }
             Column(Modifier.weight(1f, fill = false), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
                     filename,
@@ -58,9 +76,10 @@ fun AttachmentFile(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (sizeBytes != null) {
+                val subtitle = attachmentFileSubtitle(isLoading = isLoading, sizeBytes = sizeBytes)
+                if (subtitle != null) {
                     Text(
-                        formatFileSize(sizeBytes),
+                        subtitle,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -72,6 +91,17 @@ fun AttachmentFile(
             Text(caption, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
         }
     }
+}
+
+/// The chip's subtitle line: "Downloading…" while the blob fetch is in flight,
+/// else the formatted size (or nothing when the size is unknown). Pure so the
+/// state precedence is unit-testable — the Apple PR pins the same states with
+/// snapshot tests (`AttachmentFileSnapshotTests.test_downloading`, apple #138),
+/// which this project's conventions replace with pure-function tests.
+internal fun attachmentFileSubtitle(isLoading: Boolean, sizeBytes: Long?): String? = when {
+    isLoading -> "Downloading…"
+    sizeBytes != null -> formatFileSize(sizeBytes)
+    else -> null
 }
 
 /// Decimal (1000-based) size string — "12 bytes", "3.4 kB", "1.2 MB" — matching

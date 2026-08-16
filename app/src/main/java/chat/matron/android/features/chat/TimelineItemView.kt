@@ -59,6 +59,10 @@ fun TimelineItemView(
     onRetry: ((String) -> Unit)? = null,
     onTapImage: ((Any) -> Unit)? = null,
     onTapFile: ((url: String, filename: String) -> Unit)? = null,
+    /// Whether a file attachment's blob download is in flight — drives the
+    /// chip's spinner ([ChatViewModel.isDownloadingFile]). `null` keeps
+    /// previews/tests compiling (port of apple #138).
+    isDownloadingFile: ((String) -> Boolean)? = null,
     askViewModel: ((String) -> AskUserSheetViewModel?)? = null,
     isPromptAnswered: ((String) -> Boolean)? = null,
     answerSummary: ((String) -> String?)? = null,
@@ -77,8 +81,8 @@ fun TimelineItemView(
     if (item.isOwn && item.sendState != TimelineSendState.Sent) {
         Column(horizontalAlignment = Alignment.End) {
             RenderedBody(
-                item, resolveImage, onTapImage, onTapFile, askViewModel, isPromptAnswered,
-                answerSummary, agentChatState, onAnswerAgentChat,
+                item, resolveImage, onTapImage, onTapFile, isDownloadingFile, askViewModel,
+                isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
             )
             SendStateIndicator(
                 state = sendStateGlyphFrom(item.sendState),
@@ -88,8 +92,8 @@ fun TimelineItemView(
         }
     } else {
         RenderedBody(
-            item, resolveImage, onTapImage, onTapFile, askViewModel, isPromptAnswered,
-            answerSummary, agentChatState, onAnswerAgentChat,
+            item, resolveImage, onTapImage, onTapFile, isDownloadingFile, askViewModel,
+            isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
         )
     }
 }
@@ -100,6 +104,7 @@ private fun RenderedBody(
     resolveImage: ((String) -> ByteArray?)?,
     onTapImage: ((Any) -> Unit)?,
     onTapFile: ((url: String, filename: String) -> Unit)?,
+    isDownloadingFile: ((String) -> Boolean)?,
     askViewModel: ((String) -> AskUserSheetViewModel?)?,
     isPromptAnswered: ((String) -> Boolean)?,
     answerSummary: ((String) -> String?)?,
@@ -130,15 +135,20 @@ private fun RenderedBody(
             }
         }
 
-        is TimelineItem.Kind.File ->
+        is TimelineItem.Kind.File -> {
+            // Read inside the row body so the collected downloadingFiles flow
+            // recomposes the row when the flag flips (apple #138).
+            val isLoading = kind.url?.let { isDownloadingFile?.invoke(it) } ?: false
             MessageBubble(style = style, timestamp = item.timestamp) {
                 AttachmentFile(
                     filename = kind.filename,
                     sizeBytes = kind.sizeBytes,
                     caption = kind.caption,
+                    isLoading = isLoading,
                     onTap = if (kind.url != null && onTapFile != null) ({ onTapFile(kind.url!!, kind.filename) }) else null,
                 )
             }
+        }
 
         is TimelineItem.Kind.StateChange -> AmbientNotice(kind.text)
 

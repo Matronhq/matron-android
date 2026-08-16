@@ -593,7 +593,10 @@ class ChatViewModelTest {
             val file = vm.writeTempFile(url, "report.pdf", root)
             assertNotNull(file)
             assertEquals("report.pdf", file!!.name)
-            assertEquals(File(root, "matron-attachments"), file.parentFile)
+            // apple #138 namespaces the write by a digest of the attachment
+            // URL so same-named attachments can't clobber each other.
+            assertEquals(ChatViewModel.attachmentURLDigest(url), file.parentFile!!.name)
+            assertEquals(File(root, "matron-attachments"), file.parentFile!!.parentFile)
             assertTrue(byteArrayOf(9, 8, 7).contentEquals(file.readBytes()))
         } finally {
             root.deleteRecursively()
@@ -691,7 +694,7 @@ class ChatViewModelTest {
         try {
             val file = vm.writeTempFile(url, "../../escape.txt", root)
             assertNotNull(file)
-            assertEquals(File(root, "matron-attachments"), file!!.parentFile)
+            assertEquals(File(root, "matron-attachments"), file!!.parentFile!!.parentFile)
             assertEquals("escape.txt", file.name)
         } finally {
             root.deleteRecursively()
