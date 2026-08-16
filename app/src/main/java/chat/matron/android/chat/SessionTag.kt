@@ -17,15 +17,17 @@ package chat.matron.android.chat
 ///   stays consistent with the chips everywhere else.
 object SessionTag {
 
-    /// The bridge's multi-agent room marker, leading every agent-chat room
-    /// title (`🔗 [ab] mac ↔ dev-z`, matron-bridge#225).
-    internal const val ROOM_MARKER = "🔗 "
+    /// The bridge's multi-agent room markers, leading every agent-chat room
+    /// title (`↔️ [ab] mac ↔ dev-z`, matron-bridge#225/#228). 🔗 is the
+    /// legacy marker rooms minted before #228 still carry — titles are only
+    /// rewritten on rename, so both must parse indefinitely.
+    internal val roomMarkers = listOf("↔️ ", "🔗 ")
 
     /// The bridge's markers that may lead a title ahead of the short:
-    /// 🔗 = multi-agent room (#225), 🐣 = session another agent spawned
-    /// (matron-bridge#227). Both stay with the visible title; only the
-    /// room marker is ever dropped, and only beside a rendered room tag.
-    internal val titleMarkers = listOf(ROOM_MARKER, "🐣 ")
+    /// ↔️/🔗 = multi-agent room (#225), 🐣 = session another agent spawned
+    /// (matron-bridge#227). All stay with the visible title; only a room
+    /// marker is ever dropped, and only beside a rendered room tag.
+    internal val titleMarkers = roomMarkers + "🐣 "
 
     /// Peels the bridge's `[bc] ` session-short prefix off a published
     /// title. Returns the short (without brackets) and the remaining title.
@@ -55,11 +57,13 @@ object SessionTag {
     }
 
     /// The title to render NEXT TO a colored `A↔B` room tag: the tag
-    /// already says "multi-agent room", so the bridge's 🔗 marker is
+    /// already says "multi-agent room", so the bridge's room marker is
     /// dropped. Rows that show no room tag (single-box users, unresolved
     /// participants) keep the marker.
-    fun titleBesideRoomTag(title: String): String =
-        if (title.startsWith(ROOM_MARKER)) title.removePrefix(ROOM_MARKER) else title
+    fun titleBesideRoomTag(title: String): String {
+        val marker = roomMarkers.firstOrNull { title.startsWith(it) } ?: return title
+        return title.removePrefix(marker)
+    }
 
     /// One display letter per box, derived from the box names: strip the
     /// prefix common to ALL names, then take the first letter/digit of what

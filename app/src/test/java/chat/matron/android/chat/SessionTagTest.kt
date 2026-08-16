@@ -48,25 +48,36 @@ class SessionTagTest {
         assertEquals("[ok] do the thing", title)
     }
 
-    /// Ports matron-apple's `testSplitTitlePeelsARoomShortBehindTheLinkMarker`:
-    /// agent-chat room titles (bridge #225) carry the room short BEHIND the
-    /// 🔗 marker, which stays with the title — a single-box user gets no
+    /// Ports matron-apple's `testSplitTitlePeelsARoomShortBehindTheRoomMarker`:
+    /// agent-chat room titles (bridge #225/#228) carry the room short BEHIND
+    /// the ↔️ marker, which stays with the title — a single-box user gets no
     /// styled tag but must keep the room marker.
     @Test
-    fun splitTitlePeelsARoomShortBehindTheLinkMarker() {
+    fun splitTitlePeelsARoomShortBehindTheRoomMarker() {
+        val (short, title) = SessionTag.splitTitle("↔️ [ab] mac ↔ dev-z — ci triage")
+        assertEquals("ab", short)
+        assertEquals("↔️ mac ↔ dev-z — ci triage", title)
+
+        // A room title with no short behind the marker comes back untouched.
+        val (none, plain) = SessionTag.splitTitle("↔️ mac ↔ dev-z")
+        assertNull(none)
+        assertEquals("↔️ mac ↔ dev-z", plain)
+    }
+
+    /// Ports matron-apple's `testSplitTitleStillPeelsTheLegacyLinkMarker`:
+    /// rooms minted before bridge #228 carry 🔗 forever — titles only
+    /// rewrite on rename, so the legacy marker must keep parsing.
+    @Test
+    fun splitTitleStillPeelsTheLegacyLinkMarker() {
         val (short, title) = SessionTag.splitTitle("🔗 [ab] mac ↔ dev-z — ci triage")
         assertEquals("ab", short)
         assertEquals("🔗 mac ↔ dev-z — ci triage", title)
-
-        // A 🔗 title with no short behind it comes back untouched.
-        val (none, plain) = SessionTag.splitTitle("🔗 mac ↔ dev-z")
-        assertNull(none)
-        assertEquals("🔗 mac ↔ dev-z", plain)
     }
 
-    /// Ports matron-apple's `testTitleBesideRoomTagDropsTheMarker`.
+    /// Ports matron-apple's `testTitleBesideRoomTagDropsEitherMarker`.
     @Test
-    fun titleBesideRoomTagDropsTheMarker() {
+    fun titleBesideRoomTagDropsEitherMarker() {
+        assertEquals("mac ↔ dev-z", SessionTag.titleBesideRoomTag("↔️ mac ↔ dev-z"))
         assertEquals("mac ↔ dev-z", SessionTag.titleBesideRoomTag("🔗 mac ↔ dev-z"))
         assertEquals("mac ↔ dev-z", SessionTag.titleBesideRoomTag("mac ↔ dev-z"))
     }

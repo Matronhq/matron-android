@@ -196,15 +196,15 @@ class JournalChatServiceTest {
         store.applyColdSnapshot(
             listOf(
                 ConvoSummaryDTO(
-                    "room", "🔗 [ab] mac ↔ dev-z", "waiting", 1, "", 1,
+                    "room", "↔️ [ab] mac ↔ dev-z", "waiting", 1, "", 1,
                     agentDeviceID = 7, participants = listOf(7, 9),
                 ),
                 ConvoSummaryDTO(
-                    "local", "🔗 [cd] mac ↔ mac", "waiting", 1, "", 1,
+                    "local", "↔️ [cd] mac ↔ mac", "waiting", 1, "", 1,
                     agentDeviceID = 7, participants = listOf(7),
                 ),
                 ConvoSummaryDTO(
-                    "ghost", "🔗 [ef] mac ↔ gone", "waiting", 1, "", 1,
+                    "ghost", "↔️ [ef] mac ↔ gone", "waiting", 1, "", 1,
                     agentDeviceID = 7, participants = listOf(7, 999),
                 ),
             ),
@@ -218,12 +218,12 @@ class JournalChatServiceTest {
 
         // A genuine multi-box room tags every box — names for the hue,
         // letters for the glyphs, journal order — and the room short comes
-        // off the `🔗 [ab] ` title prefix with the marker kept.
+        // off the `↔️ [ab] ` title prefix with the marker kept.
         val multi = JournalChatService.summary(room, two, letters)
         assertEquals(listOf("dev-y", "dev-z"), multi.roomBoxNames)
         assertEquals(listOf("Y", "Z"), multi.roomBoxShorts)
         assertEquals("ab", multi.sessionShort)
-        assertEquals("🔗 mac ↔ dev-z", multi.title)
+        assertEquals("↔️ mac ↔ dev-z", multi.title)
 
         // Single-box user: same gate as the single-box tag — no letters.
         val gated = JournalChatService.summary(room, mapOf(7L to "dev-y"))
