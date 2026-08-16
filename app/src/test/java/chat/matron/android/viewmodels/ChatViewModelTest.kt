@@ -701,6 +701,28 @@ class ChatViewModelTest {
         }
     }
 
+    // MARK: - attachmentURLDigest
+
+    @Test
+    fun attachmentURLDigest_pinsExactHex_andMasksHighBytes() {
+        // Pinned: first 8 bytes of SHA-256("mxc://matron.chat/abc123"), hex.
+        // The digest contains bytes >= 0x80 (0xe7, 0xa8), so this also pins
+        // that formatting treats bytes as unsigned — a sign-extending
+        // formatter would render "ffffffe7" and blow past 16 chars.
+        assertEquals(
+            "222ce7a7942892a8",
+            ChatViewModel.attachmentURLDigest("mxc://matron.chat/abc123"),
+        )
+    }
+
+    @Test
+    fun attachmentURLDigest_isAlways16LowercaseHexChars() {
+        for (url in listOf("mxc://a/b", "https://example.com/x?y=1", "", "é你好")) {
+            val digest = ChatViewModel.attachmentURLDigest(url)
+            assertTrue("'$url' digest '$digest'", digest.matches(Regex("[0-9a-f]{16}")))
+        }
+    }
+
     // MARK: - sanitisedAttachmentFilename (ported Swift contract)
 
     @Test
