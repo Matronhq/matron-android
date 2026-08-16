@@ -6,6 +6,7 @@ import java.time.Instant
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -210,9 +211,13 @@ class WireModelsTest {
         val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42,
             null, null, "L2"))
         val payload = media.objectOrNull("payload")
-        assertNull(payload?.stringOrNull("batch_id"))
-        assertNull(payload?.intOrNull("batch_index"))
-        assertNull(payload?.intOrNull("batch_total"))
+        assertNotNull(payload)
+        // containsKey rather than xOrNull: the *OrNull helpers can't tell an
+        // absent key from an explicit JSON null, and "byte-identical to an
+        // untagged frame" means the keys must not appear at all.
+        assertFalse(payload!!.containsKey("batch_id"))
+        assertFalse(payload.containsKey("batch_index"))
+        assertFalse(payload.containsKey("batch_total"))
     }
 
     @Test
