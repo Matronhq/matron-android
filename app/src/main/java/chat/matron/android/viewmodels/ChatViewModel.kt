@@ -673,6 +673,14 @@ class ChatViewModel(
         historyRefillTask = null
         focusTask?.cancel()
         focusTask = null
+        // Drop any unconsumed TOC jump target. VM instances are cached across
+        // visits and `pendingFocusID` is a StateFlow, so a new collector
+        // receives the current value immediately: a target still set when the
+        // view exits (mid-scroll, or between the focus landing and the
+        // consumer's clearPendingFocus) would replay the jump on re-entry.
+        // The Apple original doesn't need this — its views consume via
+        // `.onChange`, which fires on transitions only, never on subscription.
+        _pendingFocusID.value = null
     }
 
     /// One-shot refetch of the newest page after content → empty. Resets the

@@ -1314,6 +1314,23 @@ class ChatViewModelTest {
         assertEquals("320", vm.pendingFocusID.value)
         vm.stop()
     }
+
+    /// Bugbot "Stale focus survives chat exit": VM instances are cached across
+    /// visits (ChatVMCache) and `pendingFocusID` is a StateFlow, replayed to
+    /// every new collector — so a target still set when the view exits
+    /// (between the focus landing and the consumer's clearPendingFocus) must
+    /// not replay the jump on re-entry. stop() drops it.
+    @Test
+    fun stopClearsUnconsumedPendingFocus() = vmTest { scope ->
+        val vm = makeVMWithMessages(scope, listOf(10, 20, 30, 40))
+        vm.focus(35)
+        assertEquals("30", vm.pendingFocusID.value)   // landed, not yet consumed
+        vm.stop()
+        assertNull(vm.pendingFocusID.value)
+        vm.start()
+        assertNull(vm.pendingFocusID.value)           // re-entry sees no stale jump
+        vm.stop()
+    }
 }
 
 /// Paged-history [TimelineService] fake for the focus(seq) tests: [items]
