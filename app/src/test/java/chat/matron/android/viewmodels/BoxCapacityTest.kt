@@ -76,4 +76,30 @@ class BoxCapacityTest {
         assertTrue(BoxCapacity.resetText(nextWeek, now, zone)!!.contains("Aug"))
         assertNull(BoxCapacity.resetText(null, now, zone))
     }
+
+    /// Port of apple's BoxCapacityTests
+    /// `test_resetText_passedResetReadsReset_notAPastMomentAsUpcoming`.
+    @Test
+    fun resetText_passedResetReadsReset_notAPastMomentAsUpcoming() {
+        val zone = ZoneId.of("UTC")
+        val now = 1_754_900_000_000L
+        // Earlier today AND a previous day: both used to format as if
+        // upcoming ("resets 5:30 PM" the day after the fact — the stale
+        // cache-line bug); both must read as already reset.
+        assertEquals("reset", BoxCapacity.resetText(now - 3_600_000L, now, zone))
+        assertEquals("reset", BoxCapacity.resetText(now - 2 * 86_400_000L, now, zone))
+    }
+
+    /// Port of apple's BoxCapacityTests `test_hasReset_pastTrue_futureAndUnknownFalse`.
+    @Test
+    fun hasReset_pastTrue_futureAndUnknownFalse() {
+        val now = 1_754_900_000_000L
+        assertTrue(BoxCapacity.hasReset(now - 1, now))
+        assertTrue("the boundary instant counts as reset", BoxCapacity.hasReset(now, now))
+        assertFalse(BoxCapacity.hasReset(now + 60_000L, now))
+        assertFalse(
+            "no timestamp means no expiry claim — the line renders normally",
+            BoxCapacity.hasReset(null, now),
+        )
+    }
 }

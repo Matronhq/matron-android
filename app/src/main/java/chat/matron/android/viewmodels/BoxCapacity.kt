@@ -49,14 +49,28 @@ data class BoxCapacity(
             return BoxCapacity(live, lines, email)
         }
 
+        /// True when the line's reset moment is known and already behind
+        /// `nowMs`: the limit has rolled over since the bridge cached this
+        /// line, so the percent on screen predates the reset. Callers
+        /// de-emphasise the stale number instead of presenting it as current.
+        fun hasReset(resetsAt: Long?, nowMs: Long = System.currentTimeMillis()): Boolean {
+            if (resetsAt == null) return false
+            return resetsAt <= nowMs
+        }
+
         /// "resets 11:59 PM" when the reset falls on today's local date,
-        /// "resets Aug 15" otherwise; null when the bridge sent no timestamp.
+        /// "resets Aug 15" otherwise. A reset already behind `nowMs` reads
+        /// "reset" — showing a past moment as upcoming ("resets 5:30 PM" the
+        /// day after) is how stale cache lines used to masquerade as live.
+        /// Null when the bridge sent no timestamp, so the caller drops the
+        /// trailing text (the limit line still renders).
         fun resetText(
             resetsAt: Long?,
             nowMs: Long = System.currentTimeMillis(),
             zone: ZoneId = ZoneId.systemDefault(),
         ): String? {
             if (resetsAt == null) return null
+            if (resetsAt <= nowMs) return "reset"
             val date = Instant.ofEpochMilli(resetsAt).atZone(zone)
             val now = Instant.ofEpochMilli(nowMs).atZone(zone)
             val pattern = if (date.toLocalDate() == now.toLocalDate()) "h:mm a" else "MMM d"
