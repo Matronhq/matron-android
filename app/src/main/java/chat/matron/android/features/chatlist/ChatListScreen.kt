@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -221,7 +222,14 @@ private fun ChatRow(
                     // Which box owns this conversation. Null unless the user
                     // has two or more boxes — the gate lives in
                     // JournalChatService, so this row just renders.
-                    summary.boxName?.let { BoxChip(it) }
+                    //
+                    // Width-capped: Compose measures the unweighted chip
+                    // BEFORE the weighted title, so an uncapped chip at the
+                    // 40-char name cap would squeeze the title to nothing —
+                    // unlike the iOS HStack, which negotiates space between
+                    // its two texts. The cap keeps the title legible; the
+                    // chip's own Text ellipsizes past it.
+                    summary.boxName?.let { BoxChip(it, modifier = Modifier.widthIn(max = 144.dp)) }
                 }
                 Text(
                     summary.snippet.ifEmpty { " " },
