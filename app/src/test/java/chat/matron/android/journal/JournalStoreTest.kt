@@ -649,9 +649,14 @@ class JournalStoreTest {
         store.renameAgent(7, "dev-yellow")
         assertEquals(mapOf(7L to "dev-yellow"), store.agentNames())
 
-        // A rename for a box we have never seen inserts it.
+        // A rename for an id NOT in the roster must not create a row: the
+        // server broadcasts `device_meta` for client renames too, and an
+        // upsert would let a renamed phone flip the ≥2-boxes chip gate.
+        // (Divergence from matron-apple, which upserts — see
+        // JournalStore.renameAgent.)
         store.renameAgent(12, "dev-new")
-        assertEquals("dev-new", store.agentNames()[12])
+        assertNull(store.agentNames()[12])
+        assertEquals(mapOf(7L to "dev-yellow"), store.agentNames())
     }
 
     /// Ports matron-apple's `testAgentNamesStreamRefiresOnRename`: the roster

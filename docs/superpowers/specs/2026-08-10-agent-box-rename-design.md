@@ -69,9 +69,11 @@ place of GRDB, Compose in place of SwiftUI):
 - `ConvoSummaryDTO` + `ConversationEntity` gain `agentDeviceID: Long?`
   (column `agent_device_id`); Room migration v3 adds the column.
 - New Room table `agent` (`id INTEGER PRIMARY KEY`, `name TEXT NOT NULL`),
-  replaced wholesale on each snapshot apply (`JournalStore.replaceAgents`,
-  empty-list = no-op so an older server can't wipe a good roster) and patched
-  by `device_meta` (`renameAgent`, an upsert).
+  replaced wholesale on each snapshot apply (`JournalStore.replaceAgents`)
+  and patched by `device_meta` (`renameAgent`, update-only — the frame fans
+  out for any device kind, so an upsert would let a renamed phone join the
+  agent roster; unknown ids wait for the next snapshot. Divergence from
+  matron-apple, which upserts).
 - `convo_meta` handling stores `agent_device_id` when present; a snapshot row
   that omits it never clears a learned value (the `parent_convo_id`
   discipline), but a present value always wins.

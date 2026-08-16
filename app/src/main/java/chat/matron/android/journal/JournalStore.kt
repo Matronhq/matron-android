@@ -402,9 +402,14 @@ class JournalStore(
         }
     }
 
-    /// Applies one live `device_meta` rename. Upsert, not update: the rename
-    /// may name a box this device has not snapshotted yet.
-    suspend fun renameAgent(id: Long, name: String) = agentDao.upsert(AgentEntity(id = id, name = name))
+    /// Applies one live `device_meta` rename. Update-only, NOT an upsert
+    /// (deliberate divergence from matron-apple, which upserts): the frame
+    /// carries only `device_id` + `name` and the server fans it out for ANY
+    /// device kind, so renaming a phone would otherwise insert a client into
+    /// the agent roster and flip the ≥2-boxes chip gate for a single-box
+    /// user. An id not in the table is ignored — a genuinely new box gets
+    /// its name from the next `agents` snapshot instead.
+    suspend fun renameAgent(id: Long, name: String) = agentDao.rename(id, name)
 
     /// id → name for every known box. The chat list joins against this to
     /// label rows, and its COUNT is the "does this user have ≥2 boxes" gate.
