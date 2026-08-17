@@ -52,6 +52,10 @@ fun SubChatView(
     fallbackTitle: String,
     onBack: () -> Unit,
     onSwitchTo: (String) -> Unit,
+    /// Opens a spawned session's room from an agent-spawn card or its
+    /// `SpawnOutcomeRow` in this sub-chat's own timeline — same callback
+    /// [ChatScreen] gets, threaded through [TimelineList].
+    onOpenConversation: (String) -> Unit,
 ) {
     val children by stripVM.children.collectAsStateWithLifecycle()
     val sessionStatus by chatVM.sessionStatus.collectAsStateWithLifecycle()
@@ -134,6 +138,7 @@ fun SubChatView(
                     stripVM = stripVM,
                     activityLabel = null,
                     onOpenChild = onSwitchTo,
+                    onOpenConversation = onOpenConversation,
                     onPreviewImage = { previewModel = it },
                     modifier = Modifier.weight(1f),
                 )

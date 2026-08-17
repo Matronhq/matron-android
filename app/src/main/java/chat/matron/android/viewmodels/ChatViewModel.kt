@@ -5,9 +5,14 @@ import chat.matron.android.chat.TimelineItem
 import chat.matron.android.chat.TimelineService
 import chat.matron.android.events.AgentChatCardState
 import chat.matron.android.events.AgentChatRequest
+import chat.matron.android.events.AgentSpawnCardState
+import chat.matron.android.events.AgentSpawnRequest
 import chat.matron.android.events.AskUserEvent
+import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.journal.AgentChatDecision
+import chat.matron.android.journal.AgentSpawnAnswering
+import chat.matron.android.journal.AgentSpawnDecision
 import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.SessionState
 import chat.matron.android.models.SessionStatus
@@ -75,6 +80,10 @@ class ChatViewModel(
     /// answerer renders read-only rather than offering buttons that would do
     /// nothing — the exact failure this whole path exists to fix.
     private val agentChat: AgentChatAnswering? = null,
+    /// Answers agent-spawn consent cards. Nullable for the same reason as
+    /// [agentChat]. Unlike [agentChat], resolution is never remembered by
+    /// this view model — see [agentSpawnState].
+    private val agentSpawn: AgentSpawnAnswering? = null,
 ) {
     // MARK: - Published state
 
@@ -286,11 +295,101 @@ class ChatViewModel(
         _agentChatStates.value = _agentChatStates.value - eventID
     }
 
+    // MARK: - Agent-spawn consent cards
+
+    /// The durable resolution for every agent-spawn card currently in the
+    /// timeline, rebuilt fresh from [TimelineItem.Kind.SpawnOutcomeRow] items
+    /// on every snapshot (see [applySnapshot]) — NOT persisted, unlike
+    /// [agentChatAnswers]. Keyed by `SpawnOutcome.requestId`, the
+    /// correlation key back to the card (see `AgentSpawnRequest.requestId`'s
+    /// doc). A fresh view model for the same room reconstructs this purely
+    /// from the replayed snapshot, with zero [KeyValueStore] involvement.
+    private val _spawnOutcomes = MutableStateFlow<Map<String, SpawnOutcome>>(emptyMap())
+    val spawnOutcomes: StateFlow<Map<String, SpawnOutcome>> = _spawnOutcomes.asStateFlow()
+
+    /// Live per-card state while an answer is in flight or has failed. Not
+    /// persisted, same rationale as [_agentChatStates]: a send interrupted by
+    /// process death or a cancelled scope should come back answerable rather
+    /// than stuck — and once the durable [SpawnOutcome] lands it supersedes
+    /// whatever is left here regardless (see [agentSpawnState]'s precedence).
+    private val _agentSpawnStates = MutableStateFlow<Map<String, AgentSpawnCardState>>(emptyMap())
+    val agentSpawnStates: StateFlow<Map<String, AgentSpawnCardState>> = _agentSpawnStates.asStateFlow()
+
+    /// Render state for one agent-spawn card. Precedence: the durable
+    /// [SpawnOutcome] (a journaled `spawn_outcome` event, [_spawnOutcomes])
+    /// always wins — once it lands there is nothing left to answer, no
+    /// matter what a stale transient state says; then the transient
+    /// in-flight/failed/[AgentSpawnCardState.Unavailable] state
+    /// ([_agentSpawnStates]); then [AgentSpawnCardState.Idle] if an answerer
+    /// is wired, else [AgentSpawnCardState.Unavailable] — mirrors
+    /// [agentChatState]'s nil-answerer -> `Expired` convention: a card with
+    /// no answerer must not offer buttons that do nothing.
+    fun agentSpawnState(eventID: String, request: AgentSpawnRequest): AgentSpawnCardState {
+        _spawnOutcomes.value[request.requestId]?.let { return AgentSpawnCardState.Resolved(it) }
+        _agentSpawnStates.value[eventID]?.let { return it }
+        return if (agentSpawn == null) AgentSpawnCardState.Unavailable else AgentSpawnCardState.Idle
+    }
+
+    /// Answers an agent-spawn card. Unlike [answerAgentChat] there is no
+    /// local "answered" memory to write on success: the durable record is
+    /// the journal's own `spawn_outcome` event, which [_spawnOutcomes] picks
+    /// up on its own the moment it lands and which then supersedes whatever
+    /// this leaves behind in [_agentSpawnStates]. So a plain success here
+    /// does nothing further — the card just stays `Sending` until either the
+    /// outcome event supersedes it, or a later failure makes it answerable
+    /// again.
+    ///
+    /// Runs on [scope], not the caller's — the same "the row can scroll away
+    /// or the chat can close mid-request" rationale as [answerAgentChat]: a
+    /// row-scoped coroutine would be cancelled with the request still in
+    /// flight, leaving the card stuck on `Sending` with no way to retry.
+    fun answerAgentSpawn(
+        eventID: String,
+        request: AgentSpawnRequest,
+        decision: AgentSpawnDecision,
+    ) {
+        val answerer = agentSpawn ?: return
+        when (agentSpawnState(eventID, request)) {
+            is AgentSpawnCardState.Resolved, is AgentSpawnCardState.Sending,
+            AgentSpawnCardState.Unavailable,
+            -> return
+            else -> {}
+        }
+        setAgentSpawnState(eventID, AgentSpawnCardState.Sending)
+        scope.launch {
+            try {
+                answerer.answerAgentSpawn(request.requestId, decision)
+            } catch (cancel: CancellationException) {
+                // Whole chat is going away. Drop the in-flight marker so the
+                // card comes back answerable rather than stuck mid-send.
+                _agentSpawnStates.value = _agentSpawnStates.value - eventID
+                throw cancel
+            } catch (conflict: JournalApiError.Conflict) {
+                // The row stopped awaiting an answer between the card being
+                // drawn and the tap (answered on another device, or
+                // expired). Settle it as Unavailable — "no longer waiting for
+                // an answer" — rather than a failure the user would only
+                // retry; the real spawn_outcome event, once it lands,
+                // supersedes this regardless (see [agentSpawnState]'s
+                // precedence).
+                setAgentSpawnState(eventID, AgentSpawnCardState.Unavailable)
+            } catch (error: Throwable) {
+                setAgentSpawnState(eventID, AgentSpawnCardState.Failed(describeAgentSpawnError(error)))
+            }
+        }
+    }
+
+    private fun setAgentSpawnState(eventID: String, state: AgentSpawnCardState) {
+        _agentSpawnStates.value = _agentSpawnStates.value + (eventID to state)
+    }
 
     // MARK: - Snapshot → derived state
 
     private fun applySnapshot(snapshot: List<TimelineItem>) {
         _items.value = snapshot
+        _spawnOutcomes.value = snapshot.mapNotNull { item ->
+            (item.kind as? TimelineItem.Kind.SpawnOutcomeRow)?.outcome
+        }.associateBy { it.requestId }
         applyDerivedRecompute()
     }
 
@@ -826,6 +925,13 @@ class ChatViewModel(
         private const val EXPIRED_ANSWER = "expired"
 
         internal fun describeAgentChatError(error: Throwable): String = when (error) {
+            is JournalApiError.Transport ->
+                "Couldn't reach the server — check your connection and try again."
+            is JournalApiError.NotFound -> "That request is no longer on the server."
+            else -> "The server refused that answer."
+        }
+
+        internal fun describeAgentSpawnError(error: Throwable): String = when (error) {
             is JournalApiError.Transport ->
                 "Couldn't reach the server — check your connection and try again."
             is JournalApiError.NotFound -> "That request is no longer on the server."
