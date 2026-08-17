@@ -279,13 +279,22 @@ private fun SignedInApp(
         openConversationCallback(
             scope = sessionScope,
             prepareConversation = { id -> deps.prepareConversation(session, id) },
-            // launchSingleTop: a repeat tap (no immediate feedback — the
-            // navigation is deferred behind the suspend placeholder write,
-            // which invites a double-tap) or an Open for the room already on
-            // screen must no-op rather than push a duplicate back-stack
-            // entry — matches the port source's explicit
-            // `path.wrappedValue.last != roomID` guard (ChatView.swift).
-            navigate = { id -> nav.navigate("chat/$id") { launchSingleTop = true } },
+            // A repeat tap (no immediate feedback — the navigation is
+            // deferred behind the suspend placeholder write, which invites a
+            // double-tap) or an Open for the room already on screen must
+            // no-op rather than push a duplicate back-stack entry — matches
+            // the port source's explicit `path.wrappedValue.last != roomID`
+            // guard (ChatView.swift). NOT launchSingleTop: that matches on
+            // the destination id, so all `chat/{convoID}` screens count as
+            // "the same" — opening a spawned room from its parent chat would
+            // REPLACE the parent's back-stack entry (Back then skips to the
+            // list and the parent's state is lost) instead of pushing.
+            navigate = { id ->
+                val entry = nav.currentBackStackEntry
+                val alreadyOpen = entry?.destination?.route == "chat/{convoID}" &&
+                    entry.arguments?.getString("convoID") == id
+                if (!alreadyOpen) nav.navigate("chat/$id")
+            },
         )
     }
 

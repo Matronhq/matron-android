@@ -84,6 +84,27 @@ object JournalTimelineMapper {
                     agentSpawn != null ->
                         TimelineItem.Kind.AgentSpawnRequestCard(event.seq.toString(), agentSpawn)
 
+                    // A consent-kind payload the parser rejected (malformed —
+                    // e.g. no request_id). It answers over HTTP
+                    // (`POST /agent-spawn/answer` / `/agent-chat/answer`),
+                    // never `prompt_reply`, so the generic branch below would
+                    // draw Allow/Deny buttons wired to a channel nothing
+                    // reads — dead taps until the ask expires. Render an
+                    // inert notice instead; web renders the spawn card
+                    // read-only for the same case.
+                    payload.stringOrNull("kind") in listOf("agent_spawn", "agent_chat") -> {
+                        val headline = payload.stringOrNull("topic")?.takeIf { it.isNotBlank() }
+                            ?: payload.stringOrNull("task")
+                                ?.substringBefore('\n')?.takeIf { it.isNotBlank() }
+                        TimelineItem.Kind.StateChange(
+                            if (headline != null) {
+                                "Agent request that can't be answered here: $headline"
+                            } else {
+                                "Agent request that can't be answered here"
+                            },
+                        )
+                    }
+
                     else -> {
                         val description = payload.stringOrNull("description") ?: "Permission request"
                         val arr = payload.arrayOrNull("options")

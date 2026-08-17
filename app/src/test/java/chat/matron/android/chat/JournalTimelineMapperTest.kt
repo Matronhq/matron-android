@@ -435,14 +435,16 @@ class JournalTimelineMapperTest {
     }
 
     /// A card whose payload is missing something the answer call needs is
-    /// unanswerable — better a generic card than buttons that would 400.
-    @Test fun unanswerableAgentChatPayloadFallsBackToTheGenericCard() {
+    /// unanswerable — and its answer channel is HTTP, not `prompt_reply`, so
+    /// the generic card's Allow/Deny would be dead buttons. Rendered as an
+    /// inert notice instead.
+    @Test fun unanswerableAgentChatPayloadRendersAsAnInertNotice() {
         val item = map(ev(33, "permission_request", payload = buildJsonObject {
             put("kind", "agent_chat")
             put("request", "invite")
             put("from_device_id", 4)
         }))!!
-        assertTrue(item.kind is TimelineItem.Kind.AskUser)
+        assertTrue(item.kind is TimelineItem.Kind.StateChange)
     }
 
     // MARK: Agent-spawn consent card
@@ -479,15 +481,20 @@ class JournalTimelineMapperTest {
     }
 
     /// A spawn card missing what the answer call needs (`task`) is
-    /// unanswerable — falls back to the generic card, same stance as
-    /// agent-chat.
-    @Test fun unanswerableAgentSpawnPayloadFallsBackToTheGenericCard() {
+    /// unanswerable — the generic card's Allow/Deny would post over
+    /// `prompt_reply`, a channel the spawn flow never reads (it answers over
+    /// `POST /agent-spawn/answer`), leaving dead buttons until the ask
+    /// expires. Rendered as an inert notice instead, same stance as
+    /// agent-chat; web renders the spawn card read-only for this case.
+    @Test fun unanswerableAgentSpawnPayloadRendersAsAnInertNotice() {
         val item = map(ev(42, "permission_request", payload = buildJsonObject {
             put("kind", "agent_spawn")
             put("request_id", "spawn-1")
             put("from_device_id", 4)
+            put("topic", "Flake hunt")
         }))!!
-        assertTrue(item.kind is TimelineItem.Kind.AskUser)
+        val kind = item.kind as TimelineItem.Kind.StateChange
+        assertTrue(kind.text.contains("Flake hunt"))
     }
 
     @Test fun spawnOutcomeEventMapsToItsOwnKind() {

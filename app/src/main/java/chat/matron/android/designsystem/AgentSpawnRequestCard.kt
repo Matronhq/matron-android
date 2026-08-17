@@ -78,7 +78,9 @@ fun AgentSpawnRequestCard(
         // and which one is being asked to run the child.
         Detail("From", request.fromLabel)
         Detail("Target", request.targetLabel)
-        Detail("Folder", request.workdir)
+        // workdir defaults to "" when the journal had no value — omit the row
+        // rather than render a label with nothing after it.
+        if (request.workdir.isNotBlank()) Detail("Folder", request.workdir)
         // The full, unapproved seed prompt — the whole point of asking first.
         Text(
             request.task,
