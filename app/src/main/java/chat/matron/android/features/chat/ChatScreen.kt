@@ -472,6 +472,9 @@ private fun TimelineRowView(
     // transient in-flight/failed state (an HTTP call, no journal event).
     val spawnOutcomes by chatVM.spawnOutcomes.collectAsStateWithLifecycle()
     val agentSpawnStates by chatVM.agentSpawnStates.collectAsStateWithLifecycle()
+    // Memoised in the VM's derived-recompute pass (apple #141) — reading the
+    // flag here is a plain state read, never an O(N) timeline scan per row.
+    val hasMultipleSenders by chatVM.hasMultipleSenders.collectAsStateWithLifecycle()
     when (row) {
         is TimelineRow.Separator -> DateSeparator(label = DateSeparatorLabel.format(row.date))
         is TimelineRow.Message -> {
@@ -525,6 +528,7 @@ private fun TimelineRowView(
                         chatVM.answerAgentSpawn(eventID = eventID, request = request, decision = decision)
                     },
                     onOpenSpawnedRoom = onOpenConversation,
+                    hasMultipleSenders = hasMultipleSenders,
                 )
             }
         }

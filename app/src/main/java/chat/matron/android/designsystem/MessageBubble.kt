@@ -51,8 +51,15 @@ object MessageBubbleMetrics {
 /// applies the bubble chrome appropriate to the author.
 ///
 /// [timestamp], when supplied, renders as a subtle light-grey time tucked into
-/// the bubble's bottom-right corner, sharing the last line's baseline. The
-/// sender name is deliberately NOT shown — these are 1:1 chats with one bot.
+/// the bubble's bottom-right corner, sharing the last line's baseline.
+///
+/// [sender], when supplied, renders as a leading, bottom-aligned
+/// [SenderAvatar] outside the bubble chrome (apple #141). `null` (the
+/// default) keeps the pre-avatar layout — zero change for every existing
+/// call site. Callers pass it only in rooms with ≥2 distinct non-own senders
+/// (`ChatViewModel.hasMultipleSenders`); own messages never pass one, and
+/// it's ignored for [MessageAuthorStyle.Me] bubbles regardless — see
+/// [messageBubbleShowsAvatar].
 ///
 /// [copyText], when supplied, arms a long-press context menu offering a single
 /// Copy action that puts the raw text on the clipboard — the port of the Apple
@@ -64,6 +71,7 @@ fun MessageBubble(
     style: MessageAuthorStyle,
     modifier: Modifier = Modifier,
     timestamp: Instant? = null,
+    sender: String? = null,
     copyText: String? = null,
     content: @Composable () -> Unit,
 ) {
@@ -74,16 +82,12 @@ fun MessageBubble(
     val clipboard = LocalClipboardManager.current
     val haptics = LocalHapticFeedback.current
 
-    Box(
-        modifier
-            .padding(horizontal = 16.dp)
-            // Own bubbles keep a minimum inset from the far edge so a long
-            // sent message never spans the full pane on narrow windows.
-            .padding(start = if (style == MessageAuthorStyle.Me) 32.dp else 0.dp),
-        contentAlignment = alignment,
-    ) {
-        // Inner Box exists to anchor the DropdownMenu to the bubble itself,
-        // not the full-width outer row.
+    // The bubble itself — chrome + content + timestamp + copy menu. Factored
+    // out so both the avatar'd and plain paths share one definition (Apple's
+    // `bubbleChrome`: "layout stays in one place"). The inner Box exists to
+    // anchor the DropdownMenu to the bubble itself, not the full-width outer
+    // row.
+    val bubbleChrome: @Composable () -> Unit = {
         Box {
             Row(
                 Modifier
@@ -136,7 +140,43 @@ fun MessageBubble(
             }
         }
     }
+
+    Box(
+        modifier
+            .padding(horizontal = 16.dp)
+            // Own bubbles keep a minimum inset from the far edge so a long
+            // sent message never spans the full pane on narrow windows.
+            .padding(start = if (style == MessageAuthorStyle.Me) 32.dp else 0.dp),
+        contentAlignment = alignment,
+    ) {
+        val avatarSender = sender?.takeIf { messageBubbleShowsAvatar(style, sender) }
+        if (avatarSender != null) {
+            // Bottom-aligned like Apple's `.lastTextBaseline`-adjacent
+            // HStack(alignment: .bottom, spacing: 6): the circle sits at the
+            // foot of the bubble, beside the last line.
+            Row(
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                SenderAvatar(avatarSender)
+                bubbleChrome()
+            }
+        } else {
+            bubbleChrome()
+        }
+    }
 }
+
+/**
+ * Whether a bubble renders a leading [SenderAvatar]: [sender] only ever
+ * renders for [MessageAuthorStyle.Bot] — own messages never get an avatar
+ * even if a caller passed one by mistake (spec, 2026-08-13; Apple pins this
+ * in `MessageBubbleSnapshotTests.test_botBubble_withSender`, ported here as
+ * a logic test since the `nil`/`Me` path must be layout-identical to before
+ * the parameter existed).
+ */
+fun messageBubbleShowsAvatar(style: MessageAuthorStyle, sender: String?): Boolean =
+    sender != null && style == MessageAuthorStyle.Bot
 
 private val timeFormatter: DateTimeFormatter =
     DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT)
