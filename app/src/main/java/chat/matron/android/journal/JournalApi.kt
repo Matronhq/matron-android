@@ -22,7 +22,14 @@ data class LoginResponse(val token: String, val deviceID: Long, val userID: Long
 /// One of the user's agent boxes, as listed by `GET /snapshot`. Just identity
 /// and label — the full device row (lag, cursor, last seen) is [DeviceDTO]
 /// from `GET /devices`. Ported from matron-apple's `AgentDTO`.
-data class AgentDTO(val id: Long, val name: String)
+/// One box from the snapshot's `agents` list. [tagChar] is the user-chosen
+/// roster tag character, journal-held so every device shows the same letter
+/// (null = automatic). [tagCharKnown] is false when the server never sent the
+/// `tag_char` key at all — a journal predating tags — where null means
+/// "unknown", not "cleared", and `JournalStore.replaceAgents` preserves the
+/// local mirror. A tag-aware server always sends the key (explicit null = an
+/// authoritative clear), so the default is true (apple #158).
+data class AgentDTO(val id: Long, val name: String, val tagChar: String? = null, val tagCharKnown: Boolean = true)
 
 /// [agents] is the user's agent boxes, id → name. Presence-aware, diverging
 /// from the Swift original (which conflates): `null` = the server predates
@@ -89,6 +96,9 @@ data class DeviceDTO(
     /// Whether the device has a live journal connection right now. Defaults
     /// false when the server predates the flag.
     val connected: Boolean = false,
+    /// User-chosen roster tag character (agent boxes; journal-held). null =
+    /// automatic, and always null from a server predating the field.
+    val tagChar: String? = null,
 )
 
 /// The user's answer to an agent-chat consent card. Mirrors the `decision`
@@ -295,7 +305,9 @@ class JournalApi(
         val agents = obj.arrayOrNull("agents")?.objects()?.mapNotNull { a ->
             val id = a.longOrNull("device_id") ?: return@mapNotNull null
             val name = a.stringOrNull("name") ?: return@mapNotNull null
-            AgentDTO(id, name)
+            // Key-presence carries meaning: absent = a server predating tags,
+            // present-but-null = an authoritative "no tag".
+            AgentDTO(id, name, tagChar = a.stringOrNull("tag_char"), tagCharKnown = a.containsKey("tag_char"))
         }
         return SnapshotResponse(conversations, obj.longOrNull("seq") ?: 0, agents)
     }
@@ -382,8 +394,20 @@ class JournalApi(
                 lastSeenAt = d.longOrNull("last_seen_at"),
                 isSelf = d.boolOrNull("is_self") ?: false,
                 connected = d.boolOrNull("connected") ?: false,
+                tagChar = d.stringOrNull("tag_char"),
             )
         }
+    }
+
+    /// Sets or clears (null) a device's roster tag character — the letter
+    /// clients show beside the box. Journal-held so the choice follows the
+    /// user to every device. 404 covers "not yours" and "gone", like rename.
+    /// The server keeps only the first grapheme of what it's sent; callers
+    /// re-fetch the roster rather than trusting the echo (apple #158).
+    suspend fun setDeviceTag(id: Long, tagChar: String?) {
+        request(path = "/devices/$id/tag", method = "POST", jsonBody = buildJsonObject {
+            if (tagChar != null) put("tag_char", tagChar) else put("tag_char", kotlinx.serialization.json.JsonNull)
+        })
     }
 
     /// Immediate, permanent revocation. 404 (`NotFound`) means already revoked
@@ -506,10 +530,14 @@ class JournalApi(
     }
 
     /// Approves a pairing code. Exactly-once: `Conflict` = already approved.
-    suspend fun pairApprove(code: String, agentName: String) {
+    /// [tagChar], when given, lets the box be born with the right letter
+    /// (colleagues' dev-a/dev-b → a/b from day one); omitted entirely when
+    /// null, not sent as null (apple #158).
+    suspend fun pairApprove(code: String, agentName: String, tagChar: String? = null) {
         request(path = "/pair/approve", method = "POST", jsonBody = buildJsonObject {
             put("pair_code", code)
             put("agent_name", agentName)
+            if (tagChar != null) put("tag_char", tagChar)
         })
     }
 

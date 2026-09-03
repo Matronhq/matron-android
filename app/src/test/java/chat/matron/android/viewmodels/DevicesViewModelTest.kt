@@ -178,4 +178,71 @@ class DevicesViewModelTest {
         assertNotNull(DevicesViewModel.validate("   "))
         assertNotNull(DevicesViewModel.validate("y".repeat(41)))
     }
+
+    // MARK: - journal-held tag characters (apple #158)
+
+    @Test
+    fun tagCharFromDraft_sievesToOneVisibleGrapheme() {
+        assertEquals("Q", DevicesViewModel.tagCharFromDraft("  Qx "))
+        assertEquals("🦊", DevicesViewModel.tagCharFromDraft("🦊🐻"))
+        assertEquals("👨‍👩‍👧", DevicesViewModel.tagCharFromDraft("👨‍👩‍👧"))
+        assertNull(DevicesViewModel.tagCharFromDraft(""))
+        assertNull(DevicesViewModel.tagCharFromDraft("   "))
+    }
+
+    /// Overlong and invisible clusters sieve to null (automatic) rather than
+    /// landing an unreadable tag.
+    @Test
+    fun tagCharFromDraft_rejectsOverlongAndInvisibleClusters() {
+        val overlong = "e" + "\u0301".repeat(DevicesViewModel.TAG_MAX_SCALARS)
+        assertNull(DevicesViewModel.tagCharFromDraft(overlong))
+        assertNull(DevicesViewModel.tagCharFromDraft("\u200B"))
+        assertNull(DevicesViewModel.tagCharFromDraft("\u200D\u200D"))
+    }
+
+    @Test
+    fun setTag_pushesTheSievedValueAndRefreshes() = runBlocking {
+        val fake = FakeDevicesProvider()
+        val box = device(7, kind = "agent", name = "dev-y", connected = true)
+        fake.rosters = mutableListOf(listOf(box))
+        val vm = DevicesViewModel(fake) {}
+        vm.refresh()
+        vm.setTag(box, " Qz ")
+        assertEquals(listOf(7L to "Q"), fake.tags)
+        assertEquals("Q", vm.devices.value.single().tagChar)
+        vm.setTag(box, "")
+        assertEquals(7L to null, fake.tags.last())
+        assertNull(vm.devices.value.single().tagChar)
+        assertNull(vm.errorMessage.value)
+    }
+
+    @Test
+    fun setTag_failureReportsAndKeepsTheRoster() = runBlocking {
+        val fake = FakeDevicesProvider()
+        val box = device(7, kind = "agent", name = "dev-y", connected = true)
+        fake.rosters = mutableListOf(listOf(box))
+        fake.tagError = JournalApiError.Transport("boom")
+        val vm = DevicesViewModel(fake) {}
+        vm.refresh()
+        vm.setTag(box, "Q")
+        assertNotNull(vm.errorMessage.value)
+        assertNull(vm.devices.value.single().tagChar)
+    }
+
+    /// Duplicate letters are legal — the warning is advisory, compared
+    /// case-insensitively on the sieved value, across agent boxes only.
+    @Test
+    fun duplicateTagWarning_warnsCaseInsensitivelyAcrossOtherBoxes() = runBlocking {
+        val fake = FakeDevicesProvider()
+        val y = device(7, kind = "agent", name = "dev-y", connected = true).copy(tagChar = "Q")
+        val z = device(9, kind = "agent", name = "dev-z", connected = true)
+        val phone = device(1, kind = "client", name = "phone", connected = true).copy(tagChar = "q")
+        fake.rosters = mutableListOf(listOf(y, z, phone))
+        val vm = DevicesViewModel(fake) {}
+        vm.refresh()
+        assertNotNull(vm.duplicateTagWarning(z, "q"))
+        assertNull("a box's own letter is not a clash", vm.duplicateTagWarning(y, "Q"))
+        assertNull(vm.duplicateTagWarning(z, "Z"))
+        assertNull(vm.duplicateTagWarning(z, ""))
+    }
 }

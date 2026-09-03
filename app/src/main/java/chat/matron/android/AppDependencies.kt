@@ -6,6 +6,7 @@ import chat.matron.android.auth.AuthService
 import chat.matron.android.platform.Haptics
 import chat.matron.android.platform.SystemHaptics
 import chat.matron.android.auth.JournalAuthService
+import chat.matron.android.chat.BoxLetterMigration
 import chat.matron.android.chat.BoxLetterOverrides
 import chat.matron.android.chat.ChatService
 import chat.matron.android.chat.JournalChatService
@@ -328,7 +329,7 @@ class AppDependencies(
 
     fun chatService(session: UserSession): ChatService {
         val core = core(session)
-        return JournalChatService(store = core.store, engine = core.engine, overrides = boxLetterOverrides)
+        return JournalChatService(store = core.store, engine = core.engine)
     }
 
     fun mediaService(session: UserSession): MediaService =
@@ -428,6 +429,25 @@ class AppDependencies(
      * still-running sync write. The job closes over its own cores, so it's safe to
      * clear [cores] synchronously right after.
      */
+    /// One-time push of legacy local tag letters up to the journal (apple
+    /// #158). Only the account that owns the relics migrates them; the mirror
+    /// is seeded first so the letters show before the push's `device_meta`
+    /// echo lands. Failures leave entries for the next launch.
+    suspend fun migrateBoxLetters(session: UserSession) {
+        if (!boxLetterOverrides.claim(session.userID)) return
+        val core = core(session)
+        // Seed the mirror from the relics FIRST, against the roster the store
+        // already holds: an offline launch must not lose the custom letters
+        // for the whole session just because GET /devices failed (Bugbot,
+        // #57). seedAgentTagChars only fills NULL rows, so a journal-held tag
+        // that already arrived wins.
+        val known = runCatching { core.store.agentNames().keys }.getOrDefault(emptySet())
+        runCatching { core.store.seedAgentTagChars(boxLetterOverrides.all().filterKeys { it in known }) }
+        val devices = runCatching { core.api.devices() }.getOrNull() ?: return
+        val serverTags = devices.filter { it.kind == "agent" }.associate { it.id to it.tagChar }
+        BoxLetterMigration.run(boxLetterOverrides, serverTags) { id, letter -> core.api.setDeviceTag(id, letter) }
+    }
+
     fun signOut() {
         val oldCores = cores.values.toList()
         val oldUserIDs = cores.keys.toList()

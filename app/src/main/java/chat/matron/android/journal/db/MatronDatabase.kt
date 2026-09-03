@@ -39,7 +39,7 @@ import java.io.File
         ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
         SummaryEntryEntity::class, AgentEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -131,10 +131,19 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
+        /// v6 (matron-apple's v7, #158): the journal-held box tag character.
+        /// Additive; NULL rows fall back to the derived letter until a
+        /// snapshot or the legacy-override migration fills them in.
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `agent` ADD COLUMN `tag_char` TEXT")
+            }
+        }
+
         /// Production, file-backed at the given path.
         fun open(context: Context, file: File): MatronDatabase =
             Room.databaseBuilder(context.applicationContext, MatronDatabase::class.java, file.absolutePath)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .build()
 
         /// Test/ephemeral, memory-backed. Cleared when the last connection closes.

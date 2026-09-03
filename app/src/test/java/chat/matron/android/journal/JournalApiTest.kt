@@ -105,7 +105,7 @@ class JournalApiTest {
         )
         val snap = api(token = "t").snapshot()
         assertEquals(7L, snap.conversations.first().agentDeviceID)
-        assertEquals(listOf(AgentDTO(7, "dev-y"), AgentDTO(9, "dev-z")), snap.agents)
+        assertEquals(listOf(AgentDTO(7, "dev-y", tagCharKnown = false), AgentDTO(9, "dev-z", tagCharKnown = false)), snap.agents)
 
         server.enqueue(json(200, """{"conversations":[{"id":"c1","title":"T","session_state":"running","last_seq":1,"snippet":"","created_at":0}],"seq":1}"""))
         val old = api(token = "t").snapshot()
@@ -449,5 +449,52 @@ class JournalApiTest {
             api().linkPoll("aa11"); fail("expected throw")
         } catch (e: JournalApiError.Transport) { /* expected */ }
         Unit
+    }
+
+    // MARK: - journal-held tag characters (apple #158)
+
+    @Test
+    fun setDeviceTagSendsValueAndNullForClear() = runBlocking {
+        server.enqueue(json(200, """{"ok":true}"""))
+        api(token = "t").setDeviceTag(7, "Q")
+        val set = server.takeRequest()
+        assertEquals("/devices/7/tag", set.path)
+        assertEquals("POST", set.method)
+        assertEquals("""{"tag_char":"Q"}""", set.body.readUtf8())
+
+        server.enqueue(json(200, """{"ok":true}"""))
+        api(token = "t").setDeviceTag(7, null)
+        assertEquals("""{"tag_char":null}""", server.takeRequest().body.readUtf8())
+    }
+
+    /// The tag rides `pair/approve` only when given — omitted entirely, not
+    /// sent as null, so an older server sees the request it always did.
+    @Test
+    fun pairApproveCarriesTagOnlyWhenGiven() = runBlocking {
+        server.enqueue(json(200, """{"ok":true}"""))
+        api(token = "t").pairApprove("1234-5678", "dev-a", tagChar = "a")
+        assertEquals("""{"pair_code":"1234-5678","agent_name":"dev-a","tag_char":"a"}""", server.takeRequest().body.readUtf8())
+        server.enqueue(json(200, """{"ok":true}"""))
+        api(token = "t").pairApprove("1234-5678", "dev-a")
+        assertEquals("""{"pair_code":"1234-5678","agent_name":"dev-a"}""", server.takeRequest().body.readUtf8())
+    }
+
+    @Test
+    fun devicesParseTagChar() = runBlocking {
+        server.enqueue(json(200, """{"devices":[{"device_id":1,"kind":"agent","name":"dev-y","tag_char":"Q"},{"device_id":2,"kind":"agent","name":"dev-z"}]}"""))
+        val devices = api(token = "t").devices()
+        assertEquals("Q", devices[0].tagChar)
+        assertNull(devices[1].tagChar)
+    }
+
+    /// Snapshot `agents[]`: an absent key is a server predating tags
+    /// (unknown), an explicit null is an authoritative clear.
+    @Test
+    fun snapshotAgentsDistinguishAbsentTagCharFromNull() = runBlocking {
+        server.enqueue(json(200, """{"seq":1,"conversations":[],"agents":[{"device_id":1,"name":"a","tag_char":"Q"},{"device_id":2,"name":"b","tag_char":null},{"device_id":3,"name":"c"}]}"""))
+        val agents = api(token = "t").snapshot().agents!!
+        assertEquals(AgentDTO(1, "a", tagChar = "Q", tagCharKnown = true), agents[0])
+        assertEquals(AgentDTO(2, "b", tagChar = null, tagCharKnown = true), agents[1])
+        assertEquals(AgentDTO(3, "c", tagChar = null, tagCharKnown = false), agents[2])
     }
 }

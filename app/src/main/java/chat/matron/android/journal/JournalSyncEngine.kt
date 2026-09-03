@@ -951,7 +951,7 @@ class JournalSyncEngine(
                 // A device was renamed elsewhere — patch the local roster so
                 // open chat lists relabel their chips without waiting for the
                 // next snapshot.
-                runCatching { store.renameAgent(frame.id, frame.name) }
+                runCatching { store.applyDeviceMeta(frame.id, frame.name, frame.tagChar, frame.tagCharKnown) }
             }
             is ServerFrame.HelloOK, is ServerFrame.UnknownControl -> Unit // post-hello control frames are advisory
         }

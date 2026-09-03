@@ -932,4 +932,58 @@ class JournalStoreTest {
         store.wipe()
         assertTrue(store.summaryEntries("c1").isEmpty())
     }
+
+    // MARK: - journal-held tag characters (apple #158)
+
+    /// A snapshot from a server predating tags says nothing about them: the
+    /// standing letter survives. A tag-aware snapshot's explicit null clears.
+    @Test
+    fun replaceAgentsPreservesTagWhenTheSnapshotPredatesTags() = runBlocking {
+        val store = makeStore()
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y", tagChar = "Q", tagCharKnown = true)))
+        assertEquals(mapOf(7L to "Q"), store.agentTags())
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y", tagChar = null, tagCharKnown = false)))
+        assertEquals("an absent key must not wipe the letter", mapOf(7L to "Q"), store.agentTags())
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y", tagChar = null, tagCharKnown = true)))
+        assertTrue("an explicit null is an authoritative clear", store.agentTags().isEmpty())
+    }
+
+    /// A `device_meta` rename from a pre-tag server omits `tag_char`; the
+    /// letter must survive the rename. A tag-aware frame's null clears.
+    @Test
+    fun applyDeviceMetaPreservesTagWhenTheFrameOmitsIt() = runBlocking {
+        val store = makeStore()
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y", tagChar = "Q")))
+        store.applyDeviceMeta(7, "dev-yellow", tagChar = null, tagCharKnown = false)
+        assertEquals(mapOf(7L to "dev-yellow"), store.agentNames())
+        assertEquals(mapOf(7L to "Q"), store.agentTags())
+        store.applyDeviceMeta(7, "dev-yellow", tagChar = "Z", tagCharKnown = true)
+        assertEquals(mapOf(7L to "Z"), store.agentTags())
+        store.applyDeviceMeta(7, "dev-yellow", tagChar = null, tagCharKnown = true)
+        assertTrue(store.agentTags().isEmpty())
+    }
+
+    /// The legacy-override migration seeds only rows with no letter, and only
+    /// for ids the roster knows.
+    @Test
+    fun seedAgentTagCharsFillsOnlyNullRowsForKnownIds() = runBlocking {
+        val store = makeStore()
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y", tagChar = "Q"), AgentDTO(9, "dev-z")))
+        store.seedAgentTagChars(mapOf(7L to "X", 9L to "Z", 99L to "N"))
+        assertEquals(mapOf(7L to "Q", 9L to "Z"), store.agentTags())
+    }
+
+    /// Names and tags reach the chat list together, in lockstep.
+    @Test
+    fun agentRosterFlowDeliversNamesAndTagsInLockstep() = runBlocking {
+        val store = makeStore()
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y", tagChar = "Q")))
+        store.agentRosterFlow().test {
+            val first = awaitItem().single()
+            assertEquals("dev-y" to "Q", first.name to first.tagChar)
+            store.applyDeviceMeta(7, "dev-y", tagChar = "Z", tagCharKnown = true)
+            assertEquals("Z", awaitItem().single().tagChar)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
 }

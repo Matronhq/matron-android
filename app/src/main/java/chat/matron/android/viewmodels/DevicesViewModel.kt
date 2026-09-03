@@ -18,6 +18,14 @@ interface DevicesProviding {
     suspend fun renameDevice(id: Long, name: String): DeviceDTO
     suspend fun pairPreview(code: String): PairPreview
     suspend fun pairApprove(code: String, agentName: String)
+
+    /// Approves with a roster tag character so the box is born with the
+    /// right letter (apple #158). Default delegates to the tagless form so
+    /// fakes that don't care keep compiling.
+    suspend fun pairApprove(code: String, agentName: String, tagChar: String?) = pairApprove(code, agentName)
+
+    /// Sets or clears (null) a device's journal-held tag character.
+    suspend fun setDeviceTag(id: Long, tagChar: String?) {}
 }
 
 /// Production adapter over [JournalApi] (which already exposes these calls).
@@ -27,6 +35,9 @@ class JournalDevicesService(private val api: JournalApi) : DevicesProviding {
     override suspend fun renameDevice(id: Long, name: String): DeviceDTO = api.renameDevice(id, name)
     override suspend fun pairPreview(code: String): PairPreview = api.pairPreview(code)
     override suspend fun pairApprove(code: String, agentName: String) = api.pairApprove(code, agentName)
+    override suspend fun pairApprove(code: String, agentName: String, tagChar: String?) =
+        api.pairApprove(code, agentName, tagChar)
+    override suspend fun setDeviceTag(id: Long, tagChar: String?) = api.setDeviceTag(id, tagChar)
 }
 
 /// Devices-screen state: the signed-in user's device roster with per-device
@@ -112,7 +123,66 @@ class DevicesViewModel(
         }
     }
 
+    /// Sets (or clears, on a blank draft) [device]'s journal-held tag
+    /// character (apple #158). The sieved value is applied locally first so
+    /// a failed re-fetch can't leave the old letter on screen, then the
+    /// roster is re-fetched: the server keeps only the first grapheme and is
+    /// the authority on what it stored.
+    suspend fun setTag(device: DeviceDTO, draft: String) {
+        val tag = tagCharFromDraft(draft)
+        try {
+            api.setDeviceTag(device.id, tag)
+            _devices.value = _devices.value.map { if (it.id == device.id) it.copy(tagChar = tag) else it }
+            _errorMessage.value = null
+            refresh()
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            _errorMessage.value = "Couldn't set the tag for ${device.name} — ${describe(error)}"
+        }
+    }
+
+    /// Warns (never blocks) when [draft] would give [device] the same tag
+    /// character another agent box already has — compared case-insensitively
+    /// on the sieved value, so `q` and `Q` count as a clash.
+    fun duplicateTagWarning(device: DeviceDTO, draft: String): String? {
+        val tag = tagCharFromDraft(draft) ?: return null
+        val clash = _devices.value.firstOrNull {
+            it.id != device.id && it.kind == "agent" && it.tagChar?.equals(tag, ignoreCase = true) == true
+        } ?: return null
+        return "${clash.name} already uses “$tag”"
+    }
+
     companion object {
+        /// Longest grapheme cluster (in code points) accepted as a tag: a
+        /// flag or ZWJ-emoji is a handful, anything longer is not a character.
+        const val TAG_MAX_SCALARS = 16
+
+        /// The tag a draft field maps to: trimmed, first grapheme cluster
+        /// only (so a surrogate-pair emoji survives whole), rejected when
+        /// that cluster is over [TAG_MAX_SCALARS] code points or made only of
+        /// format/control/space characters (invisible on screen). Null means
+        /// "automatic" — the same sieve the server applies, mirrored so the
+        /// field can refuse before a round-trip (apple #158).
+        fun tagCharFromDraft(draft: String): String? {
+            val trimmed = draft.trim()
+            if (trimmed.isEmpty()) return null
+            val boundary = java.text.BreakIterator.getCharacterInstance()
+            boundary.setText(trimmed)
+            val end = boundary.next()
+            val cluster = if (end > 0) trimmed.substring(0, end) else return null
+            val points = cluster.codePoints().toArray()
+            if (points.size > TAG_MAX_SCALARS) return null
+            val visible = points.any { cp ->
+                when (Character.getType(cp)) {
+                    Character.FORMAT.toInt(), Character.CONTROL.toInt(), Character.SPACE_SEPARATOR.toInt(),
+                    Character.LINE_SEPARATOR.toInt(), Character.PARAGRAPH_SEPARATOR.toInt() -> false
+                    else -> true
+                }
+            }
+            return if (visible) cluster else null
+        }
+
         /// Server-side cap on a device name, mirrored here so the field can
         /// refuse before a round-trip.
         const val NAME_CAP = 40

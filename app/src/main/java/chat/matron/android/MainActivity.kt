@@ -302,6 +302,9 @@ private fun SignedInApp(
     }
 
     LaunchedEffect(session.userID) { chatListVM.start() }
+    // One-time push of legacy local tag letters up to the journal (apple
+    // #158); idempotent, and a no-op once the install carries none.
+    LaunchedEffect(session.userID) { deps.migrateBoxLetters(session) }
     LaunchedEffect(session.userID) {
         // Periodic background catch-up (journal + offline outbox flush) for
         // when the process is gone — the analog of iOS's BGAppRefresh.
@@ -424,7 +427,6 @@ private fun SignedInApp(
                 api = deps.devicesService(session),
                 onSelfRevoked = onSignOut,
                 onBack = { nav.popBackStack() },
-                overrides = deps.boxLetterOverrides,
             )
         }
 

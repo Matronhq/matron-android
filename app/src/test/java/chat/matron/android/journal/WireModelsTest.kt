@@ -376,7 +376,8 @@ class WireModelsTest {
     @Test
     fun decodesDeviceMetaRenameFrame() {
         val frame = ServerFrame.decode("""{"kind":"device_meta","device_id":7,"name":"dev-y"}""")
-        assertEquals(ServerFrame.DeviceMeta(7, "dev-y"), frame)
+        // A server predating tags omits the key: null here is "unknown".
+        assertEquals(ServerFrame.DeviceMeta(7, "dev-y", tagChar = null, tagCharKnown = false), frame)
         // Malformed frames are skipped, not crashed on.
         assertNull(ServerFrame.decode("""{"kind":"device_meta","name":"dev-y"}"""))
         assertNull(ServerFrame.decode("""{"kind":"device_meta","device_id":7}"""))
@@ -447,5 +448,17 @@ class WireModelsTest {
         assertEquals("opus", cleared.model)
         assertNull(status("""{"kind":"ephemeral","convo_id":"c1","status":{"model":"gpt-5"}}""").effort)
         assertNull("a non-string, non-null effort is not a statement", status("""{"kind":"ephemeral","convo_id":"c1","status":{"effort":7}}""").effort)
+    }
+
+    // MARK: - journal-held tag characters (apple #158)
+
+    /// Key-presence carries meaning on `device_meta`: absent = a server
+    /// predating tags (unknown), present-but-null = an authoritative clear.
+    @Test
+    fun decodeDeviceMetaDistinguishesAbsentTagFromNull() {
+        val tagged = ServerFrame.decode("""{"kind":"device_meta","device_id":7,"name":"dev-y","tag_char":"Q"}""")
+        assertEquals(ServerFrame.DeviceMeta(7, "dev-y", tagChar = "Q", tagCharKnown = true), tagged)
+        val cleared = ServerFrame.decode("""{"kind":"device_meta","device_id":7,"name":"dev-y","tag_char":null}""")
+        assertEquals(ServerFrame.DeviceMeta(7, "dev-y", tagChar = null, tagCharKnown = true), cleared)
     }
 }

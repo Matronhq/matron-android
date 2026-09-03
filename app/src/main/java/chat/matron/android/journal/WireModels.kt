@@ -208,7 +208,17 @@ sealed interface ServerFrame {
     /// A device was renamed (`POST /devices/:id/rename`). Transient — not a
     /// journal event, carries no seq. A client that misses it picks the name
     /// up from the next snapshot's `agents` list.
-    data class DeviceMeta(val id: Long, val name: String) : ServerFrame
+    /// A device's meta changed (`POST /devices/:id/rename` or `/tag`). The
+    /// frame carries the device's full current meta — a rename repeats the
+    /// standing tag character and vice versa. [tagChar] null = automatic,
+    /// but only when [tagCharKnown]: a server predating tags omits the key
+    /// entirely, and that null means "unknown", not "cleared" (apple #158).
+    data class DeviceMeta(
+        val id: Long,
+        val name: String,
+        val tagChar: String? = null,
+        val tagCharKnown: Boolean = true,
+    ) : ServerFrame
 
     companion object {
         /// Bridge timestamps are `Date.toISOString()` output (fractional), but
@@ -227,7 +237,8 @@ sealed interface ServerFrame {
                     // Malformed frames are skipped, not crashed on.
                     val id = obj.longOrNull("device_id") ?: return null
                     val name = obj.stringOrNull("name") ?: return null
-                    DeviceMeta(id, name)
+                    // Key-presence, not value: only an explicit null clears a tag.
+                    DeviceMeta(id, name, tagChar = obj.stringOrNull("tag_char"), tagCharKnown = obj.containsKey("tag_char"))
                 }
                 "control" -> decodeControl(obj)
                 else -> null

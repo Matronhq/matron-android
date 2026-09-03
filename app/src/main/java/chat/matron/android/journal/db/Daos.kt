@@ -81,6 +81,12 @@ interface AgentDao {
     @Query("UPDATE agent SET name = :name WHERE id = :id")
     suspend fun rename(id: Long, name: String)
 
+    /// Applies a `device_meta` frame: the name always, the tag only when the
+    /// frame carried the key (`known`) — a server predating tags omits it,
+    /// and that must not wipe a standing letter on a plain rename.
+    @Query("UPDATE agent SET name = :name, tag_char = CASE WHEN :known THEN :tagChar ELSE tag_char END WHERE id = :id")
+    suspend fun applyMeta(id: Long, name: String, tagChar: String?, known: Boolean)
+
     @Query("SELECT * FROM agent")
     suspend fun all(): List<AgentEntity>
 

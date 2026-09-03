@@ -45,10 +45,12 @@ import kotlinx.coroutines.launch
 fun AddAgentSheet(
     api: DevicesProviding,
     existingNames: List<String>,
+    /// Tag characters already in use across the roster (apple #158).
+    existingTags: List<String> = emptyList(),
     onDone: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val viewModel = remember { PairingViewModel(api = api, existingNames = existingNames, scope = scope) }
+    val viewModel = remember { PairingViewModel(api = api, existingNames = existingNames, scope = scope, existingTags = existingTags) }
     val phase by viewModel.phase.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val duplicateWarning by viewModel.duplicateNameWarning.collectAsStateWithLifecycle()
@@ -57,6 +59,8 @@ fun AddAgentSheet(
 
     var code by remember { mutableStateOf(viewModel.codeInput) }
     var name by remember { mutableStateOf(viewModel.agentName) }
+    var tag by remember { mutableStateOf(viewModel.tagChar) }
+    val duplicateTagWarning by viewModel.duplicateTagWarning.collectAsStateWithLifecycle()
 
     DisposableEffect(Unit) { onDispose { viewModel.cancelWaiting() } }
 
@@ -113,6 +117,21 @@ fun AddAgentSheet(
                         duplicateWarning ?: "Convention: the box's short hostname. The name can't be changed later.",
                         style = MaterialTheme.typography.bodySmall,
                         color = if (duplicateWarning == null) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.tertiary,
+                    )
+                    // Optional roster tag character (apple #158): journal-held,
+                    // so the letter shows on every device from day one.
+                    OutlinedTextField(
+                        value = tag,
+                        onValueChange = { viewModel.tagChar = it; tag = it },
+                        label = { Text("Tag character (optional)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        duplicateTagWarning ?: "One character shown before chat titles. Leave empty to derive it from the name.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (duplicateTagWarning == null) MaterialTheme.colorScheme.onSurfaceVariant
                         else MaterialTheme.colorScheme.tertiary,
                     )
                     Button(

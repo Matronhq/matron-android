@@ -13,7 +13,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 
 /// Errors surfaced by the journal chat/timeline services. `data object`/
@@ -34,10 +33,6 @@ class JournalChatService(
     private val store: JournalStore,
     private val engine: JournalSyncEngine,
     private val coalesceInterval: Duration = 250.milliseconds,
-    /// The user's tag-character overrides (Settings → Devices). Optional so
-    /// tests that never touch tags need no store; null means "no overrides,
-    /// ever" — derived letters only.
-    private val overrides: BoxLetterOverrides? = null,
 ) : ChatService {
 
     override fun chatSummaries(): Flow<List<ChatSummary>> = flow {
@@ -62,11 +57,15 @@ class JournalChatService(
         // A tag-character override (Settings → Devices) writes only the
         // preference store — no journal record, no Room re-fire — so its
         // change flow rides the same combine to re-derive letters live.
-        val overridesFlow = overrides?.flow ?: flowOf(emptyMap())
-        combine(store.conversationsFlow(), store.agentNamesFlow(), overridesFlow) { records, boxNames, letterOverrides ->
+        // The journal owns the tag letters now (apple #158): names and tags
+        // arrive in lockstep from the roster flow, so a Settings edit lands
+        // through its `device_meta` echo like any other device's would.
+        combine(store.conversationsFlow(), store.agentRosterFlow()) { records, roster ->
+            val boxNames = roster.associate { it.id to it.name }
+            val journalTags = roster.mapNotNull { row -> row.tagChar?.let { row.id to it } }.toMap()
             // Derived once per snapshot, not per row — the letters depend on
             // the whole name set (common-prefix strip).
-            val boxLetters = SessionTag.boxLetters(boxNames, letterOverrides)
+            val boxLetters = SessionTag.boxLetters(boxNames, journalTags)
             records.map { summary(it, boxNames, boxLetters) }
         }.conflate().collect { summaries ->
             emit(summaries)
