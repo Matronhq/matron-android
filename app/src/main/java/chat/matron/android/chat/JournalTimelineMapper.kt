@@ -1,9 +1,11 @@
 package chat.matron.android.chat
 
 import chat.matron.android.events.AgentChatRequest
+import chat.matron.android.events.AgentSpawnRequest
 import chat.matron.android.events.AskUserEvent
 import chat.matron.android.events.DiffEvent
 import chat.matron.android.events.LiveOutputEvent
+import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.journal.ActivityUpdate
 import chat.matron.android.journal.JournalEvent
@@ -72,34 +74,62 @@ object JournalTimelineMapper {
                 // literal string "Permission request" with Allow/Deny buttons
                 // that answered over `prompt_reply` — a channel that never
                 // reaches the parked row. The tap did nothing and the ask
-                // expired 24h later.
+                // expired 24h later. Agent-spawn is tried next, same reasoning.
                 val agentChat = AgentChatRequest.parse(payload)
-                if (agentChat != null) {
-                    TimelineItem.Kind.AgentChatRequestCard(event.seq.toString(), agentChat)
-                } else {
-                    val description = payload.stringOrNull("description") ?: "Permission request"
-                    val arr = payload.arrayOrNull("options")
-                    val optionValues = if (arr != null && arr.all { it is JsonPrimitive && it.isString }) {
-                        arr.map { (it as JsonPrimitive).content }
-                    } else {
-                        listOf("Allow", "Deny")
+                val agentSpawn = AgentSpawnRequest.parse(payload)
+                when {
+                    agentChat != null ->
+                        TimelineItem.Kind.AgentChatRequestCard(event.seq.toString(), agentChat)
+
+                    agentSpawn != null ->
+                        TimelineItem.Kind.AgentSpawnRequestCard(event.seq.toString(), agentSpawn)
+
+                    // A consent-kind payload the parser rejected (malformed —
+                    // e.g. no request_id). It answers over HTTP
+                    // (`POST /agent-spawn/answer` / `/agent-chat/answer`),
+                    // never `prompt_reply`, so the generic branch below would
+                    // draw Allow/Deny buttons wired to a channel nothing
+                    // reads — dead taps until the ask expires. Render an
+                    // inert notice instead; web renders the spawn card
+                    // read-only for the same case.
+                    payload.stringOrNull("kind") in listOf("agent_spawn", "agent_chat") -> {
+                        val headline = payload.stringOrNull("topic")?.takeIf { it.isNotBlank() }
+                            ?: payload.stringOrNull("task")
+                                ?.substringBefore('\n')?.takeIf { it.isNotBlank() }
+                        TimelineItem.Kind.StateChange(
+                            if (headline != null) {
+                                "Agent request that can't be answered here: $headline"
+                            } else {
+                                "Agent request that can't be answered here"
+                            },
+                        )
                     }
-                    TimelineItem.Kind.AskUser(
-                        event.seq.toString(),
-                        AskUserEvent(
-                            prompt = description,
-                            kind = AskUserEvent.InputKind.Choice(
-                                optionValues.map { AskUserEvent.Option(it, it) },
-                                allowOther = false,
+
+                    else -> {
+                        val description = payload.stringOrNull("description") ?: "Permission request"
+                        val arr = payload.arrayOrNull("options")
+                        val optionValues = if (arr != null && arr.all { it is JsonPrimitive && it.isString }) {
+                            arr.map { (it as JsonPrimitive).content }
+                        } else {
+                            listOf("Allow", "Deny")
+                        }
+                        TimelineItem.Kind.AskUser(
+                            event.seq.toString(),
+                            AskUserEvent(
+                                prompt = description,
+                                kind = AskUserEvent.InputKind.Choice(
+                                    optionValues.map { AskUserEvent.Option(it, it) },
+                                    allowOther = false,
+                                ),
+                                // The journal protocol carries no expiry on
+                                // permission_request/prompt payloads — always null
+                                // here (same as AskUserEvent.swift; expiry is a
+                                // legacy Matrix-era field the VMs still honor).
+                                expiresAt = null,
+                                replyChannel = AskUserEvent.ReplyChannel.CHOICE_REPLY,
                             ),
-                            // The journal protocol carries no expiry on
-                            // permission_request/prompt payloads — always null
-                            // here (same as AskUserEvent.swift; expiry is a
-                            // legacy Matrix-era field the VMs still honor).
-                            expiresAt = null,
-                            replyChannel = AskUserEvent.ReplyChannel.CHOICE_REPLY,
-                        ),
-                    )
+                        )
+                    }
                 }
             }
 
@@ -131,6 +161,15 @@ object JournalTimelineMapper {
                     TimelineItem.Kind.File(
                         url, payload.stringOrNull("name") ?: "file", caption, size, expired,
                     )
+                }
+            }
+
+            JournalEventType.SPAWN_OUTCOME -> {
+                val outcome = SpawnOutcome.parse(payload)
+                if (outcome != null) {
+                    TimelineItem.Kind.SpawnOutcomeRow(event.seq.toString(), outcome)
+                } else {
+                    TimelineItem.Kind.Unknown(event.type)
                 }
             }
 

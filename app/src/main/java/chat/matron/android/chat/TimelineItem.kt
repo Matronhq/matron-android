@@ -1,9 +1,11 @@
 package chat.matron.android.chat
 
 import chat.matron.android.events.AgentChatRequest
+import chat.matron.android.events.AgentSpawnRequest
 import chat.matron.android.events.AskUserEvent
 import chat.matron.android.events.DiffEvent
 import chat.matron.android.events.LiveOutputEvent
+import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.models.TimelineSendState
 import java.time.Instant
@@ -91,6 +93,25 @@ data class TimelineItem(
         data class AgentChatRequestCard(
             val eventID: String,
             val request: AgentChatRequest,
+        ) : Kind
+        /// The journal's agent-spawn consent card — one agent asking to spawn
+        /// a child session on another of the user's devices. Its own kind for
+        /// the same reasons as [AgentChatRequestCard]: the answer goes over
+        /// HTTP (`POST /agent-spawn/answer`), not into the timeline. Unlike
+        /// [AgentChatRequestCard], resolution is NOT remembered locally —
+        /// `eventID` correlates this card against a later [SpawnOutcomeRow]
+        /// carrying the same `request.requestId`, which is the durable record.
+        data class AgentSpawnRequestCard(
+            val eventID: String,
+            val request: AgentSpawnRequest,
+        ) : Kind
+        /// A journal `spawn_outcome` event — the durable resolution of an
+        /// [AgentSpawnRequestCard]. Correlated to its card by
+        /// `outcome.requestId`, not by `eventID` (the outcome is a distinct
+        /// journal row with its own seq).
+        data class SpawnOutcomeRow(
+            val eventID: String,
+            val outcome: SpawnOutcome,
         ) : Kind
         /// Transient typing / tool-use indicator. Not persisted; appended as a
         /// trailing overlay row while the agent is thinking or running a tool.

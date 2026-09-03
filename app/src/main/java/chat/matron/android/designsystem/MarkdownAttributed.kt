@@ -13,7 +13,27 @@ import androidx.compose.ui.unit.sp
 /// The block-level markdown structure this converter renders. Mirrors the
 /// Swift `MarkdownAttributed` `BlockKind`, distilled to what a chat message
 /// needs.
-enum class MarkdownBlockKind { Paragraph, Header, CodeBlock, BlockQuote, ListItem }
+enum class MarkdownBlockKind { Paragraph, Header, CodeBlock, BlockQuote, ListItem, Table }
+
+/// Column alignment of a parsed pipe table. Mirrors the Swift `TableAlignment`
+/// (port of apple #134) so the renderer and the flat-copy degradation share
+/// one value.
+enum class MarkdownTableAlignment { Left, Center, Right }
+
+/// One parsed GFM pipe table. [header] and [rows] hold display-ready cell
+/// strings (inline styling applied, header cells bold — the Swift port's
+/// `isBold` for header cells). Every body row is normalised to
+/// [columnCount] cells (GFM: extra cells dropped, missing cells empty), so
+/// the renderer can index by column without bounds checks. [alignments] has
+/// exactly [columnCount] entries — the delimiter row is required to match the
+/// header's column count for the table to parse at all.
+data class MarkdownTable(
+    val header: List<AnnotatedString>,
+    val rows: List<List<AnnotatedString>>,
+    val alignments: List<MarkdownTableAlignment>,
+) {
+    val columnCount: Int get() = header.size
+}
 
 /// One rendered block. [text] is the display-ready [AnnotatedString] (list
 /// markers already prepended). [spacingBefore]/[spacingAfter] are the visual
@@ -24,6 +44,10 @@ data class MarkdownBlock(
     val text: AnnotatedString,
     val headerLevel: Int? = null,
     val language: String? = null,
+    /// Structured cells for [MarkdownBlockKind.Table] blocks; the renderer
+    /// draws the grid from this. [text] then carries the flat pipe-text
+    /// degradation for the [MarkdownDocument.annotated] copy path.
+    val table: MarkdownTable? = null,
     val spacingBefore: Float = 0f,
     val spacingAfter: Float = 0f,
 )
@@ -199,13 +223,59 @@ object MarkdownAttributed {
                 continue
             }
 
+            // Pipe table — a header row of pipe cells followed by a GFM
+            // delimiter row with the SAME cell count (`:?-+:?` per cell).
+            // Mirrors what Apple's parser (cmark-gfm) accepts in the Swift
+            // `MarkdownAttributed` table path (port of apple #134): a column
+            // -count mismatch means "not a table" and the lines stay
+            // paragraphs.
+            if (isTableStart(lines, i)) {
+                val headerCells = splitTableRow(lines[i])
+                val alignments = parseDelimiterRow(lines[i + 1])!! // isTableStart matched it
+                i += 2
+                // Body rows run until a blank line or the start of another
+                // block — a plain pipe-less line is swallowed as a one-cell
+                // row, as GFM does (cmark-gfm spec example 205).
+                val bodyRows = mutableListOf<List<String>>()
+                while (i < lines.size) {
+                    val l = lines[i]
+                    if (l.isBlank() || headerRegex.find(l) != null || fenceRegex.find(l) != null ||
+                        unorderedRegex.find(l) != null || orderedRegex.find(l) != null ||
+                        l.trimStart().startsWith(">")
+                    ) break
+                    bodyRows.add(splitTableRow(l)); i++
+                }
+                val base = SpanStyle(fontSize = baseFontSize.sp, color = colors.onSurface)
+                val headerBase = base.merge(SpanStyle(fontWeight = FontWeight.Bold))
+                fun cell(text: String, style: SpanStyle) =
+                    buildAnnotatedString { appendInline(text, style, colors) }
+                val columnCount = headerCells.size
+                val table = MarkdownTable(
+                    header = headerCells.map { cell(it, headerBase) },
+                    rows = bodyRows.map { row ->
+                        List(columnCount) { c -> cell(row.getOrElse(c) { "" }, base) }
+                    },
+                    alignments = alignments,
+                )
+                blocks.add(
+                    MarkdownBlock(
+                        MarkdownBlockKind.Table, pipeText(table, base),
+                        table = table, spacingAfter = paragraphSpacing,
+                    )
+                )
+                isFirstBlock = false
+                continue
+            }
+
             // Paragraph — gather consecutive plain lines (soft-wrapped to one).
             val paraLines = mutableListOf<String>()
             while (i < lines.size) {
                 val l = lines[i]
                 if (l.isBlank() || headerRegex.find(l) != null || fenceRegex.find(l) != null ||
                     unorderedRegex.find(l) != null || orderedRegex.find(l) != null ||
-                    l.trimStart().startsWith(">")
+                    l.trimStart().startsWith(">") ||
+                    // GFM tables interrupt paragraphs — no blank line needed.
+                    isTableStart(lines, i)
                 ) break
                 paraLines.add(l); i++
             }
@@ -217,6 +287,103 @@ object MarkdownAttributed {
 
         return blocks
     }
+
+    // MARK: - Tables
+
+    /// True when [lines] at [i] starts a pipe table: a line containing a pipe
+    /// whose NEXT line is a delimiter row with the same cell count. The
+    /// count must match exactly — GFM (and so Apple's parser) rejects the
+    /// table otherwise.
+    private fun isTableStart(lines: List<String>, i: Int): Boolean {
+        if (i + 1 >= lines.size) return false
+        if (!lines[i].contains('|')) return false
+        val alignments = parseDelimiterRow(lines[i + 1]) ?: return false
+        return alignments.size == splitTableRow(lines[i]).size
+    }
+
+    /// Parses a GFM delimiter row (`| :--- | ---: |`) into per-column
+    /// alignments, or null when [line] isn't one. Each cell must be `:?-+:?`
+    /// after trimming; a leading colon alone still means left (markdown's
+    /// default) — mirroring the Swift `TableAlignment.init`.
+    private fun parseDelimiterRow(line: String): List<MarkdownTableAlignment>? {
+        if (!line.contains('-')) return null
+        val cells = splitTableRow(line)
+        val delimiter = Regex("^:?-+:?$")
+        val alignments = mutableListOf<MarkdownTableAlignment>()
+        for (cell in cells) {
+            if (!delimiter.matches(cell)) return null
+            alignments.add(
+                when {
+                    cell.startsWith(":") && cell.endsWith(":") -> MarkdownTableAlignment.Center
+                    cell.endsWith(":") -> MarkdownTableAlignment.Right
+                    else -> MarkdownTableAlignment.Left
+                }
+            )
+        }
+        return alignments
+    }
+
+    /// Splits one table row into trimmed cell strings. Outer pipes are
+    /// optional (GFM allows `A | B`); `\|` escapes a literal pipe inside a
+    /// cell and unescapes here.
+    private fun splitTableRow(line: String): List<String> {
+        var s = line.trim()
+        if (s.startsWith("|")) s = s.substring(1)
+        if (s.endsWith("|") && !s.endsWith("\\|")) s = s.dropLast(1)
+        val cells = mutableListOf<String>()
+        val current = StringBuilder()
+        var i = 0
+        while (i < s.length) {
+            when {
+                s[i] == '\\' && i + 1 < s.length && s[i + 1] == '|' -> {
+                    current.append('|'); i += 2
+                }
+                s[i] == '|' -> {
+                    cells.add(current.toString().trim()); current.setLength(0); i++
+                }
+                else -> {
+                    current.append(s[i]); i++
+                }
+            }
+        }
+        cells.add(current.toString().trim())
+        return cells
+    }
+
+    /// Flat pipe-text degradation of [table] for the
+    /// [MarkdownDocument.annotated] copy path — the analog of the Swift
+    /// `MarkdownReconstruction.renderTable` (port of apple #134): rows
+    /// re-join as `| a | b |`, the delimiter row is rebuilt from the carried
+    /// alignments, and a left column stays plain `---` (left is markdown's
+    /// default; only center/right carry colons). Cell spans (bold header,
+    /// inline styling) ride along; the pipes themselves are plain base text.
+    private fun pipeText(table: MarkdownTable, base: SpanStyle): AnnotatedString =
+        buildAnnotatedString {
+            fun plain(text: String) {
+                pushStyle(base); append(text); pop()
+            }
+            fun appendRow(cells: List<AnnotatedString>) {
+                plain("| ")
+                cells.forEachIndexed { c, cell ->
+                    append(cell)
+                    plain(if (c < cells.size - 1) " | " else " |")
+                }
+            }
+            appendRow(table.header)
+            plain(
+                "\n| " + table.alignments.joinToString(" | ") {
+                    when (it) {
+                        MarkdownTableAlignment.Left -> "---"
+                        MarkdownTableAlignment.Center -> ":---:"
+                        MarkdownTableAlignment.Right -> "---:"
+                    }
+                } + " |"
+            )
+            table.rows.forEach { row ->
+                plain("\n")
+                appendRow(row)
+            }
+        }
 
     /// Inline parser: bold (`**`/`__`), italic (`*`/`_`), inline code, strike
     /// (`~~`), and `[text](url)` links, applied over [base]. Recurses so nested

@@ -473,14 +473,89 @@ class JournalTimelineMapperTest {
     }
 
     /// A card whose payload is missing something the answer call needs is
-    /// unanswerable — better a generic card than buttons that would 400.
-    @Test fun unanswerableAgentChatPayloadFallsBackToTheGenericCard() {
+    /// unanswerable — and its answer channel is HTTP, not `prompt_reply`, so
+    /// the generic card's Allow/Deny would be dead buttons. Rendered as an
+    /// inert notice instead.
+    @Test fun unanswerableAgentChatPayloadRendersAsAnInertNotice() {
         val item = map(ev(33, "permission_request", payload = buildJsonObject {
             put("kind", "agent_chat")
             put("request", "invite")
             put("from_device_id", 4)
         }))!!
-        assertTrue(item.kind is TimelineItem.Kind.AskUser)
+        assertTrue(item.kind is TimelineItem.Kind.StateChange)
+    }
+
+    // MARK: Agent-spawn consent card
+
+    @Test fun agentSpawnPermissionRequestMapsToItsOwnKind() {
+        val item = map(ev(40, "permission_request", payload = buildJsonObject {
+            put("kind", "agent_spawn")
+            put("request_id", "spawn-1")
+            put("from_device_id", 4)
+            put("from_name", "dev-2")
+            put("target_device_id", 7)
+            put("workdir", "/home/dev/project")
+            put("task", "Fix the failing build")
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.AgentSpawnRequestCard
+        assertEquals("40", kind.eventID)
+        assertEquals("spawn-1", kind.request.requestId)
+        assertEquals(7L, kind.request.targetDeviceId)
+    }
+
+    /// The dispatch order matters: agent-chat is tried first, so a payload
+    /// carrying `kind: "agent_chat"` must keep mapping to
+    /// `AgentChatRequestCard` even though `AgentSpawnRequest.parse` is now
+    /// also in the branch.
+    @Test fun agentSpawnDispatchDoesNotShadowAgentChatPriority() {
+        val item = map(ev(41, "permission_request", payload = buildJsonObject {
+            put("kind", "agent_chat")
+            put("request", "invite")
+            put("room_id", "room-1")
+            put("from_device_id", 4)
+            put("target_device_id", 7)
+        }))!!
+        assertTrue(item.kind is TimelineItem.Kind.AgentChatRequestCard)
+    }
+
+    /// A spawn card missing what the answer call needs (`task`) is
+    /// unanswerable — the generic card's Allow/Deny would post over
+    /// `prompt_reply`, a channel the spawn flow never reads (it answers over
+    /// `POST /agent-spawn/answer`), leaving dead buttons until the ask
+    /// expires. Rendered as an inert notice instead, same stance as
+    /// agent-chat; web renders the spawn card read-only for this case.
+    @Test fun unanswerableAgentSpawnPayloadRendersAsAnInertNotice() {
+        val item = map(ev(42, "permission_request", payload = buildJsonObject {
+            put("kind", "agent_spawn")
+            put("request_id", "spawn-1")
+            put("from_device_id", 4)
+            put("topic", "Flake hunt")
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.StateChange
+        assertTrue(kind.text.contains("Flake hunt"))
+    }
+
+    @Test fun spawnOutcomeEventMapsToItsOwnKind() {
+        val item = map(ev(43, "spawn_outcome", sender = "journal", payload = buildJsonObject {
+            put("request_id", "spawn-1")
+            put("outcome", "started")
+            put("room_id", "room-9")
+            put("child_convo_id", "child-1")
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.SpawnOutcomeRow
+        assertEquals("43", kind.eventID)
+        assertEquals("spawn-1", kind.outcome.requestId)
+        assertEquals("room-9", kind.outcome.roomId)
+    }
+
+    /// A malformed spawn_outcome (missing what's needed to correlate it back
+    /// to a card) falls back to the generic unknown-type rendering rather
+    /// than crashing.
+    @Test fun unparseableSpawnOutcomeFallsBackToUnknown() {
+        val item = map(ev(44, "spawn_outcome", sender = "journal", payload = buildJsonObject {
+            put("outcome", "started")
+        }))!!
+        assertEquals(TimelineItem.Kind.Unknown("spawn_outcome"), item.kind)
     }
 
 }

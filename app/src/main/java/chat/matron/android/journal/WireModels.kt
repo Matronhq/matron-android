@@ -1,5 +1,6 @@
 package chat.matron.android.journal
 
+import chat.matron.android.models.AttachmentBatchTag
 import chat.matron.android.models.SessionStatus
 import chat.matron.android.models.SessionStatusUpdate
 import java.time.Instant
@@ -28,12 +29,22 @@ object JournalEventType {
     /// Conversation metadata (title, etc.). Carries no message body.
     const val CONVO_META = "convo_meta"
 
+    /// The durable resolution of an `agent_spawn` consent card — journal
+    /// -authored, appended into the parent's own conversation (see
+    /// `chat.matron.android.events.SpawnOutcome`).
+    const val SPAWN_OUTCOME = "spawn_outcome"
+
     /// Infix in a subagent child's convo id: `<parent>:sub:<agentId>`.
     const val CHILD_CONVO_INFIX = ":sub:"
 
     /// Types that bump unread counts and set the conversation snippet.
+    /// `SPAWN_OUTCOME` joins the set for the same reason the card
+    /// (`PERMISSION_REQUEST`) is in it: the chat-list row must stop
+    /// advertising "🤝 Agent spawn request" once the ask is settled, and an
+    /// unresolved-then-expired card should surface as unread (mirrors the
+    /// journal server's `MESSAGE_TYPES`, matron-journal `src/journal.js`).
     val MESSAGE_TYPES: Set<String> = setOf(
-        TEXT, TOOL_OUTPUT, DIFF, PROMPT, PERMISSION_REQUEST, FILE, IMAGE,
+        TEXT, TOOL_OUTPUT, DIFF, PROMPT, PERMISSION_REQUEST, FILE, IMAGE, SPAWN_OUTCOME,
     )
 }
 
@@ -359,6 +370,10 @@ sealed interface ClientOp {
     /// A media `send`: `type` is the wire kind (`"file"`/`"image"`), `blobRef`
     /// the id from a prior `POST /media` upload. `caption` is the composer text
     /// this attachment left with, omitted from the payload when null/empty.
+    /// `batch` marks this attachment as one of several sent together from
+    /// one composer message (same opaque-payload trick as `caption`): the
+    /// bridge gathers frames sharing a `batch_id` and injects them as ONE
+    /// prompt instead of starting a turn on the first and queueing the rest.
     data class SendMedia(
         val convoID: String,
         val type: MediaKind,
@@ -367,6 +382,7 @@ sealed interface ClientOp {
         val contentType: String,
         val size: Int,
         val caption: String?,
+        val batch: AttachmentBatchTag?,
         val localID: String,
     ) : ClientOp
     data class PromptReply(
@@ -413,6 +429,14 @@ sealed interface ClientOp {
                     put("size", size)
                     // Absent rather than null for a captionless send.
                     if (!caption.isNullOrEmpty()) put("caption", caption)
+                    // Same absent-when-single rule: a lone attachment carries
+                    // no batch keys, so an older bridge sees byte-identical
+                    // frames.
+                    if (batch != null) {
+                        put("batch_id", batch.id)
+                        put("batch_index", batch.index)
+                        put("batch_total", batch.total)
+                    }
                 })
                 put("local_id", localID)
             }
