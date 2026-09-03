@@ -26,6 +26,12 @@ data class AskUserEvent(
     val kind: InputKind,
     val expiresAt: Instant?,
     val replyChannel: ReplyChannel = ReplyChannel.TEXT_REPLY,
+    /// The bridge-owned prompt id (`pr_<uuid>`) of a busy-queue
+    /// `queued_release` card, `null` for every other prompt. The bridge's
+    /// durable release frames name cards by this id (not by seq), so it's
+    /// what lets a "Send all" on one card retire the buttons on the rest —
+    /// see `ChatViewModel.queuedReleaseAnswer` (port of apple #162).
+    val queuedReleasePromptID: String? = null,
 ) {
     sealed interface InputKind {
         data object Text : InputKind

@@ -31,6 +31,14 @@ object JournalTimelineMapper {
     /// local caches.
     const val TOOL_LOG_TTL_SECONDS: Long = 24L * 3600
 
+    /// Payload `kind` shared by a bridge busy-queue card (`prompt`) and its
+    /// durable release (`prompt_reply`).
+    const val QUEUED_RELEASE_KIND = "queued_release"
+
+    /// The hidden answer-row key a `queued_release` reply is filed under:
+    /// namespaced so a bridge prompt id can never collide with an event seq.
+    fun queuedReleaseAnswerKey(releasePromptID: String): String = "qr:$releasePromptID"
+
     fun displayName(sender: String): String {
         val colon = sender.indexOf(':')
         if (colon >= 0 && sender.substring(0, colon) in setOf("user", "agent")) {
@@ -138,13 +146,28 @@ object JournalTimelineMapper {
             }
 
             JournalEventType.PROMPT_REPLY -> {
-                val ir = payload.longOrNull("target_seq")?.toString()
-                inReplyTo = ir
-                val choice = payload.stringOrNull("choice")
-                when {
-                    choice != null && ir != null -> TimelineItem.Kind.AskUserAnswer(ir, listOf(choice))
-                    choice != null -> TimelineItem.Kind.Unknown(JournalEventType.PROMPT_REPLY)
-                    else -> TimelineItem.Kind.Text(payload.stringOrNull("text") ?: "", null)
+                if (payload.stringOrNull("kind") == QUEUED_RELEASE_KIND) {
+                    // A bridge-authored queued_release resolution: prompt_id +
+                    // action, no target_seq and no choice. Hide it as an answer
+                    // row namespaced by the bridge prompt id ("qr:pr_…") so a
+                    // flush retires every sent card's buttons on every device —
+                    // the generic branches below would render it as an empty
+                    // text bubble and resolve nothing. A release is never meant
+                    // to be visible, so a malformed one (no prompt_id / no
+                    // action) drops entirely rather than falling through to
+                    // that empty bubble (port of apple #162).
+                    val releasePromptID = payload.stringOrNull("prompt_id") ?: return null
+                    val action = payload.stringOrNull("action") ?: return null
+                    TimelineItem.Kind.AskUserAnswer(queuedReleaseAnswerKey(releasePromptID), listOf(action))
+                } else {
+                    val ir = payload.longOrNull("target_seq")?.toString()
+                    inReplyTo = ir
+                    val choice = payload.stringOrNull("choice")
+                    when {
+                        choice != null && ir != null -> TimelineItem.Kind.AskUserAnswer(ir, listOf(choice))
+                        choice != null -> TimelineItem.Kind.Unknown(JournalEventType.PROMPT_REPLY)
+                        else -> TimelineItem.Kind.Text(payload.stringOrNull("text") ?: "", null)
+                    }
                 }
             }
 
@@ -263,6 +286,10 @@ object JournalTimelineMapper {
                 AskUserEvent.InputKind.MultiChoice(options, allowsFreeText)
             else -> AskUserEvent.InputKind.Choice(options, allowsFreeText)
         }
+        // Busy-queue cards carry the bridge-owned prompt id their durable
+        // release frames will later name — see the PROMPT_REPLY branch.
+        val queuedReleasePromptID =
+            if (payload.stringOrNull("kind") == QUEUED_RELEASE_KIND) payload.stringOrNull("prompt_id") else null
         return AskUserEvent(
             prompt = question,
             kind = kind,
@@ -271,6 +298,7 @@ object JournalTimelineMapper {
             expiresAt = null,
             replyChannel = if (options.isEmpty()) AskUserEvent.ReplyChannel.TEXT_REPLY
             else AskUserEvent.ReplyChannel.CHOICE_REPLY,
+            queuedReleasePromptID = queuedReleasePromptID,
         )
     }
 

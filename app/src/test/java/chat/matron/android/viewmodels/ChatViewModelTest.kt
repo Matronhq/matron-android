@@ -83,6 +83,41 @@ class ChatViewModelTest {
         isOwn = false,
     )
 
+    /// A bridge queued_release card: choice buttons plus the bridge prompt id
+    /// releases resolve against (apple #162).
+    private fun queuedCardItem(id: String, promptID: String) = TimelineItem(
+        id = id,
+        sender = "@bot:s",
+        timestamp = Instant.now(),
+        kind = TimelineItem.Kind.AskUser(
+            id,
+            AskUserEvent(
+                prompt = "Send all 2 queued messages now, or cancel this one?",
+                kind = AskUserEvent.InputKind.Choice(
+                    listOf(
+                        AskUserEvent.Option("send", "⚡ Send all now", "send"),
+                        AskUserEvent.Option("cancel", "✕ Cancel this", "cancel"),
+                    ),
+                    allowOther = false,
+                ),
+                expiresAt = null,
+                replyChannel = AskUserEvent.ReplyChannel.CHOICE_REPLY,
+                queuedReleasePromptID = promptID,
+            ),
+        ),
+        isOwn = false,
+    )
+
+    /// The bridge's release row as the mapper hides it: a namespaced answer
+    /// that is NOT ours (the bridge authored it).
+    private fun releaseItem(id: String, promptID: String, action: String = "send") = TimelineItem(
+        id = id,
+        sender = "agent:bridge",
+        timestamp = Instant.now(),
+        kind = TimelineItem.Kind.AskUserAnswer("qr:$promptID", listOf(action)),
+        isOwn = false,
+    )
+
     private fun answerItem(id: String, promptEventID: String, isOwn: Boolean) = TimelineItem(
         id = id,
         sender = if (isOwn) "@me:s" else "@someone-else:s",
@@ -966,6 +1001,77 @@ class ChatViewModelTest {
     fun pendingAsk_skipsExpiredPrompts() = vmTest { scope ->
         val vm = makeAskVM(scope, listOf(askItem("\$1", expiresAt = Instant.now().minusSeconds(10))), InMemoryKeyValueStore())
         assertNull(vm.pendingAsk())
+    }
+
+    // MARK: - queued_release resolution (stale buttons after a flush, apple #162)
+
+    /// A "Send all now" tap on ONE card flushes the whole queue; the bridge
+    /// emits a release per flushed card. Those releases are bridge-authored
+    /// (not isOwn) and must still retire the buttons — the queue action
+    /// happened regardless of which device tapped.
+    @Test
+    fun isPromptAnswered_viaQueuedRelease_despiteNotOwn() = vmTest { scope ->
+        val vm = makeAskVM(scope, listOf(queuedCardItem("\$1", "pr_a"), releaseItem("\$9", "pr_a")), InMemoryKeyValueStore())
+        assertTrue(vm.isPromptAnswered("\$1"))
+    }
+
+    @Test
+    fun queuedRelease_leavesSiblingCardsLive() = vmTest { scope ->
+        val vm = makeAskVM(
+            scope,
+            listOf(queuedCardItem("\$1", "pr_a"), queuedCardItem("\$2", "pr_b"), releaseItem("\$9", "pr_a")),
+            InMemoryKeyValueStore(),
+        )
+        assertTrue(vm.isPromptAnswered("\$1"))
+        assertFalse("a release names one prompt; other queued cards stay actionable", vm.isPromptAnswered("\$2"))
+    }
+
+    @Test
+    fun answerSummary_mapsReleaseActionThroughCardOptions() = vmTest { scope ->
+        val vm = makeAskVM(scope, listOf(queuedCardItem("\$1", "pr_a"), releaseItem("\$9", "pr_a", "send")), InMemoryKeyValueStore())
+        assertEquals("⚡ Send all now", vm.answerSummary("\$1"))
+    }
+
+    /// Boot reconcile emits terminal `expired` releases for orphaned cards. No
+    /// option matches; the card shows its generic resolved state rather than
+    /// "You chose: expired".
+    @Test
+    fun answerSummary_expiredRelease_isNull() = vmTest { scope ->
+        val vm = makeAskVM(scope, listOf(queuedCardItem("\$1", "pr_a"), releaseItem("\$9", "pr_a", "expired")), InMemoryKeyValueStore())
+        assertTrue(vm.isPromptAnswered("\$1"))
+        assertNull(vm.answerSummary("\$1"))
+    }
+
+    @Test
+    fun pendingAsk_skipsReleaseResolvedCard() = vmTest { scope ->
+        val vm = makeAskVM(scope, listOf(queuedCardItem("\$1", "pr_a"), releaseItem("\$9", "pr_a")), InMemoryKeyValueStore())
+        assertNull(vm.pendingAsk())
+    }
+
+    /// The realistic double-release: a committed `send` that was never acked,
+    /// then boot reconcile's terminal `expired` for the same prompt_id. The
+    /// earliest release wins — the queue really was flushed, so the card keeps
+    /// reporting the send that happened rather than downgrading to the generic
+    /// resolved state.
+    @Test
+    fun queuedRelease_earliestWins_sendThenExpired() = vmTest { scope ->
+        val vm = makeAskVM(
+            scope,
+            listOf(queuedCardItem("\$1", "pr_a"), releaseItem("\$8", "pr_a", "send"), releaseItem("\$9", "pr_a", "expired")),
+            InMemoryKeyValueStore(),
+        )
+        assertTrue(vm.isPromptAnswered("\$1"))
+        assertEquals("⚡ Send all now", vm.answerSummary("\$1"))
+    }
+
+    /// The whole design rests on release rows being invisible: they must not
+    /// become rows, day separators, or scroll anchors.
+    @Test
+    fun releaseRow_neverEntersRows() = vmTest { scope ->
+        val vm = makeAskVM(scope, listOf(queuedCardItem("\$1", "pr_a"), releaseItem("\$9", "pr_a")), InMemoryKeyValueStore())
+        val messageIDs = vm.rows.value.mapNotNull { (it as? TimelineRow.Message)?.item?.id }
+        assertEquals(listOf("\$1"), messageIDs)
+        assertEquals(1, vm.rows.value.count { it is TimelineRow.Separator })
     }
 
     // MARK: - isPromptAnswered / persistence

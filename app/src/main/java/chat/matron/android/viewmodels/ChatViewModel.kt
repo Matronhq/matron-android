@@ -1,6 +1,7 @@
 package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.ConversationSummaryEntry
+import chat.matron.android.chat.JournalTimelineMapper
 import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineItem
 import chat.matron.android.chat.TimelineService
@@ -413,6 +414,11 @@ class ChatViewModel(
         var lastIsOwn = false
         var previousDay: LocalDate? = null
         var nextActivityLabel: String? = null
+        // Scratch for the queued-release memo: hidden "qr:" answer rows'
+        // values, and each card's own release key. Joined after the loop —
+        // a release can precede or follow its card in the snapshot.
+        val qrReleaseValues = mutableMapOf<String, List<String>>()
+        val cardReleaseKey = mutableMapOf<String, String>()
         for (item in _items.value) {
             when (val kind = item.kind) {
                 // The trailing activity indicator renders as a fixed footer, NOT a
@@ -422,8 +428,25 @@ class ChatViewModel(
                     nextActivityLabel = kind.label
                     continue
                 }
-                // Hidden kinds, kept out of rows AND day bucketing.
-                is TimelineItem.Kind.StateChange, is TimelineItem.Kind.AskUserAnswer -> continue
+                // Hidden kinds, kept out of rows AND day bucketing. Bridge
+                // release rows ("qr:" keys) are captured for the memo first:
+                // earliest wins (the snapshot is seq-ascending), so a committed
+                // `send` followed by boot reconcile's terminal `expired` keeps
+                // reporting the send that actually happened.
+                is TimelineItem.Kind.AskUserAnswer -> {
+                    if (kind.promptEventID.startsWith(QUEUED_RELEASE_KEY_PREFIX)) {
+                        qrReleaseValues.putIfAbsent(kind.promptEventID, kind.selectedValues)
+                    }
+                    continue
+                }
+                is TimelineItem.Kind.StateChange -> continue
+                // Queue cards remember their bridge prompt id; captured here so
+                // the release memo can key by the card's event id.
+                is TimelineItem.Kind.AskUser -> {
+                    kind.event.queuedReleasePromptID?.let {
+                        cardReleaseKey[kind.eventID] = JournalTimelineMapper.queuedReleaseAnswerKey(it)
+                    }
+                }
                 else -> {}
             }
             if (first == null) first = item.id
@@ -436,6 +459,11 @@ class ChatViewModel(
             }
             nextRows.add(TimelineRow.Message(item))
         }
+        val nextReleaseResolved = mutableMapOf<String, List<String>>()
+        for ((cardID, key) in cardReleaseKey) {
+            qrReleaseValues[key]?.let { nextReleaseResolved[cardID] = it }
+        }
+        releaseResolvedAnswers = nextReleaseResolved
         _rows.value = nextRows
         firstRenderableItemID = first
         _lastRenderableItemID.value = last
@@ -922,6 +950,7 @@ class ChatViewModel(
             if (kind !is TimelineItem.Kind.AskUser) continue
             if (answeredPromptIDs.contains(kind.eventID)) continue
             if (answeredInTimeline.contains(kind.eventID)) continue
+            if (queuedReleaseAnswer(kind.eventID) != null) continue
             val expiresAt = kind.event.expiresAt
             if (expiresAt != null && !Instant.now().isBefore(expiresAt)) continue
             return AskUserPromptContext(kind.eventID, kind.event)
@@ -949,7 +978,8 @@ class ChatViewModel(
     }
 
     /// True if [eventID]'s prompt was answered by US (this device, persisted, or
-    /// our own cross-device answer in the timeline).
+    /// our own cross-device answer in the timeline) — or, for a busy-queue
+    /// card, released by the bridge (see [queuedReleaseAnswer]).
     fun isPromptAnswered(eventID: String): Boolean {
         if (answeredPromptIDs.contains(eventID)) return true
         for (item in _items.value) {
@@ -958,8 +988,39 @@ class ChatViewModel(
             if (kind is TimelineItem.Kind.AskUserAnswer && kind.promptEventID == eventID) return true
             if (item.inReplyToEventID == eventID) return true
         }
-        return false
+        return queuedReleaseAnswer(eventID) != null
     }
+
+    /// The bridge's durable resolution for a busy-queue card (keyed by the
+    /// card's event id), or `null` while the card is still live. The mapper
+    /// hides each `queued_release` prompt_reply as an answer row keyed
+    /// `"qr:<prompt_id>"`; matching is by the card's own
+    /// `queuedReleasePromptID`, NOT by seq — a "Send all now" tap on one card
+    /// flushes the whole queue and the bridge emits one release per sent
+    /// card, which is how the sibling cards' dead buttons retire.
+    /// Deliberately not `isOwn`-gated: releases are bridge-authored facts
+    /// about the queue (sent / cancelled / expired), not another user's
+    /// answer, and the card must resolve for everyone.
+    ///
+    /// Earliest release wins (unlike [spawnOutcomes], where later rows win):
+    /// the realistic double is a committed `send` followed by boot
+    /// reconcile's terminal `expired`, and the card should keep reporting the
+    /// send that actually happened rather than downgrade to the generic
+    /// resolved state.
+    ///
+    /// Never folded into [answeredPromptIDs] — safe because a release always
+    /// has a higher seq than its card and the snapshot is the full local
+    /// history (the render window is display-only), so any store that holds
+    /// the card holds its release. If local event trimming is ever added,
+    /// this is the invariant that breaks first (port of apple #162).
+    private fun queuedReleaseAnswer(eventID: String): List<String>? = releaseResolvedAnswers[eventID]
+
+    /// Backing memo for [queuedReleaseAnswer], card event id → release
+    /// values. Rebuilt in [applyDerivedRecompute]'s single pass — the lookups
+    /// run from composables per ask row per snapshot, and a full-history scan
+    /// there is exactly the per-row cost the timeline's CPU history warns
+    /// about.
+    private var releaseResolvedAnswers: Map<String, List<String>> = emptyMap()
 
     /// Persists [eventID] as answered so push re-decryption can't re-pop it.
     fun markPromptAnswered(eventID: String) {
@@ -999,6 +1060,13 @@ class ChatViewModel(
                 if (kind is TimelineItem.Kind.Text) return kind.body
             }
         }
+        // Release-resolved queue card: name the action via the card's own
+        // option labels ("⚡ Send all now"). An `expired` release matches no
+        // option and shows the generic resolved state — "You chose: expired"
+        // would be a lie, nobody chose anything.
+        queuedReleaseAnswer(promptEventID)?.let { values ->
+            if (values != listOf(EXPIRED_RELEASE_ACTION)) return mapValuesToLabels(values, promptEventID)
+        }
         return null
     }
 
@@ -1035,6 +1103,14 @@ class ChatViewModel(
     companion object {
         /// Cap for both [resolvedImages] and [failedRequests].
         const val MEDIA_CACHE_LIMIT = 100
+
+        /// Prefix of the hidden answer-row key the mapper files a bridge
+        /// `queued_release` reply under (see [JournalTimelineMapper.queuedReleaseAnswerKey]).
+        private val QUEUED_RELEASE_KEY_PREFIX = JournalTimelineMapper.queuedReleaseAnswerKey("")
+
+        /// Boot reconcile's terminal release action for an orphaned queue
+        /// card — a resolution, but not a choice anyone made.
+        private const val EXPIRED_RELEASE_ACTION = "expired"
 
         /// Persisted marker for a consent card the server said was no longer
         /// awaiting an answer. Not a decision, so it can't collide with
