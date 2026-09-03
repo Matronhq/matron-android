@@ -3,9 +3,11 @@ package chat.matron.android.viewmodels
 import chat.matron.android.journal.DeviceDTO
 import chat.matron.android.journal.RPCReply
 import chat.matron.android.journal.RPCRequestError
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
@@ -27,6 +29,15 @@ private class FakeAgentRPCProvider : AgentRPCProviding {
     /// Per-box `recent_folders` scripting for the fan-out tests; consulted before
     /// [replies] so one box can answer while another fails.
     var repliesByDevice: MutableMap<Long, RPCReply> = mutableMapOf()
+
+    /// Scripted `recent_folders` replies per box, consumed one per call and
+    /// consulted before [repliesByDevice] — so the fan-out's call and a later
+    /// `select()` for the same box can answer differently.
+    var foldersSequenceByDevice: MutableMap<Long, ArrayDeque<RPCReply>> = mutableMapOf()
+
+    /// Parks a box's NEXT `recent_folders` call on the gate (a reply still on
+    /// the wire); one-shot, removed on use.
+    var gateFoldersCall: MutableMap<Long, CompletableDeferred<Unit>> = mutableMapOf()
     var rpcError: RPCRequestError? = null
 
     data class Request(val method: String, val agentDeviceID: Long, val params: JsonObject)
@@ -41,7 +52,10 @@ private class FakeAgentRPCProvider : AgentRPCProviding {
         requests.add(Request(method, agentDeviceID, params))
         rpcError?.let { throw it }
         if (method == "recent_folders") {
-            repliesByDevice[agentDeviceID]?.let { return it }
+            val reply = foldersSequenceByDevice[agentDeviceID]?.removeFirstOrNull()
+                ?: repliesByDevice[agentDeviceID]
+            gateFoldersCall.remove(agentDeviceID)?.await()
+            reply?.let { return it }
         }
         return replies[method] ?: RPCReply.Failure("unknown_method", null)
     }
@@ -285,5 +299,39 @@ class NewChatViewModelTest {
         fake.repliesByDevice[1] = foldersReply("""{"folders":[{"path":"/late","last_used":1}]}""")
         vm.select(agents[0])
         assertEquals(listOf("/late"), vm.folders.value.map { it.path })
+    }
+
+    /// Bugbot (#36): the folder step's own live `recent_folders` can fail
+    /// while the roster fan-out's call for the same box is still on the wire.
+    /// When that fan-out reply then succeeds it must repair the step (folders
+    /// in, error out), not just warm a cache behind a stuck error.
+    @Test
+    fun fanOutSuccess_repairsFolderStepAfterLiveFetchFailed() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
+        fake.devicesResult = Result.success(agents)
+        val gate = CompletableDeferred<Unit>()
+        fake.gateFoldersCall[1] = gate
+        fake.foldersSequenceByDevice[1] = ArrayDeque(
+            listOf(
+                foldersReply("""{"folders":[{"path":"/w/app","last_used":100}]}"""), // fan-out, parked
+                RPCReply.Failure("agent_unreachable", null), // select()'s live call
+            ),
+        )
+        fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
+        val vm = NewChatViewModel(fake)
+        val loading = async { vm.load() }
+        // Let load() post the roster and park box 1's fan-out on the gate.
+        while (fake.requests.count { it.method == "recent_folders" } < 2) yield()
+        assertTrue(vm.phase.value is NewChatViewModel.Phase.Agents)
+
+        vm.select(agents[0]) // cache still cold → live call → fails
+        assertNotNull(vm.foldersError.value)
+        assertTrue(vm.folders.value.isEmpty())
+
+        gate.complete(Unit) // the fan-out reply lands after the failure
+        loading.await()
+        assertNull(vm.foldersError.value)
+        assertEquals(listOf("/w/app"), vm.folders.value.map { it.path })
     }
 }

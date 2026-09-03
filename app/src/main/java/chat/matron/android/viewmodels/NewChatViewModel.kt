@@ -193,7 +193,17 @@ class NewChatViewModel(
             val reply = api.agentRequest(agentID, "recent_folders", "{}")
             if (reply is RPCReply.Ok) {
                 _capacities.value = _capacities.value + (agentID to BoxCapacity.parse(reply.result))
-                folderCache[agentID] = parseFolders(reply.result)
+                val folders = parseFolders(reply.result)
+                folderCache[agentID] = folders
+                // The folder step may already be showing this box with its own
+                // live fetch failed (it raced ahead of this reply): swap the
+                // fan-out's answer in rather than leaving a stale error over a
+                // now-warm cache (Bugbot, #36).
+                val phaseNow = _phase.value
+                if (phaseNow is Phase.Folders && phaseNow.agent.id == agentID && _foldersError.value != null) {
+                    _folders.value = folders
+                    _foldersError.value = null
+                }
             }
         } catch (cancel: CancellationException) {
             throw cancel
