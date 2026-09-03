@@ -414,6 +414,124 @@ class ComposerViewModelTest {
         assertNull(fake.sentImages.last().caption)
     }
 
+    /// Ported from matron-apple's `ComposerViewModelTests.
+    /// test_send_withSeveralAttachments_stampsOneSharedBatchTag`. A
+    /// multi-attachment send stamps every upload with the same batch id and
+    /// its 1-based place, so the bridge can gather the frames back into the
+    /// one message the user wrote instead of injecting the first image and
+    /// busy-queueing the rest.
+    @Test
+    fun send_withSeveralAttachments_stampsOneSharedBatchTag() = runBlocking {
+        val fake = FakeTimelineService()
+        val vm = makeVM(timeline = fake)
+        vm.attachFiles(listOf(makeTempFile("a.png"), makeTempFile("b.png"), makeTempFile("c.png")))
+
+        vm.send()
+
+        val tags = fake.mediaSendBatchTags.filterNotNull()
+        assertEquals("every attachment of a batch send must carry the tag", 3, tags.size)
+        assertEquals("one send = one batch id", 1, tags.map { it.id }.toSet().size)
+        assertEquals(listOf(1, 2, 3), tags.map { it.index })
+        assertEquals(listOf(3, 3, 3), tags.map { it.total })
+    }
+
+    /// Ported from matron-apple's `ComposerViewModelTests.
+    /// test_retry_afterAMidBatchFailure_reusesTheOriginalBatchTag`
+    /// (matron-apple#157). A retried attachment must rejoin the batch it
+    /// fell out of. The bridge gathers frames by batch_id: retried under
+    /// the ORIGINAL id, the frame either deposits into the still-open
+    /// gather (completing the user's one message) or — batch already
+    /// finalized — takes the per-frame path. A fresh id could do neither:
+    /// the frame would wait forever for siblings that already went out,
+    /// and the message would arrive fractured.
+    @Test
+    fun retry_afterAMidBatchFailure_reusesTheOriginalBatchTag() = runBlocking {
+        val fake = FakeTimelineService()
+        fake.failSendsAfter = 1
+        val vm = makeVM(timeline = fake)
+        vm.attachFiles(listOf(makeTempFile("a.png"), makeTempFile("b.png"), makeTempFile("c.png")))
+
+        vm.send()
+
+        assertEquals("precondition: only a.png landed", listOf("a.png"), fake.sentImages.map { it.filename })
+        assertEquals(
+            "precondition: the unsent pair came back to the tray",
+            listOf("b.png", "c.png"), vm.stagedAttachments.value.map { it.filename },
+        )
+        val original = fake.mediaSendBatchTags.filterNotNull().first()
+
+        // The network comes back and the user hits send again.
+        fake.failSendsAfter = null
+        vm.send()
+
+        assertEquals(listOf("a.png", "b.png", "c.png"), fake.sentImages.map { it.filename })
+        val retried = fake.mediaSendBatchTags.takeLast(2).filterNotNull()
+        assertEquals(
+            "retried frames must carry the ORIGINAL batch id, not a fresh one",
+            listOf(original.id, original.id), retried.map { it.id },
+        )
+        assertEquals("…in their original 1-based places", listOf(2, 3), retried.map { it.index })
+        assertEquals("…still completing a batch of three", listOf(3, 3), retried.map { it.total })
+
+        // The preserved tag must not leak past the attachments that failed
+        // out of it: the next send is its own batch under a new id.
+        vm.attachFiles(listOf(makeTempFile("d.png"), makeTempFile("e.png")))
+        vm.send()
+
+        val fresh = fake.mediaSendBatchTags.takeLast(2).filterNotNull()
+        assertEquals("a fresh multi-attachment send is tagged as usual", 2, fresh.size)
+        assertTrue("a new send mints a new batch id", fresh.first().id != original.id)
+        assertEquals(listOf(1, 2), fresh.map { it.index })
+        assertEquals(listOf(2, 2), fresh.map { it.total })
+    }
+
+    /// Ported from matron-apple's `ComposerViewModelTests.
+    /// test_retry_ofTheLastRemainingAttachment_isNotDemotedToAnUntaggedSend`
+    /// (matron-apple#157). The drops-it half of the retry bug: with only
+    /// ONE attachment left to retry, the re-send used to look like a fresh
+    /// single-attachment send and went out untagged — leaving the bridge
+    /// no way to connect the frame to the batch its sibling had already
+    /// opened.
+    @Test
+    fun retry_ofTheLastRemainingAttachment_isNotDemotedToAnUntaggedSend() = runBlocking {
+        val fake = FakeTimelineService()
+        fake.failSendsAfter = 1
+        val vm = makeVM(timeline = fake)
+        vm.attachFiles(listOf(makeTempFile("a.png"), makeTempFile("b.png")))
+
+        vm.send()
+
+        assertEquals(
+            "precondition: b.png failed and came back alone",
+            listOf("b.png"), vm.stagedAttachments.value.map { it.filename },
+        )
+        val original = fake.mediaSendBatchTags.filterNotNull().first()
+
+        fake.failSendsAfter = null
+        vm.send()
+
+        val retried = fake.mediaSendBatchTags.last()
+        assertNotNull("the lone retry must still carry its batch tag", retried)
+        assertEquals(original.id, retried!!.id)
+        assertEquals(2, retried.index)
+        assertEquals(2, retried.total)
+    }
+
+    /// Ported from matron-apple's `ComposerViewModelTests.
+    /// test_send_withOneAttachment_carriesNoBatchTag`. A single attachment
+    /// goes untagged — its frame must stay byte-identical to what an older
+    /// bridge already understands.
+    @Test
+    fun send_withOneAttachment_carriesNoBatchTag() = runBlocking {
+        val fake = FakeTimelineService()
+        val vm = makeVM(timeline = fake)
+        vm.attachFiles(listOf(makeTempFile("shot.png")))
+
+        vm.send()
+
+        assertEquals(listOf<chat.matron.android.models.AttachmentBatchTag?>(null), fake.mediaSendBatchTags)
+    }
+
     @Test
     fun send_withTextOnly_stillSendsPlainText() = runBlocking {
         val fake = FakeTimelineService()
