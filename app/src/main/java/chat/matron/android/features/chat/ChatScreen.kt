@@ -19,6 +19,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -61,9 +62,11 @@ import chat.matron.android.designsystem.TimelineLoadingIndicator
 import chat.matron.android.designsystem.shouldShowCompactHeader
 import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.ComposerViewModel
+import chat.matron.android.viewmodels.MediaBrowserViewModel
 import chat.matron.android.viewmodels.SubChatStripViewModel
 import chat.matron.android.viewmodels.TimelineRow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
@@ -91,6 +94,11 @@ fun ChatScreen(
     /// than two boxes. Threaded from the list's ChatSummary (same source as
     /// the row chip) so header and row can never disagree.
     boxName: String? = null,
+    /// Builds the media & links browser's VM when its sheet opens (deferred,
+    /// like the iOS sheet's `.task` construction — the store queries only run
+    /// for users who open the browser). `null` (previews/tests) hides the
+    /// toolbar button. Port of apple #142's ChatView toolbar + sheet.
+    mediaBrowser: ((CoroutineScope) -> MediaBrowserViewModel)? = null,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val children by stripVM.children.collectAsStateWithLifecycle()
@@ -100,6 +108,7 @@ fun ChatScreen(
     val sessionStatus by chatVM.sessionStatus.collectAsStateWithLifecycle()
 
     var showSessionStatus by remember { mutableStateOf(false) }
+    var showMediaBrowser by remember { mutableStateOf(false) }
     var showSwitcher by remember { mutableStateOf(false) }
     /// Tappable title → summaries TOC sheet (jump-to-point navigation).
     var showSummaries by remember { mutableStateOf(false) }
@@ -131,6 +140,13 @@ fun ChatScreen(
                     if (children.isNotEmpty()) {
                         IconButton(onClick = { showSwitcher = true }) {
                             Icon(Icons.Default.AccountTree, contentDescription = "Subagents")
+                        }
+                    }
+                    // Apple's photo.on.rectangle.angled toolbar button, before
+                    // the ⓘ (apple #142).
+                    if (mediaBrowser != null) {
+                        IconButton(onClick = { showMediaBrowser = true }) {
+                            Icon(Icons.Outlined.PhotoLibrary, contentDescription = "Media, files and links")
                         }
                     }
                     IconButton(onClick = { showSessionStatus = true }) {
@@ -202,6 +218,14 @@ fun ChatScreen(
         val sheetState = rememberModalBottomSheetState()
         ModalBottomSheet(onDismissRequest = { showSessionStatus = false }, sheetState = sheetState) {
             SessionStatusSheet(viewModel = chatVM, onDismiss = { showSessionStatus = false }, boxName = boxName)
+        }
+    }
+    if (showMediaBrowser && mediaBrowser != null) {
+        // skipPartiallyExpanded: the media grid wants its full height straight
+        // away (NewChatSheet precedent).
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(onDismissRequest = { showMediaBrowser = false }, sheetState = sheetState) {
+            MediaBrowserSheet(chatVM = chatVM, viewModelFactory = mediaBrowser)
         }
     }
     if (showSwitcher) {
@@ -416,9 +440,11 @@ fun TimelineList(
  * that failed to download/write had no user-visible feedback (a dead button) —
  * this surfaces it, playing the analogous role to [ComposerView]'s
  * `ComposerErrorBanner` (its own Surface/errorContainer styling, not a copy).
+ * `internal` so [MediaBrowserSheet] shows the same banner (same package) for
+ * its attachment errors instead of a dismissless copy.
  */
 @Composable
-private fun AttachmentErrorBanner(message: String, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+internal fun AttachmentErrorBanner(message: String, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.errorContainer,
