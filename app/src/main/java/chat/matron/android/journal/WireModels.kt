@@ -29,6 +29,10 @@ object JournalEventType {
     /// Conversation metadata (title, etc.). Carries no message body.
     const val CONVO_META = "convo_meta"
 
+    /// One bridge summary pass — a TOC entry anchored at its own seq.
+    /// Deliberately NOT in [MESSAGE_TYPES]: no snippet, no unread bump, no
+    /// activity timestamp (the journal server applies the same exclusion).
+    const val SUMMARY = "summary"
     /// The durable resolution of an `agent_spawn` consent card — journal
     /// -authored, appended into the parent's own conversation (see
     /// `chat.matron.android.events.SpawnOutcome`).

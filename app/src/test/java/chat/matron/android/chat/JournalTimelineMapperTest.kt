@@ -323,6 +323,16 @@ class JournalTimelineMapperTest {
         assertEquals(TimelineItem.Kind.Unknown("shiny_new_thing"), item.kind)
     }
 
+    /// Port of matron-apple `JournalTimelineMapperTests
+    /// .testSummaryEventsAreExcludedFromTranscript`: summary passes are TOC
+    /// entries, never transcript rows — without the mapper exclusion they'd
+    /// render as "[unsupported event: summary]" noise.
+    @Test fun summaryEventsAreExcludedFromTranscript() {
+        assertNull(map(ev(11, "summary", payload = buildJsonObject {
+            put("toc", "Fixed auth"); put("detail", "…"); put("model", "m")
+        })))
+    }
+
     @Test fun streamingItem() {
         val item = JournalTimelineMapper.streamingItem("m1", "working…", Instant.ofEpochSecond(99))
         assertEquals("eph:m1", item.id)

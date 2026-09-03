@@ -31,11 +31,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import chat.matron.android.designsystem.UsageMetersFormat
 import chat.matron.android.journal.DeviceDTO
 import chat.matron.android.viewmodels.AgentRPCProviding
+import chat.matron.android.viewmodels.BoxCapacity
 import chat.matron.android.viewmodels.NewChatViewModel
 import chat.matron.android.viewmodels.lastSeenText
 import kotlinx.coroutines.launch
@@ -60,6 +63,8 @@ fun NewChatSheet(
     val foldersError by viewModel.foldersError.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val isStarting by viewModel.isStarting.collectAsStateWithLifecycle()
+    val capacities by viewModel.capacities.collectAsStateWithLifecycle()
+    val capacityPending by viewModel.capacityPending.collectAsStateWithLifecycle()
 
     var navigated by remember { mutableStateOf(false) }
 
@@ -99,7 +104,12 @@ fun NewChatSheet(
                     )
                 }
                 current.agents.forEach { agent ->
-                    AgentRow(agent = agent, onClick = { scope.launch { viewModel.select(agent) } })
+                    AgentRow(
+                        agent = agent,
+                        capacity = capacities[agent.id],
+                        capacityPending = agent.id in capacityPending,
+                        onClick = { scope.launch { viewModel.select(agent) } },
+                    )
                 }
             }
 
@@ -181,8 +191,16 @@ private fun CustomFolderStarter(
     )
 }
 
+/// One machine in the picker. [capacity] is the fanned-out `recent_folders`
+/// answer for this box (null while unknown or after a failed fetch) and is
+/// display-only — the row's click/enabled behaviour never depends on it.
 @Composable
-private fun AgentRow(agent: DeviceDTO, onClick: () -> Unit) {
+private fun AgentRow(
+    agent: DeviceDTO,
+    capacity: BoxCapacity?,
+    capacityPending: Boolean,
+    onClick: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -193,15 +211,71 @@ private fun AgentRow(agent: DeviceDTO, onClick: () -> Unit) {
     ) {
         Icon(Icons.Default.Dns, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                agent.name.ifEmpty { "Unnamed agent" },
-                color = if (agent.connected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    agent.name.ifEmpty { "Unnamed agent" },
+                    color = if (agent.connected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                capacity?.accountEmail?.let { email ->
+                    Text(
+                        email,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                }
+            }
             Text(
                 if (agent.connected) "Connected" else "Offline · Last seen ${agent.lastSeenText()}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (!agent.connected) {
+                // Offline rows stay exactly as they were — no capacity to show.
+            } else if (capacity != null) {
+                capacity.liveSessions?.let { live ->
+                    Text(
+                        if (live == 0) "No active sessions" else "$live active session" + if (live == 1) "" else "s",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                // Every line the bridge sent, in its order — the box's own
+                // reading of its limits, not a summary.
+                capacity.limitLines.forEach { line ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            line.label,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            "${line.percent}%",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                            color = UsageMetersFormat.barColor(line.percent),
+                        )
+                        BoxCapacity.resetText(line.resetsAt)?.let {
+                            Text(
+                                "· $it",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline,
+                            )
+                        }
+                    }
+                }
+            } else if (capacityPending) {
+                Text(
+                    "Checking…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
         }
     }
 }

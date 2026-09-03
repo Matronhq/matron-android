@@ -16,6 +16,13 @@ on:
       - "v*"
   workflow_dispatch:
 
+# Despite the name, this job does not create a GitHub Release: it builds the
+# bundle and hands it to actions/upload-artifact, which uses the Actions
+# artifact API rather than the contents API. So read-only is correct here —
+# if this ever grows a `gh release create` step it will need contents: write.
+permissions:
+  contents: read
+
 jobs:
   build-aab:
     runs-on: ubuntu-latest
