@@ -89,6 +89,12 @@ class JournalStore(
             if (c.agentDeviceID != null) {
                 updated = updated.copy(agentDeviceID = c.agentDeviceID)
             }
+            // Same absent-never-clears rule: only a present membership array
+            // replaces the stored one (a dissolved room's snapshot omits the
+            // key, and the last-known chips are still the right tags).
+            if (c.participants != null) {
+                updated = updated.copy(participants = ConversationEntity.encodeParticipants(c.participants))
+            }
             if (c.lastSeq > updated.lastSeq) {
                 updated = updated.copy(lastSeq = c.lastSeq, snippet = c.snippet)
             }
@@ -108,6 +114,7 @@ class JournalStore(
                     readUpToSeq = if (resetLocalState) c.lastSeq else 0,
                     unreadCount = 0, parentConvoID = c.parentConvoID,
                     agentDeviceID = c.agentDeviceID,
+                    participants = c.participants?.let(ConversationEntity::encodeParticipants),
                 )
             )
         }
@@ -183,6 +190,13 @@ class JournalStore(
                 // session resumed on another box changes owner.
                 payload.longOrNull("agent_device_id")?.let {
                     convo = convo.copy(agentDeviceID = it)
+                }
+                // Room membership, learned live so a room re-chips the
+                // moment an agent joins or leaves (the journal fans a
+                // membership-only convo_meta). Present replaces wholesale;
+                // absent (a plain rename meta) leaves the stored set alone.
+                payload.longArrayOrNull("participants")?.let {
+                    convo = convo.copy(participants = ConversationEntity.encodeParticipants(it))
                 }
             }
             event.type == JournalEventType.SESSION_STATUS -> {

@@ -66,6 +66,12 @@ data class ConvoSummaryDTO(
     /// [parentConvoID] this is mutable — resuming a session on another box
     /// legitimately repoints it.
     val agentDeviceID: Long? = null,
+    /// Every agent box in a multi-agent room (the journal's recorded owner
+    /// plus joined participants), or `null` when the server omits the key —
+    /// a solo conversation, a dissolved room, or a server predating the
+    /// field. Absent never clears a stored set (same discipline as
+    /// [agentDeviceID]); present replaces it wholesale.
+    val participants: List<Long>? = null,
 )
 
 /// One row of `GET /devices`. Timestamps are epoch ms; `lastSeenAt` is null for
@@ -279,6 +285,9 @@ class JournalApi(
                 // Which box manages this conversation. Absent on older
                 // servers -> null -> no chip.
                 agentDeviceID = c.longOrNull("agent_device_id"),
+                // Multi-agent room membership (owner + joined). Absent for
+                // solo conversations and on older servers -> null.
+                participants = c.longArrayOrNull("participants"),
             )
         }
         // Absent field (old server) → null, present-but-empty → empty list:

@@ -358,6 +358,10 @@ private fun SignedInApp(
                 vmCache = vmCache,
                 title = currentSummary(groups, convoID)?.title ?: "",
                 boxName = currentSummary(groups, convoID)?.boxName,
+                sessionShort = currentSummary(groups, convoID)?.sessionShort,
+                boxShort = currentSummary(groups, convoID)?.boxShort,
+                roomBoxNames = currentSummary(groups, convoID)?.roomBoxNames ?: emptyList(),
+                roomBoxShorts = currentSummary(groups, convoID)?.roomBoxShorts ?: emptyList(),
                 onBack = { nav.popBackStack() },
                 onOpenChild = { nav.navigate("chat/$it") },
                 onSwitchTo = { sibling ->
@@ -407,6 +411,7 @@ private fun SignedInApp(
                 api = deps.devicesService(session),
                 onSelfRevoked = onSignOut,
                 onBack = { nav.popBackStack() },
+                overrides = deps.boxLetterOverrides,
             )
         }
 
@@ -464,6 +469,12 @@ private fun ChatRoute(
     /// than two boxes. Threaded from the list's ChatSummary (same source as
     /// the row chip) so header and row can never disagree.
     boxName: String? = null,
+    /// The `A:bc` tag halves + multi-agent room participants, threaded from
+    /// the same ChatSummary so the in-chat header matches the row.
+    sessionShort: String? = null,
+    boxShort: String? = null,
+    roomBoxNames: List<String> = emptyList(),
+    roomBoxShorts: List<String> = emptyList(),
 ) {
     // Observed, not one-shot: the mirror can learn parent_convo_id AFTER this
     // route composes (convo_meta or a snapshot upsert), and the route must
@@ -499,6 +510,10 @@ private fun ChatRoute(
             stripVM = stripVM,
             chatTitle = title,
             boxName = boxName,
+            sessionShort = sessionShort,
+            boxShort = boxShort,
+            roomBoxNames = roomBoxNames,
+            roomBoxShorts = roomBoxShorts,
             onBack = onBack,
             onOpenChild = onOpenChild,
             onOpenConversation = onOpenConversation,

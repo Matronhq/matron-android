@@ -7,6 +7,20 @@ class InMemoryKeyValueStore : KeyValueStore {
     private val storage = mutableMapOf<String, List<String>>()
     private val booleans = mutableMapOf<String, Boolean>()
     private val integers = mutableMapOf<String, Int>()
+    private val strings = mutableMapOf<String, String>()
+
+    override fun getString(key: String): String? = strings[key]
+
+    override fun setString(key: String, value: String) {
+        strings[key] = value
+    }
+
+    override fun remove(key: String) {
+        strings.remove(key)
+        storage.remove(key)
+        booleans.remove(key)
+        integers.remove(key)
+    }
 
     override fun getStringList(key: String): List<String>? = storage[key]?.toList()
 

@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -40,10 +39,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.text.AnnotatedString
 import chat.matron.android.chat.ChatService
 import chat.matron.android.chat.ChatSummary
-import chat.matron.android.designsystem.BoxChip
+import chat.matron.android.chat.SessionTag
 import chat.matron.android.designsystem.RelativeMinuteTimeView
+import chat.matron.android.designsystem.SessionTagText
 import chat.matron.android.designsystem.SyncBannerState
 import chat.matron.android.designsystem.UnreadBadge
 import chat.matron.android.models.MatronDebug
@@ -205,32 +208,22 @@ private fun ChatRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        summary.title,
-                        style = MaterialTheme.typography.bodyLarge,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        // fill = false so a long title truncates and the chip
-                        // stays visible (the iOS HStack shrinks Text the same
-                        // way).
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    // Which box owns this conversation. Null unless the user
-                    // has two or more boxes — the gate lives in
-                    // JournalChatService, so this row just renders.
-                    //
-                    // Width-capped: Compose measures the unweighted chip
-                    // BEFORE the weighted title, so an uncapped chip at the
-                    // 40-char name cap would squeeze the title to nothing —
-                    // unlike the iOS HStack, which negotiates space between
-                    // its two texts. The cap keeps the title legible; the
-                    // chip's own Text ellipsizes past it.
-                    summary.boxName?.let { BoxChip(it, modifier = Modifier.widthIn(max = 144.dp)) }
-                }
+                // `A:bc Title` as ONE text so the tag leads the eye scan
+                // (colored box letter + session short — the trailing BoxChip
+                // capsule this replaces put the machine at the END and cost
+                // a capsule of width) and the whole line truncates together,
+                // which also retires the capsule's 144dp width cap: there is
+                // no unweighted sibling left to starve the title.
+                // Tag halves are gated upstream (JournalChatService): no
+                // letter for single-box users, no short for titles the
+                // bridge never prefixed.
+                val darkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+                Text(
+                    titleLine(summary, darkTheme, MaterialTheme.colorScheme.onSurfaceVariant),
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Text(
                     summary.snippet.ifEmpty { " " },
                     style = MaterialTheme.typography.bodySmall,
@@ -255,6 +248,32 @@ private fun ChatRow(
             DropdownMenuItem(text = { Text("Leave") }, onClick = { menuOpen = false; onLeave() })
         }
     }
+}
+
+/// `A:bc Title` (or `A↔B:bc Title` for a multi-agent room) as one styled
+/// string — a multi-agent room leads with every participating box as a
+/// colored letter (`A↔B`, `A,B,C`); the tag already says "room", so the
+/// bridge's 🔗 title marker is dropped beside it. Falls through to the
+/// single-box `A:bc` tag, then to the bare title. Ports the iOS ChatRow's
+/// `titleLine` composition (apple #152).
+private fun titleLine(summary: ChatSummary, darkTheme: Boolean, secondary: Color): AnnotatedString {
+    // Same marker discipline as every tagged surface: the room marker drops
+    // only when a room tag will actually render in its place.
+    val title = if (summary.roomBoxNames.size >= 2) {
+        SessionTag.titleBesideRoomTag(summary.title)
+    } else {
+        summary.title
+    }
+    return SessionTagText.titleLine(
+        title = title,
+        boxLetter = summary.boxShort,
+        boxName = summary.boxName,
+        sessionShort = summary.sessionShort,
+        roomBoxNames = summary.roomBoxNames,
+        roomBoxShorts = summary.roomBoxShorts,
+        darkTheme = darkTheme,
+        secondary = secondary,
+    )
 }
 
 @Composable
