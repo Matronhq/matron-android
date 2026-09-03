@@ -559,6 +559,20 @@ fun TimelineList(
         }
     }
 
+    // Near-bottom of a window that has slid up into history → slide it back
+    // down toward the tail (apple #166). The pin-to-tail effect never runs
+    // while the window is detached, so this is the only way back.
+    val windowTailAnchorID by chatVM.windowTailAnchorID.collectAsStateWithLifecycle()
+    LaunchedEffect(listState, windowTailAnchorID) {
+        if (windowTailAnchorID == null) return@LaunchedEffect
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
+            .distinctUntilChanged()
+            .collect { last ->
+                val total = listState.layoutInfo.totalItemsCount
+                if (last != null && total > 0 && last >= total - 3) chatVM.revealNewerHistory()
+            }
+    }
+
     // Near-top → grow the history window and paginate backward over HTTP.
     LaunchedEffect(listState) {
         snapshotFlow { listState.firstVisibleItemIndex }
