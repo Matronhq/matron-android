@@ -1233,6 +1233,48 @@ class ChatViewModelTest {
         vm.stop()
     }
 
+    /// Bugbot (#56): closing the bar while the query is still in flight must
+    /// not let the late result resurrect it.
+    @Test
+    fun inChatSearch_endMidQueryDoesNotResurrectTheBar() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(textItem("3", body = "match")), olderPages = mutableListOf())
+        val search = FakeSearchService(listOf(searchHit("3")))
+        search.queryGate = CompletableDeferred()
+        val vm = searchVM(scope, fake, search)
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+        val begin = launch { vm.beginChatSearch("match") }
+        waitUntil { search.queryCalls == 1 }
+        vm.endChatSearch()
+        search.queryGate!!.complete(Unit)
+        begin.join()
+        assertNull("a superseded query must not publish", vm.chatSearch.value)
+        assertNull(vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// Bugbot (#56): a slower earlier query must not overwrite a newer one.
+    @Test
+    fun inChatSearch_newerQuerySupersedesASlowerEarlierOne() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(textItem("3", body = "match")), olderPages = mutableListOf())
+        val search = FakeSearchService(listOf(searchHit("3")))
+        search.queryGate = CompletableDeferred()
+        val vm = searchVM(scope, fake, search)
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+        val slow = launch { vm.beginChatSearch("slow") }
+        waitUntil { search.queryCalls == 1 }
+        val slowGate = search.queryGate!!
+        search.queryGate = null
+        search.hits = emptyList()
+        vm.beginChatSearch("newer")
+        assertEquals("newer", vm.chatSearch.value?.query)
+        slowGate.complete(Unit)
+        slow.join()
+        assertEquals("the earlier query's late result is discarded", "newer", vm.chatSearch.value?.query)
+        vm.stop()
+    }
+
     /// Without a search service the entry point is a no-op — the bar must not
     /// come up reporting bogus emptiness.
     @Test

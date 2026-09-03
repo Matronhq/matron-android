@@ -113,13 +113,28 @@ class ChatViewModel(
     /// falsely latch `reachedHistoryStart`.
     private var pendingChatSearchFocusSeq: Long? = null
 
+    /// Bumped by every [beginChatSearch] and [endChatSearch]; an in-flight
+    /// query whose generation moved on discards its result.
+    private var chatSearchGeneration = 0
+
     /// Runs the room-scoped query, focuses the NEWEST match, and arms the bar.
     /// A re-query disarms the previous query's parked jump.
     suspend fun beginChatSearch(query: String) {
         val service = search ?: return
         val trimmed = query.trim()
         if (trimmed.isEmpty()) return
-        val hits = runCatching { service.query(trimmed, roomID, CHAT_SEARCH_MATCH_LIMIT) }.getOrDefault(emptyList())
+        // Generation token: a newer query or a close while this one is still
+        // in flight supersedes it, so a slow earlier query can't overwrite
+        // the newer state or resurrect a closed bar (Bugbot, #56).
+        val generation = ++chatSearchGeneration
+        val hits = try {
+            service.query(trimmed, roomID, CHAT_SEARCH_MATCH_LIMIT)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            emptyList()
+        }
+        if (generation != chatSearchGeneration) return
         // A hit whose id is not a seq (the index only ever stores seqs) is
         // dropped rather than derailing navigation.
         val seqs = hits.mapNotNull { it.id.toLongOrNull() }
@@ -152,6 +167,7 @@ class ChatViewModel(
     /// pagination would otherwise land `pendingFocusID` after the user closed
     /// search, scrolling the transcript out from under them.
     fun endChatSearch() {
+        chatSearchGeneration += 1
         _chatSearch.value = null
         pendingChatSearchFocusSeq = null
         focusTask?.cancel()

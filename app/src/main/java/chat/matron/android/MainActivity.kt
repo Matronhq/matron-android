@@ -382,7 +382,6 @@ private fun SignedInApp(
                 LaunchedEffect(Unit) { nav.popBackStack() }
             } else {
                 val searchVM = remember { SearchViewModel(searchService, allChats) }
-                val armScope = rememberCoroutineScope()
                 SearchScreen(
                     viewModel = searchVM,
                     onSelectChat = { chat -> nav.popBackStack(); nav.navigate("chat/${chat.id}") },
@@ -392,7 +391,10 @@ private fun SignedInApp(
                         // jump until its first snapshot lands (apple #172).
                         val query = searchVM.trimmedQuery
                         val (chatVM, _) = vmCache.viewModels(hit.roomID)
-                        armScope.launch { chatVM.beginChatSearch(query) }
+                        // sessionScope, not this route's composition scope:
+                        // popBackStack below cancels the latter before the
+                        // query's first suspend (Bugbot, #56).
+                        sessionScope.launch { chatVM.beginChatSearch(query) }
                         nav.popBackStack()
                         nav.navigate("chat/${hit.roomID}")
                     },
