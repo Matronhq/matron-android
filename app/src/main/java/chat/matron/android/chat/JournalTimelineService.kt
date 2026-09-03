@@ -618,8 +618,9 @@ class JournalTimelineService(
     override suspend fun paginateBackward(requestSize: Int): Boolean {
         // Reveal mirror rows beneath the observed window first — no network —
         // and only reach for the server below the local mirror (apple #171).
-        overlay.localRevealBoundary?.let { oldestFetched ->
-            val localPage = store.eventsBefore(convoID, oldestFetched, maxOf(requestSize, LOCAL_REVEAL_PAGE_LIMIT))
+        val boundary = overlay.localRevealBoundary
+        if (boundary != null) {
+            val localPage = store.eventsBefore(convoID, boundary, maxOf(requestSize, LOCAL_REVEAL_PAGE_LIMIT))
             if (localPage.isNotEmpty()) {
                 overlay.prependOlder(localPage)
                 itemsSignal?.invoke()
@@ -630,10 +631,17 @@ class JournalTimelineService(
         val events = api.messages(convoID, before, requestSize)
         val newOnes = events.filter { before == null || it.seq < before }
         store.insertHistory(newOnes)
-        // Below the tail anchor the observation won't see these; hand them
-        // to the overlay directly.
-        overlay.prependOlder(newOnes)
-        itemsSignal?.invoke()
+        // Below the tail anchor the observation won't see these; hand them to
+        // the overlay directly — but only when a subscription has rebased
+        // (boundary known). With no subscription yet, prepending would put
+        // remote rows under a window that doesn't exist and leave the mirror
+        // rows between them and the window forever unrevealed (Bugbot, #60);
+        // the store insert alone is right, the eventual subscription reveals
+        // them page by page.
+        if (boundary != null) {
+            overlay.prependOlder(newOnes)
+            itemsSignal?.invoke()
+        }
         search?.let { s ->
             for (event in newOnes) {
                 val body = event.previewText()
