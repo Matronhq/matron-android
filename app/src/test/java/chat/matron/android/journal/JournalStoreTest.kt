@@ -8,6 +8,8 @@ import java.time.Instant
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -723,6 +725,80 @@ class JournalStoreTest {
             )
         )
         assertEquals(11L, store.conversation("c3")?.agentDeviceID)
+    }
+
+    // MARK: Room participants (multi-agent room tags)
+
+    /// Ports matron-apple's `testParticipantsRoundTripAndAbsentNeverClears`.
+    @Test
+    fun participantsRoundTripAndAbsentNeverClears() = runBlocking {
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(
+                ConvoSummaryDTO(
+                    "room", "🔗 [ab] a ↔ b", "waiting", 1, "", 1,
+                    agentDeviceID = 7, participants = listOf(7, 9),
+                ),
+                ConvoSummaryDTO("solo", "solo", "running", 1, "", 1, agentDeviceID = 7),
+            ),
+            headSeq = 1,
+        )
+        assertEquals(listOf(7L, 9L), store.conversation("room")?.participantIDs)
+        assertEquals(
+            "no key on the wire decodes as no membership, not a crash",
+            emptyList<Long>(), store.conversation("solo")?.participantIDs,
+        )
+
+        // A refresh that omits the key must not clear a stored membership —
+        // a dissolved room's snapshot omits it, and the last-known tags are
+        // still the right tags (same absent-never-clears discipline as
+        // agent_device_id)…
+        store.refreshSummaries(
+            listOf(ConvoSummaryDTO("room", "🔗 [ab] a ↔ b", "done", 1, "", 1)),
+        )
+        assertEquals(listOf(7L, 9L), store.conversation("room")?.participantIDs)
+
+        // …while a present array replaces wholesale, growth and shrink alike.
+        store.refreshSummaries(
+            listOf(ConvoSummaryDTO("room", "🔗 [ab] a ↔ b", "waiting", 1, "", 1, participants = listOf(7, 9, 12))),
+        )
+        assertEquals(listOf(7L, 9L, 12L), store.conversation("room")?.participantIDs)
+    }
+
+    /// Ports matron-apple's `testParticipantsLearnedLiveFromConvoMeta`.
+    @Test
+    fun participantsLearnedLiveFromConvoMeta() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(
+            ev(1, convo = "room", type = "convo_meta", payload = buildJsonObject { put("title", "🔗 room") })
+        )
+        assertEquals(emptyList<Long>(), store.conversation("room")?.participantIDs)
+
+        // The journal's membership fan is a participants-only convo_meta —
+        // it must set the array without touching the title…
+        store.applyJournal(
+            ev(
+                2, convo = "room", type = "convo_meta",
+                payload = buildJsonObject { put("participants", buildJsonArray { add(7); add(9) }) },
+            )
+        )
+        assertEquals(listOf(7L, 9L), store.conversation("room")?.participantIDs)
+        assertEquals("🔗 room", store.conversation("room")?.title)
+
+        // …a later rename meta without the key leaves membership alone…
+        store.applyJournal(
+            ev(3, convo = "room", type = "convo_meta", payload = buildJsonObject { put("title", "renamed") })
+        )
+        assertEquals(listOf(7L, 9L), store.conversation("room")?.participantIDs)
+
+        // …and a departure shrinks it wholesale.
+        store.applyJournal(
+            ev(
+                4, convo = "room", type = "convo_meta",
+                payload = buildJsonObject { put("participants", buildJsonArray { add(7) }) },
+            )
+        )
+        assertEquals(listOf(7L), store.conversation("room")?.participantIDs)
     }
 
     /// Ports matron-apple's `testAgentRosterMirrorsSnapshotAndLiveRenames`.

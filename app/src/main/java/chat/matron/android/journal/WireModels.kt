@@ -313,6 +313,35 @@ sealed interface ServerFrame {
                         vitals = SessionStatus.Vitals(cpuPct = cpu, ramPct = ram)
                     }
                 }
+                // Session-scoped argument lists for the slash palette. Unlike
+                // `limits`, an empty array is NOT collapsed to null: absent
+                // means "this bridge doesn't say" and empty means "this agent
+                // offers nothing", and only the second may overwrite a list
+                // the app already holds. A non-empty array that yields nothing
+                // is a THIRD case, and it is malformed rather than empty:
+                // returning `[]` there would let a garbled frame overwrite a
+                // good list with "offers nothing". Only a wire `[]` is a
+                // statement, so that alone survives as `[]` (apple #163).
+                fun options(key: String): List<SessionStatus.Option>? {
+                    val raw = status.arrayOrNull(key) ?: return null
+                    val parsed = raw.mapNotNull { entry ->
+                        val obj = entry as? JsonObject ?: return@mapNotNull null
+                        val value = obj.stringOrNull("value") ?: return@mapNotNull null
+                        SessionStatus.Option(value, obj.stringOrNull("label"))
+                    }
+                    return if (raw.isEmpty() || parsed.isNotEmpty()) parsed else null
+                }
+                // Effort is tri-state: a missing key is silence, a JSON null is
+                // the bridge disowning the level it was tracking (republished
+                // on every frame while untracked, so this is the only signal
+                // that arrives), and only a string sets one. Anything else is
+                // not a statement about effort — say nothing.
+                val effort: SessionStatusUpdate.Effort? = when (val raw = status["effort"]) {
+                    null -> null
+                    is JsonNull -> SessionStatusUpdate.Effort.Cleared
+                    is JsonPrimitive -> if (raw.isString) SessionStatusUpdate.Effort.Set(raw.content) else null
+                    else -> null
+                }
                 return SessionStatusFrame(SessionStatusUpdate(
                     convoID = convoID,
                     model = status.stringOrNull("model"),
@@ -322,6 +351,9 @@ sealed interface ServerFrame {
                     taskRef = status.stringOrNull("task_ref"),
                     workdir = status.stringOrNull("workdir"),
                     vitals = vitals,
+                    modelOptions = options("model_options"),
+                    effortLevels = options("effort_levels"),
+                    effort = effort,
                 ))
             }
             val ref = obj.stringOrNull("message_ref") ?: return null

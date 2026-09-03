@@ -116,6 +116,23 @@ class JournalApiTest {
         assertEquals(emptyList<AgentDTO>(), api(token = "t").snapshot().agents)
     }
 
+    /// Ports the snapshot-parsing slice of matron-apple #151: a multi-agent
+    /// room row carries its `participants` membership; absent (a solo
+    /// conversation or an older server) degrades to null — untouched store.
+    @Test
+    fun snapshotParsesParticipants() = runBlocking {
+        server.enqueue(
+            json(
+                200,
+                """{"conversations":[{"id":"room","title":"T","session_state":"waiting","last_seq":1,"snippet":"","created_at":0,"agent_device_id":7,"participants":[7,9]},""" +
+                    """{"id":"solo","title":"S","session_state":"running","last_seq":1,"snippet":"","created_at":0}],"seq":1}""",
+            )
+        )
+        val snap = api(token = "t").snapshot()
+        assertEquals(listOf(7L, 9L), snap.conversations.first { it.id == "room" }.participants)
+        assertNull(snap.conversations.first { it.id == "solo" }.participants)
+    }
+
     @Test
     fun snapshotToleratesMissingLastTS() = runBlocking {
         server.enqueue(json(200, """{"conversations":[{"id":"c1","title":"T","session_state":"waiting","last_seq":9,"unread_count":2,"snippet":"s","created_at":5}],"seq":9}"""))

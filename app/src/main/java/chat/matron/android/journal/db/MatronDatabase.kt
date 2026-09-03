@@ -29,12 +29,17 @@ import java.io.File
 /// `conversation.agent_device_id` names which of those boxes owns the row.
 /// Additive: existing rows keep NULL and simply render no chip until the next
 /// snapshot fills them in.
+///
+/// v5 adds multi-agent room membership (matron-apple's v6): JSON `[Long]` of
+/// the journal's owner + joined participant device ids, NULL for everything
+/// that is not a room. Additive like v3: existing rows keep NULL and chip as
+/// before until the next snapshot / membership convo_meta fills them in.
 @Database(
     entities = [
         ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
         SummaryEntryEntity::class, AgentEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -120,10 +125,16 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `conversation` ADD COLUMN `participants` TEXT")
+            }
+        }
+
         /// Production, file-backed at the given path.
         fun open(context: Context, file: File): MatronDatabase =
             Room.databaseBuilder(context.applicationContext, MatronDatabase::class.java, file.absolutePath)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
 
         /// Test/ephemeral, memory-backed. Cleared when the last connection closes.

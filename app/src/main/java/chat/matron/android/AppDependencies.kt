@@ -6,6 +6,7 @@ import chat.matron.android.auth.AuthService
 import chat.matron.android.platform.Haptics
 import chat.matron.android.platform.SystemHaptics
 import chat.matron.android.auth.JournalAuthService
+import chat.matron.android.chat.BoxLetterOverrides
 import chat.matron.android.chat.ChatService
 import chat.matron.android.chat.JournalChatService
 import chat.matron.android.chat.JournalMediaService
@@ -129,6 +130,15 @@ class AppDependencies(
      */
     val recentStartFolders: RecentStartFolders
 
+    /**
+     * User-chosen tag characters for agent boxes (Settings → Devices),
+     * riding the same [preferences] store. One shared instance: the Devices
+     * screen writes it and every chat service's summaries stream observes it
+     * (a settings edit writes no journal record, so nothing else would wake
+     * the chat list).
+     */
+    val boxLetterOverrides: BoxLetterOverrides
+
     /** Where the composer stages picked/pasted attachment copies. */
     val stagingDirectory: File
 
@@ -182,6 +192,7 @@ class AppDependencies(
         val prefs = context.getSharedPreferences("matron-kv", Context.MODE_PRIVATE)
         preferences = SharedPreferencesKeyValueStore(prefs)
         recentStartFolders = RecentStartFolders(preferences)
+        boxLetterOverrides = BoxLetterOverrides(preferences)
 
         stagingDirectory = File(context.cacheDir, "attachments").apply { mkdirs() }
     }
@@ -317,7 +328,7 @@ class AppDependencies(
 
     fun chatService(session: UserSession): ChatService {
         val core = core(session)
-        return JournalChatService(store = core.store, engine = core.engine)
+        return JournalChatService(store = core.store, engine = core.engine, overrides = boxLetterOverrides)
     }
 
     fun mediaService(session: UserSession): MediaService =
