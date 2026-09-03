@@ -130,6 +130,34 @@ class ChatViewModel(
     private val _activityLabel = MutableStateFlow<String?>(null)
     val activityLabel: StateFlow<String?> = _activityLabel.asStateFlow()
 
+    /// True when the loaded timeline carries messages from ≥2 distinct
+    /// NON-own senders — the agent-chat room signature ("dan-mac" and
+    /// "dev-2" both replying), as opposed to an ordinary 1:1 chat with one
+    /// bot. The timeline view reads this to decide whether to pass a sender
+    /// into `MessageBubble` at all — 1:1 chats must render exactly as before
+    /// (no avatar noise for "the bot"). Own messages never count, even
+    /// toward a single-sender total, because the flag is specifically about
+    /// attributing NON-own bubbles.
+    ///
+    /// Restricted to the durable message kinds that ever render a
+    /// `MessageBubble` — `Text` / `Image` / `File` — NOT a raw scan of
+    /// [items]. The synthetic rows the mapper synthesises mid-turn
+    /// (`streamingItem` / `activityItem` / `toolStreamItem`) hardcode
+    /// `sender = "agent"`, `isOwn = false`; counting them made an ordinary
+    /// 1:1 chat (bot "matron" + its own ephemeral "agent" row) register as
+    /// multi-sender for the whole turn, sprouting avatars that vanish again
+    /// once the turn settles. `ActivityIndicator`, `ToolStreamLive`,
+    /// `StateChange`, tool cards etc. are structurally excluded by the kind
+    /// check.
+    ///
+    /// Memoised in [applyDerivedRecompute] (not computed per read) — the
+    /// timeline reads it once per row, and an O(N) scan there is exactly the
+    /// scroll-regression pattern the Apple original documents. Ports
+    /// `ChatViewModel.hasMultipleSenders` (apple #141), including the
+    /// Bugbot ephemeral-streaming-row exclusion.
+    private val _hasMultipleSenders = MutableStateFlow(false)
+    val hasMultipleSenders: StateFlow<Boolean> = _hasMultipleSenders.asStateFlow()
+
     /// True while the conversation's durable session_state is "running" — the
     /// bridge flips it at turn start/end. Carries the floating stop button:
     /// [activityLabel] legitimately clears mid-turn (bridge dedups activity
@@ -439,6 +467,8 @@ class ChatViewModel(
         var lastIsOwn = false
         var previousDay: LocalDate? = null
         var nextActivityLabel: String? = null
+        val nonOwnSenders = mutableSetOf<String>()
+        var nextHasMultipleSenders = false
         for (item in _items.value) {
             when (val kind = item.kind) {
                 // The trailing activity indicator renders as a fixed footer, NOT a
@@ -451,6 +481,30 @@ class ChatViewModel(
                 // Hidden kinds, kept out of rows AND day bucketing.
                 is TimelineItem.Kind.StateChange, is TimelineItem.Kind.AskUserAnswer -> continue
                 else -> {}
+            }
+            // hasMultipleSenders only counts the durable message kinds that
+            // ever render an avatar (Text / Image / File) — NOT ToolStreamLive,
+            // StateChange, tool cards, etc. (already excluded above or below by
+            // kind). That alone still isn't enough: the mid-turn streaming
+            // placeholder row (JournalTimelineMapper.streamingItem) is ALSO a
+            // Text kind — it borrows the real message kind so it renders as a
+            // normal bubble while the reply streams in — but it hardcodes
+            // `sender = "agent"`, which is not the bot's real
+            // (displayName-resolved) sender. Left uncounted, a plain 1:1 chat
+            // (bot "matron" + its own streaming echo "agent") would spuriously
+            // register as multi-sender for the whole turn.
+            // TimelineItem.isEphemeralStreamingPlaceholder is the single source
+            // of truth for this exclusion — timelineAvatarSender needs the same
+            // check on the render side (Bugbot, apple #141) and must not drift
+            // from this one.
+            if (!item.isOwn && !item.isEphemeralStreamingPlaceholder) {
+                when (item.kind) {
+                    is TimelineItem.Kind.Text, is TimelineItem.Kind.Image, is TimelineItem.Kind.File -> {
+                        nonOwnSenders.add(item.sender)
+                        if (nonOwnSenders.size >= 2) nextHasMultipleSenders = true
+                    }
+                    else -> {}
+                }
             }
             if (first == null) first = item.id
             last = item.id
@@ -466,6 +520,7 @@ class ChatViewModel(
         firstRenderableItemID = first
         _lastRenderableItemID.value = last
         lastRenderableItemIsOwn = lastIsOwn
+        _hasMultipleSenders.value = nextHasMultipleSenders
         val previousActivityLabel = _activityLabel.value
         _activityLabel.value = nextActivityLabel
         // Turn complete: the trailing activity indicator went from present

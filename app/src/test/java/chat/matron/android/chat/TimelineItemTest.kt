@@ -5,7 +5,9 @@ import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.models.TimelineSendState
 import java.time.Instant
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TimelineItemTest {
@@ -80,5 +82,29 @@ class TimelineItemTest {
     fun sendStateFailedCarriesReason() {
         assertEquals(TimelineSendState.Failed("network"), TimelineSendState.Failed("network"))
         assertNotEquals(TimelineSendState.Failed("network"), TimelineSendState.Failed("auth"))
+    }
+
+    /// Pins `isEphemeralStreamingPlaceholder` (apple #141) against the
+    /// mapper that actually mints the "eph:" ids — the property and
+    /// `JournalTimelineMapper.streamingItem` form one contract, and both
+    /// `ChatViewModel.hasMultipleSenders` and `timelineAvatarSender` read
+    /// the property as their single source of truth.
+    @Test
+    fun ephemeralStreamingPlaceholder_matchesMapperSyntheticRows() {
+        val streaming = JournalTimelineMapper.streamingItem("7", "partial reply…", Instant.ofEpochSecond(0))
+        assertTrue(streaming.isEphemeralStreamingPlaceholder)
+        // Durable rows — including the other synthetic overlay rows, whose
+        // ids are "activity"/"toolstream:<ref>" — are NOT the placeholder.
+        val durable = TimelineItem("42", "matron", Instant.ofEpochSecond(0),
+            TimelineItem.Kind.Text("hi", null), isOwn = false)
+        assertFalse(durable.isEphemeralStreamingPlaceholder)
+        assertFalse(
+            JournalTimelineMapper.activityItem("Thinking…", Instant.ofEpochSecond(0))
+                .isEphemeralStreamingPlaceholder,
+        )
+        assertFalse(
+            JournalTimelineMapper.toolStreamItem("7", "ls", "", false, Instant.ofEpochSecond(0))
+                .isEphemeralStreamingPlaceholder,
+        )
     }
 }
