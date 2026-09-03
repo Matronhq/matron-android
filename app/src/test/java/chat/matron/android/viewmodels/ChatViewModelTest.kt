@@ -1,6 +1,7 @@
 package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.ConversationSummaryEntry
+import chat.matron.android.search.SearchHit
 import chat.matron.android.chat.FakeMediaService
 import chat.matron.android.chat.FakeTimelineService
 import chat.matron.android.chat.JournalTimelineMapper
@@ -1119,6 +1120,193 @@ class ChatViewModelTest {
         assertEquals(1, vm.rows.value.count { it is TimelineRow.Separator })
     }
 
+    // MARK: - In-conversation search (apple #172)
+
+    private fun searchHit(id: String, t: Long = 0) =
+        SearchHit(id = id, roomID = "r1", sender = "@a:s", timestamp = Instant.ofEpochSecond(t), snippet = "<mark>match</mark> $id")
+
+    private fun searchVM(scope: CoroutineScope, timeline: chat.matron.android.chat.TimelineService, search: FakeSearchService?) =
+        ChatViewModel("r1", timeline, FakeMediaService(), scope, InMemoryKeyValueStore(), Haptics.None, null, null, search)
+
+    /// begin runs the room-scoped query, focuses the NEWEST match, and the
+    /// chevrons step through matches via focus(seq) with clamping at both ends.
+    @Test
+    fun inChatSearch_beginStepAndEnd() = vmTest { scope ->
+        val items = (1..3).map { textItem(it.toString(), body = "match $it", timestamp = Instant.ofEpochSecond(it.toLong())) }
+        val fake = PagingFakeTimelineService(loaded = items, olderPages = mutableListOf())
+        val search = FakeSearchService(listOf(searchHit("3", 3), searchHit("1", 1)))
+        val vm = searchVM(scope, fake, search)
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+
+        vm.beginChatSearch("match")
+        assertEquals(listOf(3L, 1L), vm.chatSearch.value?.matchSeqs)
+        assertEquals(0, vm.chatSearch.value?.index)
+        assertEquals("3", vm.pendingFocusID.value)
+        vm.clearPendingFocus()
+
+        vm.stepChatSearch(older = true)
+        assertEquals(1, vm.chatSearch.value?.index)
+        assertEquals("1", vm.pendingFocusID.value)
+        vm.clearPendingFocus()
+
+        vm.stepChatSearch(older = true)
+        assertEquals("clamped at the oldest match", 1, vm.chatSearch.value?.index)
+        assertNull("a clamped step must not re-focus", vm.pendingFocusID.value)
+
+        vm.stepChatSearch(older = false)
+        assertEquals(0, vm.chatSearch.value?.index)
+
+        vm.stepChatSearch(older = true)
+        vm.beginChatSearch("match")
+        assertEquals("a re-query resets to the newest match", 0, vm.chatSearch.value?.index)
+
+        vm.endChatSearch()
+        assertNull(vm.chatSearch.value)
+        vm.stop()
+    }
+
+    @Test
+    fun inChatSearch_nonNumericHitIDsAreDropped() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(textItem("3", body = "match")), olderPages = mutableListOf())
+        val search = FakeSearchService(listOf(searchHit("3"), searchHit("\$not-a-seq")))
+        val vm = searchVM(scope, fake, search)
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+        vm.beginChatSearch("match")
+        assertEquals(listOf(3L), vm.chatSearch.value?.matchSeqs)
+        vm.stop()
+    }
+
+    /// Arming a search on a COLD view model (the results tap runs before the
+    /// destination's start()) must not run the focus loop against the
+    /// unsubscribed stream — that would falsely latch reachedHistoryStart.
+    /// The jump parks and fires once the first snapshot lands.
+    @Test
+    fun inChatSearch_beforeStartParksJumpAndNeverLatchesHistoryStart() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(textItem("3", body = "match")), olderPages = mutableListOf())
+        val vm = searchVM(scope, fake, FakeSearchService(listOf(searchHit("3"))))
+        vm.beginChatSearch("match")
+        assertEquals(listOf(3L), vm.chatSearch.value?.matchSeqs)
+        assertNull("parked, not focused", vm.pendingFocusID.value)
+        assertFalse(vm.reachedHistoryStart)
+        vm.start()
+        waitUntil { vm.pendingFocusID.value == "3" }
+        assertEquals("3", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// The warm twin: a cached VM whose previous view already ran stop() has
+    /// hasReceivedFirstSnapshot == true but a dead stream — the jump must park
+    /// and fire on the restarted stream's first delivery.
+    @Test
+    fun inChatSearch_afterStopParksJumpUntilRestart() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(textItem("3", body = "match")), olderPages = mutableListOf())
+        val vm = searchVM(scope, fake, FakeSearchService(listOf(searchHit("3"))))
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+        vm.stop()
+        vm.beginChatSearch("match")
+        assertNull("parked on a stopped VM", vm.pendingFocusID.value)
+        vm.start()
+        waitUntil { vm.pendingFocusID.value == "3" }
+        assertEquals("3", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// A re-query must disarm the previous query's parked jump: begin on a
+    /// stopped VM (parks), re-query with no hits, then restart — the stale
+    /// park must NOT fire a jump to a match the bar no longer shows.
+    @Test
+    fun inChatSearch_noHitRequeryDisarmsParkedJump() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(textItem("3", body = "match")), olderPages = mutableListOf())
+        val search = FakeSearchService(listOf(searchHit("3")))
+        val vm = searchVM(scope, fake, search)
+        vm.beginChatSearch("match")
+        search.hits = emptyList()
+        vm.beginChatSearch("nothing")
+        assertEquals(emptyList<Long>(), vm.chatSearch.value?.matchSeqs)
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+        delay(50)
+        assertNull("the stale park must not fire", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// Bugbot (#56): closing the bar while the query is still in flight must
+    /// not let the late result resurrect it.
+    @Test
+    fun inChatSearch_endMidQueryDoesNotResurrectTheBar() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(textItem("3", body = "match")), olderPages = mutableListOf())
+        val search = FakeSearchService(listOf(searchHit("3")))
+        search.queryGate = CompletableDeferred()
+        val vm = searchVM(scope, fake, search)
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+        val begin = launch { vm.beginChatSearch("match") }
+        waitUntil { search.queryCalls == 1 }
+        vm.endChatSearch()
+        search.queryGate!!.complete(Unit)
+        begin.join()
+        assertNull("a superseded query must not publish", vm.chatSearch.value)
+        assertNull(vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// Bugbot (#56): a slower earlier query must not overwrite a newer one.
+    @Test
+    fun inChatSearch_newerQuerySupersedesASlowerEarlierOne() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(textItem("3", body = "match")), olderPages = mutableListOf())
+        val search = FakeSearchService(listOf(searchHit("3")))
+        search.queryGate = CompletableDeferred()
+        val vm = searchVM(scope, fake, search)
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+        val slow = launch { vm.beginChatSearch("slow") }
+        waitUntil { search.queryCalls == 1 }
+        val slowGate = search.queryGate!!
+        search.queryGate = null
+        search.hits = emptyList()
+        vm.beginChatSearch("newer")
+        assertEquals("newer", vm.chatSearch.value?.query)
+        slowGate.complete(Unit)
+        slow.join()
+        assertEquals("the earlier query's late result is discarded", "newer", vm.chatSearch.value?.query)
+        vm.stop()
+    }
+
+    /// Without a search service the entry point is a no-op — the bar must not
+    /// come up reporting bogus emptiness.
+    @Test
+    fun inChatSearch_noServiceIsANoOp() = vmTest { scope ->
+        val vm = searchVM(scope, FakeTimelineService(), null)
+        vm.beginChatSearch("match")
+        assertNull(vm.chatSearch.value)
+    }
+
+    /// Dismissing the bar mid-jump must abandon the jump: a deep hit's
+    /// pagination otherwise keeps running and lands pendingFocusID after the
+    /// user closed search. The gated fake parks the paginate so the dismissal
+    /// deterministically lands mid-flight.
+    @Test
+    fun inChatSearch_endMidJumpCancelsTheJump() = vmTest { scope ->
+        val fake = BlockingPagingFakeTimelineService(
+            loaded = listOf(textItem("300", body = "late")),
+            olderPages = mutableListOf(listOf(textItem("3", body = "match"))),
+        )
+        val vm = searchVM(scope, fake, FakeSearchService(listOf(searchHit("3"))))
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+        val jump = launch { vm.beginChatSearch("match") }
+        waitUntil { fake.paginateStarted }
+        vm.endChatSearch()
+        fake.release()
+        jump.join()
+        delay(50)
+        assertNull("an abandoned jump must not land", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
     // MARK: - isPromptAnswered / persistence
 
     @Test
@@ -1954,6 +2142,41 @@ private class PagingFakeTimelineService(
         snapshots.tryEmit(current)
         return true
     }
+
+    override suspend fun sendText(body: String, inReplyTo: String?) {}
+    override suspend fun sendButtonResponse(selectedValues: List<String>, inReplyTo: String) {}
+    override suspend fun sendImage(data: ByteArray, filename: String, mimeType: String, caption: String?) {}
+    override suspend fun sendFile(data: ByteArray, filename: String, mimeType: String, caption: String?) {}
+    override suspend fun markAsRead() {}
+}
+
+/// [PagingFakeTimelineService] whose paginate parks on a gate until the test
+/// calls [release] — lets a test dismiss the search bar deterministically
+/// WHILE a deep jump's pagination is in flight (apple #172).
+private class BlockingPagingFakeTimelineService(
+    loaded: List<TimelineItem>,
+    private val olderPages: MutableList<List<TimelineItem>>,
+) : chat.matron.android.chat.TimelineService {
+    private val snapshots = kotlinx.coroutines.flow.MutableSharedFlow<List<TimelineItem>>(replay = 1)
+    private var current: List<TimelineItem> = loaded
+    private var gate = CompletableDeferred<Unit>()
+    @Volatile var paginateStarted = false
+        private set
+
+    init { snapshots.tryEmit(current) }
+
+    override fun items(): kotlinx.coroutines.flow.Flow<List<TimelineItem>> = snapshots
+
+    override suspend fun paginateBackward(requestSize: Int): Boolean {
+        paginateStarted = true
+        gate.await()
+        if (olderPages.isEmpty()) return false
+        current = olderPages.removeAt(0) + current
+        snapshots.tryEmit(current)
+        return true
+    }
+
+    fun release() { gate.complete(Unit) }
 
     override suspend fun sendText(body: String, inReplyTo: String?) {}
     override suspend fun sendButtonResponse(selectedValues: List<String>, inReplyTo: String) {}

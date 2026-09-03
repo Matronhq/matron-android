@@ -14,6 +14,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.background
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -38,6 +42,9 @@ fun SearchResultRow(
     sessionShort: String? = null,
     boxLetter: String? = null,
     boxName: String? = null,
+    /// Total matches in this chat when the row aggregates a whole
+    /// conversation (grouped search results). `null` or 1 renders no badge.
+    matchCount: Int? = null,
     roomBoxNames: List<String> = emptyList(),
     roomBoxShorts: List<String> = emptyList(),
 ) {
@@ -70,6 +77,21 @@ fun SearchResultRow(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            if (matchCount != null && matchCount > 1) {
+                // How many messages in this chat match — the row shows only
+                // the newest one's snippet (apple #172).
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "$matchCount",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.15f), CircleShape)
+                        .padding(horizontal = 6.dp, vertical = 1.dp)
+                        .semantics { contentDescription = "$matchCount matching messages" },
+                )
+            }
             Spacer(Modifier.width(8.dp))
             RelativeMinuteTimeView(
                 source = hit.timestamp,

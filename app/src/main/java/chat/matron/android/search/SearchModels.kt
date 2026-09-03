@@ -29,3 +29,12 @@ data class SearchIndexEntry(
     val timestamp: Instant,
     val body: String,
 )
+
+/// One conversation's aggregate in the grouped message-search results: how
+/// many messages match, plus the newest matching message's snippet for the
+/// row's preview line. The search UI shows ONE of these per chat
+/// (WhatsApp-style) instead of a flat flood of per-message hits — a common
+/// word's screenful of same-chat rows drowned everything else. [newestHit]
+/// doubles as the jump target when the user opens the chat's in-conversation
+/// search. Port of matron-apple's `SearchChatHit` (#172).
+data class SearchChatHit(val roomID: String, val count: Int, val newestHit: SearchHit)

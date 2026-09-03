@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.luminance
 import chat.matron.android.chat.ChatSummary
 import chat.matron.android.designsystem.SearchResultRow
 import chat.matron.android.designsystem.SessionTagText
+import chat.matron.android.search.SearchChatHit
 import chat.matron.android.search.SearchHit
 import chat.matron.android.viewmodels.SearchViewModel
 import kotlinx.coroutines.launch
@@ -51,7 +52,7 @@ import kotlinx.coroutines.launch
 fun SearchScreen(
     viewModel: SearchViewModel,
     onSelectChat: (ChatSummary) -> Unit,
-    onSelectMessage: (SearchHit) -> Unit,
+    onSelectMessage: (SearchChatHit) -> Unit,
     onBack: () -> Unit,
     liveChats: List<ChatSummary>,
 ) {
@@ -139,10 +140,11 @@ fun SearchScreen(
 
                 if (messageHits.isNotEmpty()) {
                     item { SectionHeader("Messages") }
-                    items(messageHits, key = { "msg-${it.id}" }) { hit ->
+                    items(messageHits, key = { "msg-${it.roomID}" }) { hit ->
                         val line = viewModel.hitTitle(hit.roomID)
                         SearchResultRow(
-                            hit = hit,
+                            hit = hit.newestHit,
+                            matchCount = hit.count,
                             chatTitle = line.title,
                             sessionShort = line.sessionShort,
                             boxLetter = line.boxLetter,

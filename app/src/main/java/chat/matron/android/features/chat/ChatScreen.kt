@@ -60,6 +60,7 @@ import chat.matron.android.designsystem.SessionTagText
 import chat.matron.android.journal.AgentChatDecision
 import chat.matron.android.designsystem.ActivityIndicatorRow
 import chat.matron.android.designsystem.AttachmentFullscreenViewer
+import chat.matron.android.designsystem.ChatSearchBar
 import chat.matron.android.designsystem.CompactContextBanner
 import chat.matron.android.designsystem.DateSeparator
 import chat.matron.android.designsystem.DateSeparatorLabel
@@ -123,6 +124,8 @@ fun ChatScreen(
     mediaBrowser: ((CoroutineScope) -> MediaBrowserViewModel)? = null,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
+    val chatSearch by chatVM.chatSearch.collectAsStateWithLifecycle()
+    val chatSearchScope = rememberCoroutineScope()
     val children by stripVM.children.collectAsStateWithLifecycle()
     val runningChildren by stripVM.runningChildren.collectAsStateWithLifecycle()
     val activityLabel by chatVM.activityLabel.collectAsStateWithLifecycle()
@@ -281,6 +284,22 @@ fun ChatScreen(
         ) {
             MatronTimelineBackground()
             Column(modifier = Modifier.fillMaxSize()) {
+                // In-conversation search (armed by a grouped search-result
+                // tap). Field text is local, seeded from the VM's query;
+                // submit re-runs the room-scoped search (apple #172).
+                chatSearch?.let { searchState ->
+                    var chatSearchQuery by remember(searchState.query) { mutableStateOf(searchState.query) }
+                    ChatSearchBar(
+                        query = chatSearchQuery,
+                        onQueryChange = { chatSearchQuery = it },
+                        matchCount = searchState.matchSeqs.size,
+                        matchIndex = searchState.index,
+                        onSubmit = { chatSearchScope.launch { chatVM.beginChatSearch(chatSearchQuery) } },
+                        onOlder = { chatSearchScope.launch { chatVM.stepChatSearch(older = true) } },
+                        onNewer = { chatSearchScope.launch { chatVM.stepChatSearch(older = false) } },
+                        onClose = { chatVM.endChatSearch() },
+                    )
+                }
                 if (error != null) {
                     Text(
                         error!!,
@@ -638,6 +657,7 @@ private fun TimelineRowView(
     // collecting the memo is what recomposes the sibling queue cards' buttons
     // (apple #162; Bugbot #48).
     val releaseResolvedAnswers by chatVM.releaseResolvedAnswers.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
     // Memoised in the VM's derived-recompute pass (apple #141) — reading the
     // flag here is a plain state read, never an O(N) timeline scan per row.
     val hasMultipleSenders by chatVM.hasMultipleSenders.collectAsStateWithLifecycle()

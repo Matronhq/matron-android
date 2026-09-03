@@ -386,7 +386,19 @@ private fun SignedInApp(
                 SearchScreen(
                     viewModel = searchVM,
                     onSelectChat = { chat -> nav.popBackStack(); nav.navigate("chat/${chat.id}") },
-                    onSelectMessage = { hit -> nav.popBackStack(); nav.navigate("chat/${hit.roomID}") },
+                    onSelectMessage = { hit ->
+                        // Arm the (cached) chat VM's in-conversation search
+                        // with the query, then navigate: a cold VM parks the
+                        // jump until its first snapshot lands (apple #172).
+                        val query = searchVM.trimmedQuery
+                        val (chatVM, _) = vmCache.viewModels(hit.roomID)
+                        // sessionScope, not this route's composition scope:
+                        // popBackStack below cancels the latter before the
+                        // query's first suspend (Bugbot, #56).
+                        sessionScope.launch { chatVM.beginChatSearch(query) }
+                        nav.popBackStack()
+                        nav.navigate("chat/${hit.roomID}")
+                    },
                     onBack = { nav.popBackStack() },
                     liveChats = allChats,
                 )

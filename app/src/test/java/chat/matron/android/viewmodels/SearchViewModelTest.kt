@@ -199,4 +199,20 @@ class SearchViewModelTest {
         vm.search()
         assertEquals(false, vm.searchFailed.value)
     }
+
+    /// apple #172: message hits are grouped one row per chat, ordered by the
+    /// newest hit, carrying the count and the newest hit's snippet.
+    @Test
+    fun search_groupsMessageHitsPerChat() = runBlocking {
+        fun hit(id: String, room: String, t: Long) =
+            SearchHit(id = id, roomID = room, sender = "@a:s", timestamp = Instant.ofEpochSecond(t), snippet = "<mark>x</mark> $id")
+        val fakeSearch = FakeSearchService(listOf(hit("4", "rA", 400), hit("3", "rB", 300), hit("2", "rA", 200), hit("1", "rA", 100)))
+        val vm = SearchViewModel(fakeSearch, emptyList())
+        vm.query = "x"
+        vm.search()
+        assertEquals(listOf("rA", "rB"), vm.messageHits.value.map { it.roomID })
+        assertEquals(listOf(3, 1), vm.messageHits.value.map { it.count })
+        assertEquals("4", vm.messageHits.value[0].newestHit.id)
+        assertEquals("x", vm.trimmedQuery)
+    }
 }

@@ -54,6 +54,19 @@ data class SearchHitRow(
     val snippet: String,
 )
 
+/// Projection for one room's aggregate in the grouped search (pass 1).
+data class GroupedHitRow(
+    @ColumnInfo(name = "roomID") val roomID: String,
+    val hitCount: Int,
+    val newestTs: Long,
+    val newestEventId: String,
+    val newestSender: String,
+    val newestRowid: Long,
+)
+
+/// Projection for the grouped search's snippet pass (pass 2).
+data class SnippetRow(val id: String, val snippet: String)
+
 @Dao
 interface SearchDao {
     @Query("SELECT rowid FROM messages_fts WHERE event_id = :eventId LIMIT 1")
@@ -72,6 +85,39 @@ interface SearchDao {
             "ORDER BY timestamp DESC LIMIT :limit"
     )
     suspend fun search(pattern: String, limit: Int): List<SearchHitRow>
+
+    /// Pass 1 of the grouped query: counts + each room's newest hit, WITHOUT
+    /// snippets — `snippet()` re-tokenizes the document, so computing it for
+    /// every match of a common word (thousands of rows, per keystroke) is the
+    /// expensive part, deferred to [snippetsFor] which touches only the
+    /// winners. The bare `event_id` / `sender` / `rowid` ride SQLite's
+    /// documented single-MAX rule: with exactly one MAX() aggregate, bare
+    /// columns take their values from the row that supplied the maximum.
+    @Query(
+        "SELECT room_id AS roomID, COUNT(*) AS hitCount, MAX(timestamp) AS newestTs, " +
+            "event_id AS newestEventId, sender AS newestSender, rowid AS newestRowid " +
+            "FROM messages_fts WHERE messages_fts MATCH :pattern " +
+            "GROUP BY room_id ORDER BY newestTs DESC LIMIT :limit"
+    )
+    suspend fun searchGrouped(pattern: String, limit: Int): List<GroupedHitRow>
+
+    /// Pass 2: snippets for just the winning rows, constrained on rowid so
+    /// FTS seeks straight to them instead of re-walking the whole match set.
+    @Query(
+        "SELECT event_id AS id, snippet(messages_fts, '<mark>', '</mark>', '…', -1, 32) AS snippet " +
+            "FROM messages_fts WHERE messages_fts MATCH :pattern AND rowid IN (:rowids)"
+    )
+    suspend fun snippetsFor(pattern: String, rowids: List<Long>): List<SnippetRow>
+
+    /// Room filter in the WHERE keeps `limit` post-filter, and the snippet
+    /// only runs for passing rows.
+    @Query(
+        "SELECT event_id AS id, room_id AS roomID, sender, timestamp, " +
+            "snippet(messages_fts, '<mark>', '</mark>', '…', -1, 32) AS snippet " +
+            "FROM messages_fts WHERE messages_fts MATCH :pattern AND room_id = :roomId " +
+            "ORDER BY timestamp DESC LIMIT :limit"
+    )
+    suspend fun searchInRoom(pattern: String, roomId: String, limit: Int): List<SearchHitRow>
 
     @Query("SELECT COUNT(*) FROM messages_fts WHERE room_id = :roomId")
     suspend fun countForRoom(roomId: String): Int
