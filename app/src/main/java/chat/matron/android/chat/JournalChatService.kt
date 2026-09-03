@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 
 /// Errors surfaced by the journal chat/timeline services. `data object`/
@@ -33,6 +34,10 @@ class JournalChatService(
     private val store: JournalStore,
     private val engine: JournalSyncEngine,
     private val coalesceInterval: Duration = 250.milliseconds,
+    /// The user's tag-character overrides (Settings → Devices). Optional so
+    /// tests that never touch tags need no store; null means "no overrides,
+    /// ever" — derived letters only.
+    private val overrides: BoxLetterOverrides? = null,
 ) : ChatService {
 
     override fun chatSummaries(): Flow<List<ChatSummary>> = flow {
@@ -54,8 +59,15 @@ class JournalChatService(
         // on either input, always over the newest pair, and both Room flows
         // deliver an initial value on collect so the very first paint already
         // carries its chips.
-        combine(store.conversationsFlow(), store.agentNamesFlow()) { records, boxNames ->
-            records.map { summary(it, boxNames) }
+        // A tag-character override (Settings → Devices) writes only the
+        // preference store — no journal record, no Room re-fire — so its
+        // change flow rides the same combine to re-derive letters live.
+        val overridesFlow = overrides?.flow ?: flowOf(emptyMap())
+        combine(store.conversationsFlow(), store.agentNamesFlow(), overridesFlow) { records, boxNames, letterOverrides ->
+            // Derived once per snapshot, not per row — the letters depend on
+            // the whole name set (common-prefix strip).
+            val boxLetters = SessionTag.boxLetters(boxNames, letterOverrides)
+            records.map { summary(it, boxNames, boxLetters) }
         }.conflate().collect { summaries ->
             emit(summaries)
             delay(coalesceInterval)
@@ -78,18 +90,59 @@ class JournalChatService(
     companion object {
         /// [boxNames] is the id → name map of the user's agent boxes. The chip
         /// gate lives here: fewer than two boxes means no chip on any row.
-        fun summary(record: ConversationEntity, boxNames: Map<Long, String> = emptyMap()): ChatSummary {
+        fun summary(
+            record: ConversationEntity,
+            boxNames: Map<Long, String> = emptyMap(),
+            boxLetters: Map<Long, String> = emptyMap(),
+        ): ChatSummary {
             val activityMS = record.lastActivityTS ?: record.createdAt.takeIf { it > 0 }
+            // The bridge bakes a `[bc] ` session short into earned titles —
+            // peel it off so rows show the clean title and restyle the short
+            // as part of the leading `A:bc` tag.
+            val (sessionShort, cleanTitle) = SessionTag.splitTitle(record.title)
+            val boxName = boxName(record, boxNames)
+            val roomTags = roomTags(record, boxNames, boxLetters)
             return ChatSummary(
                 id = record.id,
-                title = record.title.ifEmpty { record.id },
+                title = cleanTitle.ifEmpty { record.id },
                 bot = BotIdentity(matrixID = "agent:claude", displayName = "Claude", avatarURL = null),
                 lastActivity = activityMS?.let { Instant.ofEpochMilli(it) },
                 unreadCount = record.unreadCount,
                 snippet = record.snippet,
                 parentConvoID = record.parentConvoID,
-                boxName = boxName(record, boxNames),
+                boxName = boxName,
+                sessionShort = sessionShort,
+                // Same gate as the chip: a letter only means something when
+                // there is more than one box to tell apart.
+                boxShort = if (boxName != null) record.agentDeviceID?.let(boxLetters::get) else null,
+                roomBoxNames = roomTags.map { it.first },
+                roomBoxShorts = roomTags.map { it.second },
             )
+        }
+
+        /// The tag for a multi-agent room: every participant id resolved to
+        /// its box name AND display letter (name to letter pairs), deduped by
+        /// name in journal order. Same two-box gate as [boxName] — one box
+        /// means nothing to disambiguate. Empty unless at least two DISTINCT
+        /// boxes resolve (a local room's two ends share one box, and a
+        /// participant whose device was revoked resolves to nothing), so rows
+        /// can fall back to the single-box tag. Ported from matron-apple's
+        /// `JournalChatService.roomTags(for:boxNames:boxLetters:)`.
+        fun roomTags(
+            record: ConversationEntity?,
+            boxNames: Map<Long, String>,
+            boxLetters: Map<Long, String>,
+        ): List<Pair<String, String>> {
+            if (boxNames.size < 2) return emptyList()
+            val ids = record?.participantIDs ?: return emptyList()
+            if (ids.size < 2) return emptyList()
+            val seen = mutableSetOf<String>()
+            val tags = mutableListOf<Pair<String, String>>()
+            for (id in ids) {
+                val name = boxNames[id] ?: continue
+                if (seen.add(name)) tags.add(name to (boxLetters[id] ?: "?"))
+            }
+            return if (tags.size >= 2) tags else emptyList()
         }
 
         /// The chip rule for a single conversation: named only when the user

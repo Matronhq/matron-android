@@ -6,9 +6,12 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 import chat.matron.android.journal.JournalEvent
 import chat.matron.android.journal.JournalEventType
+import chat.matron.android.journal.MatronJson
 import chat.matron.android.journal.parseJsonObjectOrNull
 import chat.matron.android.journal.stringOrNull
 import java.time.Instant
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonObject
 
 /// Local mirror of one conversation summary. Table/column names match the
@@ -37,7 +40,30 @@ data class ConversationEntity(
     /// is mutable — resuming a session on another box legitimately repoints
     /// it. Drives the box chip in the chat list and header.
     @ColumnInfo(name = "agent_device_id") val agentDeviceID: Long? = null,
-)
+    /// JSON-encoded `[Long]` of every box in a multi-agent room (owner +
+    /// joined participants, journal-ordered), else `null`. Stored as text so
+    /// the column stays a plain additive migration; read through
+    /// [participantIDs]. Replaced wholesale when the wire sends the key,
+    /// untouched when it doesn't (see `ConvoSummaryDTO.participants`).
+    val participants: String? = null,
+) {
+    /// Decoded [participants]. Empty for anything that is not a known
+    /// multi-agent room (null column, or a value that fails to decode).
+    val participantIDs: List<Long>
+        get() {
+            val raw = participants ?: return emptyList()
+            return runCatching {
+                MatronJson.decodeFromString(ListSerializer(Long.serializer()), raw)
+            }.getOrElse { emptyList() }
+        }
+
+    companion object {
+        fun encodeParticipants(ids: List<Long>): String? =
+            runCatching {
+                MatronJson.encodeToString(ListSerializer(Long.serializer()), ids)
+            }.getOrNull()
+    }
+}
 
 /// One of the user's agent boxes, id → name — the local mirror of the server's
 /// `agents` snapshot list (see `JournalStore.replaceAgents`) plus live

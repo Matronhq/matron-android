@@ -188,6 +188,91 @@ class JournalChatServiceTest {
         assertNull(JournalChatService.summary(stale, two).boxName)
     }
 
+    /// Ports matron-apple's `testRoomBoxNamesTagEveryParticipatingBox`. Same
+    /// store-backed setup as the boxName test: participants round-trip through
+    /// the real snapshot path into the record the summary reads.
+    @Test fun roomBoxNamesTagEveryParticipatingBox() = runBlocking {
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(
+                ConvoSummaryDTO(
+                    "room", "↔️ [ab] mac ↔ dev-z", "waiting", 1, "", 1,
+                    agentDeviceID = 7, participants = listOf(7, 9),
+                ),
+                ConvoSummaryDTO(
+                    "local", "↔️ [cd] mac ↔ mac", "waiting", 1, "", 1,
+                    agentDeviceID = 7, participants = listOf(7),
+                ),
+                ConvoSummaryDTO(
+                    "ghost", "↔️ [ef] mac ↔ gone", "waiting", 1, "", 1,
+                    agentDeviceID = 7, participants = listOf(7, 999),
+                ),
+            ),
+            headSeq = 1,
+        )
+        val room = store.conversation("room")!!
+        val local = store.conversation("local")!!
+        val ghost = store.conversation("ghost")!!
+        val two = mapOf(7L to "dev-y", 9L to "dev-z")
+        val letters = SessionTag.boxLetters(two)
+
+        // A genuine multi-box room tags every box — names for the hue,
+        // letters for the glyphs, journal order — and the room short comes
+        // off the `↔️ [ab] ` title prefix with the marker kept.
+        val multi = JournalChatService.summary(room, two, letters)
+        assertEquals(listOf("dev-y", "dev-z"), multi.roomBoxNames)
+        assertEquals(listOf("Y", "Z"), multi.roomBoxShorts)
+        assertEquals("ab", multi.sessionShort)
+        assertEquals("↔️ mac ↔ dev-z", multi.title)
+
+        // Single-box user: same gate as the single-box tag — no letters.
+        val gated = JournalChatService.summary(room, mapOf(7L to "dev-y"))
+        assertEquals(emptyList<String>(), gated.roomBoxNames)
+        assertNull(gated.boxName)
+
+        // A local room's two ends share one box: fall back to the single
+        // owning-box tag rather than a redundant one-entry "pair".
+        val solo = JournalChatService.summary(local, two, letters)
+        assertEquals(emptyList<String>(), solo.roomBoxNames)
+        assertEquals("dev-y", solo.boxName)
+        assertEquals("Y", solo.boxShort)
+
+        // A participant whose box was revoked resolves to nothing — with
+        // only one name left the room tag collapses to the same fallback.
+        val revoked = JournalChatService.summary(ghost, two, letters)
+        assertEquals(emptyList<String>(), revoked.roomBoxNames)
+        assertEquals("dev-y", revoked.boxName)
+    }
+
+    /// Ports matron-apple's `testSummaryStripsTheShortAndGatesTheLetter`
+    /// (from SessionTagTests — store-backed, so it lives here under
+    /// Robolectric): the fields rows actually consume.
+    @Test fun summaryStripsTheShortAndGatesTheLetter() = runBlocking {
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(
+                ConvoSummaryDTO("c1", "[b5] css token migration", "running", 1, "", 1, agentDeviceID = 7),
+            ),
+            headSeq = 1,
+        )
+        val record = store.conversation("c1")!!
+
+        // Two boxes: title is cleaned, short peeled, letter derived.
+        val two = mapOf(7L to "dev-y", 9L to "dev-z")
+        val tagged = JournalChatService.summary(record, two, SessionTag.boxLetters(two))
+        assertEquals("css token migration", tagged.title)
+        assertEquals("b5", tagged.sessionShort)
+        assertEquals("Y", tagged.boxShort)
+
+        // One box: the session short still shows (it tells SESSIONS apart),
+        // but the letter obeys the chip gate.
+        val one = mapOf(7L to "dev-y")
+        val solo = JournalChatService.summary(record, one, SessionTag.boxLetters(one))
+        assertEquals("b5", solo.sessionShort)
+        assertNull(solo.boxShort)
+        assertNull(solo.boxName)
+    }
+
     /// Ports matron-apple's `testRenamingABoxRelabelsAnOpenChatList`: a rename
     /// arrives as `device_meta`, which writes the `agent` table and nothing
     /// else — the conversations flow alone never re-fires for it, so the

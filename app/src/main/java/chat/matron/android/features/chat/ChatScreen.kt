@@ -17,9 +17,14 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -41,10 +46,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import chat.matron.android.chat.SessionTag
 import chat.matron.android.chat.TimelineItem
+import chat.matron.android.designsystem.SessionTagText
 import chat.matron.android.journal.AgentChatDecision
 import chat.matron.android.designsystem.ActivityIndicatorRow
 import chat.matron.android.designsystem.AttachmentFullscreenViewer
@@ -58,6 +69,7 @@ import chat.matron.android.designsystem.PaginatingHeader
 import chat.matron.android.designsystem.StopTurnButton
 import chat.matron.android.designsystem.SubtaskLinkCard
 import chat.matron.android.designsystem.TimelineLoadingIndicator
+import chat.matron.android.designsystem.UsageMetersFormat
 import chat.matron.android.designsystem.shouldShowCompactHeader
 import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.ComposerViewModel
@@ -91,6 +103,16 @@ fun ChatScreen(
     /// than two boxes. Threaded from the list's ChatSummary (same source as
     /// the row chip) so header and row can never disagree.
     boxName: String? = null,
+    /// The `A:bc` tag halves, threaded from the list summary like [boxName]
+    /// (see ChatSummary.sessionShort / .boxShort). Composed ahead of the
+    /// title so the in-chat header matches the row.
+    sessionShort: String? = null,
+    boxShort: String? = null,
+    /// Multi-agent room participants (ChatSummary.roomBoxNames /
+    /// .roomBoxShorts, parallel arrays), threaded like the halves above so
+    /// a room's header shows the same colored `A↔B` tag as its row.
+    roomBoxNames: List<String> = emptyList(),
+    roomBoxShorts: List<String> = emptyList(),
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val children by stripVM.children.collectAsStateWithLifecycle()
@@ -103,6 +125,7 @@ fun ChatScreen(
     var showSwitcher by remember { mutableStateOf(false) }
     /// Tappable title → summaries TOC sheet (jump-to-point navigation).
     var showSummaries by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
     var previewModel by remember { mutableStateOf<Any?>(null) }
     val compactScope = rememberCoroutineScope()
 
@@ -111,16 +134,65 @@ fun ChatScreen(
     Scaffold(
         topBar = {
             TopAppBar(
+                // Under the title, "box · ~/workdir" in small text — which
+                // machine and folder this session lives on, readable without
+                // opening the info sheet (apple #150). Box comes from the
+                // list summary (same gate as the row chip); the path arrives
+                // with the first session-status frame, home-abbreviated like
+                // the info sheet.
                 // Tappable title → summaries TOC sheet, mirroring iOS's
                 // principal-item title button (apple #124).
                 title = {
-                    Text(
-                        chatTitle,
-                        maxLines = 1,
+                    Column(
                         modifier = Modifier.clickable(
                             onClickLabel = "Show conversation summaries",
                         ) { showSummaries = true },
-                    )
+                    ) {
+                        // `A:bc Title` (or `A↔B:bc Title` for a multi-agent
+                        // room) as one styled line — same composition and
+                        // fallbacks as ChatRow's titleLine (apple #152). The
+                        // visible header leads with the styled tag, so the
+                        // accessibility label spells the same information
+                        // out — box name(s) and session short ahead of the
+                        // clean title.
+                        val darkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+                        val titleText = SessionTagText.titleLine(
+                            // The room marker drops only when a room tag
+                            // will actually render in its place.
+                            title = if (roomBoxNames.size >= 2) {
+                                SessionTag.titleBesideRoomTag(chatTitle)
+                            } else {
+                                chatTitle
+                            },
+                            boxLetter = boxShort,
+                            boxName = boxName,
+                            sessionShort = sessionShort,
+                            roomBoxNames = roomBoxNames,
+                            roomBoxShorts = roomBoxShorts,
+                            darkTheme = darkTheme,
+                            secondary = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        val a11yTitle = chatAccessibilityTitle(chatTitle, boxName, sessionShort, roomBoxNames)
+                        Text(
+                            titleText,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.semantics { contentDescription = a11yTitle },
+                        )
+                        chatContextLine(boxName, sessionStatus?.workdir)?.let { context ->
+                            Text(
+                                context,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                // The Apple original middle-truncates (the
+                                // tail of a path is the part worth keeping);
+                                // TextOverflow.MiddleEllipsis needs Compose
+                                // 1.8, so tail ellipsis until the BOM moves.
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -128,13 +200,49 @@ fun ChatScreen(
                     }
                 },
                 actions = {
-                    if (children.isNotEmpty()) {
-                        IconButton(onClick = { showSwitcher = true }) {
-                            Icon(Icons.Default.AccountTree, contentDescription = "Subagents")
-                        }
+                    // One ellipsis menu instead of a row of icon buttons —
+                    // trailing icons squeezed the title down to a few
+                    // characters (apple #150). Sub-chats stay a flat section
+                    // shown whenever this chat has ANY children (running or
+                    // finished): the running strip hides itself the moment
+                    // the last subagent finishes, so without this the only
+                    // way back into a finished sub-chat is its timeline card.
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "Chat options")
                     }
-                    IconButton(onClick = { showSessionStatus = true }) {
-                        Icon(Icons.Default.Info, contentDescription = "Session status")
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        if (children.isNotEmpty()) {
+                            Text(
+                                "Subagents",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                            )
+                            children.forEach { child ->
+                                DropdownMenuItem(
+                                    text = { Text(child.title) },
+                                    leadingIcon = {
+                                        Icon(
+                                            if (child.isRunning) Icons.Default.AccountTree else Icons.Default.Check,
+                                            contentDescription = if (child.isRunning) "Running" else "Finished",
+                                        )
+                                    },
+                                    onClick = {
+                                        menuOpen = false
+                                        onOpenChild(child.id)
+                                    },
+                                )
+                            }
+                            HorizontalDivider()
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Session Info") },
+                            leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
+                            onClick = {
+                                menuOpen = false
+                                showSessionStatus = true
+                            },
+                        )
                     }
                 },
             )
@@ -204,31 +312,33 @@ fun ChatScreen(
             SessionStatusSheet(viewModel = chatVM, onDismiss = { showSessionStatus = false }, boxName = boxName)
         }
     }
-    if (showSwitcher) {
-        val sheetState = rememberModalBottomSheetState()
-        ModalBottomSheet(onDismissRequest = { showSwitcher = false }, sheetState = sheetState) {
-            Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-                Text("Subagents", style = MaterialTheme.typography.titleMedium)
-                children.forEach { child ->
-                    Text(
-                        text = (if (child.isRunning) "● " else "✓ ") + child.title,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                showSwitcher = false
-                                onOpenChild(child.id)
-                            }
-                            .padding(vertical = 12.dp),
-                    )
-                    androidx.compose.material3.HorizontalDivider()
-                }
-            }
-        }
-    }
     previewModel?.let { model ->
         AttachmentFullscreenViewer(model = model, onDismiss = { previewModel = null })
     }
 }
+
+/// "box · ~/workdir" for the small line under the chat title. Either part can
+/// be missing (single-box users get no box name; the workdir only arrives
+/// with the first session-status frame) — show what's known, null hides the
+/// line entirely. Pure so the composition is unit-testable without rendering
+/// (ports matron-apple's `ChatView.contextLine`, pinned by
+/// `ChatViewBindingTests.test_contextLine_composesBoxAndAbbreviatedWorkdir`).
+fun chatContextLine(boxName: String?, workdir: String?): String? {
+    val parts = listOfNotNull(boxName, workdir?.let(UsageMetersFormat::homeAbbreviated))
+    return if (parts.isEmpty()) null else parts.joinToString(" · ")
+}
+
+/// What TalkBack reads for the header title: the visible tag's meaning
+/// spelled out (box names, session short), not just the clean title —
+/// sighted users see the `A:bc` tag, so the label must carry it too.
+/// Delegates to the shared `SessionTag.accessibilityTitle` (apple #154) so
+/// the header can never drift from other tagged surfaces.
+fun chatAccessibilityTitle(
+    chatTitle: String,
+    boxName: String?,
+    sessionShort: String?,
+    roomBoxNames: List<String>,
+): String = SessionTag.accessibilityTitle(chatTitle, boxName, sessionShort, roomBoxNames)
 
 /**
  * Shared timeline list used by both [ChatScreen] and the sub-chat viewer. Renders
