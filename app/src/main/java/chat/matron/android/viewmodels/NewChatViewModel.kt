@@ -130,15 +130,27 @@ class NewChatViewModel(
             if (!sameFolderAgent(agent)) return // switched away meanwhile
             when (reply) {
                 is RPCReply.Ok -> _folders.value = parseFolders(reply.result)
-                is RPCReply.Failure ->
-                    _foldersError.value = "Couldn't fetch recent folders — you can still type a path."
+                is RPCReply.Failure -> folderFetchFailed(agent)
             }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
             if (!sameFolderAgent(agent)) return
-            _foldersError.value = "Couldn't fetch recent folders — you can still type a path."
+            folderFetchFailed(agent)
         }
+    }
+
+    /// The live `recent_folders` call for the folder step failed. The roster
+    /// fan-out may have warmed the cache for this box while that call was on
+    /// the wire — if so, its answer is as good as ours; only a still-cold
+    /// cache is worth an error (CodeRabbit, #36).
+    private fun folderFetchFailed(agent: DeviceDTO) {
+        folderCache[agent.id]?.let {
+            _folders.value = it
+            _foldersError.value = null
+            return
+        }
+        _foldersError.value = "Couldn't fetch recent folders — you can still type a path."
     }
 
     /// Fires `start {workdir?, browser?}` at the picked agent. A `null`/blank

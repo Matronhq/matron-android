@@ -54,6 +54,12 @@ class BoxCapacityTest {
     }
 
     @Test
+    fun parse_negativeLiveSessions_readsAsAbsent() {
+        val c = parse("""{"activity":{"live_sessions":-1}}""")
+        assertNull(c.liveSessions)
+    }
+
+    @Test
     fun parse_percentClamped() {
         val c = parse("""{"limits":{"lines":[{"id":"a","label":"A","percent":-5},{"id":"b","label":"B","percent":5000}]}}""")
         assertEquals(listOf(0, 999), c.limitLines.map { it.percent })

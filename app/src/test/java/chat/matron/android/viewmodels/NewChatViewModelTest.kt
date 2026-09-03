@@ -35,9 +35,9 @@ private class FakeAgentRPCProvider : AgentRPCProviding {
     /// `select()` for the same box can answer differently.
     var foldersSequenceByDevice: MutableMap<Long, ArrayDeque<RPCReply>> = mutableMapOf()
 
-    /// Parks a box's NEXT `recent_folders` call on the gate (a reply still on
-    /// the wire); one-shot, removed on use.
-    var gateFoldersCall: MutableMap<Long, CompletableDeferred<Unit>> = mutableMapOf()
+    /// Parks a box's `recent_folders` calls on these gates, one per call in
+    /// order (a reply still on the wire); each is consumed on use.
+    var foldersGatesByDevice: MutableMap<Long, ArrayDeque<CompletableDeferred<Unit>>> = mutableMapOf()
     var rpcError: RPCRequestError? = null
 
     data class Request(val method: String, val agentDeviceID: Long, val params: JsonObject)
@@ -54,7 +54,7 @@ private class FakeAgentRPCProvider : AgentRPCProviding {
         if (method == "recent_folders") {
             val reply = foldersSequenceByDevice[agentDeviceID]?.removeFirstOrNull()
                 ?: repliesByDevice[agentDeviceID]
-            gateFoldersCall.remove(agentDeviceID)?.await()
+            foldersGatesByDevice[agentDeviceID]?.removeFirstOrNull()?.await()
             reply?.let { return it }
         }
         return replies[method] ?: RPCReply.Failure("unknown_method", null)
@@ -311,7 +311,7 @@ class NewChatViewModelTest {
         val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
         fake.devicesResult = Result.success(agents)
         val gate = CompletableDeferred<Unit>()
-        fake.gateFoldersCall[1] = gate
+        fake.foldersGatesByDevice[1] = ArrayDeque(listOf(gate))
         fake.foldersSequenceByDevice[1] = ArrayDeque(
             listOf(
                 foldersReply("""{"folders":[{"path":"/w/app","last_used":100}]}"""), // fan-out, parked
@@ -331,6 +331,40 @@ class NewChatViewModelTest {
 
         gate.complete(Unit) // the fan-out reply lands after the failure
         loading.await()
+        assertNull(vm.foldersError.value)
+        assertEquals(listOf("/w/app"), vm.folders.value.map { it.path })
+    }
+
+    /// The other completion order (CodeRabbit, #36): the folder step's live
+    /// call was already on the wire (cache cold) when the fan-out's reply
+    /// warmed the cache; the live call then fails. The cached answer must win
+    /// over the error.
+    @Test
+    fun selectFailure_fallsBackToFanOutFoldersThatLandedMeanwhile() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
+        fake.devicesResult = Result.success(agents)
+        val fanOutGate = CompletableDeferred<Unit>()
+        val selectGate = CompletableDeferred<Unit>()
+        fake.foldersGatesByDevice[1] = ArrayDeque(listOf(fanOutGate, selectGate))
+        fake.foldersSequenceByDevice[1] = ArrayDeque(
+            listOf(
+                foldersReply("""{"folders":[{"path":"/w/app","last_used":100}]}"""), // fan-out
+                RPCReply.Failure("agent_unreachable", null), // select()'s live call
+            ),
+        )
+        fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
+        val vm = NewChatViewModel(fake)
+        val loading = async { vm.load() }
+        while (fake.requests.count { it.method == "recent_folders" } < 2) yield()
+
+        val selecting = async { vm.select(agents[0]) } // cache cold → live call, parked
+        while (fake.requests.count { it.method == "recent_folders" } < 3) yield()
+
+        fanOutGate.complete(Unit) // cache warms while the live call is still out
+        loading.await()
+        selectGate.complete(Unit) // …and then the live call fails
+        selecting.await()
         assertNull(vm.foldersError.value)
         assertEquals(listOf("/w/app"), vm.folders.value.map { it.path })
     }

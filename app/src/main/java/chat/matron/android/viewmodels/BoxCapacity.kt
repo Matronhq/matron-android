@@ -31,7 +31,8 @@ data class BoxCapacity(
         /// an error; a malformed line drops that line only.
         fun parse(reply: JsonElement): BoxCapacity {
             val obj = reply as? JsonObject ?: return BoxCapacity(null, emptyList(), null)
-            val live = obj.objectOrNull("activity")?.intOrNull("live_sessions")
+            // A negative count is nonsense, not "zero" — treat it as absent.
+            val live = obj.objectOrNull("activity")?.intOrNull("live_sessions")?.takeIf { it >= 0 }
 
             val lines = obj.objectOrNull("limits")?.arrayOrNull("lines")?.objects().orEmpty()
                 .mapNotNull { line ->
