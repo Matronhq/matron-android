@@ -511,9 +511,15 @@ fun TimelineList(
     // it — unless the window has slid up into history: the bottom of a
     // DETACHED window is phantom (rows exist below it), so no follow from
     // there. The near-bottom effect below owns the slide back down, and the
-    // first settle after it reattaches re-arms here (apple #166).
+    // first settle after it reattaches re-arms here (apple #166). Keyed on
+    // atBottom ONLY: the anchor is read as a guard, not a key, so a reset
+    // (jump, own send) can't re-run this and clobber their explicit
+    // follow with a still-false atBottom (Bugbot, #61).
     val windowTailAnchorID by chatVM.windowTailAnchorID.collectAsStateWithLifecycle()
-    LaunchedEffect(atBottom, windowTailAnchorID) { followTail = atBottom && windowTailAnchorID == null }
+    LaunchedEffect(atBottom) {
+        if (!atBottom) followTail = false
+        else if (chatVM.windowTailAnchorID.value == null) followTail = true
+    }
 
     // Your own outgoing message always returns you to the bottom, even if
     // follow-tail was disarmed when you sent it (matron-apple ChatView.swift
