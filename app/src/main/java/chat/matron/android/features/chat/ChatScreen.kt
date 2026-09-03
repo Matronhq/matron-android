@@ -498,6 +498,10 @@ private fun TimelineRowView(
     // transient in-flight/failed state (an HTTP call, no journal event).
     val spawnOutcomes by chatVM.spawnOutcomes.collectAsStateWithLifecycle()
     val agentSpawnStates by chatVM.agentSpawnStates.collectAsStateWithLifecycle()
+    // A bridge queued_release lands as a hidden row, so no visible row changes;
+    // collecting the memo is what recomposes the sibling queue cards' buttons
+    // (apple #162; Bugbot #48).
+    val releaseResolvedAnswers by chatVM.releaseResolvedAnswers.collectAsStateWithLifecycle()
     // Memoised in the VM's derived-recompute pass (apple #141) — reading the
     // flag here is a plain state read, never an O(N) timeline scan per row.
     val hasMultipleSenders by chatVM.hasMultipleSenders.collectAsStateWithLifecycle()
@@ -524,8 +528,10 @@ private fun TimelineRowView(
                     isDownloadingFile = { url -> url in downloadingFiles },
                     isMediaUnavailable = { url -> url in unavailableMedia },
                     askViewModel = { id -> chatVM.askViewModel(id) },
-                    isPromptAnswered = { id -> chatVM.isPromptAnswered(id) },
-                    answerSummary = { id -> chatVM.answerSummary(id) },
+                    // Read through the view model; releaseResolvedAnswers above
+                    // is what makes these recompose when a release lands.
+                    isPromptAnswered = { id -> releaseResolvedAnswers.let { chatVM.isPromptAnswered(id) } },
+                    answerSummary = { id -> releaseResolvedAnswers.let { chatVM.answerSummary(id) } },
                     agentChatState = { id ->
                         // Read through the view model (persisted decision wins);
                         // `agentChatStates` above is what makes this recompose.

@@ -11,6 +11,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import org.junit.Assert.assertEquals
@@ -306,6 +307,59 @@ class JournalTimelineMapperTest {
         }))!!
         assertEquals(TimelineItem.Kind.Unknown("prompt_reply"), item.kind)
         assertNull(item.inReplyToEventID)
+    }
+
+    // MARK: - queued_release (bridge busy-queue cards, apple #162)
+
+    @Test fun queuedReleasePromptCarriesItsPromptID() {
+        val item = map(ev(20, "prompt", payload = buildJsonObject {
+            put("kind", "queued_release"); put("prompt_id", "pr_abc")
+            put("question", "Send all 2 queued messages now, or cancel this one?")
+            put("options", buildJsonArray {
+                add(buildJsonObject { put("id", "send"); put("label", "⚡ Send all now"); put("value", "send") })
+                add(buildJsonObject { put("id", "cancel"); put("label", "✕ Cancel this"); put("value", "cancel") })
+            })
+            put("mode", "pick_one")
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.AskUser
+        assertEquals("pr_abc", kind.event.queuedReleasePromptID)
+    }
+
+    @Test fun ordinaryPromptHasNoQueuedReleasePromptID() {
+        val item = map(ev(3, "prompt", payload = buildJsonObject {
+            put("question", "Deploy?")
+            put("options", buildJsonArray { add(buildJsonObject { put("id", "y"); put("label", "Yes") }) })
+        }))!!
+        assertNull((item.kind as TimelineItem.Kind.AskUser).event.queuedReleasePromptID)
+    }
+
+    /// The bridge's durable release frame carries prompt_id + action but no
+    /// target_seq and no choice — it must hide as a namespaced answer row
+    /// (retiring the card's buttons on every device), not render as an empty
+    /// text bubble.
+    @Test fun queuedReleaseReplyHidesAsNamespacedAnswer() {
+        val item = map(ev(21, "prompt_reply", sender = "agent:bridge", payload = buildJsonObject {
+            put("kind", "queued_release"); put("prompt_id", "pr_abc"); put("action", "send")
+            put("released", buildJsonArray { add("pr_abc::0") })
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.AskUserAnswer
+        assertEquals("qr:pr_abc", kind.promptEventID)
+        assertEquals(listOf("send"), kind.selectedValues)
+        assertNull(item.inReplyToEventID)
+    }
+
+    /// A release frame is never meant to be visible, so a malformed one (kind
+    /// says queued_release but prompt_id or action is missing) must drop
+    /// entirely — falling through to the generic prompt_reply path would
+    /// render it as an empty text bubble, the exact symptom the release
+    /// branch exists to remove.
+    @Test fun malformedQueuedReleaseReplyIsDropped() {
+        assertNull(map(ev(22, "prompt_reply", sender = "agent:bridge", payload = buildJsonObject {
+            put("kind", "queued_release"); put("prompt_id", "pr_abc")
+        })))
+        assertNull(map(ev(23, "prompt_reply", sender = "agent:bridge", payload = buildJsonObject {
+            put("kind", "queued_release"); put("action", "send")
+        })))
     }
 
     @Test fun imageBuildsMediaURL() {
