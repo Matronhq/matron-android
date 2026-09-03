@@ -82,11 +82,26 @@ data class StagedAttachment private constructor(
 
         /// The MIME type comes from the path extension; an unmappable extension
         /// falls back to a generic binary rather than guessing.
+        ///
+        /// Video containers are pinned explicitly: the photo picker offers
+        /// screen recordings (apple #160) and the JVM's `URLConnection` table
+        /// doesn't know all of them, so they'd otherwise land as octet-stream
+        /// and the bridge couldn't tell a recording from a blob.
         fun mimeType(forExtension: String): String {
             if (forExtension.isEmpty()) return "application/octet-stream"
+            VIDEO_MIME_BY_EXTENSION[forExtension.lowercase(Locale.US)]?.let { return it }
             return URLConnection.guessContentTypeFromName("f.$forExtension")
                 ?: "application/octet-stream"
         }
+
+        private val VIDEO_MIME_BY_EXTENSION = mapOf(
+            "mp4" to "video/mp4",
+            "m4v" to "video/x-m4v",
+            "mov" to "video/quicktime",
+            "webm" to "video/webm",
+            "3gp" to "video/3gpp",
+            "mkv" to "video/x-matroska",
+        )
 
         private fun formatBytes(bytes: Long): String {
             if (bytes < 1000) return "$bytes bytes"
