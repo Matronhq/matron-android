@@ -255,6 +255,29 @@ class NewChatViewModelWakeTest {
         assertEquals("the folder loop's outcome never overwrites the start error", startError, vm.errorMessage.value)
     }
 
+    /// Bugbot (#52): a start that first answers agent_unreachable while the
+    /// folder wake loop is running must not retire that loop — its banner and
+    /// Try Again are the recovery path if the start then fails for real.
+    @Test
+    fun startUnreachableDuringFolderWake_leavesTheFolderLoopRunning() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        fake.replies["recent_folders"] = RPCReply.Failure("agent_unreachable", null)
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        val park = sleeper.parkNext()
+        val selecting = launch { vm.select(box) }
+        park.arrived.await()
+        assertTrue(vm.isWakingBox.value)
+        fake.sequences["start"] = seq(unreachable, Result.success(RPCReply.Failure("bad_workdir", "/nope")))
+        vm.start("/nope")
+        assertNotNull(vm.errorMessage.value)
+        assertTrue("the folder loop still owns the banner", vm.isWakingBox.value)
+        fake.sequences["recent_folders"] = seq(folders)
+        park.resume.complete(Unit)
+        selecting.join()
+        assertEquals("the folder loop was not retired by the start retry", listOf("/home/dan/app"), vm.folders.value.map { it.path })
+        assertFalse(vm.isWakingBox.value)
+    }
+
     /// One box, asleep: nothing to choose between, so the sheet goes straight
     /// to the folder step and the wake loop starts.
     @Test

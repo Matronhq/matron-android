@@ -360,7 +360,13 @@ class NewChatViewModel(
                 // have landed). Keep the banner up while the box boots.
                 var attempts = 1
                 while (attempts < WAKE_ATTEMPT_LIMIT && isUnreachable(reply) && !isAbandoned) {
-                    if (startWakeToken == null) startWakeToken = beginWake(agent.id)
+                    // Only take the banner when nothing else holds it: a
+                    // folder wake already running for this box keeps its loop
+                    // (and its Try Again) — retiring it here would leave the
+                    // folder step empty after a fast start failure (Bugbot, #52).
+                    if (startWakeToken == null && !(_isWakingBox.value && wakeAgentID == agent.id)) {
+                        startWakeToken = beginWake(agent.id)
+                    }
                     wakeSleep(WAKE_RETRY_DELAY_MS)
                     if (isAbandoned || !sameFolderAgent(agent)) return
                     reply = api.agentRequest(agent.id, "start", params.toString())
