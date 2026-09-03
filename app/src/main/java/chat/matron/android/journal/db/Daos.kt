@@ -114,6 +114,22 @@ interface EventDao {
     @Query("SELECT * FROM event WHERE convo_id = :convoID ORDER BY seq")
     fun forConversationFlow(convoID: String): Flow<List<EventEntity>>
 
+    /// The tail window: rows at or after [sinceSeq]. Observed instead of the
+    /// whole conversation so a store-wide commit re-reads a bounded page,
+    /// not the entire history (apple #171).
+    @Query("SELECT * FROM event WHERE convo_id = :convoID AND seq >= :sinceSeq ORDER BY seq")
+    fun forConversationSinceFlow(convoID: String, sinceSeq: Long): Flow<List<EventEntity>>
+
+    /// The seq of the [offset]-th newest row (0-based), or null when the
+    /// conversation holds fewer rows — the anchor a tail window starts at.
+    @Query("SELECT seq FROM event WHERE convo_id = :convoID ORDER BY seq DESC LIMIT 1 OFFSET :offset")
+    suspend fun seqAtNewestOffset(convoID: String, offset: Int): Long?
+
+    /// A page of rows strictly older than [beforeSeq], newest first, for the
+    /// local reveal of history the tail window doesn't observe.
+    @Query("SELECT * FROM event WHERE convo_id = :convoID AND seq < :beforeSeq ORDER BY seq DESC LIMIT :limit")
+    suspend fun beforeSeqNewestFirst(convoID: String, beforeSeq: Long, limit: Int): List<EventEntity>
+
     @Query("SELECT MIN(seq) FROM event WHERE convo_id = :convoID")
     suspend fun minSeq(convoID: String): Long?
 

@@ -986,4 +986,35 @@ class JournalStoreTest {
             cancelAndIgnoreRemainingEvents()
         }
     }
+
+    // MARK: - windowed events fetch (apple #171)
+
+    @Test
+    fun tailWindowStartAndEventsBefore() = runBlocking {
+        val store = makeStore()
+        for (seq in 1L..10L) store.applyJournal(ev(seq, payload = buildJsonObject { put("body", "m$seq") }))
+        assertEquals("the 3rd-newest row anchors a 3-row window", 8L, store.tailWindowStart("c1", 3))
+        assertEquals("fewer rows than the window → the whole history", 0L, store.tailWindowStart("c1", 50))
+        assertEquals(0L, store.tailWindowStart("nope", 3))
+        assertEquals(listOf(5L, 6L, 7L), store.eventsBefore("c1", 8, 3).map { it.seq })
+        assertEquals(listOf(1L, 2L, 3L, 4L, 5L, 6L, 7L), store.eventsBefore("c1", 8, 100).map { it.seq })
+        assertTrue(store.eventsBefore("c1", 1, 10).isEmpty())
+    }
+
+    /// The tail flow is anchored and deduplicated: a commit that changes
+    /// nothing in the window does not re-deliver.
+    @Test
+    fun eventsFlowSinceSeqIsAnchoredAndDeduplicated() = runBlocking {
+        val store = makeStore()
+        for (seq in 1L..5L) store.applyJournal(ev(seq, payload = buildJsonObject { put("body", "m$seq") }))
+        store.eventsFlow("c1", 4).test {
+            assertEquals(listOf(4L, 5L), awaitItem().map { it.seq })
+            store.applyJournal(ev(6, payload = buildJsonObject { put("body", "m6") }))
+            assertEquals(listOf(4L, 5L, 6L), awaitItem().map { it.seq })
+            // A row below the anchor lands: the window is unchanged, no re-emit.
+            store.insertHistory(listOf(ev(0, payload = buildJsonObject { put("body", "old") })))
+            expectNoEvents()
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
 }

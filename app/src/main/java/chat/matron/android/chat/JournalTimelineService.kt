@@ -66,9 +66,16 @@ class JournalTimelineService(
     overlayStaleness: Duration = 30.seconds,
     private val sweepInterval: Duration = 10.seconds,
     toolStreamStaleness: Duration = 600.seconds,
+    /// How many newest rows the store observation covers. Everything older
+    /// is revealed locally page by page on scroll-up (apple #171).
+    private val fetchWindow: Int = DEFAULT_FETCH_WINDOW,
 ) : TimelineService {
     private val ownSender: String = "user:${session.userID}"
     private val overlay = OverlayState(staleness = overlayStaleness, toolStaleness = toolStreamStaleness)
+
+    /// The live items() subscription's re-emit hook, so a local reveal (which
+    /// changes no observed row) can still repaint (apple #171).
+    @Volatile private var itemsSignal: (() -> Unit)? = null
 
     /// Detached scope for the teardown `viewing: null` send, which must outlive
     /// the (cancelling) collector scope so it still reaches the socket.
@@ -98,6 +105,13 @@ class JournalTimelineService(
         private val lock = Any()
         private val streaming = mutableMapOf<String, Streaming>()
         private var eventsList: List<JournalEvent> = emptyList()
+
+        // The observed tail window plus the older rows a paginate has
+        // revealed beneath it; [eventsList] is their merge (apple #171).
+        private var olderEvents: List<JournalEvent> = emptyList()
+        private var tailEvents: List<JournalEvent> = emptyList()
+        private var tailEpoch = 0
+        private var pendingAnchor: Long? = null
         private val mappedCache = mutableMapOf<Long, TimelineItem>()
         private val unmappable = mutableSetOf<Long>()
         private var activity: Activity? = null
@@ -140,6 +154,49 @@ class JournalTimelineService(
         val events: List<JournalEvent> get() = synchronized(lock) { eventsList }
 
         fun setEvents(events: List<JournalEvent>) = synchronized(lock) { eventsList = events }
+
+        /// The oldest seq fetched so far — where the next local reveal starts
+        /// — or null when nothing is loaded yet.
+        val localRevealBoundary: Long? get() = synchronized(lock) {
+            pendingAnchor?.let { anchor -> olderEvents.firstOrNull()?.seq ?: anchor } ?: eventsList.firstOrNull()?.seq
+        }
+
+        /// A new observation is starting at [anchor]: rows already held that
+        /// reach the anchor become the "older" prefix so the transcript doesn't
+        /// blink to the window, and any tail from a previous subscription is
+        /// fenced by epoch.
+        fun rebaseForNewTailSubscription(anchor: Long): Int = synchronized(lock) {
+            tailEpoch += 1
+            pendingAnchor = anchor
+            olderEvents = if ((eventsList.lastOrNull()?.seq ?: -1L) >= anchor) eventsList else emptyList()
+            tailEvents = emptyList()
+            tailEpoch
+        }
+
+        fun setTail(tail: List<JournalEvent>, epoch: Int) = synchronized(lock) {
+            if (epoch != tailEpoch) return
+            pendingAnchor = null
+            if (tail.isEmpty()) olderEvents = emptyList() // a wipe empties everything
+            tailEvents = tail
+            remerge()
+        }
+
+        /// Prepends rows revealed beneath the boundary; anything at or past
+        /// the boundary is already held and is dropped.
+        fun prependOlder(older: List<JournalEvent>) = synchronized(lock) {
+            val boundary = localRevealBoundary
+            val fresh = older.filter { boundary == null || it.seq < boundary }.sortedBy { it.seq }
+            if (fresh.isEmpty()) return
+            olderEvents = fresh + olderEvents
+            remerge()
+        }
+
+        private fun remerge() {
+            val tailFirst = tailEvents.firstOrNull()?.seq
+            if (tailFirst == null) { eventsList = olderEvents; return }
+            if ((olderEvents.lastOrNull()?.seq ?: -1L) >= tailFirst) olderEvents = olderEvents.filter { it.seq < tailFirst }
+            eventsList = olderEvents + tailEvents
+        }
 
         /// Replaces the outbox projection with the observation's latest rows.
         /// Suppression markers for rows the store has since deleted are
@@ -358,6 +415,8 @@ class JournalTimelineService(
         val serverURL = api.serverURL
         val ticks = Channel<Unit>(Channel.CONFLATED)
         fun signal() { ticks.trySend(Unit) }
+        val registration: () -> Unit = { signal() }
+        itemsSignal = registration
 
         suspend fun emit() {
             val events = overlay.events
@@ -409,8 +468,14 @@ class JournalTimelineService(
             // Baseline BEFORE the first flow emission: persisted rows are
             // history and must never retire echoes (see seedBaseline).
             overlay.seedBaseline(runCatching { store.maxSeq(convoID) }.getOrNull() ?: 0L)
-            store.eventsFlow(convoID).collect { events ->
-                overlay.setEvents(events)
+            // Observe a bounded tail window, not the whole conversation: a
+            // store-wide commit (every streaming bridge, several times a
+            // second) otherwise re-read and re-decoded the entire history.
+            // Older rows are revealed locally on scroll-up (apple #171).
+            val anchor = runCatching { store.tailWindowStart(convoID, fetchWindow) }.getOrDefault(0L)
+            val epoch = overlay.rebaseForNewTailSubscription(anchor)
+            store.eventsFlow(convoID, anchor).collect { tail ->
+                overlay.setTail(tail, epoch)
                 signal()
             }
             close()
@@ -455,6 +520,7 @@ class JournalTimelineService(
             }
         }
         awaitClose {
+            if (itemsSignal === registration) itemsSignal = null
             viewingJob.cancel()
             storeJob.cancel()
             ephemeralJob.cancel()
@@ -550,10 +616,24 @@ class JournalTimelineService(
     }
 
     override suspend fun paginateBackward(requestSize: Int): Boolean {
+        // Reveal mirror rows beneath the observed window first — no network —
+        // and only reach for the server below the local mirror (apple #171).
+        overlay.localRevealBoundary?.let { oldestFetched ->
+            val localPage = store.eventsBefore(convoID, oldestFetched, maxOf(requestSize, LOCAL_REVEAL_PAGE_LIMIT))
+            if (localPage.isNotEmpty()) {
+                overlay.prependOlder(localPage)
+                itemsSignal?.invoke()
+                return true
+            }
+        }
         val before = store.minSeq(convoID)
         val events = api.messages(convoID, before, requestSize)
         val newOnes = events.filter { before == null || it.seq < before }
         store.insertHistory(newOnes)
+        // Below the tail anchor the observation won't see these; hand them
+        // to the overlay directly.
+        overlay.prependOlder(newOnes)
+        itemsSignal?.invoke()
         search?.let { s ->
             for (event in newOnes) {
                 val body = event.previewText()
@@ -593,3 +673,10 @@ class JournalTimelineService(
         }
     }
 }
+
+/// Rows the store observation covers per conversation (apple #171: ~500
+/// newest at subscribe time).
+internal const val DEFAULT_FETCH_WINDOW = 500
+
+/// Rows a scroll-up reveals from the local mirror per paginate.
+internal const val LOCAL_REVEAL_PAGE_LIMIT = 200
