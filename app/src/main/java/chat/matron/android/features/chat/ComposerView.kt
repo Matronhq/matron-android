@@ -51,6 +51,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -60,6 +61,7 @@ import chat.matron.android.models.BotCommand
 import chat.matron.android.viewmodels.ComposerDraftMemory
 import chat.matron.android.viewmodels.ComposerViewModel
 import chat.matron.android.viewmodels.MediaRecorderAudioRecording
+import chat.matron.android.viewmodels.PaletteSuggestion
 import chat.matron.android.viewmodels.VoiceRecorder
 import java.io.File
 import java.util.UUID
@@ -169,9 +171,9 @@ fun ComposerView(viewModel: ComposerViewModel) {
         if (viewModel.showPalette) {
             SlashCommandPalette(
                 commands = viewModel.filteredCommands,
-                folders = viewModel.folderSuggestions,
+                suggestions = viewModel.paletteSuggestions,
                 onSelect = { cmd -> viewModel.selectCommand(cmd); syncFromVm() },
-                onSelectFolder = { folder -> viewModel.selectFolder(folder); syncFromVm() },
+                onSelectSuggestion = { suggestion -> viewModel.selectSuggestion(suggestion); syncFromVm() },
             )
         }
 
@@ -333,15 +335,16 @@ private fun voiceRecorderErrorMessage(error: VoiceRecorder.RecorderError): Strin
 
 /**
  * Drop-down palette above the composer. Ports Composer/SlashCommandPalette.swift:
- * recent-folder rows when [folders] is non-empty, otherwise the filtered command
- * rows. The two modes are mutually exclusive; folders win.
+ * argument/folder suggestion rows when [suggestions] is non-empty (a fully-typed
+ * command; apple #161), otherwise the filtered command rows. The two modes are
+ * mutually exclusive upstream; suggestions win here.
  */
 @Composable
 fun SlashCommandPalette(
     commands: List<BotCommand>,
-    folders: List<String>,
+    suggestions: List<PaletteSuggestion>,
     onSelect: (BotCommand) -> Unit,
-    onSelectFolder: (String) -> Unit,
+    onSelectSuggestion: (PaletteSuggestion) -> Unit,
 ) {
     Surface(
         tonalElevation = 2.dp,
@@ -350,24 +353,54 @@ fun SlashCommandPalette(
             .padding(horizontal = 8.dp, vertical = 4.dp),
     ) {
         LazyColumn(modifier = Modifier.heightIn(max = 220.dp)) {
-            if (folders.isNotEmpty()) {
-                items(folders, key = { "folder-$it" }) { folder ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(
-                            folder,
-                            fontFamily = FontFamily.Monospace,
+            if (suggestions.isNotEmpty()) {
+                items(
+                    suggestions,
+                    key = {
+                        when (it) {
+                            is PaletteSuggestion.Folder -> "folder-${it.path}"
+                            is PaletteSuggestion.Argument -> "arg-${it.suggestion.value}"
+                        }
+                    },
+                ) { suggestion ->
+                    when (suggestion) {
+                        is PaletteSuggestion.Folder -> Row(
                             modifier = Modifier
-                                .weight(1f)
-                                .padding(0.dp),
-                        )
-                        TextButton(onClick = { onSelectFolder(folder) }) { Text("Use") }
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                suggestion.path,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(0.dp),
+                            )
+                            TextButton(onClick = { onSelectSuggestion(suggestion) }) { Text("Use") }
+                        }
+                        is PaletteSuggestion.Argument -> Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    suggestion.suggestion.displayLabel,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                suggestion.suggestion.summary?.let {
+                                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            TextButton(onClick = { onSelectSuggestion(suggestion) }) { Text("Insert") }
+                        }
                     }
                     HorizontalDivider()
                 }
