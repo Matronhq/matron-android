@@ -3,6 +3,7 @@ package chat.matron.android.viewmodels
 import chat.matron.android.chat.ConversationSummaryEntry
 import chat.matron.android.chat.FakeMediaService
 import chat.matron.android.chat.FakeTimelineService
+import chat.matron.android.chat.JournalTimelineMapper
 import chat.matron.android.chat.TimelineItem
 import chat.matron.android.events.AgentChatCardState
 import chat.matron.android.events.AgentChatRequest
@@ -636,7 +637,10 @@ class ChatViewModelTest {
             val file = vm.writeTempFile(url, "report.pdf", root)
             assertNotNull(file)
             assertEquals("report.pdf", file!!.name)
-            assertEquals(File(root, "matron-attachments"), file.parentFile)
+            // apple #138 namespaces the write by a digest of the attachment
+            // URL so same-named attachments can't clobber each other.
+            assertEquals(ChatViewModel.attachmentURLDigest(url), file.parentFile!!.name)
+            assertEquals(File(root, "matron-attachments"), file.parentFile!!.parentFile)
             assertTrue(byteArrayOf(9, 8, 7).contentEquals(file.readBytes()))
         } finally {
             root.deleteRecursively()
@@ -734,10 +738,32 @@ class ChatViewModelTest {
         try {
             val file = vm.writeTempFile(url, "../../escape.txt", root)
             assertNotNull(file)
-            assertEquals(File(root, "matron-attachments"), file!!.parentFile)
+            assertEquals(File(root, "matron-attachments"), file!!.parentFile!!.parentFile)
             assertEquals("escape.txt", file.name)
         } finally {
             root.deleteRecursively()
+        }
+    }
+
+    // MARK: - attachmentURLDigest
+
+    @Test
+    fun attachmentURLDigest_pinsExactHex_andMasksHighBytes() {
+        // Pinned: first 8 bytes of SHA-256("mxc://matron.chat/abc123"), hex.
+        // The digest contains bytes >= 0x80 (0xe7, 0xa8), so this also pins
+        // that formatting treats bytes as unsigned — a sign-extending
+        // formatter would render "ffffffe7" and blow past 16 chars.
+        assertEquals(
+            "222ce7a7942892a8",
+            ChatViewModel.attachmentURLDigest("mxc://matron.chat/abc123"),
+        )
+    }
+
+    @Test
+    fun attachmentURLDigest_isAlways16LowercaseHexChars() {
+        for (url in listOf("mxc://a/b", "https://example.com/x?y=1", "", "é你好")) {
+            val digest = ChatViewModel.attachmentURLDigest(url)
+            assertTrue("'$url' digest '$digest'", digest.matches(Regex("[0-9a-f]{16}")))
         }
     }
 
@@ -1775,6 +1801,132 @@ class ChatViewModelTest {
         assertEquals("started", state2.outcome.outcome)
 
         assertTrue("spawn resolution must never write to KeyValueStore", store.allKeys.isEmpty())
+    }
+
+    // MARK: - hasMultipleSenders (ports the apple #141 additions)
+
+    private fun senderItem(
+        id: String,
+        sender: String,
+        isOwn: Boolean = false,
+        kind: TimelineItem.Kind = TimelineItem.Kind.Text("hi", null),
+    ) = TimelineItem(
+        id = id,
+        sender = sender,
+        timestamp = Instant.now(),
+        kind = kind,
+        isOwn = isOwn,
+    )
+
+    private suspend fun makeSenderVM(scope: CoroutineScope, items: List<TimelineItem>): ChatViewModel {
+        val fake = FakeTimelineService()
+        fake.snapshotsToEmit = listOf(items)
+        val vm = makeVM(scope, timeline = fake)
+        vm.start().join()
+        return vm
+    }
+
+    /// Ports `testHasMultipleSenders_singleNonOwnSender_isFalse`: a 1:1 chat
+    /// — everything from a single bot sender plus the user's own messages —
+    /// must NOT flip the flag. Own messages are excluded from the
+    /// distinct-sender count even though there's only one of them here; the
+    /// point is the single bot sender alone isn't enough.
+    @Test
+    fun hasMultipleSenders_singleNonOwnSender_isFalse() = vmTest { scope ->
+        val vm = makeSenderVM(scope, listOf(
+            senderItem("1", "matron"),
+            senderItem("2", "matron"),
+            senderItem("3", "me", isOwn = true),
+        ))
+        assertFalse(vm.hasMultipleSenders.value)
+    }
+
+    /// Ports `testHasMultipleSenders_noItems_isFalse`: the degenerate
+    /// 0-sender case must not crash or false-positive.
+    @Test
+    fun hasMultipleSenders_noItems_isFalse() = vmTest { scope ->
+        val vm = makeSenderVM(scope, emptyList())
+        assertFalse(vm.hasMultipleSenders.value)
+    }
+
+    /// Ports `testHasMultipleSenders_twoDistinctNonOwnSenders_isTrue`: the
+    /// agent-chat case this whole feature exists for — two distinct non-own
+    /// senders (e.g. "dev-2" and "dan-mac" both replying) must flip the flag.
+    @Test
+    fun hasMultipleSenders_twoDistinctNonOwnSenders_isTrue() = vmTest { scope ->
+        val vm = makeSenderVM(scope, listOf(
+            senderItem("1", "dev-2"),
+            senderItem("2", "dan-mac"),
+        ))
+        assertTrue(vm.hasMultipleSenders.value)
+    }
+
+    /// Ports `testHasMultipleSenders_ownMessagesExcludedFromCount`: own
+    /// messages must not count toward the distinct-sender total even when
+    /// their `sender` string differs from the single bot's — the flag is
+    /// specifically about attributing NON-own bubbles.
+    @Test
+    fun hasMultipleSenders_ownMessagesExcludedFromCount() = vmTest { scope ->
+        val vm = makeSenderVM(scope, listOf(
+            senderItem("1", "matron"),
+            senderItem("2", "dan", isOwn = true),
+        ))
+        assertFalse(
+            "the own sender must not count toward the distinct non-own total",
+            vm.hasMultipleSenders.value,
+        )
+    }
+
+    /// Ports `testHasMultipleSenders_ephemeralActivityAndToolStreamRows_areExcluded`:
+    /// regression for the mid-turn false positive — an ordinary 1:1 chat
+    /// (single real bot sender "matron") plus the ephemeral ActivityIndicator
+    /// and ToolStreamLive overlay rows the mapper synthesises during a turn —
+    /// both hardcode `sender = "agent"` — must NOT flip the flag. Only
+    /// Text / Image / File durable kinds count.
+    @Test
+    fun hasMultipleSenders_ephemeralActivityAndToolStreamRows_areExcluded() = vmTest { scope ->
+        val vm = makeSenderVM(scope, listOf(
+            senderItem("1", "matron"),
+            JournalTimelineMapper.activityItem("Thinking…", Instant.now()),
+            JournalTimelineMapper.toolStreamItem("1", "ls", "", false, Instant.now()),
+        ))
+        assertFalse(
+            "ActivityIndicator / ToolStreamLive ephemeral rows must not count as senders",
+            vm.hasMultipleSenders.value,
+        )
+    }
+
+    /// Ports `testHasMultipleSenders_ephemeralStreamingTextRow_isExcluded`:
+    /// the mid-turn streaming placeholder row (`JournalTimelineMapper
+    /// .streamingItem`) borrows the real Text kind so it renders as a normal
+    /// bubble while a reply streams in — but it hardcodes `sender = "agent"`
+    /// and its id is prefixed `"eph:"`. A pure kind filter would still
+    /// miscount it; it must be excluded by id too.
+    @Test
+    fun hasMultipleSenders_ephemeralStreamingTextRow_isExcluded() = vmTest { scope ->
+        val vm = makeSenderVM(scope, listOf(
+            senderItem("1", "matron"),
+            JournalTimelineMapper.streamingItem("1", "partial reply…", Instant.now()),
+        ))
+        assertFalse(
+            "the 'eph:' streaming placeholder row must not count as a second sender",
+            vm.hasMultipleSenders.value,
+        )
+    }
+
+    /// Ports `testHasMultipleSenders_twoRealSendersPlusEphemerals_isTrue`:
+    /// two REAL distinct bot text senders plus ephemeral overlay rows still
+    /// flip the flag — the ephemeral exclusion must not mask a genuine
+    /// agent-chat multi-sender room.
+    @Test
+    fun hasMultipleSenders_twoRealSendersPlusEphemerals_isTrue() = vmTest { scope ->
+        val vm = makeSenderVM(scope, listOf(
+            senderItem("1", "dev-2"),
+            senderItem("2", "dan-mac"),
+            JournalTimelineMapper.activityItem("Thinking…", Instant.now()),
+            JournalTimelineMapper.toolStreamItem("1", "ls", "", false, Instant.now()),
+        ))
+        assertTrue(vm.hasMultipleSenders.value)
     }
 }
 

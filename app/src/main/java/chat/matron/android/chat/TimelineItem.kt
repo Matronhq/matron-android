@@ -26,6 +26,23 @@ data class TimelineItem(
     /// from the user's other devices.
     val inReplyToEventID: String? = null,
 ) {
+    /// True for the mid-turn streaming-reply placeholder row
+    /// (`JournalTimelineMapper.streamingItem`, id `"eph:<messageRef>"`).
+    /// It deliberately borrows the real `Text` Kind so it renders as an
+    /// ordinary bubble while a reply streams in, but it is NOT a durable
+    /// message — no real event ID, hardcoded `sender = "agent"` — and is
+    /// replaced by the durable row once the turn's journal event lands.
+    /// A `Kind` check alone (`Text`/`Image`/`File`) can't tell this row
+    /// apart from a real one, since it uses `Text` on purpose.
+    ///
+    /// Single source of truth for the two places that need to tell the
+    /// difference and would otherwise drift: `ChatViewModel
+    /// .hasMultipleSenders` (must not count this row's "agent" as a
+    /// distinct sender) and `timelineAvatarSender` (must not attribute a
+    /// bubble to it either — the render-side twin of the same bug, Cursor
+    /// Bugbot on apple #141).
+    val isEphemeralStreamingPlaceholder: Boolean
+        get() = id.startsWith("eph:")
     sealed interface Kind {
         // Invariant: every `eventID` field below always equals the enclosing
         // TimelineItem's `id` (both are `event.seq.toString()` from the same
@@ -33,12 +50,29 @@ data class TimelineItem(
         // deliberately so card/view code holding just the Kind can still
         // correlate against store events without threading the parent id through.
         data class Text(val body: String, val formattedHTML: String?) : Kind
-        data class Image(val url: String?, val caption: String?, val sizeBytes: Long?) : Kind
+        /// [expired]: the journal's media reaper deleted this attachment's
+        /// blob and tombstoned the event (`expired: true`, `blob_ref` null —
+        /// matron-journal#63). Name/size/caption survive for rendering; the
+        /// bytes are permanently gone, so the UI shows "Expired" instead of
+        /// offering a dead download. Only fresh syncs carry the flag — a
+        /// client that synced the event before the reap discovers expiry via
+        /// the 404 on fetch (`ChatViewModel.isMediaUnavailable`). Defaulted
+        /// `false` (Kotlin idiom) — which also folds in apple #140, whose
+        /// whole diff was updating construction sites the Swift enum change
+        /// broke.
+        data class Image(
+            val url: String?,
+            val caption: String?,
+            val sizeBytes: Long?,
+            val expired: Boolean = false,
+        ) : Kind
         data class File(
             val url: String?,
             val filename: String,
             val caption: String?,
             val sizeBytes: Long?,
+            /// See [Image.expired].
+            val expired: Boolean = false,
         ) : Kind
         /// Member joins, name changes — a state event rendered as a small inline
         /// notice. Currently unproduced: no journal event type maps to this kind

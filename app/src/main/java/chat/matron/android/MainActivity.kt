@@ -56,6 +56,8 @@ import chat.matron.android.platform.AndroidBiometricAuthenticator
 import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.ChatListViewModel
 import chat.matron.android.viewmodels.LinkSignInViewModel
+import chat.matron.android.viewmodels.MediaBrowserViewModel
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import chat.matron.android.viewmodels.RendezvousSignInViewModel
 import chat.matron.android.viewmodels.SearchViewModel
 import chat.matron.android.viewmodels.SignInViewModel
@@ -355,6 +357,7 @@ private fun SignedInApp(
                 convoID = convoID,
                 vmCache = vmCache,
                 title = currentSummary(groups, convoID)?.title ?: "",
+                boxName = currentSummary(groups, convoID)?.boxName,
                 onBack = { nav.popBackStack() },
                 onOpenChild = { nav.navigate("chat/$it") },
                 onSwitchTo = { sibling ->
@@ -457,6 +460,10 @@ private fun ChatRoute(
     onOpenChild: (String) -> Unit,
     onSwitchTo: (String) -> Unit,
     onOpenConversation: (String) -> Unit,
+    /// Which agent box runs this session, or null when the user has fewer
+    /// than two boxes. Threaded from the list's ChatSummary (same source as
+    /// the row chip) so header and row can never disagree.
+    boxName: String? = null,
 ) {
     // Observed, not one-shot: the mirror can learn parent_convo_id AFTER this
     // route composes (convo_meta or a snapshot upsert), and the route must
@@ -491,9 +498,21 @@ private fun ChatRoute(
             composerVM = composerVM,
             stripVM = stripVM,
             chatTitle = title,
+            boxName = boxName,
             onBack = onBack,
             onOpenChild = onOpenChild,
             onOpenConversation = onOpenConversation,
+            // Deferred: built when the browser sheet opens, on the sheet's own
+            // scope, over the same store the sync engine writes (apple #142).
+            mediaBrowser = { scope ->
+                MediaBrowserViewModel(
+                    store = deps.journalStore(session),
+                    convoID = convoID,
+                    serverURL = session.homeserverURL.toHttpUrl(),
+                    media = deps.mediaService(session),
+                    scope = scope,
+                )
+            },
         )
     }
 }

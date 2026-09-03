@@ -1,10 +1,13 @@
 package chat.matron.android.features.chat
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.view.WindowManager
 import android.webkit.MimeTypeMap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -48,6 +51,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -57,6 +61,7 @@ import chat.matron.android.models.BotCommand
 import chat.matron.android.viewmodels.ComposerDraftMemory
 import chat.matron.android.viewmodels.ComposerViewModel
 import chat.matron.android.viewmodels.MediaRecorderAudioRecording
+import chat.matron.android.viewmodels.PaletteSuggestion
 import chat.matron.android.viewmodels.VoiceRecorder
 import java.io.File
 import java.util.UUID
@@ -128,6 +133,18 @@ fun ComposerView(viewModel: ComposerViewModel) {
             },
             makeRecorder = { file -> MediaRecorderAudioRecording(file) },
             tempDirectory = File(context.cacheDir, "voice").apply { mkdirs() },
+            // Locking the screen suspends the app and cuts the capture short,
+            // so the window keeps the screen on for exactly the span of a live
+            // recording (port of apple #159).
+            setKeepScreenAwake = { keepAwake ->
+                context.findActivity()?.window?.let { window ->
+                    if (keepAwake) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
+                }
+            },
         )
     }
     val recorderState by recorder.state.collectAsStateWithLifecycle()
@@ -154,9 +171,9 @@ fun ComposerView(viewModel: ComposerViewModel) {
         if (viewModel.showPalette) {
             SlashCommandPalette(
                 commands = viewModel.filteredCommands,
-                folders = viewModel.folderSuggestions,
+                suggestions = viewModel.paletteSuggestions,
                 onSelect = { cmd -> viewModel.selectCommand(cmd); syncFromVm() },
-                onSelectFolder = { folder -> viewModel.selectFolder(folder); syncFromVm() },
+                onSelectSuggestion = { suggestion -> viewModel.selectSuggestion(suggestion); syncFromVm() },
             )
         }
 
@@ -194,7 +211,10 @@ fun ComposerView(viewModel: ComposerViewModel) {
                     AttachMenu(
                         onPickPhoto = {
                             photoLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                // Videos too: screen recordings land in the photo
+                                // library, and the bridge extracts key frames for
+                                // claude (port of apple #160).
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
                             )
                         },
                         onPickFile = { fileLauncher.launch("*/*") },
@@ -315,15 +335,16 @@ private fun voiceRecorderErrorMessage(error: VoiceRecorder.RecorderError): Strin
 
 /**
  * Drop-down palette above the composer. Ports Composer/SlashCommandPalette.swift:
- * recent-folder rows when [folders] is non-empty, otherwise the filtered command
- * rows. The two modes are mutually exclusive; folders win.
+ * argument/folder suggestion rows when [suggestions] is non-empty (a fully-typed
+ * command; apple #161), otherwise the filtered command rows. The two modes are
+ * mutually exclusive upstream; suggestions win here.
  */
 @Composable
 fun SlashCommandPalette(
     commands: List<BotCommand>,
-    folders: List<String>,
+    suggestions: List<PaletteSuggestion>,
     onSelect: (BotCommand) -> Unit,
-    onSelectFolder: (String) -> Unit,
+    onSelectSuggestion: (PaletteSuggestion) -> Unit,
 ) {
     Surface(
         tonalElevation = 2.dp,
@@ -332,24 +353,54 @@ fun SlashCommandPalette(
             .padding(horizontal = 8.dp, vertical = 4.dp),
     ) {
         LazyColumn(modifier = Modifier.heightIn(max = 220.dp)) {
-            if (folders.isNotEmpty()) {
-                items(folders, key = { "folder-$it" }) { folder ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(
-                            folder,
-                            fontFamily = FontFamily.Monospace,
+            if (suggestions.isNotEmpty()) {
+                items(
+                    suggestions,
+                    key = {
+                        when (it) {
+                            is PaletteSuggestion.Folder -> "folder-${it.path}"
+                            is PaletteSuggestion.Argument -> "arg-${it.suggestion.value}"
+                        }
+                    },
+                ) { suggestion ->
+                    when (suggestion) {
+                        is PaletteSuggestion.Folder -> Row(
                             modifier = Modifier
-                                .weight(1f)
-                                .padding(0.dp),
-                        )
-                        TextButton(onClick = { onSelectFolder(folder) }) { Text("Use") }
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                suggestion.path,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(0.dp),
+                            )
+                            TextButton(onClick = { onSelectSuggestion(suggestion) }) { Text("Use") }
+                        }
+                        is PaletteSuggestion.Argument -> Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    suggestion.suggestion.displayLabel,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                suggestion.suggestion.summary?.let {
+                                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            TextButton(onClick = { onSelectSuggestion(suggestion) }) { Text("Insert") }
+                        }
                     }
                     HorizontalDivider()
                 }
@@ -385,16 +436,31 @@ private suspend fun attachUri(context: Context, viewModel: ComposerViewModel, ur
 
 private fun copyUriToTemp(context: Context, uri: Uri): File? = runCatching {
     val resolver = context.contentResolver
-    val name = displayName(context, uri) ?: run {
-        val ext = resolver.getType(uri)?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
-        "picked-${UUID.randomUUID()}" + (ext?.let { ".$it" } ?: "")
-    }
+    val declaredExt = resolver.getType(uri)?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
+    val name = pickedFilename(displayName(context, uri), declaredExt)
     val dir = File(context.cacheDir, "picked").apply { mkdirs() }
     val out = File(dir, "${UUID.randomUUID()}-$name")
     resolver.openInputStream(uri)?.use { input -> out.outputStream().use { input.copyTo(it) } }
         ?: return null
     out
 }.getOrNull()
+
+/// The staged filename for a picked item: the provider's display name when it
+/// carries an extension; otherwise the name (or a generated one) with the
+/// extension implied by the provider's declared MIME type appended. The
+/// extension is what `StagedAttachment` types the attachment by, so a video
+/// that arrives without one must not fall through as an untyped blob — or
+/// worse, be relabelled an image (port of apple #160's class-aware fallback).
+internal fun pickedFilename(displayName: String?, extensionFromMime: String?): String {
+    val base = displayName?.takeIf { it.isNotBlank() } ?: "picked-${UUID.randomUUID()}"
+    if (base.substringAfterLast('.', "").isNotEmpty()) return base
+    return extensionFromMime?.let { "$base.$it" } ?: base
+}
+
+/// Walks the context chain to the hosting Activity (Compose hands out a
+/// ContextThemeWrapper), so a composable can reach the window flags.
+private fun Context.findActivity(): Activity? =
+    generateSequence(this) { (it as? ContextWrapper)?.baseContext }.filterIsInstance<Activity>().firstOrNull()
 
 private fun displayName(context: Context, uri: Uri): String? = runCatching {
     context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->

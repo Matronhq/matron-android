@@ -205,6 +205,11 @@ sealed interface ServerFrame {
     data object SnapshotRequired : ServerFrame
     data class UnknownControl(val op: String) : ServerFrame
 
+    /// A device was renamed (`POST /devices/:id/rename`). Transient — not a
+    /// journal event, carries no seq. A client that misses it picks the name
+    /// up from the next snapshot's `agents` list.
+    data class DeviceMeta(val id: Long, val name: String) : ServerFrame
+
     companion object {
         /// Bridge timestamps are `Date.toISOString()` output (fractional), but
         /// plain ISO is accepted too for robustness.
@@ -218,6 +223,12 @@ sealed interface ServerFrame {
                 "journal" -> JournalEvent.fromFrame(obj)?.let { Journal(it) }
                 "ephemeral" -> decodeEphemeral(obj)
                 "rpc" -> decodeRpc(obj)
+                "device_meta" -> {
+                    // Malformed frames are skipped, not crashed on.
+                    val id = obj.longOrNull("device_id") ?: return null
+                    val name = obj.stringOrNull("name") ?: return null
+                    DeviceMeta(id, name)
+                }
                 "control" -> decodeControl(obj)
                 else -> null
             }

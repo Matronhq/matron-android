@@ -2,6 +2,7 @@ package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.FakeTimelineService
 import chat.matron.android.chat.SendGate
+import chat.matron.android.models.ArgSuggestion
 import chat.matron.android.models.BotCommand
 import chat.matron.android.models.BotCommandCatalog
 import java.io.File
@@ -168,16 +169,22 @@ class ComposerViewModelTest {
 
     @Test
     fun palette_staysClosed_afterCommandSelection() {
+        // Pinned against /stop — a command with no argument suggestions —
+        // because commands WITH suggestions (e.g. /start) now deliberately
+        // reopen the palette in argument mode (apple #161).
         val vm = makeVM(commands = BotCommandCatalog.claudeBridge)
-        vm.selectCommand(BotCommand("/start", "x", "[workdir]"))
-        assertEquals("/start ", vm.input)
+        vm.selectCommand(BotCommand("/stop", "x"))
+        assertEquals("/stop ", vm.input)
         assertFalse(vm.showPalette)
     }
 
     @Test
     fun palette_isHiddenForCommandWithTrailingSpace() {
+        // A suggestion-free command followed by a space hides the palette so
+        // it doesn't cover the next character; commands with suggestions keep
+        // it open in argument mode instead.
         val vm = makeVM(commands = BotCommandCatalog.claudeBridge)
-        vm.input = "/start "
+        vm.input = "/stop "
         assertFalse(vm.showPalette)
     }
 
@@ -701,7 +708,9 @@ class ComposerViewModelTest {
         val vm = makeVM(roomID = "!r", commands = BotCommandCatalog.claudeBridge, recentFolders = store)
         vm.input = "/status ~/p"
         assertTrue(vm.folderSuggestions.isEmpty())
-        vm.input = "/start --browser ~/p"
+        // A non-flag token before the partial doesn't qualify — the path
+        // slot is already filled (flags ahead of the path are fine now).
+        vm.input = "/start ~/other ~/p"
         assertTrue(vm.folderSuggestions.isEmpty())
     }
 
@@ -822,7 +831,9 @@ class ComposerViewModelTest {
         store.record("~/one")
         store.record("~/two")
         val vm = makeVM(roomID = "!r", commands = BotCommandCatalog.claudeBridge, recentFolders = store)
-        vm.input = "/start "
+        // "~" filters the palette to folder rows alone (no flag matches),
+        // most-recent-first: row 0 is "~/two", row 1 is "~/one".
+        vm.input = "/start ~"
         vm.paletteMoveDown()
         vm.paletteMoveDown()
         assertTrue(vm.confirmPaletteSelection())
@@ -956,5 +967,116 @@ class ComposerViewModelTest {
 
         vm.exitHistoryNavigation()
         assertEquals("half-typed draft", vm.input)
+    }
+
+    // MARK: - Argument suggestions (apple #161, 2026-08-10 spec phase 1)
+
+    private fun recentsWith(vararg paths: String) = emptyRecentFolders().also { store -> paths.forEach { store.record(it) } }
+
+    /// Convenience: the `Argument` values currently offered.
+    private fun argumentValues(vm: ComposerViewModel) =
+        vm.paletteSuggestions.mapNotNull { (it as? PaletteSuggestion.Argument)?.suggestion?.value }
+
+    @Test
+    fun recentFolderArgument_uppercaseCommand_stillExtracts() {
+        // Folder completion matches /START case-insensitively, so a sent
+        // uppercase line must still record the path — one case rule.
+        assertEquals("~/x", ComposerViewModel.recentFolderArgument("/START ~/x"))
+    }
+
+    @Test
+    fun recentFolderArgument_skipsSmartDashedFlags() {
+        // "—browser" (em dash) is a flag the bridge normalizes, not a folder —
+        // recording it would poison the recents list.
+        assertEquals("~/x", ComposerViewModel.recentFolderArgument("/start \u2014browser ~/x"))
+    }
+
+    @Test
+    fun folderSuggestions_uppercaseCommand_stillCompletes() {
+        val vm = makeVM(commands = BotCommandCatalog.claudeBridge, recentFolders = recentsWith("~/proj"))
+        vm.input = "/START ~"
+        assertEquals(listOf("~/proj"), vm.folderSuggestions)
+    }
+
+    @Test
+    fun folderSuggestions_allowedAfterFlags() {
+        // The bridge's grammar is `/start [flags] [workdir]`, so folder
+        // completion must survive flag tokens ahead of the path.
+        val vm = makeVM(commands = BotCommandCatalog.claudeBridge, recentFolders = recentsWith("~/proj"))
+        vm.input = "/start --browser ~/p"
+        assertEquals(listOf("~/proj"), vm.folderSuggestions)
+    }
+
+    @Test
+    fun folderSuggestions_allowedAfterSmartDashedFlag() {
+        val vm = makeVM(commands = BotCommandCatalog.claudeBridge, recentFolders = recentsWith("~/proj"))
+        vm.input = "/start \u2014browser ~/p"
+        assertEquals(listOf("~/proj"), vm.folderSuggestions)
+    }
+
+    @Test
+    fun folderSuggestions_notOfferedOncePathSlotFilled() {
+        // A non-flag token before the partial doesn't qualify — the path slot
+        // is already filled.
+        val vm = makeVM(commands = BotCommandCatalog.claudeBridge, recentFolders = recentsWith("~/proj"))
+        vm.input = "/start ~/other ~/p"
+        assertTrue(vm.folderSuggestions.isEmpty())
+    }
+
+    @Test
+    fun completedCommand_opensPaletteInArgumentMode() {
+        val vm = makeVM(commands = BotCommandCatalog.claudeBridge)
+        vm.input = "/restart "
+        assertTrue(vm.showPalette)
+        assertEquals(listOf("--force", "--browser"), argumentValues(vm))
+        assertEquals(2, vm.paletteItemCount)
+    }
+
+    @Test
+    fun paletteSuggestions_argumentsPrecedeFolders() {
+        val vm = makeVM(commands = BotCommandCatalog.claudeBridge, recentFolders = recentsWith("~/proj"))
+        vm.input = "/start "
+        val start = BotCommandCatalog.claudeBridge.first { it.trigger == "/start" }
+        assertEquals(
+            start.argSuggestions.map { PaletteSuggestion.Argument(it) } + PaletteSuggestion.Folder("~/proj"),
+            vm.paletteSuggestions,
+        )
+    }
+
+    @Test
+    fun selectSuggestion_argument_insertsValueAndSpace_thenOffersRest() {
+        val vm = makeVM(commands = BotCommandCatalog.claudeBridge)
+        vm.input = "/restart --f"
+        vm.selectSuggestion(PaletteSuggestion.Argument(ArgSuggestion("--force")))
+        assertEquals("/restart --force ", vm.input)
+        assertEquals(listOf("--browser"), argumentValues(vm))
+        assertTrue(vm.showPalette)
+    }
+
+    @Test
+    fun selectSuggestion_lastValue_dismissesPalette() {
+        val vm = makeVM(commands = BotCommandCatalog.claudeBridge)
+        vm.input = "/switch "
+        vm.selectSuggestion(PaletteSuggestion.Argument(ArgSuggestion("claude")))
+        assertEquals("/switch claude ", vm.input)
+        assertFalse("a value fills the single slot, so nothing is left to offer", vm.showPalette)
+    }
+
+    @Test
+    fun selectSuggestion_folder_delegatesToFolderPick() {
+        val vm = makeVM(commands = BotCommandCatalog.claudeBridge)
+        vm.input = "/start ~/y"
+        vm.selectSuggestion(PaletteSuggestion.Folder("~/yearbook-app"))
+        assertEquals("/start ~/yearbook-app", vm.input)
+    }
+
+    @Test
+    fun confirmPaletteSelection_picksFromUnifiedList() {
+        val vm = makeVM(commands = BotCommandCatalog.claudeBridge, recentFolders = recentsWith("~/proj"))
+        vm.input = "/start "
+        // Walk the highlight to the folder row: 3 argument rows precede it.
+        repeat(4) { vm.paletteMoveDown() }
+        assertTrue(vm.confirmPaletteSelection())
+        assertEquals("/start ~/proj", vm.input)
     }
 }

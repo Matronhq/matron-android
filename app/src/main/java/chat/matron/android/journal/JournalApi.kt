@@ -19,7 +19,22 @@ import okio.buffer
 
 data class LoginResponse(val token: String, val deviceID: Long, val userID: Long)
 
-data class SnapshotResponse(val conversations: List<ConvoSummaryDTO>, val seq: Long)
+/// One of the user's agent boxes, as listed by `GET /snapshot`. Just identity
+/// and label — the full device row (lag, cursor, last seen) is [DeviceDTO]
+/// from `GET /devices`. Ported from matron-apple's `AgentDTO`.
+data class AgentDTO(val id: Long, val name: String)
+
+/// [agents] is the user's agent boxes, id → name. Presence-aware, diverging
+/// from the Swift original (which conflates): `null` = the server predates
+/// the field ("this server doesn't say" — the store keeps what it has),
+/// empty = the server said the user has NO boxes (revoking the last box must
+/// clear stale chips). Defaulted last (unlike the Swift original's middle
+/// position) so existing positional constructions compile.
+data class SnapshotResponse(
+    val conversations: List<ConvoSummaryDTO>,
+    val seq: Long,
+    val agents: List<AgentDTO>? = null,
+)
 
 /// The narrow slice of [JournalApi] the sync engine depends on: the WebSocket
 /// URL and the cold-start / refresh snapshot fetch. Extracted as an interface
@@ -45,6 +60,12 @@ data class ConvoSummaryDTO(
     val lastTS: Long? = null,
     /// Parent conversation id for a subagent child, else `null`.
     val parentConvoID: String? = null,
+    /// Which agent box (journal device id) currently manages this
+    /// conversation, or `null` when the server has never recorded one (a row
+    /// predating the column, or a server predating this field). Unlike
+    /// [parentConvoID] this is mutable — resuming a session on another box
+    /// legitimately repoints it.
+    val agentDeviceID: Long? = null,
 )
 
 /// One row of `GET /devices`. Timestamps are epoch ms; `lastSeenAt` is null for
@@ -255,9 +276,19 @@ class JournalApi(
                 createdAt = c.longOrNull("created_at") ?: 0,
                 lastTS = c.longOrNull("last_ts"),
                 parentConvoID = c.stringOrNull("parent_convo_id"),
+                // Which box manages this conversation. Absent on older
+                // servers -> null -> no chip.
+                agentDeviceID = c.longOrNull("agent_device_id"),
             )
         }
-        return SnapshotResponse(conversations, obj.longOrNull("seq") ?: 0)
+        // Absent field (old server) → null, present-but-empty → empty list:
+        // the store keeps its roster on null and clears it on empty.
+        val agents = obj.arrayOrNull("agents")?.objects()?.mapNotNull { a ->
+            val id = a.longOrNull("device_id") ?: return@mapNotNull null
+            val name = a.stringOrNull("name") ?: return@mapNotNull null
+            AgentDTO(id, name)
+        }
+        return SnapshotResponse(conversations, obj.longOrNull("seq") ?: 0, agents)
     }
 
     suspend fun messages(convoID: String, beforeSeq: Long?, limit: Int): List<JournalEvent> {
@@ -350,6 +381,29 @@ class JournalApi(
     /// elsewhere — callers treat it as success.
     suspend fun revokeDevice(id: Long) {
         request(path = "/devices/$id/revoke", method = "POST", jsonBody = buildJsonObject { })
+    }
+
+    /// Renames a device. Client tokens only (the server 403s an agent), and
+    /// 404 covers both "not yours" and "gone".
+    suspend fun renameDevice(id: Long, name: String): DeviceDTO {
+        val obj = request(
+            path = "/devices/$id/rename", method = "POST",
+            jsonBody = buildJsonObject { put("name", name) },
+        )
+        val d = obj.objectOrNull("device")
+        val deviceID = d?.longOrNull("device_id")
+        val newName = d?.stringOrNull("name")
+        // An echo naming a DIFFERENT device is as malformed as a missing one.
+        if (deviceID == null || newName == null || deviceID != id) {
+            throw JournalApiError.Transport("malformed rename response")
+        }
+        // Partial DTO: the rename response carries only identity and the new
+        // name. Callers re-fetch the roster for the full row rather than
+        // trusting these zeros — see DevicesViewModel.rename.
+        return DeviceDTO(
+            id = deviceID, kind = "", name = newName, createdAt = 0,
+            cursor = 0, lag = 0, lastSeenAt = null, isSelf = false,
+        )
     }
 
     // MARK: Agent chat consent

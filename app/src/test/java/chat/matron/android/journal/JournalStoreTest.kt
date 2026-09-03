@@ -684,6 +684,101 @@ class JournalStoreTest {
         assertEquals(0L, store.cursor())
     }
 
+    /// Ports matron-apple's `testSnapshotAndConvoMetaRecordTheOwningBox`.
+    @Test
+    fun snapshotAndConvoMetaRecordTheOwningBox() = runBlocking {
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(
+                ConvoSummaryDTO("c1", "Fix the parser", "running", 5, "", 1, agentDeviceID = 7),
+                ConvoSummaryDTO("c2", "No box", "running", 6, "", 1),
+            ),
+            headSeq = 6,
+        )
+
+        assertEquals(7L, store.conversation("c1")?.agentDeviceID)
+        assertNull(store.conversation("c2")?.agentDeviceID)
+
+        // A later snapshot that omits the field must not clear what we know.
+        store.refreshSummaries(
+            listOf(ConvoSummaryDTO("c1", "Fix the parser", "running", 7, "", 1)),
+        )
+        assertEquals(7L, store.conversation("c1")?.agentDeviceID)
+
+        // A live convo_meta teaches the linkage for a convo we have never seen.
+        store.applyJournal(
+            ev(
+                8, convo = "c3", type = "convo_meta",
+                payload = buildJsonObject { put("title", "Brand new"); put("agent_device_id", 9) },
+            )
+        )
+        assertEquals(9L, store.conversation("c3")?.agentDeviceID)
+
+        // Re-pointing IS allowed: a session resumed on another box legitimately
+        // changes owner, unlike parent_convo_id which is immutable.
+        store.applyJournal(
+            ev(
+                9, convo = "c3", type = "convo_meta",
+                payload = buildJsonObject { put("title", "Brand new"); put("agent_device_id", 11) },
+            )
+        )
+        assertEquals(11L, store.conversation("c3")?.agentDeviceID)
+    }
+
+    /// Ports matron-apple's `testAgentRosterMirrorsSnapshotAndLiveRenames`.
+    @Test
+    fun agentRosterMirrorsSnapshotAndLiveRenames() = runBlocking {
+        val store = makeStore()
+        assertTrue(store.agentNames().isEmpty())
+
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y"), AgentDTO(9, "dev-z")))
+        assertEquals(mapOf(7L to "dev-y", 9L to "dev-z"), store.agentNames())
+
+        // Wholesale replace: a box revoked server-side disappears here too.
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y")))
+        assertEquals(mapOf(7L to "dev-y"), store.agentNames())
+
+        // Null is "this server doesn't say" (a server predating the field) —
+        // the roster is retained.
+        store.replaceAgents(null)
+        assertEquals(mapOf(7L to "dev-y"), store.agentNames())
+
+        // An EMPTY list is the server saying "you have no boxes" — revoking
+        // the last box must clear the roster, not leave stale chips.
+        store.replaceAgents(emptyList())
+        assertTrue(store.agentNames().isEmpty())
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y")))
+
+        // A live rename patches one row without a re-snapshot.
+        store.renameAgent(7, "dev-yellow")
+        assertEquals(mapOf(7L to "dev-yellow"), store.agentNames())
+
+        // A rename for an id NOT in the roster must not create a row: the
+        // server broadcasts `device_meta` for client renames too, and an
+        // upsert would let a renamed phone flip the ≥2-boxes chip gate.
+        // (Divergence from matron-apple, which upserts — see
+        // JournalStore.renameAgent.)
+        store.renameAgent(12, "dev-new")
+        assertNull(store.agentNames()[12])
+        assertEquals(mapOf(7L to "dev-yellow"), store.agentNames())
+    }
+
+    /// Ports matron-apple's `testAgentNamesStreamRefiresOnRename`: the roster
+    /// needs an observation of its own — Room only re-fires a Flow for the
+    /// tables its query reads, and `conversationsFlow()` never reads `agent`,
+    /// so a `device_meta` rename has to reach chip labels through this flow.
+    @Test
+    fun agentNamesFlowRefiresOnRename() = runBlocking {
+        val store = makeStore()
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y"), AgentDTO(9, "dev-z")))
+        store.agentNamesFlow().test {
+            assertEquals(mapOf(7L to "dev-y", 9L to "dev-z"), awaitItem())
+            store.renameAgent(7, "dev-yellow")
+            assertEquals(mapOf(7L to "dev-yellow", 9L to "dev-z"), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
     // MARK: Summary TOC entries (matron-apple #124 port)
 
     private fun summaryEv(seq: Long, convo: String = "c1") = ev(
@@ -737,6 +832,20 @@ class JournalStoreTest {
         assertTrue(store.summaryEntries("c1").isEmpty())
         assertEquals(1L, store.cursor())
         assertEquals(listOf(1L), store.events("c1").map { it.seq })
+    }
+
+    /// Bugbot (#38): a wipe must take the agent roster with it, or a server
+    /// that predates `agents` (replaceAgents(null) keeps what's there) would
+    /// leave stale box names — and the ≥2-boxes chip gate — standing over an
+    /// empty mirror.
+    @Test
+    fun wipeClearsAgentRoster() = runBlocking {
+        val store = makeStore()
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y"), AgentDTO(9, "dev-z")))
+        store.wipe()
+        assertTrue(store.agentNames().isEmpty())
+        store.replaceAgents(null)
+        assertTrue(store.agentNames().isEmpty())
     }
 
     /// Port of matron-apple `JournalStoreTests.testWipeClearsSummaryEntries`.

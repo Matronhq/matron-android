@@ -41,10 +41,12 @@ class VoiceRecorderTest {
     private fun makeRecorder(
         permission: Boolean = true,
         fake: FakeAudioRecorder = FakeAudioRecorder(),
+        keepAwakeCalls: MutableList<Boolean> = mutableListOf(),
     ) = VoiceRecorder(
         requestPermission = { permission },
         makeRecorder = { fake },
         tempDirectory = tempDir(),
+        setKeepScreenAwake = { keepAwakeCalls.add(it) },
     )
 
     @Test
@@ -184,5 +186,41 @@ class VoiceRecorderTest {
         fake.recordReturn = true
         rec.start()
         assertTrue(rec.state.value is VoiceRecorder.State.Recording)
+    }
+
+    // MARK: keep-screen-awake claim/release (apple #159)
+
+    @Test
+    fun start_claimsKeepScreenAwakeWhileRecording() = runBlocking {
+        val calls = mutableListOf<Boolean>()
+        val rec = makeRecorder(keepAwakeCalls = calls)
+        rec.start()
+        assertEquals(listOf(true), calls)
+    }
+
+    @Test
+    fun stop_releasesKeepScreenAwake() = runBlocking {
+        val calls = mutableListOf<Boolean>()
+        val rec = makeRecorder(keepAwakeCalls = calls)
+        rec.start()
+        rec.stop()
+        assertEquals(listOf(true, false), calls)
+    }
+
+    @Test
+    fun cancel_releasesKeepScreenAwake() = runBlocking {
+        val calls = mutableListOf<Boolean>()
+        val rec = makeRecorder(keepAwakeCalls = calls)
+        rec.start()
+        rec.cancel()
+        assertEquals(listOf(true, false), calls)
+    }
+
+    @Test
+    fun start_recordFailure_neverClaimsKeepScreenAwake() = runBlocking {
+        val calls = mutableListOf<Boolean>()
+        val rec = makeRecorder(fake = FakeAudioRecorder(recordReturn = false), keepAwakeCalls = calls)
+        runCatching { rec.start() }
+        assertTrue(calls.isEmpty())
     }
 }

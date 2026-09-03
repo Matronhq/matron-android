@@ -2,6 +2,7 @@ package chat.matron.android.chat
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import chat.matron.android.journal.AgentDTO
 import chat.matron.android.journal.ConvoSummaryDTO
 import chat.matron.android.journal.FakeConnector
 import chat.matron.android.journal.FakeSnapshotSource
@@ -24,6 +25,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -154,6 +156,70 @@ class JournalChatServiceTest {
     @Test fun forceSnapshotIsBestEffortWhenOffline() = runBlocking {
         val service = makeService(makeStore())
         service.forceSnapshot() // must not throw or hang
+    }
+
+    /// Ports matron-apple's `testBoxNameOnlyResolvesWhenTheUserHasTwoOrMoreBoxes`.
+    /// Records come from the store rather than a literal so the real snapshot
+    /// path also proves agent_device_id survives a round trip.
+    @Test fun boxNameOnlyResolvesWhenTheUserHasTwoOrMoreBoxes() = runBlocking {
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(
+                ConvoSummaryDTO("c1", "Fix the parser", "running", 1, "", 1, agentDeviceID = 7),
+                ConvoSummaryDTO("c2", "No box", "running", 1, "", 1),
+                ConvoSummaryDTO("c3", "Old", "done", 1, "", 1, agentDeviceID = 999),
+            ),
+            headSeq = 1,
+        )
+        val owned = store.conversation("c1")!!
+        val orphan = store.conversation("c2")!!
+        val stale = store.conversation("c3")!!
+
+        // One box: no chip anywhere — a single-box user has nothing to
+        // disambiguate and shouldn't pay for the clutter.
+        assertNull(JournalChatService.summary(owned, mapOf(7L to "dev-y")).boxName)
+
+        // Two boxes: the owning box is named.
+        val two = mapOf(7L to "dev-y", 9L to "dev-z")
+        assertEquals("dev-y", JournalChatService.summary(owned, two).boxName)
+        // …but a conversation with no recorded box still shows nothing.
+        assertNull(JournalChatService.summary(orphan, two).boxName)
+        // …and an id that resolves to nothing (revoked box) shows nothing.
+        assertNull(JournalChatService.summary(stale, two).boxName)
+    }
+
+    /// Ports matron-apple's `testRenamingABoxRelabelsAnOpenChatList`: a rename
+    /// arrives as `device_meta`, which writes the `agent` table and nothing
+    /// else — the conversations flow alone never re-fires for it, so the
+    /// summaries stream must observe the roster too (the `combine` in
+    /// `chatSummaries`) or open chips keep the old label until unrelated
+    /// conversation activity happens to re-fire the list.
+    @Test fun renamingABoxRelabelsAnOpenChatList() = runBlocking {
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(ConvoSummaryDTO("c1", "Fix the parser", "running", 1, "", 1, agentDeviceID = 7)),
+            headSeq = 1,
+        )
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y"), AgentDTO(9, "dev-z")))
+        val service = makeService(store, coalesce = 10.milliseconds)
+
+        val probe = FlowProbe(this, service.chatSummaries())
+        // Let the first snapshot (and its "dev-y" chip) land before the
+        // rename, so the relabel is unambiguously a re-emission.
+        val labels = mutableListOf<String?>()
+        labels.add(probe.next().first().boxName)
+
+        store.renameAgent(7, "dev-yellow")
+        while (labels.last() != "dev-yellow") {
+            val label = probe.next().firstOrNull()?.boxName
+            if (labels.last() != label) labels.add(label)
+        }
+        assertEquals(
+            "an agent rename must re-emit summaries with the new chip label",
+            listOf("dev-y", "dev-yellow"),
+            labels,
+        )
+        probe.cancel()
     }
 
     @Test fun refreshThrowsWhenEngineStopped() = runBlocking {

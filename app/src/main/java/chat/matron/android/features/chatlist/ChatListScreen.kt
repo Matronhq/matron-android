@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -41,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.chat.ChatService
 import chat.matron.android.chat.ChatSummary
+import chat.matron.android.designsystem.BoxChip
 import chat.matron.android.designsystem.RelativeMinuteTimeView
 import chat.matron.android.designsystem.SyncBannerState
 import chat.matron.android.designsystem.UnreadBadge
@@ -203,12 +205,32 @@ private fun ChatRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    summary.title,
-                    style = MaterialTheme.typography.bodyLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        summary.title,
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        // fill = false so a long title truncates and the chip
+                        // stays visible (the iOS HStack shrinks Text the same
+                        // way).
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    // Which box owns this conversation. Null unless the user
+                    // has two or more boxes — the gate lives in
+                    // JournalChatService, so this row just renders.
+                    //
+                    // Width-capped: Compose measures the unweighted chip
+                    // BEFORE the weighted title, so an uncapped chip at the
+                    // 40-char name cap would squeeze the title to nothing —
+                    // unlike the iOS HStack, which negotiates space between
+                    // its two texts. The cap keeps the title legible; the
+                    // chip's own Text ellipsizes past it.
+                    summary.boxName?.let { BoxChip(it, modifier = Modifier.widthIn(max = 144.dp)) }
+                }
                 Text(
                     summary.snippet.ifEmpty { " " },
                     style = MaterialTheme.typography.bodySmall,
