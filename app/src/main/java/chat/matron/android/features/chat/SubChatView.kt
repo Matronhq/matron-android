@@ -146,7 +146,7 @@ fun SubChatView(
         }
     }
 
-    previewModel?.let { model ->
-        AttachmentFullscreenViewer(model = model, onDismiss = { previewModel = null })
+    previewModel?.let { tapped ->
+        AttachmentFullscreenViewer(model = (tapped as? TappedImage)?.model ?: tapped, onDismiss = { previewModel = null })
     }
 }

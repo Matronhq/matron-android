@@ -61,6 +61,7 @@ import chat.matron.android.journal.AgentChatDecision
 import chat.matron.android.designsystem.ActivityIndicatorRow
 import chat.matron.android.designsystem.AttachmentFullscreenViewer
 import chat.matron.android.designsystem.ChatSearchBar
+import chat.matron.android.designsystem.ImageGallery
 import chat.matron.android.designsystem.CompactContextBanner
 import chat.matron.android.designsystem.DateSeparator
 import chat.matron.android.designsystem.DateSeparatorLabel
@@ -140,6 +141,32 @@ fun ChatScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var previewModel by remember { mutableStateOf<Any?>(null) }
     val compactScope = rememberCoroutineScope()
+    // The gallery a timeline tap opens: every image in the conversation,
+    // oldest → newest (so swipe-left means "newer", matching the direction
+    // the timeline reads), starting at the tapped one. Built from the same
+    // store mapping the media browser uses, so it covers the whole
+    // conversation rather than the loaded scrollback window; with no
+    // browser factory, or a URL the store doesn't hold yet (an outgoing image
+    // still uploading), the viewer falls back to just the tapped image
+    // (apple #175).
+    var previewGallery by remember { mutableStateOf<ImageGallery?>(null) }
+    LaunchedEffect(previewModel) {
+        val tapped = previewModel
+        if (tapped == null) { previewGallery = null; return@LaunchedEffect }
+        val image = tapped as? TappedImage ?: run { previewGallery = ImageGallery.single(tapped); return@LaunchedEffect }
+        val browser = mediaBrowser?.invoke(compactScope)
+        val stored = if (browser == null || image.url == null) emptyList() else runCatching { browser.imageEntries() }.getOrDefault(emptyList())
+        val entries = stored.asReversed().map { ImageGallery.Entry(it.id.toString(), it.url, it.expired) }
+        val start = entries.indexOfFirst { it.url == image.url }
+        previewGallery = if (browser == null || start < 0) {
+            ImageGallery.single(image.model)
+        } else {
+            ImageGallery(entries, start, image.model) { url ->
+                // The timeline may already hold this neighbour's bytes.
+                chatVM.resolvedImage(url) ?: browser.openMedia(url)
+            }
+        }
+    }
 
     ChatLifecycle(chatVM, stripVM)
 
@@ -381,8 +408,8 @@ fun ChatScreen(
             }
         }
     }
-    previewModel?.let { model ->
-        AttachmentFullscreenViewer(model = model, onDismiss = { previewModel = null })
+    previewGallery?.let { gallery ->
+        AttachmentFullscreenViewer(gallery = gallery, onDismiss = { previewModel = null })
     }
 }
 

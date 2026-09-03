@@ -181,7 +181,9 @@ private fun RenderedBody(
                     model = model,
                     placeholder = if (isExpired) "Image expired" else "Image",
                     caption = kind.caption,
-                    onTap = if (model != null && onTapImage != null) ({ onTapImage(model) }) else null,
+                    // The URL rides along so the viewer can find this image in
+                    // the conversation's gallery (apple #175).
+                    onTap = if (model != null && onTapImage != null) ({ onTapImage(TappedImage(kind.url, model)) }) else null,
                 )
             }
         }
@@ -473,3 +475,8 @@ fun timelineDisplayName(senderID: String): String {
     val withoutSigil = if (senderID.startsWith("@")) senderID.drop(1) else senderID
     return withoutSigil.split(":").firstOrNull()?.takeIf { it.isNotEmpty() } ?: senderID
 }
+
+/// What a timeline image tap hands up: the resolved Coil model plus the
+/// media URL it came from, so the fullscreen viewer can locate the image in
+/// the conversation's gallery and step to its neighbours (apple #175).
+data class TappedImage(val url: String?, val model: Any)

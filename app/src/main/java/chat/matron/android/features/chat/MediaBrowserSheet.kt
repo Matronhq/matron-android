@@ -16,6 +16,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.AttachmentFullscreenViewer
+import chat.matron.android.designsystem.ImageGallery
 import chat.matron.android.designsystem.MediaBrowserFileRow
 import chat.matron.android.designsystem.MediaBrowserLinkRow
 import chat.matron.android.designsystem.MediaBrowserMediaCell
@@ -83,7 +84,7 @@ fun MediaBrowserSheet(
     /// Sheet-local (not `ChatViewModel`) because the browser owns its own
     /// media fetches, mirroring apple #142's `openingMedia`.
     var openingMedia by remember { mutableStateOf(setOf<String>()) }
-    var preview by remember { mutableStateOf<ByteArray?>(null) }
+    var preview by remember { mutableStateOf<ImageGallery?>(null) }
 
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
@@ -130,7 +131,18 @@ fun MediaBrowserSheet(
                                 // load decodes them at screen size. A transient
                                 // failure sets the VM's attachmentError (the
                                 // banner below) so the tap isn't a dead one.
-                                vm.openMedia(url)?.let { preview = it }
+                                vm.openMedia(url)?.let { bytes ->
+                                    // The grid's own list in its own order
+                                    // (newest first), starting at the tapped
+                                    // cell, so "next" is the next cell on
+                                    // screen (apple #175).
+                                    val entries = mediaItems.map { ImageGallery.Entry(it.id.toString(), it.url, it.expired) }
+                                    preview = ImageGallery(
+                                        entries = entries,
+                                        startIndex = mediaItems.indexOfFirst { it.url == url }.coerceAtLeast(0),
+                                        initial = bytes,
+                                    ) { u -> vm.openMedia(u) }
+                                }
                             } finally {
                                 openingMedia = openingMedia - url
                             }
@@ -170,7 +182,7 @@ fun MediaBrowserSheet(
         }
     }
 
-    preview?.let { bytes ->
-        AttachmentFullscreenViewer(model = bytes, onDismiss = { preview = null })
+    preview?.let { gallery ->
+        AttachmentFullscreenViewer(gallery = gallery, onDismiss = { preview = null })
     }
 }
