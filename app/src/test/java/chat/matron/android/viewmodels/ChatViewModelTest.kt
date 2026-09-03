@@ -1307,6 +1307,116 @@ class ChatViewModelTest {
         vm.stop()
     }
 
+    // MARK: - render window cap + slide (apple #166)
+
+    private fun messageIDs(vm: ChatViewModel) = vm.windowedRows.value.mapNotNull { (it as? TimelineRow.Message)?.item?.id }
+
+    /// 600 same-day messages — enough to exercise the cap (360) and the slide
+    /// beyond it.
+    private suspend fun bigVM(scope: CoroutineScope, fake: AppendableFakeTimelineService = AppendableFakeTimelineService()): ChatViewModel {
+        val base = Instant.parse("2026-08-20T10:00:00Z")
+        fake.emit((0 until 600).map { textItem("m$it", "msg $it", timestamp = base.plusSeconds(it.toLong())) })
+        val vm = ChatViewModel("!r:s", fake, FakeMediaService(), scope, InMemoryKeyValueStore())
+        // start() returns the live collection job; this fake's flow never
+        // completes, so joining it would hang. start() itself already awaits
+        // the first snapshot.
+        vm.start()
+        waitUntil { vm.rows.value.size == 600 }
+        return vm
+    }
+
+    @Test
+    fun extendHistoryWindow_capsAtMax_thenSlidesUpThroughHistory() = vmTest { scope ->
+        val vm = bigVM(scope)
+        assertEquals(120, messageIDs(vm).size)
+        assertTrue(vm.windowContainsTail)
+        vm.extendHistoryWindow(); vm.extendHistoryWindow()
+        assertEquals(360, messageIDs(vm).size)
+        assertEquals("m599", messageIDs(vm).last())
+        // At the cap the window slides instead of growing: the newest edge
+        // moves up by a step and pins to a row identity (row ids carry the
+        // "msg:" prefix; the rendered ids below are bare item ids).
+        vm.extendHistoryWindow()
+        assertEquals(360, messageIDs(vm).size)
+        assertFalse(vm.windowContainsTail)
+        assertEquals("msg:m479", vm.windowTailAnchorID.value)
+        assertEquals("m479", messageIDs(vm).last())
+        assertEquals("m120", messageIDs(vm).first())
+        vm.extendHistoryWindow()
+        assertEquals("msg:m359", vm.windowTailAnchorID.value)
+        assertEquals("m0", messageIDs(vm).first())
+        // Nothing older is loaded now: the next extend paginates (the fake
+        // has nothing) and the window holds.
+        vm.extendHistoryWindow()
+        assertEquals("m0", messageIDs(vm).first())
+        vm.stop()
+    }
+
+    @Test
+    fun revealNewerHistory_slidesDown_andReattachesAtTail() = vmTest { scope ->
+        val vm = bigVM(scope)
+        repeat(4) { vm.extendHistoryWindow() }
+        assertEquals("msg:m359", vm.windowTailAnchorID.value)
+        vm.revealNewerHistory()
+        waitUntil { !vm.isExtendingWindow.value }
+        assertEquals("msg:m479", vm.windowTailAnchorID.value)
+        assertEquals("m479", messageIDs(vm).last())
+        vm.revealNewerHistory()
+        waitUntil { !vm.isExtendingWindow.value }
+        assertTrue("reattached at the tail", vm.windowContainsTail)
+        assertEquals("m599", messageIDs(vm).last())
+        assertEquals(360, messageIDs(vm).size)
+        vm.stop()
+    }
+
+    /// Stream appends below a slid window must not move it: the window is
+    /// pinned to a row identity, not a count from the tail.
+    @Test
+    fun streamAppends_doNotMoveAnAnchoredWindow() = vmTest { scope ->
+        val fake = AppendableFakeTimelineService()
+        val vm = bigVM(scope, fake)
+        repeat(3) { vm.extendHistoryWindow() }
+        assertEquals("msg:m479", vm.windowTailAnchorID.value)
+        val before = messageIDs(vm)
+        fake.emit(vm.items.value + textItem("m600", "new", timestamp = Instant.parse("2026-08-20T11:00:00Z")))
+        waitUntil { vm.rows.value.size == 601 }
+        assertEquals(before, messageIDs(vm))
+        assertEquals("msg:m479", vm.windowTailAnchorID.value)
+        vm.stop()
+    }
+
+    /// The anchored row vanishing (a wipe of the region) rescues the window
+    /// to the nearest surviving row it was showing rather than snapping to
+    /// the tail.
+    @Test
+    fun vanishedAnchor_rescuesToNearestSurvivingRow() = vmTest { scope ->
+        val fake = AppendableFakeTimelineService()
+        val vm = bigVM(scope, fake)
+        repeat(3) { vm.extendHistoryWindow() }
+        assertEquals("msg:m479", vm.windowTailAnchorID.value)
+        fake.emit(vm.items.value.filterNot { it.id == "m479" })
+        waitUntil { vm.rows.value.size == 599 }
+        assertEquals("msg:m478", vm.windowTailAnchorID.value)
+        assertEquals("m478", messageIDs(vm).last())
+        vm.stop()
+    }
+
+    /// A deep restore/jump target mounts a capped window around it instead
+    /// of every row between it and the tail.
+    @Test
+    fun ensureWindowContains_deepTarget_capsTheWindowAroundIt() = vmTest { scope ->
+        val vm = bigVM(scope)
+        vm.ensureWindowContains("m10")
+        val ids = messageIDs(vm)
+        assertTrue(ids.size <= ChatViewModel.MAX_WINDOW_SIZE)
+        assertTrue("the target is in the window", "m10" in ids)
+        assertFalse(vm.windowContainsTail)
+        vm.resetHistoryWindow()
+        assertTrue(vm.windowContainsTail)
+        assertEquals(120, messageIDs(vm).size)
+        vm.stop()
+    }
+
     // MARK: - isPromptAnswered / persistence
 
     @Test
@@ -2178,6 +2288,21 @@ private class BlockingPagingFakeTimelineService(
 
     fun release() { gate.complete(Unit) }
 
+    override suspend fun sendText(body: String, inReplyTo: String?) {}
+    override suspend fun sendButtonResponse(selectedValues: List<String>, inReplyTo: String) {}
+    override suspend fun sendImage(data: ByteArray, filename: String, mimeType: String, caption: String?) {}
+    override suspend fun sendFile(data: ByteArray, filename: String, mimeType: String, caption: String?) {}
+    override suspend fun markAsRead() {}
+}
+
+/// Yields an initial snapshot, then lets a test push appended/altered
+/// snapshots through the SAME items() subscription — the shape a live stream
+/// commit takes (apple #166).
+private class AppendableFakeTimelineService : chat.matron.android.chat.TimelineService {
+    private val snapshots = kotlinx.coroutines.flow.MutableSharedFlow<List<TimelineItem>>(replay = 1)
+    fun emit(items: List<TimelineItem>) { snapshots.tryEmit(items) }
+    override fun items(): kotlinx.coroutines.flow.Flow<List<TimelineItem>> = snapshots
+    override suspend fun paginateBackward(requestSize: Int): Boolean = false
     override suspend fun sendText(body: String, inReplyTo: String?) {}
     override suspend fun sendButtonResponse(selectedValues: List<String>, inReplyTo: String) {}
     override suspend fun sendImage(data: ByteArray, filename: String, mimeType: String, caption: String?) {}

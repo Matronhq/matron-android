@@ -282,6 +282,16 @@ class ChatViewModel(
     private var visibleWindowSize = DEFAULT_WINDOW_SIZE
     private var consecutiveNoGrowthPaginates = 0
 
+    /// The row the render window's newest edge is pinned to while the user
+    /// has slid up into history past the cap, or null when the window is
+    /// attached to the tail (apple #166). Identity-anchored, not index-
+    /// anchored, so stream appends below don't move a slid window.
+    private val _windowTailAnchorID = MutableStateFlow<String?>(null)
+    val windowTailAnchorID: StateFlow<String?> = _windowTailAnchorID.asStateFlow()
+
+    /// True while the window's newest edge is the transcript's newest row.
+    val windowContainsTail: Boolean get() = _windowTailAnchorID.value == null
+
     /// Date-separator bucketing zone. Injectable so tests pin a timezone;
     /// re-buckets on change so a late set doesn't desync rows from items.
     var zone: ZoneId = ZoneId.systemDefault()
@@ -657,7 +667,27 @@ class ChatViewModel(
     /// Rebuilds [windowedRows] from [rows] and the window size, re-synthesizing a
     /// leading separator when the cut lands mid-day.
     private fun recomputeWindow() {
-        val window = _rows.value.takeLast(visibleWindowSize).toMutableList()
+        val rows = _rows.value
+        var anchorIdx: Int? = null
+        _windowTailAnchorID.value?.let { anchorID ->
+            anchorIdx = rows.indexOfLast { it.id == anchorID }.takeIf { it >= 0 }
+            if (anchorIdx == null) {
+                // The anchored row vanished (a wipe, a retired echo): rescue
+                // to the nearest surviving row we were showing, else reattach.
+                val rescue = rescueAnchor()
+                if (rescue != null) {
+                    _windowTailAnchorID.value = rescue.first
+                    anchorIdx = rescue.second
+                }
+            }
+        }
+        val window = anchorIdx?.let { upper ->
+            val end = upper + 1
+            rows.subList(maxOf(0, end - visibleWindowSize), end).toMutableList()
+        } ?: run {
+            if (_windowTailAnchorID.value != null) _windowTailAnchorID.value = null
+            rows.takeLast(visibleWindowSize).toMutableList()
+        }
         val head = window.firstOrNull()
         if (head is TimelineRow.Message) {
             window.add(0, TimelineRow.Separator(head.item.timestamp))
@@ -665,26 +695,98 @@ class ChatViewModel(
         _windowedRows.value = window
     }
 
-    // MARK: - History window
+    // MARK: - History window (apple #166: capped at MAX_WINDOW_SIZE and slid
+    // through history on an identity anchor)
 
-    /// Reveals older content: grows the render window over loaded rows first
-    /// (instant), fetching another page only when the window already shows
-    /// everything local. Holds [isExtendingWindow] through the layout pass.
+    /// The nearest surviving row among what the window was showing, newest
+    /// first — durable messages only (an echo or streaming placeholder can
+    /// retire at any moment and would strand the anchor again).
+    private fun rescueAnchor(): Pair<String, Int>? {
+        val rows = _rows.value
+        if (_windowedRows.value.isEmpty() || rows.isEmpty()) return null
+        val indexByID = HashMap<String, Int>(rows.size)
+        rows.forEachIndexed { i, row -> indexByID[row.id] = i }
+        for (row in _windowedRows.value.asReversed()) {
+            val message = row as? TimelineRow.Message ?: continue
+            if (message.item.id.startsWith("echo:") || message.item.id.startsWith("eph:")) continue
+            val i = indexByID[row.id] ?: continue
+            return row.id to i
+        }
+        return null
+    }
+
+    /// The newest durable message row at or below [index] (not below [floor]).
+    private fun anchorID(atOrBelow: Int, floor: Int = 0): String? {
+        val rows = _rows.value
+        var i = atOrBelow
+        while (i >= floor) {
+            val row = rows[i]
+            if (row is TimelineRow.Message && !row.item.id.startsWith("echo:") && !row.item.id.startsWith("eph:")) return row.id
+            i -= 1
+        }
+        return null
+    }
+
+    /// Grows the window over loaded rows up to the cap, then slides it up
+    /// through history on an anchor. Returns false when nothing older is
+    /// loaded (time to paginate).
+    private fun extendWindowUpLocally(): Boolean {
+        val rows = _rows.value
+        val upper = _windowTailAnchorID.value
+            ?.let { id -> rows.indexOfLast { it.id == id }.takeIf { it >= 0 } }
+            ?.let { it + 1 } ?: rows.size
+        val lower = maxOf(0, upper - visibleWindowSize)
+        if (lower <= 0) return false
+        if (visibleWindowSize < MAX_WINDOW_SIZE) {
+            visibleWindowSize = minOf(MAX_WINDOW_SIZE, minOf(upper, visibleWindowSize + WINDOW_GROWTH_STEP))
+        } else {
+            val newUpper = maxOf(visibleWindowSize, upper - WINDOW_GROWTH_STEP)
+            val anchor = anchorID(atOrBelow = newUpper - 1) ?: return true // no durable row to hold — keep the window
+            _windowTailAnchorID.value = anchor
+        }
+        recomputeWindow()
+        return true
+    }
+
+    /// Reveals older content: grows (then slides) the render window over
+    /// loaded rows first (instant), fetching another page only when the
+    /// window already shows everything local. Holds [isExtendingWindow]
+    /// through the layout pass.
     suspend fun extendHistoryWindow() {
         if (_isExtendingWindow.value || isPaginatingBackward) return
-        if (visibleWindowSize < _rows.value.size) {
-            _isExtendingWindow.value = true
-            visibleWindowSize = minOf(_rows.value.size, visibleWindowSize + WINDOW_GROWTH_STEP)
-            recomputeWindow()
+        _isExtendingWindow.value = true
+        if (extendWindowUpLocally()) {
             delay(150)
             _isExtendingWindow.value = false
             return
         }
+        _isExtendingWindow.value = false
         paginateBackward()
-        if (visibleWindowSize < _rows.value.size) {
-            _isExtendingWindow.value = true
-            visibleWindowSize = minOf(_rows.value.size, visibleWindowSize + WINDOW_GROWTH_STEP)
-            recomputeWindow()
+        _isExtendingWindow.value = true
+        if (extendWindowUpLocally()) delay(150)
+        _isExtendingWindow.value = false
+    }
+
+    /// Reveals newer content below a slid window: slides the anchor down a
+    /// step, reattaching at the tail once it reaches the newest rows. A
+    /// no-op while the window contains the tail. Holds [isExtendingWindow]
+    /// through the layout pass like [extendHistoryWindow].
+    fun revealNewerHistory() {
+        if (_isExtendingWindow.value || isPaginatingBackward) return
+        val currentAnchor = _windowTailAnchorID.value ?: return
+        val rows = _rows.value
+        val anchorIdx = rows.indexOfLast { it.id == currentAnchor }.takeIf { it >= 0 } ?: return
+        _isExtendingWindow.value = true
+        val newUpper = anchorIdx + 1 + WINDOW_GROWTH_STEP
+        if (newUpper >= rows.size) {
+            _windowTailAnchorID.value = null
+        } else {
+            val anchor = anchorID(atOrBelow = newUpper - 1)
+            if (anchor != null && anchor != currentAnchor) _windowTailAnchorID.value = anchor
+            // else: only transient rows follow — hold.
+        }
+        recomputeWindow()
+        scope.launch {
             delay(150)
             _isExtendingWindow.value = false
         }
@@ -693,9 +795,18 @@ class ChatViewModel(
     /// Snaps the window back to steady-state. Called only when no reader is up
     /// in history.
     fun resetHistoryWindow() {
-        if (visibleWindowSize == DEFAULT_WINDOW_SIZE) return
+        if (visibleWindowSize == DEFAULT_WINDOW_SIZE && _windowTailAnchorID.value == null) return
         visibleWindowSize = DEFAULT_WINDOW_SIZE
+        _windowTailAnchorID.value = null
         recomputeWindow()
+    }
+
+    /// [resetHistoryWindow], but only if no re-subscription happened since
+    /// [generation] was read — a view's deferred reset must not clobber a
+    /// newer visit's window.
+    fun resetHistoryWindow(ifGeneration: Int) {
+        if (ifGeneration != observationGeneration) return
+        resetHistoryWindow()
     }
 
     /// Widens the window so a remembered scroll position outside the tail window
@@ -705,15 +816,25 @@ class ChatViewModel(
             if (row is TimelineRow.Message) row.item.id == id else row.id == id
         }
         if (index < 0) return
-        val needed = _rows.value.size - index + 20
-        if (needed > visibleWindowSize) {
-            _isExtendingWindow.value = true
-            visibleWindowSize = needed
-            recomputeWindow()
-            scope.launch {
-                delay(150)
-                _isExtendingWindow.value = false
-            }
+        val rows = _rows.value
+        val needed = rows.size - index + 20
+        if (needed <= MAX_WINDOW_SIZE) {
+            // Within the cap: widen from the tail as before.
+            if (needed <= visibleWindowSize && _windowTailAnchorID.value == null) return
+            _windowTailAnchorID.value = null
+            visibleWindowSize = maxOf(visibleWindowSize, minOf(MAX_WINDOW_SIZE, needed))
+        } else {
+            // Deep target: mount a capped window around it instead of every
+            // row between it and the tail (apple #166).
+            val anchor = anchorID(atOrBelow = minOf(rows.lastIndex, index + 20), floor = index) ?: rows[index].id
+            _windowTailAnchorID.value = anchor
+            visibleWindowSize = MAX_WINDOW_SIZE
+        }
+        _isExtendingWindow.value = true
+        recomputeWindow()
+        scope.launch {
+            delay(150)
+            _isExtendingWindow.value = false
         }
     }
 
@@ -1383,6 +1504,10 @@ class ChatViewModel(
 
         private const val DEFAULT_WINDOW_SIZE = 120
         private const val WINDOW_GROWTH_STEP = 120
+
+        /// Most rows the window ever renders; beyond this it slides on an
+        /// anchor instead of growing (apple #166).
+        const val MAX_WINDOW_SIZE = 360
         private const val NO_GROWTH_LIMIT = 2
         private const val SNAPSHOT_POLL_MS = 50L
 

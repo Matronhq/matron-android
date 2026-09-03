@@ -507,8 +507,19 @@ fun TimelineList(
     var followTail by remember { mutableStateOf(true) }
     var paginating by remember { mutableStateOf(false) }
 
-    // A user scroll away from the bottom drops follow-tail; returning re-arms it.
-    LaunchedEffect(atBottom) { followTail = atBottom }
+    // A user scroll away from the bottom drops follow-tail; returning re-arms
+    // it — unless the window has slid up into history: the bottom of a
+    // DETACHED window is phantom (rows exist below it), so no follow from
+    // there. The near-bottom effect below owns the slide back down, and the
+    // first settle after it reattaches re-arms here (apple #166). Keyed on
+    // atBottom ONLY: the anchor is read as a guard, not a key, so a reset
+    // (jump, own send) can't re-run this and clobber their explicit
+    // follow with a still-false atBottom (Bugbot, #61).
+    val windowTailAnchorID by chatVM.windowTailAnchorID.collectAsStateWithLifecycle()
+    LaunchedEffect(atBottom) {
+        if (!atBottom) followTail = false
+        else if (chatVM.windowTailAnchorID.value == null) followTail = true
+    }
 
     // Your own outgoing message always returns you to the bottom, even if
     // follow-tail was disarmed when you sent it (matron-apple ChatView.swift
@@ -518,6 +529,9 @@ fun TimelineList(
     // they can't trigger this, only a genuinely new tail row can.
     LaunchedEffect(lastRenderableItemID) {
         if (lastRenderableItemID != null && chatVM.lastRenderableItemIsOwn) {
+            // The tail row isn't mounted while the window is detached —
+            // re-anchor first, or the pin lands on the slid edge (Bugbot, #61).
+            if (chatVM.windowTailAnchorID.value != null) chatVM.resetHistoryWindow()
             followTail = true
         }
     }
@@ -528,6 +542,9 @@ fun TimelineList(
     // optional activity footer sits one further past the last row.
     LaunchedEffect(followTail, lastRenderableItemID, rows.size, activityLabel) {
         if (followTail && rows.isNotEmpty()) {
+            // Following implies the window contains the tail; a slid window
+            // reattaches (the size change re-runs this effect on the new rows).
+            if (chatVM.windowTailAnchorID.value != null) chatVM.resetHistoryWindow()
             val lastIndex = rows.size + if (activityLabel != null) 1 else 0
             listState.scrollToItem(lastIndex)
         }
@@ -557,6 +574,19 @@ fun TimelineList(
                 }
             }
         }
+    }
+
+    // Near-bottom of a window that has slid up into history → slide it back
+    // down toward the tail (apple #166). The pin-to-tail effect never runs
+    // while the window is detached, so this is the only way back.
+    LaunchedEffect(listState, windowTailAnchorID) {
+        if (windowTailAnchorID == null) return@LaunchedEffect
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
+            .distinctUntilChanged()
+            .collect { last ->
+                val total = listState.layoutInfo.totalItemsCount
+                if (last != null && total > 0 && last >= total - 3) chatVM.revealNewerHistory()
+            }
     }
 
     // Near-top → grow the history window and paginate backward over HTTP.
@@ -609,7 +639,11 @@ fun TimelineList(
 
         if (!followTail) {
             JumpToBottomButton(
-                onClick = { followTail = true },
+                onClick = {
+                    // A detached window has no tail row to scroll to — re-anchor first.
+                    if (chatVM.windowTailAnchorID.value != null) chatVM.resetHistoryWindow()
+                    followTail = true
+                },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(16.dp),
@@ -800,6 +834,10 @@ private fun ChatLifecycle(chatVM: ChatViewModel, stripVM: SubChatStripViewModel)
         val stripGeneration = stripVM.observationGeneration
         onDispose {
             chatVM.stop(chatGeneration)
+            // Trim a slid/widened window on a genuine leave so re-entry opens
+            // at the tail. Same generation guard as the stop: on a same-room
+            // remount the successor may already own the window (apple #166).
+            chatVM.resetHistoryWindow(chatGeneration)
             stripVM.stop(stripGeneration)
         }
     }
