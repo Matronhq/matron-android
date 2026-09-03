@@ -435,10 +435,15 @@ class AppDependencies(
     suspend fun migrateBoxLetters(session: UserSession) {
         if (!boxLetterOverrides.claim(session.userID)) return
         val core = core(session)
+        // Seed the mirror from the relics FIRST, against the roster the store
+        // already holds: an offline launch must not lose the custom letters
+        // for the whole session just because GET /devices failed (Bugbot,
+        // #57). seedAgentTagChars only fills NULL rows, so a journal-held tag
+        // that already arrived wins.
+        val known = runCatching { core.store.agentNames().keys }.getOrDefault(emptySet())
+        runCatching { core.store.seedAgentTagChars(boxLetterOverrides.all().filterKeys { it in known }) }
         val devices = runCatching { core.api.devices() }.getOrNull() ?: return
         val serverTags = devices.filter { it.kind == "agent" }.associate { it.id to it.tagChar }
-        val seed = boxLetterOverrides.all().filter { (id, _) -> id in serverTags && serverTags[id] == null }
-        runCatching { core.store.seedAgentTagChars(seed) }
         BoxLetterMigration.run(boxLetterOverrides, serverTags) { id, letter -> core.api.setDeviceTag(id, letter) }
     }
 
