@@ -54,6 +54,7 @@ import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.UserSession
 import chat.matron.android.platform.AndroidBiometricAuthenticator
 import chat.matron.android.viewmodels.AppLockController
+import chat.matron.android.viewmodels.KeyValueBoxCapacityCache
 import chat.matron.android.viewmodels.ChatListViewModel
 import chat.matron.android.viewmodels.LinkSignInViewModel
 import chat.matron.android.viewmodels.MediaBrowserViewModel
@@ -438,6 +439,7 @@ private fun SignedInApp(
         ModalBottomSheet(onDismissRequest = { showNewChat = false }, sheetState = sheetState) {
             NewChatSheet(
                 api = deps.agentRPCService(session),
+                capacityCache = KeyValueBoxCapacityCache(session.userID, deps.preferences),
                 prepareConversation = { id -> deps.prepareConversation(session, id) },
                 onCreated = { convoID ->
                     showNewChat = false

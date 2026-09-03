@@ -78,7 +78,7 @@ class NewChatViewModelTest {
                 agent(4, name = "dev-9", connected = true),
             ),
         )
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         val phase = vm.phase.value
         assertTrue(phase is NewChatViewModel.Phase.Agents)
@@ -90,7 +90,7 @@ class NewChatViewModelTest {
         val fake = FakeAgentRPCProvider()
         fake.devicesResult = Result.success(listOf(agent(9, connected = true), agent(2, connected = false)))
         fake.replies["recent_folders"] = foldersReply("""{"folders":[{"path":"/home/dan/app","last_used":100}]}""")
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         val phase = vm.phase.value
         assertTrue(phase is NewChatViewModel.Phase.Folders)
@@ -105,7 +105,7 @@ class NewChatViewModelTest {
         fake.replies["recent_folders"] = foldersReply(
             """{"folders":[{"path":"/never","last_used":null},{"path":"/old","last_used":100},{"path":"/new","last_used":900}]}""",
         )
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         assertEquals(listOf("/new", "/old", "/never"), vm.folders.value.map { it.path })
         assertNull(vm.folders.value.last().lastUsed)
@@ -116,7 +116,7 @@ class NewChatViewModelTest {
         val fake = FakeAgentRPCProvider()
         fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
         fake.rpcError = RPCRequestError.Timeout
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         assertTrue(vm.phase.value is NewChatViewModel.Phase.Folders)
         assertNotNull(vm.foldersError.value)
@@ -129,7 +129,7 @@ class NewChatViewModelTest {
         fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
         fake.replies["recent_folders"] = foldersReply("""{"folders":[]}""")
         fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         vm.browserEnabled = true
         vm.start("~/dev/app")
@@ -146,7 +146,7 @@ class NewChatViewModelTest {
         fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
         fake.replies["recent_folders"] = foldersReply("""{"folders":[]}""")
         fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         vm.start("  ")
         val params = fake.requests.last().params
@@ -168,7 +168,7 @@ class NewChatViewModelTest {
             fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
             fake.replies["recent_folders"] = foldersReply("""{"folders":[]}""")
             fake.replies["start"] = reply
-            val vm = NewChatViewModel(fake)
+            val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
             vm.load()
             vm.start("/x")
             assertEquals(expected, vm.errorMessage.value)
@@ -181,7 +181,7 @@ class NewChatViewModelTest {
         val fake = FakeAgentRPCProvider()
         fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
         fake.replies["recent_folders"] = foldersReply("""{"folders":[]}""")
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         fake.rpcError = RPCRequestError.Timeout
         vm.start("/x")
@@ -194,7 +194,7 @@ class NewChatViewModelTest {
         fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
         fake.replies["recent_folders"] = foldersReply("""{"folders":[]}""")
         fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{}"""))
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         vm.start("/x")
         assertNotNull(vm.errorMessage.value)
@@ -207,7 +207,7 @@ class NewChatViewModelTest {
         fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
         fake.replies["recent_folders"] = foldersReply("""{"folders":[]}""")
         fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         val first = async { vm.start("/x") }
         val second = async { vm.start("/x") }
@@ -220,7 +220,7 @@ class NewChatViewModelTest {
         val fake = FakeAgentRPCProvider()
         fake.devicesResult = Result.success(listOf(agent(3, connected = true), agent(4, connected = true)))
         fake.replies["recent_folders"] = foldersReply("""{"folders":[]}""")
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         val phase = vm.phase.value
         assertTrue(phase is NewChatViewModel.Phase.Agents)
@@ -245,7 +245,7 @@ class NewChatViewModelTest {
         fake.repliesByDevice[1] =
             foldersReply("""{"folders":[],"account":{"email":"pat@yearbook.com"},"activity":{"live_sessions":2}}""")
         fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         assertEquals(
             listOf(1L, 2L),
@@ -265,7 +265,7 @@ class NewChatViewModelTest {
         )
         fake.repliesByDevice[1] = foldersReply("""{"folders":[],"activity":{"live_sessions":1}}""")
         fake.repliesByDevice[2] = RPCReply.Failure("agent_unreachable", null)
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         assertEquals(1, vm.capacities.value[1L]?.liveSessions)
         assertNull(vm.capacities.value[2L])
@@ -279,7 +279,7 @@ class NewChatViewModelTest {
         fake.devicesResult = Result.success(agents)
         fake.repliesByDevice[1] = foldersReply("""{"folders":[{"path":"/w/app","last_used":100}]}""")
         fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         val callsBefore = fake.requests.count { it.method == "recent_folders" }
         vm.select(agents[0])
@@ -294,7 +294,7 @@ class NewChatViewModelTest {
         fake.devicesResult = Result.success(agents)
         fake.repliesByDevice[1] = RPCReply.Failure("agent_unreachable", null)
         fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         fake.repliesByDevice[1] = foldersReply("""{"folders":[{"path":"/late","last_used":1}]}""")
         vm.select(agents[0])
@@ -319,7 +319,7 @@ class NewChatViewModelTest {
             ),
         )
         fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         val loading = async { vm.load() }
         // Let load() post the roster and park box 1's fan-out on the gate.
         while (fake.requests.count { it.method == "recent_folders" } < 2) yield()
@@ -354,7 +354,7 @@ class NewChatViewModelTest {
             ),
         )
         fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
-        val vm = NewChatViewModel(fake)
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         val loading = async { vm.load() }
         while (fake.requests.count { it.method == "recent_folders" } < 2) yield()
 
