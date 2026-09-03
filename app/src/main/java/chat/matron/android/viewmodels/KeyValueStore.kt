@@ -50,13 +50,6 @@ interface KeyValueStore {
     fun getIntOrNull(key: String): Int?
 
     fun setInt(key: String, value: Int)
-
-    /// The string stored under [key], or `null` when unset.
-    fun getString(key: String): String?
-    fun setString(key: String, value: String)
-
-    /// Drops whatever is stored under [key]; a no-op when unset.
-    fun remove(key: String)
 }
 
 /// `SharedPreferences`-backed [KeyValueStore]. Order-preserving via JSON.
@@ -97,16 +90,6 @@ class SharedPreferencesKeyValueStore(
 
     override fun setInt(key: String, value: Int) {
         prefs.edit().putInt(key, value).apply()
-    }
-
-    override fun getString(key: String): String? = prefs.getString(key, null)
-
-    override fun setString(key: String, value: String) {
-        prefs.edit().putString(key, value).apply()
-    }
-
-    override fun remove(key: String) {
-        prefs.edit().remove(key).apply()
     }
 
     private companion object {

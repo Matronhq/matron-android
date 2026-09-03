@@ -157,17 +157,16 @@ class NewChatViewModel(
         }
         try {
             val reply = api.agentRequest(agent.id, "recent_folders", "{}")
+            // A fleet with one connected box auto-skips the roster and never
+            // fans out, so this is the only reply that box's capacity can be
+            // learned from before it goes to sleep. Recorded off the answer
+            // rather than off the phase — BEFORE the switched-away check — so
+            // a start fired from the custom-folder field while this reply was
+            // still in flight can't discard it (Bugbot, #51).
+            if (reply is RPCReply.Ok) capacityCache.save(BoxCapacity.parse(reply.result), agent.id, now())
             if (!sameFolderAgent(agent)) return // switched away meanwhile
             when (reply) {
-                is RPCReply.Ok -> {
-                    _folders.value = parseFolders(reply.result)
-                    // A fleet with one connected box auto-skips the roster and
-                    // never fans out, so this is the only reply that box's
-                    // capacity can be learned from before it goes to sleep.
-                    // Recorded off the answer rather than off the phase: it is
-                    // true whether or not the user has moved on since.
-                    capacityCache.save(BoxCapacity.parse(reply.result), agent.id, now())
-                }
+                is RPCReply.Ok -> _folders.value = parseFolders(reply.result)
                 is RPCReply.Failure -> folderFetchFailed(agent)
             }
         } catch (cancel: CancellationException) {

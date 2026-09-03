@@ -2,7 +2,9 @@ package chat.matron.android.viewmodels
 
 import chat.matron.android.journal.DeviceDTO
 import chat.matron.android.journal.RPCReply
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -145,6 +147,30 @@ class NewChatViewModelOfflineCapacityTest {
         makeVM(fake, cache).load()
         assertEquals(3, cache.loadAll()[9L]?.capacity?.liveSessions)
         assertEquals(now, cache.loadAll()[9L]?.capturedAtMs)
+    }
+
+    /// Bugbot (#51): the capacity is recorded off the answer, not the phase —
+    /// a start fired from the custom-folder field while the live folder reply
+    /// is still in flight moves the phase to Done, and the quota must still land.
+    @Test
+    fun select_persistsCapacityEvenIfThePhaseMovedOnMeanwhile() = runBlocking {
+        val fake = object : AgentRPCProviding {
+            val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            override suspend fun devices() = listOf(agent(9, "only", true))
+            override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply {
+                if (method == "recent_folders") { gate.await(); return ok("""{"folders":[],"activity":{"live_sessions":3}}""") }
+                return ok("""{"convo_id":"c-new"}""")
+            }
+        }
+        val cache = InMemoryBoxCapacityCache()
+        val vm = NewChatViewModel(fake, cache, now = { now })
+        val loading = launch { vm.load() } // auto-skips into select(), parks on the reply
+        yield()
+        vm.start("/w") // custom path, before the folder reply lands → phase Done
+        assertTrue(vm.phase.value is NewChatViewModel.Phase.Done)
+        fake.gate.complete(Unit)
+        loading.join()
+        assertEquals(3, cache.loadAll()[9L]?.capacity?.liveSessions)
     }
 
     /// A cache seed for a box that has since come online is dropped on the
