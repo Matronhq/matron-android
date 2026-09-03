@@ -7,6 +7,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -42,6 +43,34 @@ class JournalMediaServiceTest {
 
     @Test fun imageForURLNotUnderMediaPathReturnsNilWithoutRequest() = runBlocking {
         assertNull(service.image("mxc://matrix.example.com/abc123"))
+        assertEquals(0, server.requestCount)
+    }
+
+    // MARK: fetchOutcome (port of apple #139's JournalMediaService.fetchOutcome)
+
+    @Test fun fetchOutcomeForKnownBlobReturnsData() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("PNGDATA"))
+        val outcome = service.fetchOutcome(server.url("/media/b1").toString())
+        assertTrue(outcome is MediaFetchOutcome.Data)
+        assertEquals("PNGDATA", String((outcome as MediaFetchOutcome.Data).bytes))
+    }
+
+    /// The server's 404 is definitive — the blob was reaped and ids are
+    /// immutable — so it must surface as NotFound, not a retryable failure.
+    @Test fun fetchOutcomeSurfaces404AsNotFound() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("""{"error":"not_found"}"""))
+        assertEquals(MediaFetchOutcome.NotFound, service.fetchOutcome(server.url("/media/b1").toString()))
+    }
+
+    @Test fun fetchOutcomeMapsServerErrorToFailure() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(500).setBody("boom"))
+        assertEquals(MediaFetchOutcome.Failure, service.fetchOutcome(server.url("/media/b1").toString()))
+    }
+
+    /// A URL outside this journal's media namespace is Failure, not NotFound —
+    /// we know nothing definitive about it, and no request is made.
+    @Test fun fetchOutcomeForForeignURLIsFailureWithoutRequest() = runBlocking {
+        assertEquals(MediaFetchOutcome.Failure, service.fetchOutcome("mxc://matrix.example.com/abc123"))
         assertEquals(0, server.requestCount)
     }
 }

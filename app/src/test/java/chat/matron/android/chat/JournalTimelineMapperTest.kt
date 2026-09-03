@@ -5,6 +5,7 @@ import chat.matron.android.journal.ActivityUpdate
 import chat.matron.android.journal.JournalEvent
 import java.time.Instant
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
@@ -407,6 +408,43 @@ class JournalTimelineMapperTest {
             put("blob_ref", "b3"); put("name", "contract.pdf"); put("caption", "review this before Friday")
         }))!!
         assertEquals("review this before Friday", (item.kind as TimelineItem.Kind.File).caption)
+    }
+
+    /// A reaped attachment (journal media reaper, matron-journal#63) arrives
+    /// tombstoned: blob_ref null + expired:true, with name/size/caption intact
+    /// — the kind must carry the flag so the chip can say "Expired" instead of
+    /// offering a dead download. Ports apple #139
+    /// `testExpiredFileTombstoneMapsWithExpiredFlag`.
+    @Test fun expiredFileTombstoneMapsWithExpiredFlag() {
+        val item = map(ev(1, "file", payload = buildJsonObject {
+            put("blob_ref", JsonNull); put("name", "old.pdf"); put("size", 1234); put("expired", true)
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.File
+        assertNull(kind.url)
+        assertEquals("old.pdf", kind.filename)
+        assertEquals(1234L, kind.sizeBytes)
+        assertTrue(kind.expired)
+    }
+
+    /// Ports apple #139 `testExpiredImageTombstoneMapsWithExpiredFlag`.
+    @Test fun expiredImageTombstoneMapsWithExpiredFlag() {
+        val item = map(ev(1, "image", payload = buildJsonObject {
+            put("blob_ref", JsonNull); put("caption", "old shot"); put("expired", true)
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.Image
+        assertNull(kind.url)
+        assertEquals("old shot", kind.caption)
+        assertTrue(kind.expired)
+    }
+
+    /// Live attachments must not read as expired — the flag defaults false
+    /// when the payload carries none. Ports apple #139
+    /// `testLiveAttachmentIsNotExpired`.
+    @Test fun liveAttachmentIsNotExpired() {
+        val item = map(ev(1, "file", payload = buildJsonObject {
+            put("blob_ref", "b1"); put("name", "a.pdf")
+        }))!!
+        assertFalse((item.kind as TimelineItem.Kind.File).expired)
     }
 
     // MARK: Agent-chat consent card

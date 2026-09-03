@@ -33,12 +33,29 @@ data class TimelineItem(
         // deliberately so card/view code holding just the Kind can still
         // correlate against store events without threading the parent id through.
         data class Text(val body: String, val formattedHTML: String?) : Kind
-        data class Image(val url: String?, val caption: String?, val sizeBytes: Long?) : Kind
+        /// [expired]: the journal's media reaper deleted this attachment's
+        /// blob and tombstoned the event (`expired: true`, `blob_ref` null —
+        /// matron-journal#63). Name/size/caption survive for rendering; the
+        /// bytes are permanently gone, so the UI shows "Expired" instead of
+        /// offering a dead download. Only fresh syncs carry the flag — a
+        /// client that synced the event before the reap discovers expiry via
+        /// the 404 on fetch (`ChatViewModel.isMediaUnavailable`). Defaulted
+        /// `false` (Kotlin idiom) — which also folds in apple #140, whose
+        /// whole diff was updating construction sites the Swift enum change
+        /// broke.
+        data class Image(
+            val url: String?,
+            val caption: String?,
+            val sizeBytes: Long?,
+            val expired: Boolean = false,
+        ) : Kind
         data class File(
             val url: String?,
             val filename: String,
             val caption: String?,
             val sizeBytes: Long?,
+            /// See [Image.expired].
+            val expired: Boolean = false,
         ) : Kind
         /// Member joins, name changes — a state event rendered as a small inline
         /// notice. Currently unproduced: no journal event type maps to this kind

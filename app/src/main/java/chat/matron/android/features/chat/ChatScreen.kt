@@ -459,6 +459,13 @@ private fun TimelineRowView(
     // answer is an HTTP call with no journal event behind it, so nothing in the
     // timeline snapshot would otherwise change.
     val agentChatStates by chatVM.agentChatStates.collectAsStateWithLifecycle()
+    // Collected so a file chip's spinner appears on tap and clears when the
+    // open/share fires — the download flips no timeline snapshot either
+    // (port of apple #138).
+    val downloadingFiles by chatVM.downloadingFiles.collectAsStateWithLifecycle()
+    // Collected so a 404 discovered at fetch time flips the chip/image to its
+    // Expired presentation without a timeline change (port of apple #139).
+    val unavailableMedia by chatVM.unavailableMedia.collectAsStateWithLifecycle()
     // Same idea for agent-spawn cards, but two sources: the durable
     // resolution (a `spawn_outcome` event arriving IS a snapshot change, but
     // the card is a different row than the outcome row it resolves) and the
@@ -485,6 +492,8 @@ private fun TimelineRowView(
                     onRetry = { id -> chatVM.retrySend(id) },
                     onTapImage = { model -> onPreviewImage(model) },
                     onTapFile = onTapFile,
+                    isDownloadingFile = { url -> url in downloadingFiles },
+                    isMediaUnavailable = { url -> url in unavailableMedia },
                     askViewModel = { id -> chatVM.askViewModel(id) },
                     isPromptAnswered = { id -> chatVM.isPromptAnswered(id) },
                     answerSummary = { id -> chatVM.answerSummary(id) },

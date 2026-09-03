@@ -1,6 +1,8 @@
 package chat.matron.android.chat
 
 import chat.matron.android.journal.JournalApi
+import chat.matron.android.journal.JournalApiError
+import kotlinx.coroutines.CancellationException
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
@@ -15,6 +17,23 @@ class JournalMediaService(private val api: JournalApi) : MediaService {
     override suspend fun image(url: String): ByteArray? {
         val blobRef = blobRef(url, api.serverURL) ?: return null
         return runCatching { api.mediaData(blobRef) }.getOrNull()
+    }
+
+    /// Surfaces the server's 404 as [MediaFetchOutcome.NotFound] so the
+    /// attachment paths can mark a reaped blob permanently unavailable instead
+    /// of treating every failure as retryable (port of apple #139). A URL
+    /// outside this journal's media namespace is `Failure`, not `NotFound` —
+    /// we know nothing definitive about it.
+    override suspend fun fetchOutcome(url: String): MediaFetchOutcome {
+        val blobRef = blobRef(url, api.serverURL) ?: return MediaFetchOutcome.Failure
+        return try {
+            MediaFetchOutcome.Data(api.mediaData(blobRef))
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            if (error is JournalApiError.NotFound) MediaFetchOutcome.NotFound
+            else MediaFetchOutcome.Failure
+        }
     }
 
     companion object {
