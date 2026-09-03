@@ -74,9 +74,14 @@ class SubChatStripViewModel(
         /// `null` when [body] isn't one. The indicator is always the whole
         /// message (modulo surrounding whitespace), never an infix.
         fun subtaskDescription(fromMessageBody: String): String? {
-            val trimmed = fromMessageBody.trim()
-            if (!trimmed.startsWith(SUBTASK_INDICATOR_PREFIX)) return null
-            val description = trimmed.removePrefix(SUBTASK_INDICATOR_PREFIX).trim()
+            // Runs for EVERY message row on every list-body evaluation, so it
+            // must bail without copying the body: skip leading whitespace by
+            // index, prefix-check in place, and only then touch the (short)
+            // remainder. The old full `trim()` copied every message body on
+            // every evaluation (apple #167).
+            val start = fromMessageBody.indexOfFirst { !it.isWhitespace() }
+            if (start < 0 || !fromMessageBody.startsWith(SUBTASK_INDICATOR_PREFIX, startIndex = start)) return null
+            val description = fromMessageBody.substring(start + SUBTASK_INDICATOR_PREFIX.length).trim()
             return description.ifEmpty { null }
         }
 
