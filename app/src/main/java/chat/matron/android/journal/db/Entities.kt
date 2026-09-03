@@ -5,7 +5,9 @@ import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import chat.matron.android.journal.JournalEvent
+import chat.matron.android.journal.JournalEventType
 import chat.matron.android.journal.parseJsonObjectOrNull
+import chat.matron.android.journal.stringOrNull
 import java.time.Instant
 import kotlinx.serialization.json.JsonObject
 
@@ -61,6 +63,36 @@ data class EventEntity(
             type = event.type,
             payload = event.payload.toString(),
         )
+    }
+}
+
+/// One TOC entry per bridge summary pass. Derived from `summary` journal
+/// events; the event's own seq is the transcript anchor. Table/column names
+/// match the matron-apple GRDB schema (`summary_entry`, added there in v4).
+@Entity(tableName = "summary_entry", primaryKeys = ["convo_id", "seq"], indices = [Index("convo_id")])
+data class SummaryEntryEntity(
+    @ColumnInfo(name = "convo_id") val convoID: String,
+    val seq: Long,
+    val toc: String,
+    val detail: String,
+    /// Milliseconds since epoch, like every other Long timestamp column here.
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+) {
+    companion object {
+        /// `null` unless [event] is a `summary` frame with a usable (non-empty)
+        /// `toc` — the same accept/skip contract as the Apple
+        /// `SummaryEntryRecord(event:)` failable init.
+        fun from(event: JournalEvent): SummaryEntryEntity? {
+            if (event.type != JournalEventType.SUMMARY) return null
+            val toc = event.payload.stringOrNull("toc")?.takeIf { it.isNotEmpty() } ?: return null
+            return SummaryEntryEntity(
+                convoID = event.convoID,
+                seq = event.seq,
+                toc = toc,
+                detail = event.payload.stringOrNull("detail") ?: "",
+                createdAt = event.ts.toEpochMilli(),
+            )
+        }
     }
 }
 
