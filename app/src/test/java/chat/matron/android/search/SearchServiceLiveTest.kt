@@ -74,5 +74,59 @@ class SearchServiceLiveTest {
     fun recordAndReadBackfill() = runBlocking {
         svc.recordBackfillProgress("!r:s", indexedCount = 100, oldestEventID = "old", complete = true)
         assertTrue(svc.backfillComplete("!r:s"))
+        assertEquals("old", svc.backfillOldestEventID("!r:s"))
+    }
+
+    /// Apple PR #130: the backfill coordinator hands a whole fetched page to
+    /// `indexBatch` so it lands in one write transaction. Rows must be
+    /// queryable afterwards exactly as if indexed one by one.
+    @Test
+    fun indexBatchRoundTripsAllEntries() = runBlocking {
+        val ts = Instant.ofEpochSecond(1_745_000_000)
+        svc.indexBatch(
+            listOf(
+                SearchIndexEntry("!r:s", "e1", "@a:s", ts, "alpha message"),
+                SearchIndexEntry("!r:s", "e2", "@b:s", ts, "beta message"),
+                SearchIndexEntry("!other:s", "e3", "@c:s", ts, "gamma message"),
+            )
+        )
+        assertEquals(2, svc.eventCount("!r:s"))
+        assertEquals(1, svc.eventCount("!other:s"))
+        val hits = svc.query("beta", 10)
+        assertEquals(1, hits.size)
+        assertEquals("e2", hits[0].id)
+        assertEquals("@b:s", hits[0].sender)
+    }
+
+    /// Apple PR #130: batch indexing keeps [SearchServiceLive.index]'s
+    /// idempotency — re-batching an already-indexed event replaces its row
+    /// instead of duplicating it (backfill overlaps the live feeders).
+    @Test
+    fun indexBatchIsIdempotentOnEventId() = runBlocking {
+        svc.index("!r:s", "e1", "@a:s", Instant.now(), "first")
+        svc.indexBatch(listOf(SearchIndexEntry("!r:s", "e1", "@a:s", Instant.now(), "second")))
+        assertEquals(1, svc.eventCount("!r:s"))
+        assertEquals(0, svc.query("first", 10).size)
+        assertEquals(1, svc.query("second", 10).size)
+    }
+
+    @Test
+    fun indexBatchWithNoEntriesIsANoOp() = runBlocking {
+        svc.indexBatch(emptyList())
+        assertEquals(0, svc.eventCount("!r:s"))
+    }
+
+    /// resetBackfill clears the bookkeeping (so a sweep re-walks every room
+    /// from its head) while leaving indexed messages searchable.
+    @Test
+    fun resetBackfillClearsBookkeepingButKeepsMessages() = runBlocking {
+        svc.index("!r:s", "e1", "@a:s", Instant.now(), "durable needle")
+        svc.recordBackfillProgress("!r:s", indexedCount = 1, oldestEventID = "e1", complete = true)
+
+        svc.resetBackfill()
+
+        assertFalse(svc.backfillComplete("!r:s"))
+        assertEquals(null, svc.backfillOldestEventID("!r:s"))
+        assertEquals(1, svc.query("needle", 10).size)
     }
 }

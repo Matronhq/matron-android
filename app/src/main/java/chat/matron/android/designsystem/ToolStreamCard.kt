@@ -48,9 +48,17 @@ fun ToolStreamCard(
     initiallyExpanded: Boolean = false,
 ) {
     var expanded by remember { mutableStateOf(initiallyExpanded) }
-    // Full re-parse per text change: the timeline caps display text at 64 KiB,
-    // so a stateful incremental parse isn't worth carrying UI-side state for.
-    val rendered = remember(text, headTruncated) { renderStream(text, headTruncated) }
+    // Full re-parse per text change: a stateful incremental parse isn't worth
+    // carrying UI-side state for at these sizes (collapsed 4 KiB via
+    // [collapsedSlice], expanded 64 KiB max).
+    val rendered = remember(text, headTruncated, expanded) {
+        if (expanded) {
+            renderStream(text, headTruncated)
+        } else {
+            val (shown, cut) = collapsedSlice(text)
+            renderStream(shown, headTruncated || cut)
+        }
+    }
 
     Column(
         modifier
@@ -88,6 +96,38 @@ fun ToolStreamCard(
         }
         TerminalPane(output = rendered, expanded = expanded)
     }
+}
+
+/// How much of the stream tail a COLLAPSED pane renders. Ported from
+/// matron-apple's `ToolStreamCard.collapsedDisplayCapChars` (Apple PR #130).
+/// The timeline caps delivered text at 64 KiB, and re-parsing + re-laying-out
+/// all of it on every append is what a live command's card cost the main
+/// thread several times a second — while the collapsed pane is 76dp tall and
+/// shows ~5 lines. 4 KiB is hundreds of terminal lines, far more than the
+/// pane can scroll into view before the next append lands. Expanding renders
+/// the full tail.
+internal const val COLLAPSED_DISPLAY_CAP_CHARS = 4096
+
+/// The slice of [text] a collapsed pane renders: the last
+/// [COLLAPSED_DISPLAY_CAP_CHARS] characters, opened at a line boundary. The
+/// second value reports whether anything was dropped (the caller shows the
+/// truncation notice). Internal so tests can pin the cap and the line-boundary
+/// contract without composing. Ported from matron-apple's
+/// `ToolStreamCard.collapsedSlice` (Apple PR #130).
+internal fun collapsedSlice(text: String): Pair<String, Boolean> {
+    if (text.length <= COLLAPSED_DISPLAY_CAP_CHARS) return text to false
+    var shown = text.takeLast(COLLAPSED_DISPLAY_CAP_CHARS)
+    // Drop the (almost certainly partial) first line so the cut never opens
+    // mid-word or inside a split ANSI escape sequence — but only when that
+    // line ends within the first few hundred characters. Terminal lines are
+    // short; a newline that far in means the tail is effectively one giant
+    // line, and trimming through it would throw away most (or, when the only
+    // newline is the final character, ALL) of the visible text (Bugbot,
+    // Apple PR #130).
+    val scanEnd = minOf(512, shown.length)
+    val newline = shown.substring(0, scanEnd).indexOf('\n')
+    if (newline >= 0) shown = shown.substring(newline + 1)
+    return shown to true
 }
 
 /// Prepends the head-truncation notice (fixed dim grey, not a semantic colour —

@@ -232,6 +232,10 @@ class JournalStore(
     suspend fun conversations(now: Long = System.currentTimeMillis()): List<ConversationEntity> =
         conversationDao.visibleTopLevel().map { applyReadTimeSnippetTTL(it, now) }
 
+    /// Every conversation id, most recent activity first — the search
+    /// backfill sweep's walk order (see [chat.matron.android.search.SearchBackfillCoordinator]).
+    suspend fun allConversationIDs(): List<String> = conversationDao.allConversationIDs()
+
     suspend fun children(parentConvoID: String): List<ConversationEntity> =
         conversationDao.children(parentConvoID)
 
