@@ -50,6 +50,11 @@ data class RecentFolder(val path: String, val lastUsed: Long?)
 /// and `agent_unreachable` read the same to the user.
 class NewChatViewModel(
     private val api: AgentRPCProviding,
+    // Not defaulted: the cache is namespaced per account, and a convenient
+    // default here would be a silent app-global one (apple #164).
+    private val capacityCache: BoxCapacityCaching,
+    /// Injected clock (epoch ms), so tests can pin capture times.
+    private val now: () -> Long = System::currentTimeMillis,
 ) {
     sealed interface Phase {
         data object LoadingAgents : Phase
@@ -88,6 +93,19 @@ class NewChatViewModel(
     /// answered skips a second `recent_folders` round trip.
     private val folderCache = mutableMapOf<Long, List<RecentFolder>>()
 
+    /// Capture times for the entries in [capacities] that came out of the
+    /// cache rather than off the wire this visit. Only offline boxes are ever
+    /// seeded, so a key here means exactly "this row is showing last-known
+    /// numbers" — see [capacityFreshness].
+    private val capacityCapturedAt = mutableMapOf<Long, Long>()
+
+    /// How much a row's capacity numbers can be trusted: live for a box this
+    /// visit asked, cached-with-an-age for an offline box seeded from the
+    /// store. A box with no entry at all reads [AgentCapacityFreshness.Live] —
+    /// it has nothing to disclaim, and its row shows nothing either way.
+    fun capacityFreshness(agentID: Long): AgentCapacityFreshness =
+        capacityCapturedAt[agentID]?.let { AgentCapacityFreshness.Offline(it) } ?: AgentCapacityFreshness.Live
+
     var customPath: String = ""
     var browserEnabled: Boolean = false
 
@@ -104,7 +122,19 @@ class NewChatViewModel(
                 // The roster is already on screen (the phase flow was set
                 // first); this only fills in the capacity lines behind it.
                 val connectedIDs = connected.map { it.id }
+                val offlineIDs = agents.filter { !it.connected }.map { it.id }
                 _capacityPending.value = connectedIDs.toSet()
+                // Two entries never survive a reload: a box this fan-out won't
+                // ask at all (nothing would ever revalidate it — it is
+                // re-seeded from the cache below instead, captioned with its
+                // age), and a cache seed for a box that has since come online
+                // (never confirmed against the running box, so keeping it
+                // would launder disk data into an uncaptioned, live-looking
+                // row).
+                val refreshing = connectedIDs.toSet()
+                _capacities.value = _capacities.value.filterKeys { it in refreshing && capacityCapturedAt[it] == null }
+                capacityCapturedAt.clear()
+                seedOfflineCapacities(connected = refreshing, offline = offlineIDs)
                 coroutineScope {
                     for (id in connectedIDs) launch { fetchCapacity(id) }
                 }
@@ -129,7 +159,15 @@ class NewChatViewModel(
             val reply = api.agentRequest(agent.id, "recent_folders", "{}")
             if (!sameFolderAgent(agent)) return // switched away meanwhile
             when (reply) {
-                is RPCReply.Ok -> _folders.value = parseFolders(reply.result)
+                is RPCReply.Ok -> {
+                    _folders.value = parseFolders(reply.result)
+                    // A fleet with one connected box auto-skips the roster and
+                    // never fans out, so this is the only reply that box's
+                    // capacity can be learned from before it goes to sleep.
+                    // Recorded off the answer rather than off the phase: it is
+                    // true whether or not the user has moved on since.
+                    capacityCache.save(BoxCapacity.parse(reply.result), agent.id, now())
+                }
                 is RPCReply.Failure -> folderFetchFailed(agent)
             }
         } catch (cancel: CancellationException) {
@@ -204,7 +242,13 @@ class NewChatViewModel(
         try {
             val reply = api.agentRequest(agentID, "recent_folders", "{}")
             if (reply is RPCReply.Ok) {
-                _capacities.value = _capacities.value + (agentID to BoxCapacity.parse(reply.result))
+                val capacity = BoxCapacity.parse(reply.result)
+                _capacities.value = _capacities.value + (agentID to capacity)
+                // These numbers came off the wire, so the row must not carry an
+                // age caption for them; and they are what the row will show
+                // once the host puts this box to sleep.
+                capacityCapturedAt.remove(agentID)
+                capacityCache.save(capacity, agentID, now())
                 val folders = parseFolders(reply.result)
                 folderCache[agentID] = folders
                 // The folder step may already be showing this box with its own
@@ -226,12 +270,36 @@ class NewChatViewModel(
         }
     }
 
+    /// Fills the rows of boxes the host has put to sleep with what they last
+    /// reported. Nothing here is ever asked for over the wire — that is the
+    /// whole point: the user picks which box to wake by its remaining quota.
+    private fun seedOfflineCapacities(connected: Set<Long>, offline: List<Long>) {
+        // The roster is the authority on which boxes exist; an unpaired box
+        // would otherwise sit in the cache forever with nothing to refresh it.
+        capacityCache.prune(keeping = connected + offline)
+        val cached = capacityCache.loadAll()
+        val moment = now()
+        val seeded = mutableMapOf<Long, BoxCapacity>()
+        for (id in offline) {
+            val entry = cached[id] ?: continue
+            if (moment - entry.capturedAtMs > MAX_CACHED_CAPACITY_AGE_MS) continue
+            seeded[id] = entry.capacity
+            capacityCapturedAt[id] = entry.capturedAtMs
+        }
+        if (seeded.isNotEmpty()) _capacities.value = _capacities.value + seeded
+    }
+
     private fun sameFolderAgent(agent: DeviceDTO): Boolean {
         val phaseNow = _phase.value
         return phaseNow is Phase.Folders && phaseNow.agent.id == agent.id
     }
 
     companion object {
+        /// How stale a cached capacity may be before it stops being worth
+        /// showing: past this, every limit window it describes has rolled over
+        /// several times, so the percentages say nothing about the box today.
+        const val MAX_CACHED_CAPACITY_AGE_MS: Long = 7L * 86_400_000
+
         fun sorted(agents: List<DeviceDTO>): List<DeviceDTO> =
             agents.sortedWith(compareByDescending<DeviceDTO> { it.connected }.thenBy { it.name })
 

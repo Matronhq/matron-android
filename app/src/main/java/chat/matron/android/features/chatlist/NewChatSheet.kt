@@ -38,7 +38,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.UsageMetersFormat
 import chat.matron.android.journal.DeviceDTO
 import chat.matron.android.viewmodels.AgentRPCProviding
+import chat.matron.android.viewmodels.AgentCapacityFreshness
 import chat.matron.android.viewmodels.BoxCapacity
+import chat.matron.android.viewmodels.BoxCapacityCaching
 import chat.matron.android.viewmodels.NewChatViewModel
 import chat.matron.android.viewmodels.lastSeenText
 import kotlinx.coroutines.launch
@@ -52,12 +54,15 @@ import kotlinx.coroutines.launch
 @Composable
 fun NewChatSheet(
     api: AgentRPCProviding,
+    /// Per-account last-known capacity store, so sleeping boxes still show
+    /// their quota (apple #164).
+    capacityCache: BoxCapacityCaching,
     prepareConversation: suspend (String) -> Unit,
     onCreated: (String) -> Unit,
     onCancel: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val viewModel = remember { NewChatViewModel(api) }
+    val viewModel = remember { NewChatViewModel(api, capacityCache) }
     val phase by viewModel.phase.collectAsStateWithLifecycle()
     val folders by viewModel.folders.collectAsStateWithLifecycle()
     val foldersError by viewModel.foldersError.collectAsStateWithLifecycle()
@@ -108,6 +113,9 @@ fun NewChatSheet(
                         agent = agent,
                         capacity = capacities[agent.id],
                         capacityPending = agent.id in capacityPending,
+                        // Read after `capacities` so a reload's seed and its
+                        // freshness recompose together.
+                        freshness = capacities.let { viewModel.capacityFreshness(agent.id) },
                         onClick = { scope.launch { viewModel.select(agent) } },
                     )
                 }
@@ -199,6 +207,7 @@ private fun AgentRow(
     agent: DeviceDTO,
     capacity: BoxCapacity?,
     capacityPending: Boolean,
+    freshness: AgentCapacityFreshness = AgentCapacityFreshness.Live,
     onClick: () -> Unit,
 ) {
     Row(
@@ -235,10 +244,11 @@ private fun AgentRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (!agent.connected) {
-                // Offline rows stay exactly as they were — no capacity to show.
-            } else if (capacity != null) {
-                capacity.liveSessions?.let { live ->
+            if (capacity != null && capacityHasContent(capacity, freshness)) {
+                // Cached blocks drop the live-session count — a suspended box
+                // runs nothing — while quota lines survive because they
+                // describe a window (apple #164).
+                shownSessions(capacity, freshness)?.let { live ->
                     Text(
                         if (live == 0) "No active sessions" else "$live active session" + if (live == 1) "" else "s",
                         style = MaterialTheme.typography.bodySmall,
@@ -266,7 +276,9 @@ private fun AgentRow(
                             "${line.percent}%",
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.Medium,
-                            color = if (expired) MaterialTheme.colorScheme.outline
+                            // Last-known numbers de-emphasise too: a tint would
+                            // vouch for them as current.
+                            color = if (expired || freshness.isStale) MaterialTheme.colorScheme.outline
                             else UsageMetersFormat.barColor(line.percent),
                         )
                         BoxCapacity.resetText(line.resetsAt, nowMs)?.let {
@@ -278,6 +290,13 @@ private fun AgentRow(
                         }
                     }
                 }
+                freshness.ageText()?.let { age ->
+                    Text(
+                        age,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                }
             } else if (capacityPending) {
                 Text(
                     "Checking…",
@@ -288,6 +307,18 @@ private fun AgentRow(
         }
     }
 }
+
+/// The live-session count a row shows: never for last-known numbers — a
+/// suspended box runs nothing, and the count would be a lie. Pure so it's
+/// unit-testable (apple #164's `shownSessions`).
+internal fun shownSessions(capacity: BoxCapacity?, freshness: AgentCapacityFreshness): Int? =
+    if (freshness.isStale) null else capacity?.liveSessions
+
+/// Whether a capacity block renders anything at all under this freshness —
+/// a sessions line, quota lines, or (cached) an account email.
+internal fun capacityHasContent(capacity: BoxCapacity, freshness: AgentCapacityFreshness): Boolean =
+    shownSessions(capacity, freshness) != null || capacity.limitLines.isNotEmpty() ||
+        (freshness.isStale && capacity.accountEmail != null)
 
 @Composable
 private fun LoadingRow(label: String) {

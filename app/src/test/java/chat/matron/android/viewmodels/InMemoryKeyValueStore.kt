@@ -20,7 +20,19 @@ class InMemoryKeyValueStore : KeyValueStore {
         booleans[key] = value
     }
 
+    private val strings = mutableMapOf<String, String>()
+
     override fun getIntOrNull(key: String): Int? = integers[key]
+
+    override fun getString(key: String): String? = strings[key]
+
+    override fun setString(key: String, value: String) {
+        strings[key] = value
+    }
+
+    override fun remove(key: String) {
+        storage.remove(key); booleans.remove(key); integers.remove(key); strings.remove(key)
+    }
 
     override fun setInt(key: String, value: Int) {
         integers[key] = value

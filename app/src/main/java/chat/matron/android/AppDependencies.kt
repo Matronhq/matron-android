@@ -41,6 +41,7 @@ import chat.matron.android.viewmodels.DevicesProviding
 import chat.matron.android.viewmodels.JournalAgentRPCService
 import chat.matron.android.viewmodels.JournalDeviceLinkService
 import chat.matron.android.viewmodels.JournalDevicesService
+import chat.matron.android.viewmodels.KeyValueBoxCapacityCache
 import chat.matron.android.viewmodels.KeyValueStore
 import chat.matron.android.viewmodels.RecentStartFolders
 import chat.matron.android.viewmodels.SharedPreferencesKeyValueStore
@@ -418,6 +419,7 @@ class AppDependencies(
      */
     fun signOut() {
         val oldCores = cores.values.toList()
+        val oldUserIDs = cores.keys.toList()
         // Chain onto any previous teardown: overwriting the job would leave
         // awaitPendingTeardown() watching only the newest one while an older
         // wipe/close still runs (bugbot "Sign-out drops prior teardown job").
@@ -452,6 +454,10 @@ class AppDependencies(
             }
             runCatching { search?.wipe() }
                 .onFailure { MatronDebug.breadcrumb("signOut: search.wipe failed: $it") }
+            // The chooser's last-known capacity cache is per account (agent
+            // device ids are only unique within a journal) and would otherwise
+            // outlive the sign-out (apple #164).
+            for (userID in oldUserIDs) KeyValueBoxCapacityCache.removeAll(userID, preferences)
         }
         cores.clear()
         mediaServices.clear()
