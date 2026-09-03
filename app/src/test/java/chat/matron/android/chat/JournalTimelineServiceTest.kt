@@ -862,6 +862,93 @@ class JournalTimelineServiceTest {
         assertEquals(listOf("1"), collector.last()!!.map { it.id })
         task.cancel(); engine.endSync()
     }
+
+    // MARK: - windowed events fetch (apple #171)
+
+    /// The observation covers only the newest [fetchWindow] rows; a scroll-up
+    /// reveals older mirror rows locally, page by page, with no network.
+    @Test fun windowedFetchRevealsOlderMirrorRowsLocally() = runBlocking {
+        val store = makeStore()
+        for (seq in 1L..12L) store.applyJournal(ev(seq, payload = body("m$seq")))
+        val socket = FakeWebSocketConnection().also { it.serve(helloOK(12)) }
+        // An API nobody can reach: a network paginate would throw, so a
+        // passing test proves the reveal stayed local.
+        val api = JournalApi("https://127.0.0.1:1")
+        val engine = makeEngine(store, FakeConnector(listOf(socket)), api)
+        val service = JournalTimelineService("c1", store, engine, api, makeSession(), fetchWindow = 4)
+        engine.beginSync()
+        engine.waitUntilReady()
+        val (collector, task) = collectItems(service.items())
+        waitUntil { collector.last()?.size == 4 }
+        assertEquals(listOf("9", "10", "11", "12"), collector.last()!!.map { it.id })
+
+        // A local reveal pages at max(requestSize, LOCAL_REVEAL_PAGE_LIMIT),
+        // so one scroll-up surfaces the rest of the mirror — no network.
+        assertTrue(service.paginateBackward(3))
+        waitUntil { collector.last()?.size == 12 }
+        assertEquals((1..12).map { it.toString() }, collector.last()!!.map { it.id })
+        task.cancel()
+        engine.endSync()
+    }
+
+    /// Bugbot (#60): a paginate that runs BEFORE items() subscribes (the
+    /// summaries jump, a restore) must not prepend remote rows under a
+    /// window that doesn't exist yet — the mirror rows between them and the
+    /// window would never be revealed. Everything mirrored must surface.
+    @Test fun paginateBeforeSubscribe_neverGapsTheMirror() = runBlocking {
+        val server = MockWebServer().apply {
+            enqueue(
+                MockResponse().setBody(
+                    """{"events":[{"seq":1,"convo_id":"c1","ts":1000,"sender":"agent:a","type":"text","payload":{"body":"remote"}}]}"""
+                )
+            )
+            start()
+        }
+        try {
+            val store = makeStore()
+            for (seq in 2L..8L) store.applyJournal(ev(seq, payload = body("m$seq")))
+            val socket = FakeWebSocketConnection().also { it.serve(helloOK(8)) }
+            val api = JournalApi(server.url("/"))
+            val engine = makeEngine(store, FakeConnector(listOf(socket)), api)
+            val service = JournalTimelineService("c1", store, engine, api, makeSession(), fetchWindow = 3)
+            assertTrue(service.paginateBackward(5)) // no subscription yet → network, store only
+            engine.beginSync()
+            engine.waitUntilReady()
+            val (collector, task) = collectItems(service.items())
+            waitUntil { collector.last()?.size == 3 }
+            assertEquals(listOf("6", "7", "8"), collector.last()!!.map { it.id })
+            assertTrue(service.paginateBackward(3))
+            waitUntil { collector.last()?.size == 8 }
+            assertEquals((1..8).map { it.toString() }, collector.last()!!.map { it.id })
+            task.cancel()
+            engine.endSync()
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    /// A live row landing in the window still delivers after older rows were
+    /// revealed beneath it: the merge keeps both halves.
+    @Test fun windowedFetchKeepsRevealedHistoryWhenTheTailGrows() = runBlocking {
+        val store = makeStore()
+        for (seq in 1L..6L) store.applyJournal(ev(seq, payload = body("m$seq")))
+        val socket = FakeWebSocketConnection().also { it.serve(helloOK(6)) }
+        val api = JournalApi("https://127.0.0.1:1")
+        val engine = makeEngine(store, FakeConnector(listOf(socket)), api)
+        val service = JournalTimelineService("c1", store, engine, api, makeSession(), fetchWindow = 2)
+        engine.beginSync()
+        engine.waitUntilReady()
+        val (collector, task) = collectItems(service.items())
+        waitUntil { collector.last()?.size == 2 }
+        assertTrue(service.paginateBackward(2))
+        waitUntil { collector.last()?.size == 6 }
+        store.applyJournal(ev(7, payload = body("m7")))
+        waitUntil { collector.last()?.size == 7 }
+        assertEquals((1..7).map { it.toString() }, collector.last()!!.map { it.id })
+        task.cancel()
+        engine.endSync()
+    }
+
 }
 
 /// Records every `index(...)` call so pagination tests can assert on the fed

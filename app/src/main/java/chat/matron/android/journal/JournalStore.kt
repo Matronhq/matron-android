@@ -539,6 +539,26 @@ class JournalStore(
     fun eventsFlow(convoID: String): Flow<List<JournalEvent>> =
         eventDao.forConversationFlow(convoID).map { list -> list.map { it.toJournalEvent() } }
 
+    /// The conversation's rows at or after [sinceSeq], observed. Deduplicated:
+    /// Room re-fires on every commit touching the table, and most of those
+    /// change nothing in this window (apple #171).
+    fun eventsFlow(convoID: String, sinceSeq: Long): Flow<List<JournalEvent>> =
+        eventDao.forConversationSinceFlow(convoID, sinceSeq)
+            .map { list -> list.map { it.toJournalEvent() } }
+            .distinctUntilChanged()
+
+    /// Where a tail window of [limit] rows starts: the seq of the [limit]-th
+    /// newest row, or 0 when the conversation holds fewer (so the window is
+    /// the whole history).
+    suspend fun tailWindowStart(convoID: String, limit: Int): Long =
+        eventDao.seqAtNewestOffset(convoID, (limit - 1).coerceAtLeast(0)) ?: 0L
+
+    /// Up to [limit] rows strictly older than [beforeSeq], ascending — the
+    /// local page a backward paginate reveals before it reaches for the
+    /// network.
+    suspend fun eventsBefore(convoID: String, beforeSeq: Long, limit: Int): List<JournalEvent> =
+        eventDao.beforeSeqNewestFirst(convoID, beforeSeq, limit).asReversed().map { it.toJournalEvent() }
+
     /// Live stream of one conversation's outbox rows (queued + failed, oldest
     /// first). The timeline renders these as pending/failed echoes; re-fires on
     /// enqueue, state change, and delivery-confirmed delete.
