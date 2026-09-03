@@ -163,6 +163,16 @@ class MediaBrowserViewModel(
 
     fun isUnavailable(url: String): Boolean = url in _unavailableMedia.value
 
+    /// The conversation's images as the media grid lists them — store order
+    /// (newest first), tombstones kept. This is the list the fullscreen
+    /// viewer's previous/next stepping walks; it goes through the same
+    /// mapping as [load] and so can never disagree with the grid (apple #175).
+    suspend fun imageEntries(): List<MediaEntry> =
+        store.attachmentEvents(convoID).mapNotNull { event ->
+            val item = JournalTimelineMapper.timelineItem(event, ownSender = "", serverURL = serverURL) ?: return@mapNotNull null
+            (item.kind as? TimelineItem.Kind.Image)?.let { MediaEntry(event.seq, it.url, it.caption, it.expired) }
+        }
+
     /// Fetch one grid thumbnail's bytes. A 404 is permanent (blob ids are
     /// immutable; the journal reaper deletes over-quota blobs) — the entry
     /// flips to expired and is never re-fetched. A transient failure returns

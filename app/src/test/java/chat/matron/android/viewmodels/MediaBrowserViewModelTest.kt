@@ -324,4 +324,34 @@ class MediaBrowserViewModelTest {
         )
         assertEquals("exactly one fetchOutcome call for two overlapping requests", 1, media.requestCount)
     }
+
+
+    private fun galleryEvent(seq: Long, type: String, blob: String?, expired: Boolean = false) = JournalEvent(
+        seq = seq, convoID = "c1", ts = Instant.ofEpochSecond(seq), sender = "agent:a", type = type,
+        payload = buildJsonObject {
+            if (blob != null) put("blob_ref", blob)
+            if (expired) put("expired", true)
+            if (type == "file") put("name", "f.txt")
+        },
+    )
+
+    private fun imageEvent(seq: Long, blob: String, expired: Boolean = false) = galleryEvent(seq, "image", if (expired) null else blob, expired)
+    private fun fileEvent(seq: Long) = galleryEvent(seq, "file", "f")
+
+    /// apple #175: the viewer's gallery is the grid's own image list — store
+    /// order (newest first), images only, tombstones kept.
+    @Test
+    fun imageEntries_returnsOnlyImagesInStoreOrder() = vmTest { scope ->
+        val store = FakeBrowserStore(
+            attachments = listOf(
+                imageEvent(seq = 30, blob = "c"),
+                fileEvent(seq = 20),
+                imageEvent(seq = 10, blob = "a", expired = true),
+            ),
+        )
+        val vm = makeVM(scope = scope, store = store)
+        val entries = vm.imageEntries()
+        assertEquals(listOf(30L, 10L), entries.map { it.id })
+        assertEquals(listOf(false, true), entries.map { it.expired })
+    }
 }
