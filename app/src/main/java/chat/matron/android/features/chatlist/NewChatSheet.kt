@@ -23,6 +23,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,10 +72,17 @@ fun NewChatSheet(
     val isStarting by viewModel.isStarting.collectAsStateWithLifecycle()
     val capacities by viewModel.capacities.collectAsStateWithLifecycle()
     val capacityPending by viewModel.capacityPending.collectAsStateWithLifecycle()
+    val isWakingBox by viewModel.isWakingBox.collectAsStateWithLifecycle()
+    val wakeStartedAt by viewModel.wakeStartedAt.collectAsStateWithLifecycle()
+    val wakeGaveUp by viewModel.wakeGaveUp.collectAsStateWithLifecycle()
 
     var navigated by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { viewModel.load() }
+    // Anything that removes the sheet counts as abandoning the flow —
+    // including the wake loops, which would otherwise keep re-asking a box
+    // (and a retried start could silently spawn a session) for two minutes.
+    DisposableEffect(Unit) { onDispose { viewModel.abandon() } }
     LaunchedEffect(phase) {
         val done = phase as? NewChatViewModel.Phase.Done ?: return@LaunchedEffect
         if (navigated) return@LaunchedEffect
@@ -124,9 +133,15 @@ fun NewChatSheet(
             is NewChatViewModel.Phase.Folders -> {
                 val agent = current.agent
                 Text("Folder on ${agent.name}", style = MaterialTheme.typography.labelMedium)
+                if (isWakingBox) {
+                    WakingRow(agent.name, wakeStartedAt)
+                } else if (wakeGaveUp) {
+                    TextButton(onClick = { scope.launch { viewModel.retryWake() } }) { Text("Try Again") }
+                }
                 when {
                     foldersError != null -> Text(foldersError!!, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    folders.isEmpty() -> Text("No recent folders on ${agent.name}.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    folders.isEmpty() && !isWakingBox && !wakeGaveUp ->
+                        Text("No recent folders on ${agent.name}.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 folders.forEach { folder ->
                     Column(
@@ -213,7 +228,9 @@ private fun AgentRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = agent.connected, onClick = onClick)
+            // Asleep rows are pickable too: the journal wakes the box on the
+            // first ask (apple #168).
+            .clickable(onClick = onClick)
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -240,7 +257,7 @@ private fun AgentRow(
                 }
             }
             Text(
-                if (agent.connected) "Connected" else "Offline · Last seen ${agent.lastSeenText()}",
+                if (agent.connected) "Connected" else "Asleep · Last seen ${agent.lastSeenText()} — tap to wake",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -319,6 +336,34 @@ internal fun shownSessions(capacity: BoxCapacity?, freshness: AgentCapacityFresh
 internal fun capacityHasContent(capacity: BoxCapacity, freshness: AgentCapacityFreshness): Boolean =
     shownSessions(capacity, freshness) != null || capacity.limitLines.isNotEmpty() ||
         (freshness.isStale && capacity.accountEmail != null)
+
+/// "Waking dev-7…" with a live elapsed-time caption while a wake loop runs.
+@Composable
+private fun WakingRow(agentName: String, wakeStartedAt: Long?) {
+    val elapsed by produceState(0L, wakeStartedAt) {
+        while (true) {
+            value = wakeStartedAt?.let { (System.currentTimeMillis() - it) / 1000 } ?: 0L
+            kotlinx.coroutines.delay(1_000)
+        }
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier.padding(vertical = 8.dp),
+    ) {
+        CircularProgressIndicator(modifier = Modifier.padding(2.dp), strokeWidth = 2.dp)
+        Column {
+            Text("Waking $agentName…")
+            if (wakeStartedAt != null) {
+                Text(
+                    if (elapsed < 60) "${elapsed}s" else "${elapsed / 60}m ${elapsed % 60}s",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
 
 @Composable
 private fun LoadingRow(label: String) {
