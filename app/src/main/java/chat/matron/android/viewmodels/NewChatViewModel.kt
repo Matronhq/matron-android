@@ -40,6 +40,15 @@ class JournalAgentRPCService(
         engine.agentRequest(agentDeviceID, method, paramsJson)
 }
 
+/// One model a bridge offers on its `recent_folders` reply (`model_options`):
+/// [value] is the alias the `start` RPC's `model` param takes, [label] is what
+/// the picker shows for it. Deliberately not `SessionStatus.Option` (same wire
+/// shape, different job — that one rides a per-conversation status frame and
+/// keeps its label optional): this is chooser data, keyed for a list and
+/// always displayable. [label] is never empty — the parser falls back to
+/// [value] (apple #169).
+data class ModelOption(val value: String, val label: String)
+
 /// One entry of a bridge's `recent_folders` answer. [lastUsed] (epoch ms) is
 /// `null` for "available but never used here" — sorts last, reads "never used".
 data class RecentFolder(val path: String, val lastUsed: Long?)
@@ -80,6 +89,42 @@ class NewChatViewModel(
 
     private val _isStarting = MutableStateFlow(false)
     val isStarting: StateFlow<Boolean> = _isStarting.asStateFlow()
+
+    // MARK: model picker (apple #169)
+
+    /// The model alias `start` will carry, or null for the bridge's own
+    /// default — the picker's "Default" row. Only ever set to a value the
+    /// current box listed (see [adoptModelOptions]).
+    private val _selectedModel = MutableStateFlow<String?>(null)
+    val selectedModel: StateFlow<String?> = _selectedModel.asStateFlow()
+
+    /// What the box on the folder step offers, in bridge order. Empty for a
+    /// bridge that doesn't send `model_options` at all, which hides the
+    /// picker rather than showing an empty menu.
+    private val _modelOptions = MutableStateFlow<List<ModelOption>>(emptyList())
+    val modelOptions: StateFlow<List<ModelOption>> = _modelOptions.asStateFlow()
+
+    /// Model offers learned by the fan-out, keyed by device — same lifetime
+    /// as [folderCache], since both come out of the one `recent_folders`
+    /// reply and both are wrong the moment that reply is re-asked for.
+    private val modelOptionsCache = mutableMapOf<Long, List<ModelOption>>()
+
+    /// The picker's choice: null is the bridge's default.
+    fun selectModel(value: String?) {
+        _selectedModel.value = value
+    }
+
+    /// Points the picker at one box's offer, and drops a selection that
+    /// offer doesn't contain. A model this box doesn't list can't start a
+    /// session here — carrying the previous box's pick across the switch
+    /// would send an alias the bridge answers `bad_model` to. A box that
+    /// offers nothing (older bridge) hides the picker, which is the same
+    /// situation: back to the bridge's default.
+    private fun adoptModelOptions(options: List<ModelOption>) {
+        _modelOptions.value = options
+        val picked = _selectedModel.value
+        if (picked != null && options.none { it.value == picked }) _selectedModel.value = null
+    }
 
     // MARK: wake-on-pick (apple #168)
     //
@@ -170,6 +215,7 @@ class NewChatViewModel(
                 // (never confirmed against the running box, so keeping it
                 // would launder disk data into an uncaptioned, live-looking
                 // row).
+                modelOptionsCache.clear()
                 val refreshing = connectedIDs.toSet()
                 _capacities.value = _capacities.value.filterKeys { it in refreshing && capacityCapturedAt[it] == null }
                 capacityCapturedAt.clear()
@@ -196,6 +242,9 @@ class NewChatViewModel(
         _phase.value = Phase.Folders(agent)
         _folders.value = emptyList()
         _foldersError.value = null
+        // Model offers are per-box, so the step opens on what this box is
+        // known to offer — nothing, until its own reply lands.
+        adoptModelOptions(modelOptionsCache[agent.id] ?: emptyList())
         if (!agent.connected) {
             // The first ask has already booted the box server-side; keep
             // asking until the bridge connects.
@@ -216,7 +265,10 @@ class NewChatViewModel(
             recordCapacity(reply, agent.id)
             if (!sameFolderAgent(agent)) return // switched away meanwhile
             when (reply) {
-                is RPCReply.Ok -> _folders.value = parseFolders(reply.result)
+                is RPCReply.Ok -> {
+                    _folders.value = parseFolders(reply.result)
+                    adoptModelOptions(parseModelOptions(reply.result))
+                }
                 // The roster's `connected` is a snapshot; a box idle-stopped
                 // since then answers agent_unreachable — which has already
                 // fired its wake, so it gets the wake loop, not the degrade copy.
@@ -286,6 +338,7 @@ class NewChatViewModel(
                     when (reply) {
                         is RPCReply.Ok -> {
                             _folders.value = parseFolders(reply.result)
+                            adoptModelOptions(parseModelOptions(reply.result))
                             return
                         }
                         is RPCReply.Failure -> if (reply.code != AGENT_UNREACHABLE) {
@@ -352,6 +405,10 @@ class NewChatViewModel(
             val params = buildJsonObject {
                 if (trimmed.isNotEmpty()) put("workdir", trimmed)
                 if (browserEnabled) put("browser", true)
+                // null is the bridge's own default model, and the bridge
+                // distinguishes "no opinion" from any alias it knows — so
+                // omit the key entirely.
+                _selectedModel.value?.let { put("model", it) }
             }
             try {
                 var reply = api.agentRequest(agent.id, "start", params.toString())
@@ -420,6 +477,7 @@ class NewChatViewModel(
                 capacityCache.save(capacity, agentID, now())
                 val folders = parseFolders(reply.result)
                 folderCache[agentID] = folders
+                modelOptionsCache[agentID] = parseModelOptions(reply.result)
                 // The folder step may already be showing this box with its own
                 // live fetch failed (it raced ahead of this reply): swap the
                 // fan-out's answer in rather than leaving a stale error over a
@@ -480,6 +538,27 @@ class NewChatViewModel(
         fun sorted(agents: List<DeviceDTO>): List<DeviceDTO> =
             agents.sortedWith(compareByDescending<DeviceDTO> { it.connected }.thenBy { it.name })
 
+        /// Reads `model_options` out of a `recent_folders` reply. Like every
+        /// block a bridge attaches there it is optional: an absent key is an
+        /// older bridge, and parses to no offer rather than to a failure of
+        /// the folders parse it rides along with. Bridge order is kept; a
+        /// repeated value keeps its first row (value is the row identity); a
+        /// missing label falls back to the value. The bridge's list mirrors
+        /// its `/model` buttons, which lead with the `default` alias — but the
+        /// picker already renders "no pick" as its own null "Default" row, so
+        /// that entry is dropped rather than shown as a second Default.
+        fun parseModelOptions(result: JsonElement): List<ModelOption> {
+            val obj = result as? JsonObject ?: return emptyList()
+            val raw = obj.arrayOrNull("model_options") ?: return emptyList()
+            val seen = mutableSetOf<String>()
+            return raw.objects().mapNotNull { entry ->
+                val value = entry.stringOrNull("value")?.takeIf { it.isNotEmpty() && it != "default" }
+                    ?: return@mapNotNull null
+                if (!seen.add(value)) return@mapNotNull null
+                ModelOption(value, entry.stringOrNull("label")?.takeIf { it.isNotEmpty() } ?: value)
+            }
+        }
+
         fun parseFolders(result: JsonElement): List<RecentFolder> {
             val obj = result as? JsonObject ?: return emptyList()
             val raw = obj.arrayOrNull("folders") ?: return emptyList()
@@ -501,6 +580,9 @@ class NewChatViewModel(
         fun startErrorCopy(code: String, detail: String?): String = when (code) {
             "agent_unreachable", "not_ready" -> "The agent didn't answer — is the box awake?"
             "bad_workdir" -> "That folder doesn't exist on the box."
+            // The offer came from this box's own reply, so this means it has
+            // changed its mind since — the default always works.
+            "bad_model" -> "That box doesn't offer that model — pick another."
             else -> "Couldn't start — ${detail ?: code}."
         }
     }

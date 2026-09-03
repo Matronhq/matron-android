@@ -2,6 +2,7 @@ package chat.matron.android.features.chatlist
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -13,6 +14,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -43,6 +46,7 @@ import chat.matron.android.viewmodels.AgentRPCProviding
 import chat.matron.android.viewmodels.AgentCapacityFreshness
 import chat.matron.android.viewmodels.BoxCapacity
 import chat.matron.android.viewmodels.BoxCapacityCaching
+import chat.matron.android.viewmodels.ModelOption
 import chat.matron.android.viewmodels.NewChatViewModel
 import chat.matron.android.viewmodels.lastSeenText
 import kotlinx.coroutines.launch
@@ -75,6 +79,8 @@ fun NewChatSheet(
     val isWakingBox by viewModel.isWakingBox.collectAsStateWithLifecycle()
     val wakeStartedAt by viewModel.wakeStartedAt.collectAsStateWithLifecycle()
     val wakeGaveUp by viewModel.wakeGaveUp.collectAsStateWithLifecycle()
+    val modelOptions by viewModel.modelOptions.collectAsStateWithLifecycle()
+    val selectedModel by viewModel.selectedModel.collectAsStateWithLifecycle()
 
     var navigated by remember { mutableStateOf(false) }
 
@@ -161,6 +167,15 @@ fun NewChatSheet(
 
                 HorizontalDivider()
                 Text("Other folder", style = MaterialTheme.typography.labelMedium)
+                // Hidden for a bridge that doesn't say what it can run — an
+                // empty menu would only ever offer "Default" (apple #169).
+                if (modelOptions.isNotEmpty()) {
+                    ModelPickerRow(
+                        options = modelOptions,
+                        selected = selectedModel,
+                        onSelect = { viewModel.selectModel(it) },
+                    )
+                }
                 CustomFolderStarter(viewModel = viewModel, isStarting = isStarting) { workdir ->
                     scope.launch { viewModel.start(workdir) }
                 }
@@ -168,6 +183,31 @@ fun NewChatSheet(
             }
 
             is NewChatViewModel.Phase.Done -> LoadingRow("Starting…")
+        }
+    }
+}
+
+/// "Model: Opus ▾" — a menu of the box's offered aliases plus the bridge's
+/// own Default (null, which omits the `model` key from `start`).
+@Composable
+private fun ModelPickerRow(
+    options: List<ModelOption>,
+    selected: String?,
+    onSelect: (String?) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Model", modifier = Modifier.weight(1f))
+        Box {
+            TextButton(onClick = { open = true }) {
+                Text(options.firstOrNull { it.value == selected }?.label ?: "Default")
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                DropdownMenuItem(text = { Text("Default") }, onClick = { open = false; onSelect(null) })
+                options.forEach { option ->
+                    DropdownMenuItem(text = { Text(option.label) }, onClick = { open = false; onSelect(option.value) })
+                }
+            }
         }
     }
 }
