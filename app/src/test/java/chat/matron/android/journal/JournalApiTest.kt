@@ -88,6 +88,34 @@ class JournalApiTest {
         assertNull(api(token = "t").snapshot().conversations.first().parentConvoID)
     }
 
+    /// Ports the snapshot-parsing slice of matron-apple #131: each convo row
+    /// carries its owning box, and a top-level `agents` list resolves id →
+    /// name. Presence-aware (diverging from the Swift original): an ABSENT
+    /// field (an older server) decodes to null so the store keeps its roster,
+    /// while a PRESENT-but-empty list decodes to an empty list so revoking
+    /// the last box clears stale chips.
+    @Test
+    fun snapshotParsesAgentDeviceIDAndAgentsList() = runBlocking {
+        server.enqueue(
+            json(
+                200,
+                """{"conversations":[{"id":"c1","title":"T","session_state":"running","last_seq":1,"snippet":"","created_at":0,"agent_device_id":7}],""" +
+                    """"agents":[{"device_id":7,"name":"dev-y"},{"device_id":9,"name":"dev-z"},{"name":"no-id-skipped"}],"seq":1}""",
+            )
+        )
+        val snap = api(token = "t").snapshot()
+        assertEquals(7L, snap.conversations.first().agentDeviceID)
+        assertEquals(listOf(AgentDTO(7, "dev-y"), AgentDTO(9, "dev-z")), snap.agents)
+
+        server.enqueue(json(200, """{"conversations":[{"id":"c1","title":"T","session_state":"running","last_seq":1,"snippet":"","created_at":0}],"seq":1}"""))
+        val old = api(token = "t").snapshot()
+        assertNull(old.conversations.first().agentDeviceID)
+        assertNull("absent agents field must decode to null, not empty", old.agents)
+
+        server.enqueue(json(200, """{"conversations":[],"agents":[],"seq":1}"""))
+        assertEquals(emptyList<AgentDTO>(), api(token = "t").snapshot().agents)
+    }
+
     @Test
     fun snapshotToleratesMissingLastTS() = runBlocking {
         server.enqueue(json(200, """{"conversations":[{"id":"c1","title":"T","session_state":"waiting","last_seq":9,"unread_count":2,"snippet":"s","created_at":5}],"seq":9}"""))
@@ -207,6 +235,37 @@ class JournalApiTest {
         val req = server.takeRequest()
         assertEquals("/devices/7/revoke", req.path)
         assertEquals("POST", req.method)
+    }
+
+    /// Ports the `renameDevice` slice of matron-apple #131: POST to the
+    /// scoped rename path with the name as body, parsing the partial device
+    /// echo (identity + new name only — callers re-fetch the roster).
+    @Test
+    fun renameDevicePostsAndParses() = runBlocking {
+        server.enqueue(json(200, """{"ok":true,"device":{"device_id":7,"name":"dev-y"}}"""))
+        val renamed = api(token = "t").renameDevice(7, "dev-y")
+        val req = server.takeRequest()
+        assertEquals("/devices/7/rename", req.path)
+        assertEquals("POST", req.method)
+        assertEquals("""{"name":"dev-y"}""", req.body.readUtf8())
+        assertEquals(7L, renamed.id)
+        assertEquals("dev-y", renamed.name)
+
+        // A malformed echo (no device object) throws rather than fabricating.
+        server.enqueue(json(200, """{"ok":true}"""))
+        try {
+            api(token = "t").renameDevice(7, "dev-y"); fail("expected throw")
+        } catch (e: JournalApiError) {
+            assertTrue(e is JournalApiError.Transport)
+        }
+
+        // So does an echo naming a different device than the one renamed.
+        server.enqueue(json(200, """{"ok":true,"device":{"device_id":8,"name":"dev-y"}}"""))
+        try {
+            api(token = "t").renameDevice(7, "dev-y"); fail("expected throw")
+        } catch (e: JournalApiError) {
+            assertTrue(e is JournalApiError.Transport)
+        }
     }
 
     @Test

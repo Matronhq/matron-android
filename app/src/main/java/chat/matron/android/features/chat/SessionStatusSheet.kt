@@ -30,14 +30,24 @@ import kotlinx.coroutines.launch
  * first status frame lands.
  */
 @Composable
-fun SessionStatusSheet(viewModel: ChatViewModel, onDismiss: () -> Unit) {
+fun SessionStatusSheet(
+    viewModel: ChatViewModel,
+    onDismiss: () -> Unit,
+    /// The agent box this session runs on, or null when the user has fewer
+    /// than two boxes (the chip gate — see `JournalChatService.boxName`).
+    boxName: String? = null,
+) {
     val scope = rememberCoroutineScope()
     val status by viewModel.sessionStatus.collectAsStateWithLifecycle()
 
     val current = status
-    val hasContent = current != null &&
+    // Gated on content alone, not on a non-null status frame: the box name is
+    // known from the chat list, so open the sheet before the first status
+    // lands and the footer is the only thing there is to show — requiring a
+    // frame here hid the box name behind "No usage data yet" (apple #131).
+    val hasContent = boxName != null || (current != null &&
         (current.model != null || current.context != null || !current.limits.isNullOrEmpty() ||
-            current.email != null || current.workdir != null || current.vitals != null)
+            current.email != null || current.workdir != null || current.vitals != null))
 
     Column(
         modifier = Modifier
@@ -47,8 +57,8 @@ fun SessionStatusSheet(viewModel: ChatViewModel, onDismiss: () -> Unit) {
     ) {
         Text("Session", style = MaterialTheme.typography.titleMedium)
 
-        if (current != null && hasContent) {
-            current.context?.let { context ->
+        if (hasContent) {
+            current?.context?.let { context ->
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     ContextGaugeLabel(context = context, modifier = Modifier.weight(1f))
                     OutlinedButton(onClick = {
@@ -57,23 +67,34 @@ fun SessionStatusSheet(viewModel: ChatViewModel, onDismiss: () -> Unit) {
                     }) { Text("Compact") }
                 }
             }
-            current.limits?.takeIf { it.isNotEmpty() }?.let { limits ->
+            current?.limits?.takeIf { it.isNotEmpty() }?.let { limits ->
                 UsageBarsView(limits = limits, scale = UsageBarScale.Regular)
             }
             // Vitals renders as one quiet caption line, never as a usage bar —
             // machine metrics must not read as subscription meters (#90).
-            val vitalsText = current.vitals?.let { UsageMetersFormat.vitalsLine(it) }
-            if (current.email != null || current.model != null || current.workdir != null || vitalsText != null) {
+            val vitalsText = current?.vitals?.let { UsageMetersFormat.vitalsLine(it) }
+            if (boxName != null || current?.email != null || current?.model != null ||
+                current?.workdir != null || vitalsText != null
+            ) {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    current.workdir?.let {
+                    // Leads the block: "which machine am I talking to"
+                    // outranks the account and path.
+                    boxName?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    current?.workdir?.let {
                         Text(
                             UsageMetersFormat.homeAbbreviated(it),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    current.email?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    current.model?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    current?.email?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    current?.model?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                     vitalsText?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 }
             }

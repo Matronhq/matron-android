@@ -116,6 +116,8 @@ class DevicesViewModelTest {
         val failing = object : DevicesProviding {
             override suspend fun devices(): List<DeviceDTO> = throw JournalApiError.Transport("offline")
             override suspend fun revokeDevice(id: Long) {}
+            override suspend fun renameDevice(id: Long, name: String): DeviceDTO =
+                throw JournalApiError.Transport("offline")
             override suspend fun pairPreview(code: String): PairPreview = throw JournalApiError.NotFound
             override suspend fun pairApprove(code: String, agentName: String) {}
         }
@@ -123,5 +125,57 @@ class DevicesViewModelTest {
         vm.refresh()
         assertNotNull(vm.errorMessage.value)
         assertFalse(vm.isLoading.value)
+    }
+
+    /// Ports matron-apple's `test_rename_updatesTheRosterAndSurfacesFailures`.
+    @Test
+    fun rename_updatesTheRosterAndSurfacesFailures() = runBlocking {
+        val fake = FakeDevicesProvider()
+        fake.rosters = mutableListOf(
+            listOf(device(7, kind = "agent", name = "dev-9", createdAt = 1)),
+        )
+        val vm = DevicesViewModel(fake, onSelfRevoked = {})
+        vm.refresh()
+
+        vm.rename(vm.devices.value[0], to = "dev-y")
+        assertEquals(listOf(7L to "dev-y"), fake.renamed)
+        assertEquals("dev-y", vm.devices.value.first().name)
+        assertNull(vm.errorMessage.value)
+
+        // A server refusal leaves the roster alone and explains itself.
+        fake.renameError = JournalApiError.Forbidden
+        vm.rename(vm.devices.value[0], to = "dev-z")
+        assertEquals("dev-y", vm.devices.value.first().name)
+        assertTrue(vm.errorMessage.value?.contains("dev-y") == true)
+    }
+
+    /// A rename that lands but whose follow-up roster re-fetch fails must
+    /// still show the new name — the server HAS renamed the device, and the
+    /// echo carries the sanitised name to show meanwhile.
+    @Test
+    fun rename_succeeds_refetchFails_newNameStillShows() = runBlocking {
+        val fake = FakeDevicesProvider()
+        fake.rosters = mutableListOf(
+            listOf(device(7, kind = "agent", name = "dev-9", createdAt = 1)),
+        )
+        val vm = DevicesViewModel(fake, onSelfRevoked = {})
+        vm.refresh()
+
+        fake.devicesError = JournalApiError.Transport("offline")
+        vm.rename(vm.devices.value[0], to = "dev-y")
+        assertEquals(listOf(7L to "dev-y"), fake.renamed)
+        assertEquals("dev-y", vm.devices.value.first().name)
+        assertNotNull(vm.errorMessage.value)
+    }
+
+    /// Ports matron-apple's `test_validateName_matchesTheServerRules`: mirrors
+    /// the journal's own check so the user gets told before a 400.
+    @Test
+    fun validateName_matchesTheServerRules() {
+        assertNull(DevicesViewModel.validate("dev-y"))
+        assertNull(DevicesViewModel.validate("y".repeat(40)))
+        assertNotNull(DevicesViewModel.validate(""))
+        assertNotNull(DevicesViewModel.validate("   "))
+        assertNotNull(DevicesViewModel.validate("y".repeat(41)))
     }
 }

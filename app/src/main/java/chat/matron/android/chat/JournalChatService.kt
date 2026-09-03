@@ -10,6 +10,7 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
@@ -42,8 +43,21 @@ class JournalChatService(
         // — `conflate()` drops every intermediate snapshot that lands while
         // the pacer sleeps (the Apple `bufferingNewest(1)` + `Task.sleep`
         // pacer).
-        store.conversationsFlow().conflate().collect { records ->
-            emit(records.map(::summary))
+        //
+        // The agent roster rides a second flow because Room's invalidation
+        // tracker only re-fires a Flow for the tables its query reads: a
+        // rename writes `agent`, which the conversations query never touches,
+        // so without this every open chip would keep the old label until some
+        // unrelated conversation write happened to re-fire the list.
+        // `combine` is the Kotlin shape of the Apple original's two-input
+        // doorbell (`SummaryInputs` + a one-slot signal stream): it re-emits
+        // on either input, always over the newest pair, and both Room flows
+        // deliver an initial value on collect so the very first paint already
+        // carries its chips.
+        combine(store.conversationsFlow(), store.agentNamesFlow()) { records, boxNames ->
+            records.map { summary(it, boxNames) }
+        }.conflate().collect { summaries ->
+            emit(summaries)
             delay(coalesceInterval)
         }
     }
@@ -62,7 +76,9 @@ class JournalChatService(
     override suspend fun leave(roomID: String) = store.setHidden(true, roomID)
 
     companion object {
-        fun summary(record: ConversationEntity): ChatSummary {
+        /// [boxNames] is the id → name map of the user's agent boxes. The chip
+        /// gate lives here: fewer than two boxes means no chip on any row.
+        fun summary(record: ConversationEntity, boxNames: Map<Long, String> = emptyMap()): ChatSummary {
             val activityMS = record.lastActivityTS ?: record.createdAt.takeIf { it > 0 }
             return ChatSummary(
                 id = record.id,
@@ -72,7 +88,17 @@ class JournalChatService(
                 unreadCount = record.unreadCount,
                 snippet = record.snippet,
                 parentConvoID = record.parentConvoID,
+                boxName = boxName(record, boxNames),
             )
+        }
+
+        /// The chip rule for a single conversation: named only when the user
+        /// has two or more boxes AND this conversation's box resolves. Pure,
+        /// so it is unit-testable without a live sync engine. Ported from
+        /// matron-apple's `JournalChatService.boxName(for:boxNames:)`.
+        fun boxName(record: ConversationEntity?, boxNames: Map<Long, String>): String? {
+            if (boxNames.size < 2) return null
+            return record?.agentDeviceID?.let(boxNames::get)
         }
 
         fun childSummary(record: ConversationEntity): SubChatSummary = SubChatSummary(

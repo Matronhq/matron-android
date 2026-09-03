@@ -31,6 +31,23 @@ data class ConversationEntity(
     /// row creation and never repointed (server-side immutable). Drives the
     /// chat-list filter (`parent_convo_id IS NULL`) and `children(of:)`.
     @ColumnInfo(name = "parent_convo_id") val parentConvoID: String?,
+    /// The agent box (journal device id) that manages this conversation, or
+    /// `null` when the server has never recorded one (a row predating the
+    /// column, or a server predating the field). Unlike [parentConvoID] this
+    /// is mutable — resuming a session on another box legitimately repoints
+    /// it. Drives the box chip in the chat list and header.
+    @ColumnInfo(name = "agent_device_id") val agentDeviceID: Long? = null,
+)
+
+/// One of the user's agent boxes, id → name — the local mirror of the server's
+/// `agents` snapshot list (see `JournalStore.replaceAgents`) plus live
+/// `device_meta` renames. The chat list joins conversations against this to
+/// label rows, and its COUNT is the "does this user have ≥2 boxes" chip gate.
+@Entity(tableName = "agent")
+data class AgentEntity(
+    @PrimaryKey
+    val id: Long,
+    val name: String,
 )
 
 /// One durable journal row. `payload` is stored as a JSON TEXT string (the

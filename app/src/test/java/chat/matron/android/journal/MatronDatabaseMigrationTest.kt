@@ -69,6 +69,25 @@ class MatronDatabaseMigrationTest {
         }
     }
 
+    /// v2 plus the exact v3 summary_entry schema (MIGRATION_2_3's SQL is the
+    /// Room-generated shape), with one pre-existing conversation row, stamped
+    /// user_version = 3.
+    private fun buildV3(file: File) {
+        buildV2(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL(
+                "CREATE TABLE `summary_entry` (`convo_id` TEXT NOT NULL, `seq` INTEGER NOT NULL, " +
+                    "`toc` TEXT NOT NULL, `detail` TEXT NOT NULL, `created_at` INTEGER NOT NULL, " +
+                    "PRIMARY KEY(`convo_id`, `seq`))"
+            )
+            db.execSQL("CREATE INDEX `index_summary_entry_convo_id` ON `summary_entry` (`convo_id`)")
+            db.execSQL(
+                "INSERT INTO conversation VALUES ('c1', 'Fix the parser', 'running', 3, 's', 1, NULL, 0, 0, 0, 0, NULL)"
+            )
+            db.version = 3
+        }
+    }
+
     @Test
     fun migratesV1FileToCurrentAndOutboxWorks() = runBlocking {
         val file = File.createTempFile("migration-test", ".sqlite").also { it.delete() }
@@ -145,6 +164,34 @@ class MatronDatabaseMigrationTest {
             assertEquals("Fixed the build", entries.single().toc)
             assertEquals("Pinned the toolchain", entries.single().detail)
             assertEquals(3000L, entries.single().createdAt)
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
+    /// MIGRATION_3_4 (agent-box attribution, port of matron-apple's GRDB v5):
+    /// a hand-built v3 file gains `conversation.agent_device_id` and the
+    /// `agent` table, existing rows keep NULL (no chip until the next
+    /// snapshot), and both new surfaces are fully usable after open.
+    @Test
+    fun migratesV3FileToV4AndAgentRosterWorks() = runBlocking {
+        val file = File.createTempFile("migration-test-v3", ".sqlite").also { it.delete() }
+        buildV3(file)
+
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:dan")
+            // The pre-migration row survives with a NULL box (no chip).
+            assertEquals(null, store.conversation("c1")?.agentDeviceID)
+            // The new column is writable…
+            store.refreshSummaries(
+                listOf(ConvoSummaryDTO("c1", "Fix the parser", "running", 4, "s", 1, agentDeviceID = 7)),
+            )
+            assertEquals(7L, store.conversation("c1")?.agentDeviceID)
+            // …and the migrated agent table is fully usable.
+            store.replaceAgents(listOf(AgentDTO(7, "dev-y")))
+            assertEquals(mapOf(7L to "dev-y"), store.agentNames())
         } finally {
             database.close()
             file.delete()

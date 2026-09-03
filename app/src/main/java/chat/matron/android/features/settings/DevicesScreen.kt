@@ -20,6 +20,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -62,6 +63,11 @@ fun DevicesScreen(
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
 
     var confirming by remember { mutableStateOf<DeviceDTO?>(null) }
+    // The device whose rename dialog is open, and the draft in its field.
+    // Two pieces of state, not one, mirroring the iOS alert (the field's
+    // binding must survive the dialog's own recompositions).
+    var renaming by remember { mutableStateOf<DeviceDTO?>(null) }
+    var draftName by remember { mutableStateOf("") }
     var showingAddAgent by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { viewModel.refresh() }
@@ -94,7 +100,11 @@ fun DevicesScreen(
                 }
             }
             items(devices, key = { it.id }) { device ->
-                DeviceRow(device = device, onRevoke = { confirming = device })
+                DeviceRow(
+                    device = device,
+                    onRevoke = { confirming = device },
+                    onRename = { draftName = device.name; renaming = device },
+                )
             }
             item {
                 Text(
@@ -131,6 +141,33 @@ fun DevicesScreen(
         )
     }
 
+    renaming?.let { device ->
+        AlertDialog(
+            onDismissRequest = { renaming = null },
+            title = { Text("Rename device") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("This name labels the box everywhere — in Devices and on the chip beside each conversation.")
+                    OutlinedTextField(
+                        value = draftName,
+                        onValueChange = { draftName = it },
+                        label = { Text("Name") },
+                        singleLine = true,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val target = device
+                    val name = draftName
+                    renaming = null
+                    scope.launch { viewModel.rename(target, name) }
+                }) { Text("Rename") }
+            },
+            dismissButton = { TextButton(onClick = { renaming = null }) { Text("Cancel") } },
+        )
+    }
+
     if (showingAddAgent) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(
@@ -153,7 +190,7 @@ fun DevicesScreen(
 }
 
 @Composable
-private fun DeviceRow(device: DeviceDTO, onRevoke: () -> Unit) {
+private fun DeviceRow(device: DeviceDTO, onRevoke: () -> Unit, onRename: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -187,6 +224,9 @@ private fun DeviceRow(device: DeviceDTO, onRevoke: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        // Rename sits before the destructive action (the Mac row's button
+        // pair; iOS reaches the same alert via a leading swipe).
+        TextButton(onClick = onRename) { Text("Rename") }
         TextButton(onClick = onRevoke) {
             Text(
                 if (device.isSelf) "Sign Out" else "Revoke",

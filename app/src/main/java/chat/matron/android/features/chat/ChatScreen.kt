@@ -87,6 +87,10 @@ fun ChatScreen(
     /// `SpawnOutcomeRow` — the nav host's `prepareConversation` → `navigate`
     /// callback (`MainActivity.openConversationCallback`).
     onOpenConversation: (String) -> Unit,
+    /// Which agent box runs this session, or null when the user has fewer
+    /// than two boxes. Threaded from the list's ChatSummary (same source as
+    /// the row chip) so header and row can never disagree.
+    boxName: String? = null,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val children by stripVM.children.collectAsStateWithLifecycle()
@@ -197,7 +201,7 @@ fun ChatScreen(
     if (showSessionStatus) {
         val sheetState = rememberModalBottomSheetState()
         ModalBottomSheet(onDismissRequest = { showSessionStatus = false }, sheetState = sheetState) {
-            SessionStatusSheet(viewModel = chatVM, onDismiss = { showSessionStatus = false })
+            SessionStatusSheet(viewModel = chatVM, onDismiss = { showSessionStatus = false }, boxName = boxName)
         }
     }
     if (showSwitcher) {

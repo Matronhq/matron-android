@@ -72,6 +72,26 @@ interface ConversationDao {
 }
 
 @Dao
+interface AgentDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(agent: AgentEntity)
+
+    /// Update-only (no insert): the live `device_meta` path must not create
+    /// roster rows — see `JournalStore.renameAgent`. A no-op for unknown ids.
+    @Query("UPDATE agent SET name = :name WHERE id = :id")
+    suspend fun rename(id: Long, name: String)
+
+    @Query("SELECT * FROM agent")
+    suspend fun all(): List<AgentEntity>
+
+    @Query("SELECT * FROM agent")
+    fun allFlow(): Flow<List<AgentEntity>>
+
+    @Query("DELETE FROM agent")
+    suspend fun deleteAll()
+}
+
+@Dao
 interface EventDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertReplace(event: EventEntity)

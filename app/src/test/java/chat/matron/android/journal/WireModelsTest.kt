@@ -371,6 +371,16 @@ class WireModelsTest {
         assertEquals(SessionStatus.Vitals(cpuPct = null, ramPct = 41), update.vitals)
     }
 
+    /// Ports matron-apple's `testDecodesDeviceMetaRenameFrame`.
+    @Test
+    fun decodesDeviceMetaRenameFrame() {
+        val frame = ServerFrame.decode("""{"kind":"device_meta","device_id":7,"name":"dev-y"}""")
+        assertEquals(ServerFrame.DeviceMeta(7, "dev-y"), frame)
+        // Malformed frames are skipped, not crashed on.
+        assertNull(ServerFrame.decode("""{"kind":"device_meta","name":"dev-y"}"""))
+        assertNull(ServerFrame.decode("""{"kind":"device_meta","device_id":7}"""))
+    }
+
     @Test
     fun decodeStatusEmptyVitalsDegradesToNull() {
         // An object carrying neither number degrades to null so the merge
