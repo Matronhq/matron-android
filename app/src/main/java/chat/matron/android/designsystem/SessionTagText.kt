@@ -9,7 +9,8 @@ import androidx.compose.ui.text.withStyle
 
 /// Builds the styled `A:bc ` run that leads a chat title: the box letter in
 /// the box's chip hue (so the eye can match rows to machines by color at
-/// the START of the scan), the `:bc` session short in a secondary color.
+/// the START of the scan), the `:bc` session short at the title's own
+/// weight with only the colon secondary (apple #155).
 /// Returned as an [AnnotatedString] so callers concatenate it with the title
 /// and the whole line truncates as one — a separate composable would
 /// ellipsize the title while the tag kept its own layout box. Ported from
@@ -36,17 +37,20 @@ object SessionTagText {
             boxLetter?.let {
                 withStyle(SpanStyle(color = tint, fontWeight = FontWeight.SemiBold)) { append(it) }
             }
+            // The short reads at the title's own (primary) weight — the
+            // caller's Text color, so no span here — and only the colon stays
+            // secondary: it is read constantly, so it should sit closer to the
+            // title than to a caption (apple #155).
             sessionShort?.let {
-                withStyle(SpanStyle(color = secondary)) {
-                    append(if (boxLetter != null) ":$it" else it)
-                }
+                if (boxLetter != null) withStyle(SpanStyle(color = secondary)) { append(":") }
+                append(it)
             }
         }
     }
 
     /// The multi-agent room variant: one letter per participating box, each
     /// in its own box's hue — `A↔B` for a pair, `A,B,C` beyond — then the
-    /// 2-char room short in secondary, same as the single-box tag.
+    /// 2-char room short at the title's weight, same as the single-box tag.
     /// [letters] and [names] are parallel arrays (`ChatSummary.roomBoxShorts`
     /// / `roomBoxNames`): letters are the glyphs, names carry the hue.
     /// `null` unless at least two boxes arrive — the gates upstream mean a
@@ -71,7 +75,11 @@ object SessionTagText {
                     )
                 ) { append(letter) }
             }
-            sessionShort?.let { withStyle(SpanStyle(color = secondary)) { append(":$it") } }
+            // Colon secondary, short at the title's weight — same as [run].
+            sessionShort?.let {
+                withStyle(SpanStyle(color = secondary)) { append(":") }
+                append(it)
+            }
         }
     }
 

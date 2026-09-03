@@ -4,6 +4,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /// Pins the `A:bc` tag composition — the Swift original's `SessionTagText`
@@ -68,5 +69,25 @@ class SessionTagTextTest {
         assertNull(SessionTagText.room(listOf("Y"), listOf("dev-y"), "ab", false, secondary))
         assertNull(SessionTagText.room(listOf("Y", "Z"), listOf("dev-y"), "ab", false, secondary))
         assertNull(SessionTagText.room(emptyList(), emptyList(), "ab", false, secondary))
+    }
+
+    /// apple #155: the session short reads at the title's weight — no colour
+    /// span of its own, so it inherits the Text colour — and only the colon
+    /// (or the room separator) stays secondary.
+    @Test
+    fun shortReadsPrimary_onlySeparatorSecondary() {
+        val tag = SessionTagText.run("Y", "dev-y", "b5", darkTheme = false, secondary = secondary)!!
+        assertEquals("Y:b5", tag.text)
+        val shortStart = tag.text.indexOf("b5")
+        assertTrue(tag.spanStyles.none { it.start <= shortStart && it.end > shortStart })
+        val colon = tag.spanStyles.first { it.start == tag.text.indexOf(':') }
+        assertEquals(secondary, colon.item.color)
+
+        val bare = SessionTagText.run(null, null, "b5", false, secondary)!!
+        assertTrue("no letter, no colon — and still no span on the short", bare.spanStyles.isEmpty())
+
+        val room = SessionTagText.room(listOf("Y", "Z"), listOf("dev-y", "dev-z"), "ab", false, secondary)!!
+        val roomShort = room.text.indexOf("ab")
+        assertTrue(room.spanStyles.none { it.start <= roomShort && it.end > roomShort })
     }
 }
