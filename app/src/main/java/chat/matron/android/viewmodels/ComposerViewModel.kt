@@ -5,6 +5,7 @@ import chat.matron.android.models.AttachmentBatchTag
 import chat.matron.android.models.ArgSuggestion
 import chat.matron.android.models.BotCommand
 import chat.matron.android.models.BotCommandCatalog
+import chat.matron.android.models.SessionStatus
 import chat.matron.android.models.StagedAttachment
 import java.io.File
 import java.util.UUID
@@ -39,6 +40,14 @@ class ComposerViewModel(
     private val commands: List<BotCommand>,
     private val recentFolders: RecentStartFolders,
     private val stagingDirectory: File,
+    /// The conversation's last-known session status, read on demand from the
+    /// `ChatViewModel` that owns it. A closure rather than a stored copy: the
+    /// two view models are built as a pair by the chat list's VM cache but
+    /// are otherwise independent, and reading through means the palette sees
+    /// the newest lists with nothing having to push them across. Defaults to
+    /// "no status", which is what a composer with no chat half (tests, any
+    /// future non-conversation surface) should offer: nothing (apple #163).
+    private val sessionStatus: () -> SessionStatus? = { null },
 ) {
     /// User-editable input text.
     var input: String = ""
@@ -180,7 +189,7 @@ class ComposerViewModel(
     /// suggestions, then any recent-folder matches. Arguments first — they're
     /// few and short, and the folder list can run to eight rows (apple #161).
     val paletteSuggestions: List<PaletteSuggestion>
-        get() = BotCommandCatalog.argSuggestions(input, commands).map { PaletteSuggestion.Argument(it) } +
+        get() = BotCommandCatalog.argSuggestions(input, commands, sessionStatus).map { PaletteSuggestion.Argument(it) } +
             folderSuggestions.map { PaletteSuggestion.Folder(it) }
 
     /// Row-tap / Return dispatch for the unified suggestion list.

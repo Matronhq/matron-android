@@ -35,7 +35,7 @@ class ChatVMCache(
         }
         val timeline = deps.timelineService(session, roomID)
         val media = deps.mediaService(session)
-        val pair = ChatViewModel(
+        val chat = ChatViewModel(
             roomID = roomID,
             timeline = timeline,
             media = media,
@@ -44,12 +44,16 @@ class ChatVMCache(
             haptics = deps.haptics,
             agentChat = deps.agentChatService(session),
             agentSpawn = deps.agentSpawnService(session),
-        ) to ComposerViewModel(
+        )
+        val pair = chat to ComposerViewModel(
             roomID = roomID,
             timeline = timeline,
             commands = BotCommandCatalog.claudeBridge,
             recentFolders = deps.recentStartFolders,
             stagingDirectory = deps.stagingDirectory,
+            // Read through to the chat half so `/model` and `/effort` offer
+            // whatever the bridge's latest status frame says (apple #163).
+            sessionStatus = { chat.sessionStatus.value },
         )
         entries[roomID] = pair
         if (entries.size > limit) {

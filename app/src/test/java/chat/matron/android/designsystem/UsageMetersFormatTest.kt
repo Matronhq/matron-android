@@ -114,4 +114,19 @@ class UsageMetersFormatTest {
         assertEquals("CPU 12%", UsageMetersFormat.vitalsLine(SessionStatus.Vitals(12, null)))
         assertNull(UsageMetersFormat.vitalsLine(SessionStatus.Vitals(null, null)))
     }
+
+    // MARK: - modelLine (apple #163)
+
+    @Test
+    fun modelLine_appendsEffortWithSeparator() {
+        assertEquals("opus · high", UsageMetersFormat.modelLine("opus", "high"))
+    }
+
+    @Test
+    fun modelLine_absentOrBlankEffortAddsNothing() {
+        assertEquals("opus", UsageMetersFormat.modelLine("opus", null))
+        assertEquals("opus", UsageMetersFormat.modelLine("opus", ""))
+        assertEquals("opus", UsageMetersFormat.modelLine("opus", "  \n"))
+        assertEquals("opus · high", UsageMetersFormat.modelLine("opus", " high "))
+    }
 }

@@ -2,6 +2,7 @@ package chat.matron.android.models
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -176,4 +177,125 @@ class ArgSuggestionResolutionTest {
     @Test fun bangPrefix_resolvesLikeSlash() = assertEquals(listOf("--force", "--browser"), resolve("!restart "))
     @Test fun leadingWhitespace_isIgnored() = assertEquals(listOf("--force", "--browser"), resolve("  /restart "))
     @Test fun plainText_offersNothing() = assertEquals(emptyList<String>(), resolve("just chatting about --force"))
+}
+
+/// Session-derived argument suggestions (apple #163): the model aliases and
+/// effort levels are lists the BRIDGE owns and publishes on the status frame,
+/// so `/model` and `/effort` take their values from `SessionStatus` rather
+/// than the catalog. Same resolver, same filtering and single-slot rules.
+class SessionDerivedArgSuggestionTest {
+    private val status = SessionStatus(
+        modelOptions = listOf(
+            SessionStatus.Option("opus", "Opus"),
+            SessionStatus.Option("sonnet", "Sonnet"),
+            SessionStatus.Option("opusplan", "Opus Plan"),
+        ),
+        effortLevels = listOf(
+            SessionStatus.Option("low", "Low"),
+            SessionStatus.Option("high", "High"),
+            SessionStatus.Option("xhigh", "X-High"),
+        ),
+    )
+
+    private fun resolve(input: String, status: SessionStatus? = null) =
+        BotCommandCatalog.argSuggestions(input, BotCommandCatalog.claudeBridge) { status }.map { it.value }
+
+    /// The catalog declares WHERE a command's values come from; it can't hold
+    /// the values themselves, because they're agent-dependent.
+    @Test
+    fun claudeBridge_modelAndEffortDeclareSessionSources() {
+        val catalog = BotCommandCatalog.claudeBridge
+        assertEquals(SessionArgSource.MODEL_OPTIONS, catalog.first { it.trigger == "/model" }.sessionArgSource)
+        assertEquals(SessionArgSource.EFFORT_LEVELS, catalog.first { it.trigger == "/effort" }.sessionArgSource)
+        assertNull(catalog.first { it.trigger == "/switch" }.sessionArgSource)
+    }
+
+    @Test
+    fun emptyArgument_offersEveryOption() {
+        assertEquals(listOf("opus", "sonnet", "opusplan"), resolve("/model ", status))
+        assertEquals(listOf("low", "high", "xhigh"), resolve("/effort ", status))
+    }
+
+    @Test
+    fun partialFiltersByPrefix_caseInsensitively() {
+        assertEquals(listOf("opus", "opusplan"), resolve("/model op", status))
+        assertEquals(listOf("xhigh"), resolve("/effort X", status))
+    }
+
+    @Test fun noMatch_dismisses() = assertEquals(emptyList<String>(), resolve("/model gpt", status))
+
+    @Test
+    fun partialIdenticalToOption_offersNothing() {
+        assertEquals(listOf("opusplan"), resolve("/model opus", status))
+        assertEquals(emptyList<String>(), resolve("/effort high", status))
+    }
+
+    /// These are values, not flags: one fills the slot and the palette is done.
+    @Test
+    fun valuesFillASingleSlot() {
+        assertEquals(emptyList<String>(), resolve("/model opus ", status))
+        assertEquals(emptyList<String>(), resolve("/effort high ", status))
+    }
+
+    /// An older bridge never sends the lists: absent offers nothing.
+    @Test
+    fun absentLists_offerNothing() {
+        assertEquals(emptyList<String>(), resolve("/model "))
+        assertEquals(emptyList<String>(), resolve("/effort "))
+        assertEquals(emptyList<String>(), resolve("/model ", SessionStatus(model = "opus")))
+    }
+
+    /// Empty means "this agent offers nothing" — same rendering, different statement.
+    @Test
+    fun emptyLists_offerNothing() {
+        val none = SessionStatus(modelOptions = emptyList(), effortLevels = emptyList())
+        assertEquals(emptyList<String>(), resolve("/model ", none))
+        assertEquals(emptyList<String>(), resolve("/effort ", none))
+    }
+
+    /// The label rides through to the palette row; a value without one displays as itself.
+    @Test
+    fun labelsSurviveResolution() {
+        val labels = BotCommandCatalog.argSuggestions("/model ", BotCommandCatalog.claudeBridge) { status }.map { it.displayLabel }
+        assertEquals(listOf("Opus", "Sonnet", "Opus Plan"), labels)
+        val unlabelled = SessionStatus(modelOptions = listOf(SessionStatus.Option("opus", null)))
+        assertEquals(
+            listOf("opus"),
+            BotCommandCatalog.argSuggestions("/model ", BotCommandCatalog.claudeBridge) { unlabelled }.map { it.displayLabel },
+        )
+    }
+
+    /// A session's lists belong to the command that declared them.
+    @Test
+    fun sessionListsDoNotLeakToOtherCommands() {
+        assertEquals(listOf("claude", "codex"), resolve("/switch ", status))
+        assertEquals(listOf("--force", "--browser"), resolve("/restart ", status))
+    }
+
+    @Test fun bangPrefixAndCaseResolveLikeSlash() = assertEquals(listOf("sonnet"), resolve("!MODEL son", status))
+
+    /// A bridge that publishes the same value twice must not produce two rows
+    /// (the palette keys rows by value). First occurrence wins.
+    @Test
+    fun duplicateOptions_collapseKeepingBridgeOrder() {
+        val repeated = SessionStatus(
+            modelOptions = listOf(
+                SessionStatus.Option("opus", "Opus"), SessionStatus.Option("sonnet", "Sonnet"),
+                SessionStatus.Option("OPUS", "Opus again"), SessionStatus.Option("sonnet", null),
+            ),
+        )
+        assertEquals(listOf("opus", "sonnet"), resolve("/model ", repeated))
+    }
+
+    /// The status is read only once a session-derived command has matched.
+    @Test
+    fun statusIsReadLazily() {
+        var reads = 0
+        val lazy: () -> SessionStatus? = { reads++; status }
+        BotCommandCatalog.argSuggestions("just chatting about /model", BotCommandCatalog.claudeBridge, lazy)
+        BotCommandCatalog.argSuggestions("/restart --f", BotCommandCatalog.claudeBridge, lazy)
+        assertEquals(0, reads)
+        BotCommandCatalog.argSuggestions("/model ", BotCommandCatalog.claudeBridge, lazy)
+        assertEquals(1, reads)
+    }
 }

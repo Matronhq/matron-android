@@ -28,6 +28,13 @@ data class ArgSuggestion(
     val isFlag: Boolean get() = value.startsWith("--")
 }
 
+/// Which of the bridge's session-scoped lists supplies a command's argument
+/// values. These lists are agent-dependent and the bridge owns them, so they
+/// ride the status frame ([SessionStatus.modelOptions] / [SessionStatus.effortLevels])
+/// instead of being copied into the catalog — the catalog names the source,
+/// never the values (apple #163).
+enum class SessionArgSource { MODEL_OPTIONS, EFFORT_LEVELS }
+
 /// A slash-command entry surfaced in the composer's slash palette.
 ///
 /// The catalog is local — driven by a static list per bot kind — because the
@@ -42,6 +49,11 @@ data class BotCommand(
     /// Statically-known argument completions, offered by the palette once the
     /// command is typed in full. Empty for free-text arguments.
     val argSuggestions: List<ArgSuggestion> = emptyList(),
+    /// The bridge-owned list this command's values come from, when they
+    /// aren't static. `null` for every command whose grammar the catalog
+    /// knows in full; the resolver appends the session's list to
+    /// [argSuggestions] when it's set.
+    val sessionArgSource: SessionArgSource? = null,
 )
 
 /// Static slash-command catalogs per bot kind, plus a small filter helper used
@@ -102,8 +114,18 @@ object BotCommandCatalog {
         ),
         BotCommand(trigger = "/working", summary = "Toggle tool call visibility"),
         BotCommand(trigger = "/mcp", summary = "Show MCP server status"),
-        BotCommand(trigger = "/model", summary = "Show current model"),
-        BotCommand(trigger = "/effort", summary = "Show or set effort level", argHint = "[level]"),
+        // The values for these two are the bridge's to publish: the model
+        // aliases are agent-dependent, and the effort levels are a list the
+        // bridge enumerates. No suggestions until a status frame carries them
+        // — honest where a stale hardcoded copy would not be.
+        BotCommand(
+            trigger = "/model", summary = "Show or switch the model",
+            argHint = "[alias]", sessionArgSource = SessionArgSource.MODEL_OPTIONS,
+        ),
+        BotCommand(
+            trigger = "/effort", summary = "Show or set effort level",
+            argHint = "[level]", sessionArgSource = SessionArgSource.EFFORT_LEVELS,
+        ),
         BotCommand(
             trigger = "/mode", summary = "Show or switch interactive vs print",
             argHint = "[interactive|print]",
@@ -173,7 +195,37 @@ object BotCommandCatalog {
     /// (`/switch claude codex` is junk the palette must not build). A
     /// suggestion identical to the partial offers nothing — same rule as
     /// folder completion, so the palette doesn't linger over a completed flag.
-    fun argSuggestions(input: String, commands: List<BotCommand>): List<ArgSuggestion> {
+    /// The values `status` supplies for a command that draws them from the
+    /// session rather than the catalog. Absent and empty lists both come back
+    /// empty here — the distinction lives in the model, and matters only to
+    /// the merge that produced it. Values repeated by the bridge collapse to
+    /// their first occurrence, keeping the order it sent: this pool is
+    /// remote-controlled input, and the palette keys rows by value.
+    private fun sessionSuggestions(source: SessionArgSource?, status: () -> SessionStatus?): List<ArgSuggestion> {
+        if (source == null) return emptyList()
+        val current = status() ?: return emptyList()
+        val options = when (source) {
+            SessionArgSource.MODEL_OPTIONS -> current.modelOptions
+            SessionArgSource.EFFORT_LEVELS -> current.effortLevels
+        } ?: return emptyList()
+        val seen = mutableSetOf<String>()
+        return options.mapNotNull { option ->
+            if (!seen.add(option.value.lowercase())) return@mapNotNull null
+            ArgSuggestion(option.value, label = option.label)
+        }
+    }
+
+    /// [status] is read only once a session-derived command has actually
+    /// matched: the composer's reads it out of the chat view model, and doing
+    /// that on every keystroke would make the composer observe every status
+    /// frame for input that isn't a command at all. A `null` status (no bridge
+    /// has spoken, or the caller has no session) leaves session-derived
+    /// commands offering nothing — exactly the pre-status-frame behaviour.
+    fun argSuggestions(
+        input: String,
+        commands: List<BotCommand>,
+        status: () -> SessionStatus? = { null },
+    ): List<ArgSuggestion> {
         val leading = input.dropWhile { it == ' ' || it == '\t' }
         val first = leading.firstOrNull() ?: return emptyList()
         if (first != '/' && first != '!') return emptyList()
@@ -198,7 +250,8 @@ object BotCommandCatalog {
             .toSet()
         val positionalFilled = earlier.any { !it.startsWith("--") }
 
-        return command.argSuggestions.filter { suggestion ->
+        val pool = command.argSuggestions + sessionSuggestions(command.sessionArgSource, status)
+        return pool.filter { suggestion ->
             val value = suggestion.value.lowercase()
             if (suggestion.isFlag) {
                 if (positionalFilled || earlier.contains(value)) return@filter false
