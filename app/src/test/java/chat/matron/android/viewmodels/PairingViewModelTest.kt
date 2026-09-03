@@ -276,4 +276,49 @@ class PairingViewModelTest {
         }
         Unit
     }
+
+    // MARK: - tag at pairing (apple #158)
+
+    @Test
+    fun approve_sendsTheSievedTagOrOmitsIt() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDevicesProvider()
+            fake.previewResult = preview("1.2.3.4", 600)
+            val vm = makeVM(fake, scope)
+            vm.codeInput = "ktnm-3vq8"
+            waitUntil { vm.phase.value != PairingViewModel.Phase.EnterCode }
+            vm.agentName = "dev-a"
+            vm.tagChar = " a1 "
+            vm.approve()
+            assertEquals(listOf("a"), fake.approvalTags)
+
+            val bare = FakeDevicesProvider()
+            bare.previewResult = preview("1.2.3.4", 600)
+            val vm2 = makeVM(bare, scope)
+            vm2.codeInput = "ktnm-3vq8"
+            waitUntil { vm2.phase.value != PairingViewModel.Phase.EnterCode }
+            vm2.agentName = "dev-b"
+            vm2.approve()
+            assertEquals(listOf<String?>(null), bare.approvalTags)
+        } finally {
+            scope.cancel()
+        }
+        Unit
+    }
+
+    @Test
+    fun tagChar_warnsOnADuplicateAcrossTheRoster() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val vm = PairingViewModel(api = FakeDevicesProvider(), existingNames = emptyList(), scope = scope, existingTags = listOf("Q"))
+            vm.tagChar = "q"
+            assertNotNull(vm.duplicateTagWarning.value)
+            vm.tagChar = "Z"
+            assertNull(vm.duplicateTagWarning.value)
+        } finally {
+            scope.cancel()
+        }
+        Unit
+    }
 }

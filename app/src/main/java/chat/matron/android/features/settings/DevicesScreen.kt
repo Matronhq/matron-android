@@ -37,14 +37,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import chat.matron.android.chat.BoxLetterOverrides
 import chat.matron.android.journal.DeviceDTO
 import chat.matron.android.viewmodels.DevicesProviding
 import chat.matron.android.viewmodels.DevicesViewModel
 import chat.matron.android.viewmodels.isClient
 import chat.matron.android.viewmodels.lagText
 import chat.matron.android.viewmodels.lastSeenText
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 /**
@@ -58,18 +56,11 @@ fun DevicesScreen(
     api: DevicesProviding,
     onSelfRevoked: () -> Unit,
     onBack: () -> Unit,
-    /// The tag-character override store (apple #154). Null (previews/tests)
-    /// hides the Tag affordance entirely.
-    overrides: BoxLetterOverrides? = null,
 ) {
     val scope = rememberCoroutineScope()
     val viewModel = remember { DevicesViewModel(api = api, onSelfRevoked = onSelfRevoked) }
     val devices by viewModel.devices.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
-    // Live so a saved override re-renders the row caption immediately — the
-    // same flow the chat list's summaries stream observes.
-    val overrideLetters by (overrides?.flow ?: remember { MutableStateFlow(emptyMap<Long, String>()) })
-        .collectAsStateWithLifecycle()
 
     var confirming by remember { mutableStateOf<DeviceDTO?>(null) }
     // The device whose rename dialog is open, and the draft in its field.
@@ -118,14 +109,16 @@ fun DevicesScreen(
                     // The row's detail line surfaces an agent box's override
                     // so the setting is discoverable and its current value
                     // visible without opening the editor.
-                    tagLetter = if (device.kind == "agent") overrideLetters[device.id] else null,
+                    // Journal-held now (apple #158): the row shows what every
+                    // device shows.
+                    tagLetter = if (device.kind == "agent") device.tagChar else null,
                     onRevoke = { confirming = device },
                     onRename = { draftName = device.name; renaming = device },
                     // Agent boxes only: the tag fronts chat titles and
                     // clients have no box letter.
-                    onSetLetter = if (overrides != null && device.kind == "agent") {
+                    onSetLetter = if (device.kind == "agent") {
                         {
-                            draftLetter = overrides.letter(device.id) ?: ""
+                            draftLetter = device.tagChar ?: ""
                             letterEditing = device
                         }
                     } else {
@@ -175,8 +168,8 @@ fun DevicesScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        "One character shown before chat titles to identify this machine. " +
-                            "Leave empty to derive it from the box name.",
+                        "One character shown before chat titles to identify this machine, " +
+                            "on every device. Leave empty to derive it from the box name.",
                     )
                     OutlinedTextField(
                         value = draftLetter,
@@ -184,6 +177,10 @@ fun DevicesScreen(
                         label = { Text("Automatic") },
                         singleLine = true,
                     )
+                    // Duplicates are legal — warn, don't block (apple #158).
+                    viewModel.duplicateTagWarning(device, draftLetter)?.let { warning ->
+                        Text(warning, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
+                    }
                 }
             },
             confirmButton = {
@@ -191,9 +188,9 @@ fun DevicesScreen(
                     val target = device
                     val letter = draftLetter
                     letterEditing = null
-                    // A blank draft clears the override — sanitize maps
-                    // empty to null, which means "back to automatic".
-                    overrides?.set(letter, target.id)
+                    // A blank draft clears the tag — the sieve maps empty to
+                    // null, which means "back to automatic".
+                    scope.launch { viewModel.setTag(target, letter) }
                 }) { Text("Save") }
             },
             dismissButton = { TextButton(onClick = { letterEditing = null }) { Text("Cancel") } },
@@ -239,6 +236,7 @@ fun DevicesScreen(
             AddAgentSheet(
                 api = api,
                 existingNames = devices.map { it.name },
+                existingTags = devices.mapNotNull { it.tagChar },
                 onDone = {
                     showingAddAgent = false
                     scope.launch { viewModel.refresh() }

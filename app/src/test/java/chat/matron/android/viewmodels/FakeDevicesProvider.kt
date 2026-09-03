@@ -12,6 +12,9 @@ import kotlinx.coroutines.delay
 /// matron-apple's `FakeDevicesProvider`. The `holdPreview`/`holdApprove` gates
 /// replace the Swift `CheckedContinuation` gates with `CompletableDeferred`.
 class FakeDevicesProvider : DevicesProviding {
+    val tags = mutableListOf<Pair<Long, String?>>()
+    val approvalTags = mutableListOf<String?>()
+    var tagError: JournalApiError? = null
     var rosters: MutableList<List<DeviceDTO>> = mutableListOf(emptyList())
     var devicesError: JournalApiError? = null
     var revokeError: JournalApiError? = null
@@ -86,6 +89,17 @@ class FakeDevicesProvider : DevicesProviding {
         }
         if (approveDelay > Duration.ZERO) delay(approveDelay)
         approveError?.let { throw it }
+    }
+
+    override suspend fun pairApprove(code: String, agentName: String, tagChar: String?) {
+        approvalTags.add(tagChar)
+        pairApprove(code, agentName)
+    }
+
+    override suspend fun setDeviceTag(id: Long, tagChar: String?) {
+        tags.add(id to tagChar)
+        tagError?.let { throw it }
+        rosters = rosters.map { roster -> roster.map { if (it.id == id) it.copy(tagChar = tagChar) else it } }.toMutableList()
     }
 }
 

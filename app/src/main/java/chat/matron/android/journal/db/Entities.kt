@@ -74,6 +74,9 @@ data class AgentEntity(
     @PrimaryKey
     val id: Long,
     val name: String,
+    /// User-chosen roster tag character, journal-held so every device shows
+    /// the same letter (apple #158). NULL = automatic (derived from the name).
+    @ColumnInfo(name = "tag_char") val tagChar: String? = null,
 )
 
 /// One durable journal row. `payload` is stored as a JSON TEXT string (the

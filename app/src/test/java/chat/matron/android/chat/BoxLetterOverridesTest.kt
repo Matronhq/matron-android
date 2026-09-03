@@ -3,6 +3,9 @@ package chat.matron.android.chat
 import chat.matron.android.viewmodels.InMemoryKeyValueStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 
 /// Ported from matron-apple's `BoxLetterOverridesTests` (apple #154). The
@@ -73,5 +76,38 @@ class BoxLetterOverridesTest {
             mapOf(1L to "Y", 2L to "Z"),
             SessionTag.boxLetters(names, overrides = mapOf(99L to "Q")),
         )
+    }
+
+    // MARK: - legacy claim + migration (apple #158)
+
+    @Test
+    fun claim_firstAccountOwnsTheRelics_untilTheLastIsRemoved() {
+        assertFalse("nothing to claim", overrides.claim("@pat:s"))
+        overrides.set("Q", 1)
+        assertTrue(overrides.claim("@pat:s"))
+        assertFalse("another account on the same install must not touch them", overrides.claim("@sam:s"))
+        assertTrue(overrides.claim("@pat:s"))
+        overrides.remove(1)
+        assertNull(store.getString(BoxLetterOverrides.OWNER_KEY))
+        assertFalse(overrides.claim("@pat:s"))
+    }
+
+    @Test
+    fun migration_pushesOnlyWhereTheJournalHasNoTag() = runBlocking {
+        overrides.set("Q", 1) // journal has none → push
+        overrides.set("Z", 2) // journal already tagged → drop without pushing
+        overrides.set("N", 9) // revoked box → drop
+        val pushed = mutableListOf<Pair<Long, String>>()
+        val result = BoxLetterMigration.run(overrides, mapOf(1L to null, 2L to "X")) { id, letter -> pushed.add(id to letter) }
+        assertEquals(listOf(1L to "Q"), pushed)
+        assertEquals(mapOf(1L to "Q"), result)
+        assertTrue("every entry is consumed", overrides.all().isEmpty())
+    }
+
+    @Test
+    fun migration_keepsAnEntryWhosePushFailed() = runBlocking {
+        overrides.set("Q", 1)
+        BoxLetterMigration.run(overrides, mapOf(1L to null)) { _, _ -> throw RuntimeException("offline") }
+        assertEquals("the next launch retries", mapOf(1L to "Q"), overrides.all())
     }
 }

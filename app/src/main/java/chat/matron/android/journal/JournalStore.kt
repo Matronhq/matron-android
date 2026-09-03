@@ -459,10 +459,43 @@ class JournalStore(
     suspend fun replaceAgents(agents: List<AgentDTO>?) {
         if (agents == null) return
         db.withTransaction {
+            // A snapshot from a server predating tags says nothing about
+            // them: keep each row's standing letter rather than wiping a
+            // migration-seeded one on every snapshot (apple #158).
+            val standing = agentDao.all().associate { it.id to it.tagChar }
             agentDao.deleteAll()
-            for (a in agents) agentDao.upsert(AgentEntity(id = a.id, name = a.name))
+            for (a in agents) {
+                val tag = if (a.tagCharKnown) a.tagChar else standing[a.id]
+                agentDao.upsert(AgentEntity(id = a.id, name = a.name, tagChar = tag))
+            }
         }
     }
+
+    /// Applies one live `device_meta` frame: the name always, the tag only
+    /// when the frame carried the key. Update-only like [renameAgent].
+    suspend fun applyDeviceMeta(id: Long, name: String, tagChar: String?, tagCharKnown: Boolean) =
+        agentDao.applyMeta(id, name, tagChar, tagCharKnown)
+
+    /// Fills tag letters for known ids whose row has none — the legacy local
+    /// override migration's seed, so the letter shows before the push's
+    /// `device_meta` echo lands. Only NULL rows are touched.
+    suspend fun seedAgentTagChars(tags: Map<Long, String>) {
+        db.withTransaction {
+            for (row in agentDao.all()) {
+                if (row.tagChar != null) continue
+                val tag = tags[row.id] ?: continue
+                agentDao.upsert(row.copy(tagChar = tag))
+            }
+        }
+    }
+
+    /// id → journal-held tag character for every box that has one.
+    suspend fun agentTags(): Map<Long, String> =
+        agentDao.all().mapNotNull { row -> row.tagChar?.let { row.id to it } }.toMap()
+
+    /// Live roster (names and tags together, in lockstep) — the chat list
+    /// derives box letters from both.
+    fun agentRosterFlow(): Flow<List<AgentEntity>> = agentDao.allFlow()
 
     /// Applies one live `device_meta` rename. Update-only, NOT an upsert
     /// (deliberate divergence from matron-apple, which upserts): the frame

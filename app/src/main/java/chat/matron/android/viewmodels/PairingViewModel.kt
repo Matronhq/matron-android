@@ -26,6 +26,9 @@ class PairingViewModel(
     private val now: () -> Instant = { Instant.now() },
     private val pollInterval: Duration = 2500.milliseconds,
     private val previewDebounce: Duration = 300.milliseconds,
+    /// Tag characters already in use across the roster, for the duplicate
+    /// warning (apple #158).
+    private val existingTags: List<String> = emptyList(),
 ) {
     sealed interface Phase {
         data object EnterCode : Phase
@@ -60,6 +63,20 @@ class PairingViewModel(
             _duplicateNameWarning.value =
                 if (existingNames.contains(value)) "You already have an agent called $value" else null
         }
+
+    /// Optional roster tag character to enrol the box with (apple #158): a
+    /// colleague's dev-a/dev-b become a/b from day one. Sieved on use.
+    var tagChar: String = ""
+        set(value) {
+            field = value
+            val tag = DevicesViewModel.tagCharFromDraft(value)
+            _duplicateTagWarning.value =
+                if (tag != null && existingTags.any { it.equals(tag, ignoreCase = true) }) "Another box already uses “$tag”" else null
+        }
+
+    private val _duplicateTagWarning = MutableStateFlow<String?>(null)
+    /// Duplicate tags are legal — warn, don't block.
+    val duplicateTagWarning: StateFlow<String?> = _duplicateTagWarning.asStateFlow()
 
     private val _phase = MutableStateFlow<Phase>(Phase.EnterCode)
     val phase: StateFlow<Phase> = _phase.asStateFlow()
@@ -144,7 +161,7 @@ class PairingViewModel(
                 return
             }
             try {
-                api.pairApprove(code, name)
+                api.pairApprove(code, name, DevicesViewModel.tagCharFromDraft(tagChar))
             } catch (conflict: JournalApiError.Conflict) {
                 _errorMessage.value = "This code was already approved."
                 return

@@ -262,4 +262,67 @@ class MatronDatabaseMigrationTest {
             file.delete()
         }
     }
+
+    /// The exact v5 schema (v4 + `conversation.participants`), stamped
+    /// user_version = 5, with one agent row carrying no tag.
+    private fun buildV5(file: File) {
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL(
+                "CREATE TABLE `conversation` (`id` TEXT NOT NULL, `title` TEXT NOT NULL, " +
+                    "`session_state` TEXT NOT NULL, `last_seq` INTEGER NOT NULL, `snippet` TEXT NOT NULL, " +
+                    "`created_at` INTEGER NOT NULL, `last_activity_ts` INTEGER, `muted` INTEGER NOT NULL, " +
+                    "`hidden` INTEGER NOT NULL, `read_up_to_seq` INTEGER NOT NULL, `unread_count` INTEGER NOT NULL, " +
+                    "`parent_convo_id` TEXT, `agent_device_id` INTEGER, PRIMARY KEY(`id`))"
+            )
+            db.execSQL("CREATE INDEX `index_conversation_parent_convo_id` ON `conversation` (`parent_convo_id`)")
+            db.execSQL(
+                "CREATE TABLE `event` (`seq` INTEGER NOT NULL, `convo_id` TEXT NOT NULL, `ts` INTEGER NOT NULL, " +
+                    "`sender` TEXT NOT NULL, `type` TEXT NOT NULL, `payload` TEXT NOT NULL, PRIMARY KEY(`seq`))"
+            )
+            db.execSQL("CREATE INDEX `index_event_convo_id` ON `event` (`convo_id`)")
+            db.execSQL("CREATE TABLE `meta` (`key` TEXT NOT NULL, `value` TEXT NOT NULL, PRIMARY KEY(`key`))")
+            db.execSQL(
+                "CREATE TABLE `outbox` (`local_id` TEXT NOT NULL, `convo_id` TEXT NOT NULL, " +
+                    "`body` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `state` TEXT NOT NULL, " +
+                    "`attempts` INTEGER NOT NULL, `last_error` TEXT, PRIMARY KEY(`local_id`))"
+            )
+            db.execSQL("CREATE INDEX `index_outbox_convo_id` ON `outbox` (`convo_id`)")
+            db.execSQL(
+                "CREATE TABLE `summary_entry` (`convo_id` TEXT NOT NULL, `seq` INTEGER NOT NULL, " +
+                    "`toc` TEXT NOT NULL, `detail` TEXT NOT NULL, `created_at` INTEGER NOT NULL, " +
+                    "PRIMARY KEY(`convo_id`, `seq`))"
+            )
+            db.execSQL("CREATE INDEX `index_summary_entry_convo_id` ON `summary_entry` (`convo_id`)")
+            db.execSQL("CREATE TABLE `agent` (`id` INTEGER NOT NULL, `name` TEXT NOT NULL, PRIMARY KEY(`id`))")
+            db.execSQL("CREATE TABLE room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)")
+            db.execSQL(
+                "INSERT INTO conversation VALUES ('room', 'mac ↔ dev-z', 'waiting', 3, 's', 1, NULL, 0, 0, 0, 0, NULL, 7)"
+            )
+            db.execSQL("ALTER TABLE `conversation` ADD COLUMN `participants` TEXT")
+            db.version = 5
+        }
+    }
+
+    /// MIGRATION_5_6 (journal-held tag characters, apple #158): a v5 file
+    /// gains `agent.tag_char`, existing rows read as automatic (NULL), and
+    /// the column is fully usable after open.
+    @Test
+    fun migratesV5FileToV6AndTagCharsWork() = runBlocking {
+        val file = File.createTempFile("migration-test-v5", ".sqlite").also { it.delete() }
+        buildV5(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL("INSERT INTO agent VALUES (7, 'dev-y')")
+        }
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:dan")
+            assertEquals(mapOf(7L to "dev-y"), store.agentNames())
+            assertEquals(emptyMap<Long, String>(), store.agentTags())
+            store.applyDeviceMeta(7, "dev-y", tagChar = "Q", tagCharKnown = true)
+            assertEquals(mapOf(7L to "Q"), store.agentTags())
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
 }
