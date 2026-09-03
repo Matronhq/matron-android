@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Build and test only — nothing here writes back to the repo, so the
+# GITHUB_TOKEN handed to the Gradle build needs no more than the checkout.
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest

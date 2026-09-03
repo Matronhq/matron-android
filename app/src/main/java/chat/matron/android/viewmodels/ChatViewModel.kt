@@ -1,5 +1,6 @@
 package chat.matron.android.viewmodels
 
+import chat.matron.android.chat.ConversationSummaryEntry
 import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineItem
 import chat.matron.android.chat.TimelineService
@@ -29,7 +30,10 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -105,6 +109,12 @@ class ChatViewModel(
 
     private val _sessionStatus = MutableStateFlow<SessionStatus?>(null)
     val sessionStatus: StateFlow<SessionStatus?> = _sessionStatus.asStateFlow()
+
+    /// TOC summary entries for this conversation, newest-first — mirrors
+    /// `TimelineService.summaryEntriesStream()`. Empty until the journal
+    /// replays the room's summary rows (or forever, on backends without one).
+    private val _summaryEntries = MutableStateFlow<List<ConversationSummaryEntry>>(emptyList())
+    val summaryEntries: StateFlow<List<ConversationSummaryEntry>> = _summaryEntries.asStateFlow()
 
     private val _rows = MutableStateFlow<List<TimelineRow>>(emptyList())
     val rows: StateFlow<List<TimelineRow>> = _rows.asStateFlow()
@@ -183,6 +193,7 @@ class ChatViewModel(
     private var observationTask: Job? = null
     private var statusTask: Job? = null
     private var sessionStateTask: Job? = null
+    private var summaryEntriesTask: Job? = null
     private var connectionTask: Job? = null
     private var emptyDebounceTask: Job? = null
     private var resumeTask: Job? = null
@@ -516,6 +527,93 @@ class ChatViewModel(
         }
     }
 
+    // MARK: - Summaries TOC jump-to-message
+
+    /// Pending scroll anchor for a TOC jump. The timeline observes this exactly
+    /// like the Apple views observe `pendingFocusID`: disengage tail-follow,
+    /// call [ensureWindowContains], scroll the LazyList to the row, then
+    /// [clearPendingFocus].
+    private val _pendingFocusID = MutableStateFlow<String?>(null)
+    val pendingFocusID: StateFlow<String?> = _pendingFocusID.asStateFlow()
+
+    /// Clears [pendingFocusID] once a view has consumed it and scrolled.
+    fun clearPendingFocus() {
+        _pendingFocusID.value = null
+    }
+
+    /// Backing job for [focus] — a second call must supersede rather than race
+    /// the first: two in-flight jumps would busy-yield against each other's
+    /// [paginateBackward] calls with no ordering guarantee over which one's
+    /// `pendingFocusID` write wins. Cancelling the superseded job makes the
+    /// outcome deterministic — but only because BOTH exits from the paginate
+    /// loop in [performFocus] re-check cancellation: the loop-top check for
+    /// the common case where cancellation lands mid-paginate, and a second
+    /// check right after the loop for the uncontended `break` (no growth and
+    /// nothing else in flight), which otherwise falls straight through to the
+    /// unconditional `pendingFocusID` write with no cancellation check in
+    /// between. Only the most recent call's target is ever landed.
+    private var focusTask: Job? = null
+
+    /// Navigates the transcript to the message nearest (at or before) [seq] —
+    /// the summaries TOC sheet's jump-to-message action. Pages history
+    /// backward until the target region is loaded locally, giving up when
+    /// [reachedHistoryStart] latches; at that point it lands on the oldest row
+    /// actually available rather than doing nothing. Port of the Apple
+    /// `focus(seq:)` (see its doc comment for the no-progress-bail rationale:
+    /// [paginateBackward]'s reentrancy guard early-returns when another call
+    /// is in flight, so a bare loop could spin without ever progressing).
+    suspend fun focus(seq: Long) {
+        focusTask?.cancel()
+        val job = scope.launch { performFocus(seq) }
+        focusTask = job
+        job.join()
+    }
+
+    private suspend fun performFocus(seq: Long) {
+        while (nearestMessageID(atOrBefore = seq) == null && !reachedHistoryStart) {
+            if (!currentCoroutineContext().isActive) return
+            val beforeCount = _items.value.size
+            paginateBackward()
+            val madeProgress = _items.value.size != beforeCount || reachedHistoryStart
+            if (!madeProgress) {
+                // Uncontended no-growth: bail to the oldest-row fallback
+                // rather than waiting out the reachedHistoryStart latch.
+                if (!isPaginatingBackward) break
+                yield()
+            }
+        }
+        // Every exit from the loop above — including the uncontended `break` —
+        // must re-check: a superseded job that breaks out would otherwise land
+        // its fallback target over the newer call's.
+        if (!currentCoroutineContext().isActive) return
+        val target = nearestMessageID(atOrBefore = seq) ?: oldestMessageID() ?: return
+        ensureWindowContains(target)
+        _pendingFocusID.value = target
+    }
+
+    /// Latest [rows] message id whose seq is `<= seq`, or `null` if every
+    /// loaded message postdates it. Rows are ascending (oldest first — see
+    /// [applyDerivedRecompute]), so the scan stops at the first row past the
+    /// target. Non-numeric ids (echoes, ephemerals) are skipped.
+    private fun nearestMessageID(atOrBefore: Long): String? {
+        var best: String? = null
+        for (row in _rows.value) {
+            if (row !is TimelineRow.Message) continue
+            val rowSeq = row.item.id.toLongOrNull() ?: continue
+            if (rowSeq <= atOrBefore) best = row.item.id else break
+        }
+        return best
+    }
+
+    /// The oldest loaded message row's id — the fallback landing spot when the
+    /// target region never loads (history genuinely doesn't reach that far).
+    private fun oldestMessageID(): String? {
+        for (row in _rows.value) {
+            if (row is TimelineRow.Message && row.item.id.toLongOrNull() != null) return row.item.id
+        }
+        return null
+    }
+
     // MARK: - Empty-state debounce + foreground resume
 
     /// Debounces the empty → [settledEmpty] transition. A non-empty snapshot
@@ -624,6 +722,13 @@ class ChatViewModel(
             }
         }
 
+        summaryEntriesTask?.cancel()
+        summaryEntriesTask = scope.launch {
+            timeline.summaryEntriesStream().collect { entries ->
+                _summaryEntries.value = entries
+            }
+        }
+
         // A prior failed image fetch only means "unreachable then" — once the
         // sync connection comes back up, give it another chance rather than
         // negative-caching it for the rest of the VM's (session-long) lifetime.
@@ -655,6 +760,8 @@ class ChatViewModel(
         statusTask = null
         sessionStateTask?.cancel()
         sessionStateTask = null
+        summaryEntriesTask?.cancel()
+        summaryEntriesTask = null
         connectionTask?.cancel()
         connectionTask = null
         emptyDebounceTask?.cancel()
@@ -663,6 +770,16 @@ class ChatViewModel(
         resumeTask = null
         historyRefillTask?.cancel()
         historyRefillTask = null
+        focusTask?.cancel()
+        focusTask = null
+        // Drop any unconsumed TOC jump target. VM instances are cached across
+        // visits and `pendingFocusID` is a StateFlow, so a new collector
+        // receives the current value immediately: a target still set when the
+        // view exits (mid-scroll, or between the focus landing and the
+        // consumer's clearPendingFocus) would replay the jump on re-entry.
+        // The Apple original doesn't need this — its views consume via
+        // `.onChange`, which fires on transitions only, never on subscription.
+        _pendingFocusID.value = null
     }
 
     /// One-shot refetch of the newest page after content → empty. Resets the

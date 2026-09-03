@@ -33,6 +33,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import okhttp3.HttpUrl
@@ -567,6 +568,18 @@ class JournalTimelineService(
     override fun sessionStatus(): Flow<SessionStatusUpdate> = engine.sessionStatus(convoID)
 
     override fun sessionState(): Flow<String> = store.sessionStateFlow(convoID)
+
+    override fun summaryEntriesStream(): Flow<List<ConversationSummaryEntry>> =
+        store.summaryEntriesFlow(convoID).map { records ->
+            records.map {
+                // SummaryEntryEntity.createdAt is milliseconds since epoch (the
+                // store's Long-timestamp convention).
+                ConversationSummaryEntry(
+                    seq = it.seq, toc = it.toc, detail = it.detail,
+                    date = Instant.ofEpochMilli(it.createdAt),
+                )
+            }
+        }
 
     override fun connectionState(): Flow<SyncConnectionState> = engine.stateStream
 
