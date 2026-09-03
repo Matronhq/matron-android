@@ -463,7 +463,7 @@ class ChatViewModel(
         for ((cardID, key) in cardReleaseKey) {
             qrReleaseValues[key]?.let { nextReleaseResolved[cardID] = it }
         }
-        releaseResolvedAnswers = nextReleaseResolved
+        if (nextReleaseResolved != _releaseResolvedAnswers.value) _releaseResolvedAnswers.value = nextReleaseResolved
         _rows.value = nextRows
         firstRenderableItemID = first
         _lastRenderableItemID.value = last
@@ -1013,14 +1013,19 @@ class ChatViewModel(
     /// history (the render window is display-only), so any store that holds
     /// the card holds its release. If local event trimming is ever added,
     /// this is the invariant that breaks first (port of apple #162).
-    private fun queuedReleaseAnswer(eventID: String): List<String>? = releaseResolvedAnswers[eventID]
+    private fun queuedReleaseAnswer(eventID: String): List<String>? = _releaseResolvedAnswers.value[eventID]
 
     /// Backing memo for [queuedReleaseAnswer], card event id → release
-    /// values. Rebuilt in [applyDerivedRecompute]'s single pass — the lookups
-    /// run from composables per ask row per snapshot, and a full-history scan
-    /// there is exactly the per-row cost the timeline's CPU history warns
-    /// about.
-    private var releaseResolvedAnswers: Map<String, List<String>> = emptyMap()
+    /// values. Rebuilt in [applyDerivedRecompute]'s single pass and assigned
+    /// only on change (same idiom as [spawnOutcomes]) — the lookups run from
+    /// composables per ask row per snapshot, and a full-history scan there is
+    /// exactly the per-row cost the timeline's CPU history warns about.
+    private val _releaseResolvedAnswers = MutableStateFlow<Map<String, List<String>>>(emptyMap())
+
+    /// Observed by the chat screen so a release landing recomposes the ask
+    /// rows: the hidden `qr:` row changes no visible row, so nothing else
+    /// would (Bugbot, #48). Same role as [spawnOutcomes] for spawn cards.
+    val releaseResolvedAnswers: StateFlow<Map<String, List<String>>> = _releaseResolvedAnswers.asStateFlow()
 
     /// Persists [eventID] as answered so push re-decryption can't re-pop it.
     fun markPromptAnswered(eventID: String) {

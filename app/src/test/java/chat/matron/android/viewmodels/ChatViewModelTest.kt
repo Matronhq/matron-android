@@ -1064,6 +1064,25 @@ class ChatViewModelTest {
         assertEquals("⚡ Send all now", vm.answerSummary("\$1"))
     }
 
+    /// Bugbot (#48): a release lands as a hidden row, so no visible row changes
+    /// — the screen must observe the memo itself for the sibling cards' buttons
+    /// to retire. The published flow flips when the release arrives on a later
+    /// snapshot.
+    @Test
+    fun releaseResolvedAnswers_publishesWhenAReleaseLands() = vmTest { scope ->
+        val fake = FakeTimelineService()
+        fake.snapshotsToEmit = listOf(listOf(queuedCardItem("\$1", "pr_a")))
+        val vm = ChatViewModel("!ask-room:s", fake, FakeMediaService(), scope, InMemoryKeyValueStore())
+        vm.start().join()
+        assertTrue(vm.releaseResolvedAnswers.value.isEmpty())
+        assertFalse(vm.isPromptAnswered("\$1"))
+
+        fake.snapshotsToEmit = listOf(listOf(queuedCardItem("\$1", "pr_a"), releaseItem("\$9", "pr_a")))
+        vm.start().join()
+        assertEquals(mapOf("\$1" to listOf("send")), vm.releaseResolvedAnswers.value)
+        assertTrue(vm.isPromptAnswered("\$1"))
+    }
+
     /// The whole design rests on release rows being invisible: they must not
     /// become rows, day separators, or scroll anchors.
     @Test
