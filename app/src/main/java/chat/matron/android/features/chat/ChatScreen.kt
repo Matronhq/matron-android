@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -73,9 +74,11 @@ import chat.matron.android.designsystem.UsageMetersFormat
 import chat.matron.android.designsystem.shouldShowCompactHeader
 import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.ComposerViewModel
+import chat.matron.android.viewmodels.MediaBrowserViewModel
 import chat.matron.android.viewmodels.SubChatStripViewModel
 import chat.matron.android.viewmodels.TimelineRow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
@@ -113,6 +116,11 @@ fun ChatScreen(
     /// a room's header shows the same colored `A↔B` tag as its row.
     roomBoxNames: List<String> = emptyList(),
     roomBoxShorts: List<String> = emptyList(),
+    /// Builds the media & links browser's VM when its sheet opens (deferred,
+    /// like the iOS sheet's `.task` construction — the store queries only run
+    /// for users who open the browser). `null` (previews/tests) hides the
+    /// toolbar button. Port of apple #142's ChatView toolbar + sheet.
+    mediaBrowser: ((CoroutineScope) -> MediaBrowserViewModel)? = null,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val children by stripVM.children.collectAsStateWithLifecycle()
@@ -122,6 +130,7 @@ fun ChatScreen(
     val sessionStatus by chatVM.sessionStatus.collectAsStateWithLifecycle()
 
     var showSessionStatus by remember { mutableStateOf(false) }
+    var showMediaBrowser by remember { mutableStateOf(false) }
     var showSwitcher by remember { mutableStateOf(false) }
     /// Tappable title → summaries TOC sheet (jump-to-point navigation).
     var showSummaries by remember { mutableStateOf(false) }
@@ -235,6 +244,18 @@ fun ChatScreen(
                             }
                             HorizontalDivider()
                         }
+                        // Apple's photo.on.rectangle.angled toolbar button lives
+                        // in the single ellipsis menu here (apple #142 + #150).
+                        if (mediaBrowser != null) {
+                            DropdownMenuItem(
+                                text = { Text("Media, files & links") },
+                                leadingIcon = { Icon(Icons.Outlined.PhotoLibrary, contentDescription = null) },
+                                onClick = {
+                                    menuOpen = false
+                                    showMediaBrowser = true
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("Session Info") },
                             leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
@@ -310,6 +331,35 @@ fun ChatScreen(
         val sheetState = rememberModalBottomSheetState()
         ModalBottomSheet(onDismissRequest = { showSessionStatus = false }, sheetState = sheetState) {
             SessionStatusSheet(viewModel = chatVM, onDismiss = { showSessionStatus = false }, boxName = boxName)
+        }
+    }
+    if (showMediaBrowser && mediaBrowser != null) {
+        // skipPartiallyExpanded: the media grid wants its full height straight
+        // away (NewChatSheet precedent).
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(onDismissRequest = { showMediaBrowser = false }, sheetState = sheetState) {
+            MediaBrowserSheet(chatVM = chatVM, viewModelFactory = mediaBrowser)
+        }
+    }
+    if (showSwitcher) {
+        val sheetState = rememberModalBottomSheetState()
+        ModalBottomSheet(onDismissRequest = { showSwitcher = false }, sheetState = sheetState) {
+            Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                Text("Subagents", style = MaterialTheme.typography.titleMedium)
+                children.forEach { child ->
+                    Text(
+                        text = (if (child.isRunning) "● " else "✓ ") + child.title,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                showSwitcher = false
+                                onOpenChild(child.id)
+                            }
+                            .padding(vertical = 12.dp),
+                    )
+                    androidx.compose.material3.HorizontalDivider()
+                }
+            }
         }
     }
     previewModel?.let { model ->
@@ -526,9 +576,11 @@ fun TimelineList(
  * that failed to download/write had no user-visible feedback (a dead button) —
  * this surfaces it, playing the analogous role to [ComposerView]'s
  * `ComposerErrorBanner` (its own Surface/errorContainer styling, not a copy).
+ * `internal` so [MediaBrowserSheet] shows the same banner (same package) for
+ * its attachment errors instead of a dismissless copy.
  */
 @Composable
-private fun AttachmentErrorBanner(message: String, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+internal fun AttachmentErrorBanner(message: String, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.errorContainer,
@@ -582,6 +634,9 @@ private fun TimelineRowView(
     // transient in-flight/failed state (an HTTP call, no journal event).
     val spawnOutcomes by chatVM.spawnOutcomes.collectAsStateWithLifecycle()
     val agentSpawnStates by chatVM.agentSpawnStates.collectAsStateWithLifecycle()
+    // Memoised in the VM's derived-recompute pass (apple #141) — reading the
+    // flag here is a plain state read, never an O(N) timeline scan per row.
+    val hasMultipleSenders by chatVM.hasMultipleSenders.collectAsStateWithLifecycle()
     when (row) {
         is TimelineRow.Separator -> DateSeparator(label = DateSeparatorLabel.format(row.date))
         is TimelineRow.Message -> {
@@ -635,6 +690,7 @@ private fun TimelineRowView(
                         chatVM.answerAgentSpawn(eventID = eventID, request = request, decision = decision)
                     },
                     onOpenSpawnedRoom = onOpenConversation,
+                    hasMultipleSenders = hasMultipleSenders,
                 )
             }
         }

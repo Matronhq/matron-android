@@ -333,6 +333,13 @@ class AppDependencies(
     fun mediaService(session: UserSession): MediaService =
         mediaServices.getOrPut(session.userID) { JournalMediaService(core(session).api) }
 
+    /**
+     * The session's journal store, for read-only feature queries (media
+     * browser). Same instance the sync engine writes. Port of apple #142's
+     * `journalStore(for:)`.
+     */
+    fun journalStore(session: UserSession): JournalStore = core(session).store
+
     fun pushService(session: UserSession): PushService =
         JournalPushService(api = core(session).api, environment = pushEnvironment)
 

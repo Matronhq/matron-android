@@ -117,6 +117,32 @@ object BoxChipColors {
     /// (`textTintMeetsWcagAAOnEveryPaletteEntry` pins it).
     fun textTint(name: String, darkTheme: Boolean): Color =
         (if (darkTheme) darkTextTints else lightTextTints)[paletteIndex(name)]
+
+    /// WCAG-legible foreground for text drawn directly on this box's RAW
+    /// (full-opacity) fill — e.g. `SenderAvatar`'s initials circle.
+    ///
+    /// Distinct from [textTint] above: that answers "what colour reads well
+    /// NEXT TO a pale, ~18%-opacity capsule that's mostly the page
+    /// background", so it's driven by the app's light/dark theme. A solid
+    /// avatar circle's background luminance is fixed by the hue ITSELF, not
+    /// by the theme — green/orange/cyan/mint read as "light" regardless of
+    /// appearance — so this picks whichever of white/black has the higher
+    /// WCAG contrast ratio against the specific hue. Most of the palette
+    /// lands well clear of AA's 4.5:1 small-text threshold either way;
+    /// blue/purple/indigo are the close calls, resolved by picking the
+    /// objectively higher ratio rather than eyeballing it.
+    ///
+    /// Ports `BoxChip.contrastingForeground(for:)` (apple #141). Apple keeps
+    /// a parallel `paletteRGB` table because its palette entries are OS
+    /// system colours; here [palette] already stores the raw sRGB values and
+    /// Compose ships the WCAG relative-luminance function
+    /// (`Color.luminance()`), so no shadow table can drift.
+    fun contrastingForeground(name: String): Color {
+        val luminance = tint(name).luminance()
+        val contrastWithWhite = 1.05f / (luminance + 0.05f)
+        val contrastWithBlack = (luminance + 0.05f) / 0.05f
+        return if (contrastWithBlack > contrastWithWhite) Color.Black else Color.White
+    }
 }
 
 /**

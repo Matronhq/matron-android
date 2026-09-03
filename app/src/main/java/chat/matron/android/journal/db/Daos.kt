@@ -126,6 +126,24 @@ interface EventDao {
     @Query("SELECT * FROM event WHERE type = :type AND ts <= :cutoff")
     suspend fun ofTypeAtOrBefore(type: String, cutoff: Long): List<EventEntity>
 
+    /// Events of the given [types] for one conversation, newest first — the
+    /// media & links browser's Media and Files tabs (port of apple #142's
+    /// `attachmentEvents` GRDB query).
+    @Query("SELECT * FROM event WHERE convo_id = :convoID AND type IN (:types) ORDER BY seq DESC")
+    suspend fun ofTypesNewestFirst(convoID: String, types: Collection<String>): List<EventEntity>
+
+    /// `text` events whose payload contains [needle], newest first — the
+    /// browser's cheap SQL prefilter for link candidates; precise extraction
+    /// happens in Kotlin (`LinkExtractor`). The Apple original CASTs its BLOB
+    /// payload to TEXT before LIKE; this schema stores payload as TEXT
+    /// already, so a plain LIKE suffices (port of apple #142's
+    /// `linkCandidateEvents` query).
+    @Query(
+        "SELECT * FROM event WHERE convo_id = :convoID AND type = 'text' " +
+            "AND payload LIKE '%' || :needle || '%' ORDER BY seq DESC"
+    )
+    suspend fun textEventsContainingNewestFirst(convoID: String, needle: String): List<EventEntity>
+
     @Query("UPDATE event SET payload = :payload WHERE seq = :seq")
     suspend fun updatePayload(seq: Long, payload: String)
 

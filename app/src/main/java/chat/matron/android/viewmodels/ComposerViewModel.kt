@@ -2,6 +2,7 @@ package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.TimelineService
 import chat.matron.android.models.AttachmentBatchTag
+import chat.matron.android.models.ArgSuggestion
 import chat.matron.android.models.BotCommand
 import chat.matron.android.models.BotCommandCatalog
 import chat.matron.android.models.StagedAttachment
@@ -14,6 +15,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+
+/// One row of the palette's argument-completion mode — a static argument
+/// suggestion (flag or enumerated value) or a recent folder. Ordered
+/// arguments-first by [ComposerViewModel.paletteSuggestions]; the palette
+/// view renders each case with its own row style (apple #161).
+sealed interface PaletteSuggestion {
+    data class Argument(val suggestion: ArgSuggestion) : PaletteSuggestion
+    data class Folder(val path: String) : PaletteSuggestion
+}
 
 /// Drives the message composer: text input, slash-command palette, recent-folder
 /// completion, sent-message recall, and the send / attach actions. Ported from
@@ -98,7 +108,11 @@ class ComposerViewModel(
     val showPalette: Boolean
         get() {
             if (palettePinnedOpen) return true
-            if (folderSuggestions.isNotEmpty()) return true
+            // Suggestion mode: a fully-typed command followed by a partial
+            // argument, with at least one argument or folder row to offer.
+            // Takes priority over the command list (which only shows for
+            // single-token input, so the two never both qualify).
+            if (paletteSuggestions.isNotEmpty()) return true
             val leading = input.dropWhile { it == ' ' || it == '\t' }
             if (!(leading.startsWith("/") || leading.startsWith("!"))) return false
             return leading.split(" ").size == 1
@@ -116,10 +130,15 @@ class ComposerViewModel(
         palettePinnedOpen = false
     }
 
-    /// Rows the palette shows: folder suggestions in folder-completion mode,
-    /// filtered commands otherwise.
+    /// Rows the palette shows: the unified suggestion list in argument/folder-
+    /// completion mode, filtered commands otherwise. Must mirror the palette
+    /// view's "suggestions win" display rule so the keyboard highlight and the
+    /// rendered rows agree.
     val paletteItemCount: Int
-        get() = if (folderSuggestions.isEmpty()) filteredCommands.size else folderSuggestions.size
+        get() {
+            val suggestions = paletteSuggestions
+            return if (suggestions.isEmpty()) filteredCommands.size else suggestions.size
+        }
 
     /// Down-arrow: highlight the first row, or step down, clamping at the last.
     /// No-op during a history walk (the arrows keep walking history).
@@ -145,16 +164,41 @@ class ComposerViewModel(
         if (!showPalette) return false
         val index = _paletteSelection.value ?: return false
         _paletteSelection.value = null
-        val folders = folderSuggestions
-        if (folders.isNotEmpty()) {
-            if (index !in folders.indices) return false
-            selectFolder(folders[index])
+        val suggestions = paletteSuggestions
+        if (suggestions.isNotEmpty()) {
+            if (index !in suggestions.indices) return false
+            selectSuggestion(suggestions[index])
             return true
         }
         val cmds = filteredCommands
         if (index !in cmds.indices) return false
         selectCommand(cmds[index])
         return true
+    }
+
+    /// The palette's second mode: the matched command's static argument
+    /// suggestions, then any recent-folder matches. Arguments first — they're
+    /// few and short, and the folder list can run to eight rows (apple #161).
+    val paletteSuggestions: List<PaletteSuggestion>
+        get() = BotCommandCatalog.argSuggestions(input, commands).map { PaletteSuggestion.Argument(it) } +
+            folderSuggestions.map { PaletteSuggestion.Folder(it) }
+
+    /// Row-tap / Return dispatch for the unified suggestion list.
+    fun selectSuggestion(suggestion: PaletteSuggestion) {
+        when (suggestion) {
+            is PaletteSuggestion.Argument -> selectArgument(suggestion.suggestion)
+            is PaletteSuggestion.Folder -> selectFolder(suggestion.path)
+        }
+    }
+
+    /// Replaces the trailing partial token with the chosen argument plus a
+    /// trailing space — mirroring [selectCommand] — so the palette immediately
+    /// offers whatever the command still accepts (`/restart --force ` goes on
+    /// to offer `--browser`), and dismisses itself once nothing is left.
+    fun selectArgument(argument: ArgSuggestion) {
+        val partialStart = input.indexOfLast { it.isWhitespace() } + 1
+        input = input.substring(0, partialStart) + argument.value + " "
+        palettePinnedOpen = false
     }
 
     /// Recent-folder suggestions for the current input (palette-friendly count).
@@ -179,8 +223,11 @@ class ComposerViewModel(
     }
 
     /// The partial path token when the input is in folder-completion mode: a
-    /// `/start`/`/workdir` command (`/` or `!` prefix) followed by whitespace and
-    /// at most one more token with no trailing whitespace. `null` otherwise.
+    /// `/start`/`/workdir` command (`/` or `!` prefix) followed by whitespace,
+    /// optional `--flag` tokens, and a trailing (possibly empty) partial
+    /// token. `null` when the input isn't such a command line. The bridge's
+    /// grammar is `[flags] [path]`, so flags ahead of the partial are fine,
+    /// but a completed non-flag token means the path slot is already taken.
     private val folderCompletionPartial: String?
         get() {
             val leading = input.dropWhile { it == ' ' || it == '\t' }
@@ -189,11 +236,18 @@ class ComposerViewModel(
             val body = leading.drop(1)
             val commandEnd = body.indexOfFirst { it.isWhitespace() }
             if (commandEnd < 0) return null
-            val command = body.substring(0, commandEnd)
+            // Case-insensitive, matching the command palette's filter and the
+            // argument resolver — one input, one case rule.
+            val command = body.substring(0, commandEnd).lowercase()
             if (command != "start" && command != "workdir") return null
-            val partial = body.substring(commandEnd).dropWhile { it.isWhitespace() }
-            if (partial.any { it.isWhitespace() }) return null
-            return partial
+            // The trailing token (after the last whitespace) is the partial;
+            // every completed token between it and the command must be a flag
+            // (smart-dashed forms included — the bridge normalizes them).
+            val args = body.substring(commandEnd)
+            val partialStart = args.indexOfLast { it.isWhitespace() } + 1
+            val earlier = args.substring(0, partialStart).split(Regex("\\s+")).filter { it.isNotEmpty() }
+            if (!earlier.all { BotCommandCatalog.normalizeLeadingDashes(it).startsWith("--") }) return null
+            return args.substring(partialStart)
         }
 
     /// Sends the composer's contents: staged attachments (carrying the text as
@@ -504,10 +558,14 @@ class ComposerViewModel(
             val first = trimmed.firstOrNull() ?: return null
             if (first != '/' && first != '!') return null
             val tokens = trimmed.drop(1).split(Regex("\\s+")).filter { it.isNotEmpty() }
-            val command = tokens.firstOrNull() ?: return null
+            // Case-insensitive, agreeing with folderCompletionPartial and the
+            // palette — one input, one case rule.
+            val command = tokens.firstOrNull()?.lowercase() ?: return null
             if (command != "start" && command != "workdir") return null
+            // Smart-dashed flags ("—browser") are flags, not folders — the
+            // bridge normalizes them, and recording one would poison recents.
             for (token in tokens.drop(1)) {
-                if (!token.startsWith("--")) return token
+                if (!BotCommandCatalog.normalizeLeadingDashes(token).startsWith("--")) return token
             }
             return null
         }
