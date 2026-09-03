@@ -113,6 +113,12 @@ class NewChatViewModel(
         try {
             val agents = api.devices().filter { it.kind == "agent" }
             val connected = agents.filter { it.connected }
+            // The roster is the authority on which boxes exist: prune the
+            // capacity cache here, on EVERY path — the single-box auto-skip
+            // below never reaches the fan-out, and an unpaired box would
+            // otherwise sit in the cache forever with its quota and account
+            // email (CodeRabbit, #51).
+            capacityCache.prune(keeping = agents.map { it.id }.toSet())
             if (connected.size == 1) {
                 // Auto-skip straight to the folder step: there's no roster to
                 // decorate, so no fan-out.
@@ -134,7 +140,7 @@ class NewChatViewModel(
                 val refreshing = connectedIDs.toSet()
                 _capacities.value = _capacities.value.filterKeys { it in refreshing && capacityCapturedAt[it] == null }
                 capacityCapturedAt.clear()
-                seedOfflineCapacities(connected = refreshing, offline = offlineIDs)
+                seedOfflineCapacities(offline = offlineIDs)
                 coroutineScope {
                     for (id in connectedIDs) launch { fetchCapacity(id) }
                 }
@@ -272,10 +278,7 @@ class NewChatViewModel(
     /// Fills the rows of boxes the host has put to sleep with what they last
     /// reported. Nothing here is ever asked for over the wire — that is the
     /// whole point: the user picks which box to wake by its remaining quota.
-    private fun seedOfflineCapacities(connected: Set<Long>, offline: List<Long>) {
-        // The roster is the authority on which boxes exist; an unpaired box
-        // would otherwise sit in the cache forever with nothing to refresh it.
-        capacityCache.prune(keeping = connected + offline)
+    private fun seedOfflineCapacities(offline: List<Long>) {
         val cached = capacityCache.loadAll()
         val moment = now()
         val seeded = mutableMapOf<Long, BoxCapacity>()

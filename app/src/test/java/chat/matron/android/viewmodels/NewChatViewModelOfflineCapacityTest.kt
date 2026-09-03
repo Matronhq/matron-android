@@ -123,6 +123,20 @@ class NewChatViewModelOfflineCapacityTest {
         assertNull(cache.loadAll()[99L])
     }
 
+    /// CodeRabbit (#51): a one-box fleet auto-skips the roster and never fans
+    /// out, so the prune must not live only on the fan-out path — a departed
+    /// box's quota and account email would otherwise persist forever.
+    @Test
+    fun load_singleAgentFleet_stillPrunesDepartedBoxes() = runBlocking {
+        val fake = Fake()
+        fake.devicesResult = Result.success(listOf(agent(9, "only", true)))
+        fake.replies["recent_folders"] = ok("""{"folders":[]}""")
+        val cache = InMemoryBoxCapacityCache(mapOf(99L to CachedBoxCapacity(capacity(10), now)))
+        makeVM(fake, cache).load()
+        assertEquals(setOf(9L), cache.pruneCalls.last())
+        assertNull("the departed box is gone from the cache", cache.loadAll()[99L])
+    }
+
     @Test
     fun fanOut_persistsEveryCapacityItParses() = runBlocking {
         val fake = Fake()
