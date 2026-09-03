@@ -14,6 +14,7 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -164,6 +165,7 @@ class NewChatViewModelTest {
             RPCReply.Failure("agent_unreachable", null) to "The agent didn't answer — is the box awake?",
             RPCReply.Failure("not_ready", null) to "The agent didn't answer — is the box awake?",
             RPCReply.Failure("bad_workdir", "/nope") to "That folder doesn't exist on the box.",
+            RPCReply.Failure("bad_model", "opus") to "That box doesn't offer that model — pick another.",
             RPCReply.Failure("spawn_failed", "boom") to "Couldn't start — boom.",
             RPCReply.Failure("unsupported_mode", null) to "Couldn't start — unsupported_mode.",
         )
@@ -371,5 +373,94 @@ class NewChatViewModelTest {
         selecting.await()
         assertNull(vm.foldersError.value)
         assertEquals(listOf("/w/app"), vm.folders.value.map { it.path })
+    }
+
+    // MARK: Model picker (apple #169)
+
+    private fun vmWith(fake: FakeAgentRPCProvider) = NewChatViewModel(fake, InMemoryBoxCapacityCache(), wakeSleep = { _ -> })
+
+    @Test
+    fun start_sendsSelectedModel() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
+        fake.replies["recent_folders"] = foldersReply("""{"folders":[],"model_options":[{"value":"opus","label":"Opus"},{"value":"sonnet","label":"Sonnet"}]}""")
+        fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
+        val vm = vmWith(fake)
+        vm.load()
+        vm.selectModel("sonnet")
+        vm.start("~/dev/app")
+        assertEquals("sonnet", fake.requests.last().params["model"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun start_omitsModelWhenDefaultPicked() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
+        fake.replies["recent_folders"] = foldersReply("""{"folders":[],"model_options":[{"value":"opus","label":"Opus"}]}""")
+        fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
+        val vm = vmWith(fake)
+        vm.load()
+        assertNull("the picker opens on the bridge's own default", vm.selectedModel.value)
+        vm.start("~/dev/app")
+        assertFalse("no pick means the bridge decides — omit the key", fake.requests.last().params.containsKey("model"))
+    }
+
+    @Test
+    fun modelOptions_parsedFromRecentFolders() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
+        fake.replies["recent_folders"] = foldersReply(
+            """{"folders":[],"model_options":[{"value":"default","label":"Default"},{"value":"opus","label":"Opus 4.6"},{"value":"sonnet"},{"value":"opus","label":"Opus again"},{"label":"nameless"},{"value":""}]}""",
+        )
+        val vm = vmWith(fake)
+        vm.load()
+        assertEquals(listOf(ModelOption("opus", "Opus 4.6"), ModelOption("sonnet", "sonnet")), vm.modelOptions.value)
+    }
+
+    @Test
+    fun modelOptions_absentKeyLeavesNoOffer() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
+        fake.replies["recent_folders"] = foldersReply("""{"folders":[{"path":"/a","last_used":1}]}""")
+        val vm = vmWith(fake)
+        vm.load()
+        assertTrue("an older bridge omits the key — the picker hides", vm.modelOptions.value.isEmpty())
+        assertEquals(listOf("/a"), vm.folders.value.map { it.path })
+    }
+
+    /// The roster fan-out already asked every connected box, so the folder
+    /// step must render that box's offer without a second round-trip.
+    @Test
+    fun modelOptions_arriveFromTheRosterPrefetch() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
+        fake.devicesResult = Result.success(agents)
+        fake.repliesByDevice[1] = foldersReply("""{"folders":[],"model_options":[{"value":"opus","label":"Opus"}]}""")
+        fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
+        val vm = vmWith(fake)
+        vm.load()
+        val before = fake.requests.count { it.method == "recent_folders" }
+        vm.select(agents[0])
+        assertEquals(listOf("opus"), vm.modelOptions.value.map { it.value })
+        assertEquals("served from the prefetch, not re-asked", before, fake.requests.count { it.method == "recent_folders" })
+    }
+
+    @Test
+    fun switchingBoxes_dropsAModelTheNewBoxDoesNotOffer() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
+        fake.devicesResult = Result.success(agents)
+        fake.repliesByDevice[1] = foldersReply("""{"folders":[],"model_options":[{"value":"opus","label":"Opus"},{"value":"sonnet","label":"Sonnet"}]}""")
+        fake.repliesByDevice[2] = foldersReply("""{"folders":[],"model_options":[{"value":"sonnet","label":"Sonnet"}]}""")
+        val vm = vmWith(fake)
+        vm.load()
+        vm.select(agents[0])
+        vm.selectModel("sonnet")
+        vm.select(agents[1])
+        assertEquals("a model the new box also offers survives", "sonnet", vm.selectedModel.value)
+        vm.select(agents[0])
+        vm.selectModel("opus")
+        vm.select(agents[1])
+        assertNull("box b can't run opus — carrying the pick over would earn a bad_model", vm.selectedModel.value)
     }
 }
