@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cancel
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
@@ -90,6 +91,9 @@ fun AttachmentFullscreenViewer(gallery: ImageGallery, onDismiss: () -> Unit) {
 
         val entry = entries[index]
         val model = resolved.value[index]
+        // No key yet means the fetch hasn't answered; a stored null is a
+        // fetch that failed (or an expired entry) and is final (Bugbot).
+        val stillLoading = !resolved.value.containsKey(index)
 
         Box(
             Modifier
@@ -158,13 +162,18 @@ fun AttachmentFullscreenViewer(gallery: ImageGallery, onDismiss: () -> Unit) {
                 )
             } else {
                 // A reaped or unresolved image keeps its place so the counter
-                // matches the grid the user came from.
+                // matches the grid the user came from; one still on its way
+                // shows a spinner rather than a verdict.
                 Box(Modifier.fillMaxSize().then(gestures), contentAlignment = Alignment.Center) {
-                    Text(
-                        if (entry.expired) "Image expired" else "Image unavailable",
-                        color = Color.White.copy(alpha = 0.7f),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    if (stillLoading) {
+                        CircularProgressIndicator(color = Color.White.copy(alpha = 0.7f))
+                    } else {
+                        Text(
+                            if (entry.expired) "Image expired" else "Image unavailable",
+                            color = Color.White.copy(alpha = 0.7f),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
                 }
             }
 

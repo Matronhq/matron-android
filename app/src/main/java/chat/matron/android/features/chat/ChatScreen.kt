@@ -62,6 +62,7 @@ import chat.matron.android.designsystem.ActivityIndicatorRow
 import chat.matron.android.designsystem.AttachmentFullscreenViewer
 import chat.matron.android.designsystem.ChatSearchBar
 import chat.matron.android.designsystem.ImageGallery
+import kotlinx.coroutines.CancellationException
 import chat.matron.android.designsystem.CompactContextBanner
 import chat.matron.android.designsystem.DateSeparator
 import chat.matron.android.designsystem.DateSeparatorLabel
@@ -154,14 +155,27 @@ fun ChatScreen(
         val tapped = previewModel
         if (tapped == null) { previewGallery = null; return@LaunchedEffect }
         val image = tapped as? TappedImage ?: run { previewGallery = ImageGallery.single(tapped); return@LaunchedEffect }
+        // The tapped image opens on the SAME frame as the tap; the full
+        // gallery swaps in underneath once the store has answered (Bugbot).
+        previewGallery = ImageGallery.single(image.model)
         val browser = mediaBrowser?.invoke(compactScope)
-        val stored = if (browser == null || image.url == null) emptyList() else runCatching { browser.imageEntries() }.getOrDefault(emptyList())
+        val stored = if (browser == null || image.url == null) {
+            emptyList()
+        } else {
+            try {
+                browser.imageEntries()
+            } catch (cancel: CancellationException) {
+                // A superseding tap or a screen exit: this build is stale
+                // and must not land at all.
+                throw cancel
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        }
         val entries = stored.asReversed().map { ImageGallery.Entry(it.id.toString(), it.url, it.expired) }
         val start = entries.indexOfFirst { it.url == image.url }
-        previewGallery = if (browser == null || start < 0) {
-            ImageGallery.single(image.model)
-        } else {
-            ImageGallery(entries, start, image.model) { url ->
+        if (browser != null && start >= 0) {
+            previewGallery = ImageGallery(entries, start, image.model) { url ->
                 // The timeline may already hold this neighbour's bytes.
                 chatVM.resolvedImage(url) ?: browser.openMedia(url)
             }
@@ -409,7 +423,9 @@ fun ChatScreen(
         }
     }
     previewGallery?.let { gallery ->
-        AttachmentFullscreenViewer(gallery = gallery, onDismiss = { previewModel = null })
+        // Both cleared together: the viewer must leave on the frame of the
+        // dismiss, not after the effect above catches up (Bugbot).
+        AttachmentFullscreenViewer(gallery = gallery, onDismiss = { previewModel = null; previewGallery = null })
     }
 }
 
