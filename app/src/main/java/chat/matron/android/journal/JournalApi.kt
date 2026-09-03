@@ -92,6 +92,24 @@ enum class AgentChatDecision(val wire: String) {
     DENY("deny"),
 }
 
+/// The user's answer to an agent-spawn consent card. Mirrors the `decision`
+/// field of `POST /agent-spawn/answer`.
+enum class AgentSpawnDecision(val wire: String) {
+    APPROVE("approve"),
+    DENY("deny"),
+}
+
+/// The one call that resolves an agent-spawn consent card, extracted (like
+/// `AgentChatAnswering`) so [chat.matron.android.viewmodels.ChatViewModel]
+/// can depend on just the answer, not the whole [JournalApi] surface. Put
+/// beside [JournalApi] itself, not in the viewmodels package: unlike
+/// agent-chat there is no parked-list screen for spawn cards — the durable
+/// record is the `spawn_outcome` journal event, not a server-side pending
+/// row — so there is no natural view-model home for a wrapper.
+interface AgentSpawnAnswering {
+    suspend fun answerAgentSpawn(requestId: String, decision: AgentSpawnDecision)
+}
+
 /// One row of `GET /agent-chat/pending` — an agent's request to chat that is
 /// parked waiting on this user. The durable form of the consent card, for asks
 /// that arrived while no client was connected.
@@ -197,7 +215,7 @@ class JournalApi(
     private val baseUrl: HttpUrl,
     private val client: OkHttpClient = OkHttpClient(),
     token: String? = null,
-) : SnapshotSource {
+) : SnapshotSource, AgentSpawnAnswering {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -443,6 +461,28 @@ class JournalApi(
     /// The journal defaults an absent topic/justification to `""` rather than
     /// omitting the key, so "absent" and "empty" arrive identically.
     private fun nonEmpty(raw: String?): String? = raw?.trim()?.takeIf { it.isNotEmpty() }
+
+    // MARK: Agent spawn consent
+
+    /// Answers one agent-spawn consent card. The ONLY path that resolves
+    /// one — unlike agent-chat there is no parked-list counterpart, and the
+    /// answer produces no journal event of its own: the eventual
+    /// `spawn_outcome` event (a distinct, journal-authored row) is what
+    /// tells every device — including the asking agent — how this was
+    /// resolved.
+    ///
+    /// Throws `Conflict` if the row is no longer awaiting an answer (already
+    /// answered here or elsewhere, or expired) and `NotFound` if the request
+    /// isn't this user's (or is already gone).
+    override suspend fun answerAgentSpawn(requestId: String, decision: AgentSpawnDecision) {
+        request(
+            path = "/agent-spawn/answer", method = "POST",
+            jsonBody = buildJsonObject {
+                put("request_id", requestId)
+                put("decision", decision.wire)
+            },
+        )
+    }
 
     /// Previews a pairing code before approval. 404 = unknown/expired/approved.
     suspend fun pairPreview(code: String): PairPreview {

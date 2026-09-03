@@ -15,6 +15,7 @@ import chat.matron.android.journal.MediaKind
 import chat.matron.android.journal.previewText
 import chat.matron.android.journal.ToolStreamUpdate
 import chat.matron.android.journal.stringOrNull
+import chat.matron.android.models.AttachmentBatchTag
 import chat.matron.android.models.SessionStatusUpdate
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.TimelineSendState
@@ -520,15 +521,28 @@ class JournalTimelineService(
         data: ByteArray, filename: String, mimeType: String, caption: String?, progress: ((Double) -> Unit)?,
     ) = sendMedia(data, filename, mimeType, type = MediaKind.FILE, caption = caption, progress = progress)
 
+    override suspend fun sendImage(
+        data: ByteArray, filename: String, mimeType: String, caption: String?,
+        batch: AttachmentBatchTag?, progress: ((Double) -> Unit)?,
+    ) = sendMedia(data, filename, mimeType, type = MediaKind.IMAGE, caption = caption, batch = batch,
+        progress = progress)
+
+    override suspend fun sendFile(
+        data: ByteArray, filename: String, mimeType: String, caption: String?,
+        batch: AttachmentBatchTag?, progress: ((Double) -> Unit)?,
+    ) = sendMedia(data, filename, mimeType, type = MediaKind.FILE, caption = caption, batch = batch,
+        progress = progress)
+
     private suspend fun sendMedia(
         data: ByteArray, filename: String, mimeType: String, type: MediaKind, caption: String?,
+        batch: AttachmentBatchTag? = null,
         progress: ((Double) -> Unit)?,
     ) {
         val blobRef = api.uploadMedia(data, mimeType, progress)
         engine.sendOp(
             ClientOp.SendMedia(
                 convoID = convoID, type = type, blobRef = blobRef, name = filename,
-                contentType = mimeType, size = data.size, caption = caption,
+                contentType = mimeType, size = data.size, caption = caption, batch = batch,
                 localID = UUID.randomUUID().toString(),
             )
         )

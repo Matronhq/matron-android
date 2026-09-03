@@ -31,6 +31,7 @@ class FakeSearchService(var hits: List<SearchHit> = emptyList(), var queryError:
     }
 
     override suspend fun backfillComplete(roomID: String): Boolean = true
+    override suspend fun backfillOldestEventID(roomID: String): String? = null
     override suspend fun eventCount(roomID: String): Int = 0
     override suspend fun contains(eventID: String): Boolean = false
 }

@@ -25,6 +25,19 @@ data class StagedAttachment private constructor(
     val filename: String,
     val mimeType: String,
     val sizeBytes: Long,
+    /// The batch tag this attachment's frame carried when a send failed, or
+    /// null for an attachment that hasn't failed out of a batch. Freshly
+    /// staged attachments never have one — the composer stamps it onto the
+    /// unsent leftovers of a failed multi-attachment send so a retry can
+    /// re-emit the frame under the SAME `batch_id`/`batch_index`/
+    /// `batch_total`. The bridge gathers frames by batch id: a retried
+    /// frame under the original id either deposits into the still-open
+    /// gather (completing the message) or, if the batch already finalized,
+    /// is routed down the per-frame path. A fresh id could do neither — the
+    /// frame would sit waiting for siblings that already went out, and the
+    /// user's one message would arrive fractured. Ported from matron-apple's
+    /// `StagedAttachment.batchTag` (matron-apple#157).
+    val batchTag: AttachmentBatchTag? = null,
 ) {
     /// Drives both the tray (thumbnail vs. file chip) and the send path
     /// (`sendImage` vs. `sendFile`), so the two can never disagree about what a
@@ -33,6 +46,11 @@ data class StagedAttachment private constructor(
 
     /// Human-readable size for the tray's file chips.
     val formattedSize: String get() = formatBytes(sizeBytes)
+
+    /// The same staged file under a (possibly different) batch tag. The only
+    /// sanctioned use of `copy()` — it can't reroute [file] out of the staging
+    /// directory, so [deleteStagedCopy]'s scope guarantee holds.
+    fun carrying(batchTag: AttachmentBatchTag?): StagedAttachment = copy(batchTag = batchTag)
 
     /// Best-effort removal of this attachment's staged copy. Failures are
     /// ignored: a temp file we couldn't delete is litter the OS clears.

@@ -45,13 +45,16 @@ fun MarkdownText(
     val colors = rememberMatronMarkdownColors()
     val document = remember(raw, colors) { MarkdownAttributed.parse(raw, colors) }
     val uriHandler = LocalUriHandler.current
-    val click = onLinkClick ?: { url -> runCatching { uriHandler.openUri(url) } }
+    val click: (String) -> Unit = onLinkClick ?: { url -> runCatching { uriHandler.openUri(url) } }
 
     Column(modifier) {
         document.blocks.forEach { block ->
             val blockModifier = Modifier.padding(top = block.spacingBefore.dp, bottom = block.spacingAfter.dp)
+            val table = block.table
             if (block.kind == MarkdownBlockKind.CodeBlock) {
                 CodeBlock(block.language ?: "", block.text.text, modifier = blockModifier)
+            } else if (block.kind == MarkdownBlockKind.Table && table != null) {
+                MarkdownTableBlock(table, modifier = blockModifier, textStyle = textStyle, onLinkClick = click)
             } else {
                 ClickableText(
                     text = block.text,

@@ -307,6 +307,48 @@ class JournalApiTest {
     }
 
     @Test
+    fun answerAgentSpawnPostsExactBody() = runBlocking {
+        server.enqueue(json(200, """{"ok":true}"""))
+        api(token = "t").answerAgentSpawn("spawn-1", AgentSpawnDecision.APPROVE)
+        val req = server.takeRequest()
+        assertEquals("/agent-spawn/answer", req.path)
+        assertEquals("POST", req.method)
+        val obj = parseJsonObjectOrNull(req.body.readUtf8())!!
+        // Exact key set: no `always_allow`, no stray fields.
+        assertEquals(setOf("request_id", "decision"), obj.keys)
+        assertEquals("spawn-1", obj.stringOrNull("request_id"))
+        assertEquals("approve", obj.stringOrNull("decision"))
+    }
+
+    @Test
+    fun answerAgentSpawnSendsDenyWireValue() = runBlocking {
+        server.enqueue(json(200, """{"ok":true}"""))
+        api(token = "t").answerAgentSpawn("spawn-2", AgentSpawnDecision.DENY)
+        val obj = parseJsonObjectOrNull(server.takeRequest().body.readUtf8())!!
+        assertEquals("deny", obj.stringOrNull("decision"))
+    }
+
+    @Test
+    fun answerAgentSpawnMapsConflict() = runBlocking {
+        server.enqueue(json(409, """{"error":"conflict"}"""))
+        try {
+            api(token = "t").answerAgentSpawn("spawn-1", AgentSpawnDecision.APPROVE); fail("expected throw")
+        } catch (e: JournalApiError) {
+            assertEquals(JournalApiError.Conflict, e)
+        }
+    }
+
+    @Test
+    fun answerAgentSpawnMapsNotFound() = runBlocking {
+        server.enqueue(json(404, """{"error":"not_found"}"""))
+        try {
+            api(token = "t").answerAgentSpawn("spawn-1", AgentSpawnDecision.APPROVE); fail("expected throw")
+        } catch (e: JournalApiError) {
+            assertEquals(JournalApiError.NotFound, e)
+        }
+    }
+
+    @Test
     fun serverPathPrefixIsPreservedOnRequests() = runBlocking {
         server.enqueue(json(200, """{"conversations":[],"seq":0}"""))
         JournalApi(server.url("/matron").toString(), token = "t").snapshot()

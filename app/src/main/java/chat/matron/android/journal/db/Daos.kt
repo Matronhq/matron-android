@@ -47,6 +47,14 @@ interface ConversationDao {
     )
     fun visibleTopLevelFlow(): Flow<List<ConversationEntity>>
 
+    /// EVERY conversation id — hidden rows and subagent children included
+    /// (their history is searchable, so the backfill sweep must cover them).
+    /// Activity ordering indexes the conversations the user is most likely to
+    /// search before the long tail. Ported from matron-apple's
+    /// `JournalStore.allConversationIDs`.
+    @Query("SELECT id FROM conversation ORDER BY last_activity_ts DESC, last_seq DESC")
+    suspend fun allConversationIDs(): List<String>
+
     @Query("SELECT * FROM conversation WHERE parent_convo_id = :parentConvoID ORDER BY created_at ASC, id ASC")
     suspend fun children(parentConvoID: String): List<ConversationEntity>
 

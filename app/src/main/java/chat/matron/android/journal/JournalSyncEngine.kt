@@ -68,6 +68,29 @@ sealed class RPCRequestError(message: String) : Exception(message) {
 /// [chat.matron.android.search.SearchServiceLive] indexes every applied event on the fly.
 interface SearchIndexer {
     suspend fun index(roomID: String, eventID: String, sender: String, timestamp: Instant, body: String)
+
+    /// Clears all backfill bookkeeping while keeping the indexed messages.
+    /// Called when the local journal mirror re-bootstraps from a snapshot
+    /// (`coldStartIfNeeded`): the unbridgeable replay gap means "complete"
+    /// flags may now hide head-side holes, so the backfill sweep must re-walk
+    /// every room from its newest page (cheap — already-indexed rows are
+    /// re-indexed idempotently). Ported from matron-apple's
+    /// `SearchService.resetBackfill`. Default no-op so indexing-only fakes
+    /// stay small; [chat.matron.android.search.SearchServiceLive] overrides.
+    suspend fun resetBackfill() {}
+
+    /// Monotonic count of [resetBackfill] calls in this process. The backfill
+    /// walk snapshots it per room and refuses to write progress once it moved:
+    /// the walk's bookkeeping (resume point, complete flag) predates the reset,
+    /// and re-asserting it would resurrect exactly the head-side-hole-hiding
+    /// rows the reset just deleted (bugbot "Backfill races cold-start reset").
+    /// In-memory only — the race is in-process; a restart starts fresh walks.
+    /// Deviation from matron-apple, which has the same race unguarded (its
+    /// coordinator is an actor, but the engine's cold-start reset goes
+    /// straight to the SearchService, not through the coordinator). Default 0
+    /// pairs with the no-op [resetBackfill]: a fake that never resets never
+    /// moves the generation.
+    suspend fun backfillGeneration(): Long = 0
 }
 
 /// The single writer of the [JournalStore] and owner of the reconnect loop.
@@ -934,6 +957,14 @@ class JournalSyncEngine(
         val snapshot = api.snapshot()
         store.applyColdSnapshot(snapshot.conversations, snapshot.seq)
         store.replaceAgents(snapshot.agents)
+        // Cold snapshot means the events between the old cursor and the
+        // snapshot head were never live-indexed, so any persisted "backfill
+        // complete" flags may now hide head-side holes. Reset the bookkeeping
+        // (messages stay indexed) so the backfill sweep re-walks every
+        // conversation from its head. Best-effort: a failed reset just leaves
+        // search coverage where it was. Ported from matron-apple's
+        // `JournalSyncEngine` cold-start reset.
+        search?.let { runCatching { it.resetBackfill() } }
     }
 
     /// Production liveness rides OkHttp's protocol-level `pingInterval`

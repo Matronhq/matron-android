@@ -12,6 +12,7 @@ import chat.matron.android.chat.JournalMediaService
 import chat.matron.android.chat.JournalTimelineService
 import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineService
+import chat.matron.android.journal.AgentSpawnAnswering
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.JournalSyncEngine
@@ -21,6 +22,7 @@ import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.UserSession
 import chat.matron.android.push.JournalPushService
 import chat.matron.android.push.PushService
+import chat.matron.android.search.SearchBackfillCoordinator
 import chat.matron.android.search.SearchDatabase
 import chat.matron.android.search.SearchService
 import chat.matron.android.search.SearchServiceLive
@@ -30,6 +32,7 @@ import chat.matron.android.storage.LRUCache
 import chat.matron.android.storage.StoragePaths
 import chat.matron.android.storage.TimelineCacheKey
 import chat.matron.android.sync.SyncService
+import chat.matron.android.sync.isAppProcessInForeground
 import chat.matron.android.viewmodels.AgentRPCProviding
 import chat.matron.android.viewmodels.DeviceLinking
 import chat.matron.android.viewmodels.AgentChatProviding
@@ -146,6 +149,13 @@ class AppDependencies(
         val engine: JournalSyncEngine,
         /** Boot-time TTL sweep; teardown joins it before wiping the same DB. */
         var purgeJob: Job? = null,
+        /**
+         * Background search-history backfill sweep for this session (see
+         * [SearchBackfillCoordinator]). Cancelled on sign-out, and joined by
+         * teardown before the search wipe so a straggler page can't re-insert
+         * the previous user's rows after the wipe.
+         */
+        var backfillJob: Job? = null,
     )
 
     private val cores: MutableMap<String, JournalCore> = mutableMapOf()
@@ -219,7 +229,63 @@ class AppDependencies(
             runCatching { store.purgeExpiredToolOutputSnippets() }
                 .onFailure { MatronDebug.breadcrumb("AppDependencies: boot purge failed: $it") }
         }
+        core.backfillJob = startBackfill(search = search, api = api, store = store)
         return core
+    }
+
+    /**
+     * Kicks off the background search-history backfill for a session's core:
+     * a low-priority sweep that walks every conversation's server history into
+     * the FTS index, so search covers messages this device never saw live
+     * (fresh installs and snapshot re-bootstraps start with an empty message
+     * index). Retries with backoff while any conversation fails (offline
+     * launch, server error). Stays resident for the whole session even after a
+     * clean sweep: a mid-session `snapshot_required` bootstrap resets the
+     * backfill bookkeeping (the engine's cold-start `resetBackfill`) and only
+     * a later pass here re-walks the gap — exiting after the first clean sweep
+     * would leave that hole until the next launch. An all-complete idle pass
+     * is pure local reads, so the long cadence costs no network.
+     *
+     * Ported from matron-apple's `AppDependencies.startBackfill` (including
+     * Apple PR #130's page-batched indexing in the coordinator). Android
+     * deviations: a coroutine [Job] on [appScope] instead of a `Task`; the
+     * "don't page history while backgrounded" check reads process importance
+     * ([isAppProcessInForeground] — the same check the catch-up worker uses)
+     * instead of `UIApplication.applicationState`; the iOS-only
+     * `resetBookkeepingFirst` late-attach path is dropped because the Android
+     * search DB opens with the process (no device-unlock deferral).
+     */
+    private fun startBackfill(search: SearchService?, api: JournalApi, store: JournalStore): Job? {
+        if (search == null) return null
+        val coordinator = SearchBackfillCoordinator(search = search) { convoID, beforeSeq, limit ->
+            api.messages(convoID, beforeSeq, limit)
+        }
+        return appScope.launch {
+            // Let the initial connect + catch-up replay land before adding
+            // background request load.
+            delay(10_000)
+            var backoffMillis = 30_000L
+            while (true) {
+                // Backgrounded (a WorkManager catch-up wake or the outbox
+                // grace window): that runtime belongs to catch-up and send
+                // delivery, not to history paging — don't spend its radio
+                // time on a sweep the next foreground can run.
+                if (!isAppProcessInForeground(context)) {
+                    delay(60_000)
+                    continue
+                }
+                // An empty list means the first snapshot hasn't landed yet —
+                // treat it like a failed pass and retry on the backoff curve.
+                val ids = runCatching { store.allConversationIDs() }.getOrDefault(emptyList())
+                if (ids.isNotEmpty() && coordinator.run(ids)) {
+                    backoffMillis = 30_000 // a later failure restarts the curve
+                    delay(900_000)
+                } else {
+                    delay(backoffMillis)
+                    backoffMillis = (backoffMillis * 2).coerceAtMost(600_000)
+                }
+            }
+        }
     }
 
     fun syncService(session: UserSession): SyncService = core(session).engine
@@ -269,6 +335,14 @@ class AppDependencies(
      */
     fun agentChatService(session: UserSession): AgentChatProviding =
         JournalAgentChatService(core(session).api)
+
+    /**
+     * Agent-spawn consent surface: answering the card inline in a chat.
+     * Unlike [agentChatService] there is no parked-list screen to back —
+     * [JournalApi] implements [AgentSpawnAnswering] directly, so this is
+     * just the session's existing API client.
+     */
+    fun agentSpawnService(session: UserSession): AgentSpawnAnswering = core(session).api
 
     /** Show-QR surface (Settings → Link a Device). */
     fun deviceLinkService(session: UserSession): DeviceLinking =
@@ -344,6 +418,11 @@ class AppDependencies(
         teardownJob = appScope.launch {
             previous?.join()
             for (core in oldCores) {
+                // Stop the history sweep before anything else: joining (not
+                // just cancelling) guarantees no in-flight indexBatch commits
+                // after the search wipe below.
+                core.backfillJob?.cancel()
+                core.backfillJob?.join()
                 core.purgeJob?.join()
                 val pushResult = withTimeoutOrNull(5_000) { runCatching { core.api.unregisterPush() } }
                 when {

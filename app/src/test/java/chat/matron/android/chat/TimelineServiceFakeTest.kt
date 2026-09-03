@@ -1,5 +1,6 @@
 package chat.matron.android.chat
 
+import chat.matron.android.models.AttachmentBatchTag
 import java.time.Instant
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -64,6 +65,11 @@ class FakeTimelineService : TimelineService {
     /// drop-the-handler default.
     val mediaSendsWithProgressHandler = mutableListOf<Boolean>()
 
+    /// Batch tag per media send (null for untagged sends) — pins that the
+    /// composer stamps multi-attachment sends and leaves singles untagged.
+    /// Ported from the Swift fake's `mediaSendBatchTags`.
+    val mediaSendBatchTags = mutableListOf<AttachmentBatchTag?>()
+
     override fun items(): Flow<List<TimelineItem>> = flow {
         snapshotsToEmit.forEach { emit(it) }
         streamError?.let { throw it }
@@ -126,6 +132,22 @@ class FakeTimelineService : TimelineService {
         mediaSendsWithProgressHandler.add(progress != null)
         progress?.invoke(0.5)
         sendFile(data, filename, mimeType, caption)
+    }
+
+    override suspend fun sendImage(
+        data: ByteArray, filename: String, mimeType: String, caption: String?,
+        batch: AttachmentBatchTag?, progress: ((Double) -> Unit)?,
+    ) {
+        mediaSendBatchTags.add(batch)
+        sendImage(data, filename, mimeType, caption, progress)
+    }
+
+    override suspend fun sendFile(
+        data: ByteArray, filename: String, mimeType: String, caption: String?,
+        batch: AttachmentBatchTag?, progress: ((Double) -> Unit)?,
+    ) {
+        mediaSendBatchTags.add(batch)
+        sendFile(data, filename, mimeType, caption, progress)
     }
 
     override suspend fun retrySend(itemID: String) {

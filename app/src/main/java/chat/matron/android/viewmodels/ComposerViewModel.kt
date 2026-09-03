@@ -1,10 +1,12 @@
 package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.TimelineService
+import chat.matron.android.models.AttachmentBatchTag
 import chat.matron.android.models.BotCommand
 import chat.matron.android.models.BotCommandCatalog
 import chat.matron.android.models.StagedAttachment
 import java.io.File
+import java.util.UUID
 import kotlin.time.Duration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -276,15 +278,51 @@ class ComposerViewModel(
     }
 
     /// Uploads staged attachments in order, hanging the caption on the first.
+    ///
+    /// The caption goes on ONE attachment because the bridge injects each
+    /// media event as its own prompt (or, when the frames carry a batch tag,
+    /// folds them into one prompt — either way a repeated caption would make
+    /// claude read the same sentence once per photo). First rather than last
+    /// matches every other chat client, and means claude has the context
+    /// before it sees the pictures.
+    ///
     /// Stops at the first failure instead of pressing on.
     private suspend fun sendAttachments(attachments: List<StagedAttachment>, caption: String) {
         var captionDelivered = false
+        // One batch id for the whole send, but only when there IS a batch: a
+        // single attachment goes untagged, so its journal frame is
+        // byte-identical to what an older bridge already understands. The
+        // bridge uses the tag to gather these sequential uploads back into
+        // the one message the user wrote, instead of starting a turn on the
+        // first image and busy-queueing the rest.
+        //
+        // An attachment that failed out of an earlier send arrives here
+        // already carrying its tag (stamped in the catch below) and keeps it
+        // verbatim. Fresh tags are minted only across the untagged
+        // attachments — a fresh id only when there are ≥2 of them, with
+        // index/total computed over the untagged subset — so a retry neither
+        // re-brands the members of the old batch nor takes a place in a new
+        // one. Mirrors matron-apple#157.
+        val untaggedCount = attachments.count { it.batchTag == null }
+        val freshBatchID = if (untaggedCount > 1) UUID.randomUUID().toString() else null
+        var freshIndex = 0
+        val planned = attachments.map { attachment ->
+            when {
+                attachment.batchTag != null -> attachment
+                freshBatchID == null -> attachment
+                else -> {
+                    freshIndex += 1
+                    attachment.carrying(AttachmentBatchTag(id = freshBatchID, index = freshIndex, total = untaggedCount))
+                }
+            }
+        }
         try {
-            attachments.forEachIndexed { index, attachment ->
+            planned.forEachIndexed { index, attachment ->
                 val itemCaption = if (index == 0 && caption.isNotEmpty()) caption else null
-                val batchIndex = index + 1
+                val sendIndex = index + 1
+                val batch = attachment.batchTag
                 _uploadProgress.value = UploadProgress(
-                    filename = attachment.filename, index = batchIndex,
+                    filename = attachment.filename, index = sendIndex,
                     count = attachments.size, fraction = 0.0,
                 )
                 // Fraction updates arrive on an OkHttp writer thread; drop
@@ -292,7 +330,7 @@ class ComposerViewModel(
                 // batch) has moved on.
                 val onProgress: (Double) -> Unit = { fraction ->
                     _uploadProgress.value = _uploadProgress.value
-                        ?.takeIf { it.index == batchIndex }
+                        ?.takeIf { it.index == sendIndex }
                         ?.copy(fraction = fraction)
                         ?: _uploadProgress.value
                 }
@@ -302,16 +340,32 @@ class ComposerViewModel(
                     // for visible fractions of a second.
                     val data = withContext(Dispatchers.IO) { attachment.file.readBytes() }
                     if (attachment.isImage) {
-                        timeline.sendImage(data, attachment.filename, attachment.mimeType, itemCaption, onProgress)
+                        timeline.sendImage(
+                            data, attachment.filename, attachment.mimeType, itemCaption, batch, onProgress,
+                        )
                     } else {
-                        timeline.sendFile(data, attachment.filename, attachment.mimeType, itemCaption, onProgress)
+                        timeline.sendFile(
+                            data, attachment.filename, attachment.mimeType, itemCaption, batch, onProgress,
+                        )
                     }
                 } catch (cancel: CancellationException) {
                     throw cancel
                 } catch (error: Throwable) {
+                    // Each unsent attachment goes back to the tray stamped
+                    // with the tag its frame was about to carry (`planned`
+                    // holds the stamped copies), so the retry re-emits it
+                    // under the ORIGINAL batch_id/index/total. The bridge
+                    // (lib/journal-media.js) gathers frames by batch id:
+                    // under the original id a retried frame either deposits
+                    // into the still-open gather — completing the batch — or,
+                    // if the batch already finalized without it, the
+                    // `finalized` map routes it down the immediate per-frame
+                    // path. A freshly minted id could do neither: the frame
+                    // would wait forever for siblings that already went out,
+                    // and the user's one message would arrive fractured.
                     throw AttachmentSendFailure(
                         underlying = error,
-                        unsent = attachments.subList(index, attachments.size).toList(),
+                        unsent = planned.subList(index, planned.size).toList(),
                         captionDelivered = captionDelivered,
                     )
                 }

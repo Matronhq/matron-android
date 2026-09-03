@@ -59,6 +59,7 @@ import chat.matron.android.viewmodels.LinkSignInViewModel
 import chat.matron.android.viewmodels.RendezvousSignInViewModel
 import chat.matron.android.viewmodels.SearchViewModel
 import chat.matron.android.viewmodels.SignInViewModel
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 /**
@@ -217,6 +218,32 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController) {
     }
 }
 
+/**
+ * Builds the "open a spawned session's room" callback the agent-spawn card
+ * and its `SpawnOutcomeRow` deep-link into (`TimelineItemView.onOpenSpawnedRoom`,
+ * threaded through `ChatScreen`/`SubChatView` as `onOpenConversation`).
+ *
+ * Copies the exact [NewChatSheet] / `NewChatViewModel` precedent for a
+ * freshly-started conversation: [prepareConversation] (ensures the
+ * placeholder convo row) THEN [navigate] — in that order, so a `chat/$roomId`
+ * navigation that lands before the room's first journal frame still has a
+ * row to render against, rather than racing the journal's own snapshot.
+ *
+ * A plain top-level function — not a `@Composable` — so the ordering is unit
+ * -testable without Compose: pass a test scope and fakes for the two
+ * effects.
+ */
+fun openConversationCallback(
+    scope: CoroutineScope,
+    prepareConversation: suspend (roomId: String) -> Unit,
+    navigate: (roomId: String) -> Unit,
+): (roomId: String) -> Unit = { roomId ->
+    scope.launch {
+        prepareConversation(roomId)
+        navigate(roomId)
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SignedInApp(
@@ -238,6 +265,38 @@ private fun SignedInApp(
 
     val groups by chatListVM.groups.collectAsStateWithLifecycle()
     val allChats = remember(groups) { groups.flatMap { it.summaries } }
+
+    // Agent-spawn card / SpawnOutcomeRow "Open" deep link. remembered (keyed
+    // on session.userID, matching vmCache/chatListVM above) because
+    // openConversationCallback is a plain function, not @Composable — its
+    // returned lambda is NOT compiler-memoised, so calling it unremembered
+    // would allocate a fresh instance on every SignedInApp recomposition
+    // (e.g. every `groups` emission) and, as the only unstable parameter in
+    // the ChatRoute -> ChatScreen/SubChatView -> TimelineList ->
+    // TimelineRowView chain, force every visible timeline row to recompose
+    // under strong skipping.
+    val onOpenConversation = remember(session.userID) {
+        openConversationCallback(
+            scope = sessionScope,
+            prepareConversation = { id -> deps.prepareConversation(session, id) },
+            // A repeat tap (no immediate feedback — the navigation is
+            // deferred behind the suspend placeholder write, which invites a
+            // double-tap) or an Open for the room already on screen must
+            // no-op rather than push a duplicate back-stack entry — matches
+            // the port source's explicit `path.wrappedValue.last != roomID`
+            // guard (ChatView.swift). NOT launchSingleTop: that matches on
+            // the destination id, so all `chat/{convoID}` screens count as
+            // "the same" — opening a spawned room from its parent chat would
+            // REPLACE the parent's back-stack entry (Back then skips to the
+            // list and the parent's state is lost) instead of pushing.
+            navigate = { id ->
+                val entry = nav.currentBackStackEntry
+                val alreadyOpen = entry?.destination?.route == "chat/{convoID}" &&
+                    entry.arguments?.getString("convoID") == id
+                if (!alreadyOpen) nav.navigate("chat/$id")
+            },
+        )
+    }
 
     LaunchedEffect(session.userID) { chatListVM.start() }
     LaunchedEffect(session.userID) {
@@ -304,6 +363,7 @@ private fun SignedInApp(
                         popUpTo("chat/$convoID") { inclusive = true }
                     }
                 },
+                onOpenConversation = onOpenConversation,
             )
         }
 
@@ -397,6 +457,7 @@ private fun ChatRoute(
     onBack: () -> Unit,
     onOpenChild: (String) -> Unit,
     onSwitchTo: (String) -> Unit,
+    onOpenConversation: (String) -> Unit,
     /// Which agent box runs this session, or null when the user has fewer
     /// than two boxes. Threaded from the list's ChatSummary (same source as
     /// the row chip) so header and row can never disagree.
@@ -425,6 +486,7 @@ private fun ChatRoute(
             fallbackTitle = "Subagent",
             onBack = onBack,
             onSwitchTo = onSwitchTo,
+            onOpenConversation = onOpenConversation,
         )
     } else {
         val (chatVM, composerVM) = vmCache.viewModels(convoID)
@@ -437,6 +499,7 @@ private fun ChatRoute(
             boxName = boxName,
             onBack = onBack,
             onOpenChild = onOpenChild,
+            onOpenConversation = onOpenConversation,
         )
     }
 }
