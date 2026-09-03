@@ -22,6 +22,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
@@ -60,8 +63,10 @@ fun AttachmentFullscreenViewer(gallery: ImageGallery, onDismiss: () -> Unit) {
         // A pinch's two-finger centroid also reaches the drag detector. Two
         // guards keep it from paging: the classifier reads the LIVE scale at
         // drag end (a zoomed image never pages), and any pinch during the
-        // gesture marks it so a drifting pinch that lands back near 1× is
-        // still not a swipe (Bugbot, #58).
+        // touch marks it so a drifting pinch that lands back near 1× is
+        // still not a swipe. The mark is reset on the FIRST finger down, not
+        // at drag start — drag start fires only after touch slop, by which
+        // time a pinch may already have run and been consumed (Bugbot, #58).
         var pinchedThisGesture by remember(index) { mutableStateOf(false) }
         val transformState = rememberTransformableState { zoomChange, _, _ ->
             if (zoomChange != 1f) pinchedThisGesture = true
@@ -98,12 +103,24 @@ fun AttachmentFullscreenViewer(gallery: ImageGallery, onDismiss: () -> Unit) {
                     scaleY = scale
                     translationY = offsetY
                 }
+                .pointerInput(gallery, index) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        pinchedThisGesture = false
+                        do {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            // A second finger at any point in the touch is a
+                            // pinch, whether or not the zoom callback ran.
+                            if (event.changes.count { it.pressed } > 1) pinchedThisGesture = true
+                        } while (event.changes.any { it.pressed })
+                    }
+                }
                 .transformable(transformState)
                 .pointerInput(gallery, index) {
                     var dx = 0f
                     var dy = 0f
                     detectDragGestures(
-                        onDragStart = { dx = 0f; dy = 0f; pinchedThisGesture = false },
+                        onDragStart = { dx = 0f; dy = 0f },
                         onDragEnd = {
                             val zoomed = scale > MIN_SCALE + 0.01f
                             if (zoomed || pinchedThisGesture) {
