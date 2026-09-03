@@ -88,7 +88,9 @@ class NewChatViewModelTest {
     @Test
     fun load_singleConnectedAgent_skipsStraightToFolders() = runBlocking {
         val fake = FakeAgentRPCProvider()
-        fake.devicesResult = Result.success(listOf(agent(9, connected = true), agent(2, connected = false)))
+        // A single-box fleet auto-skips the roster (asleep or not, apple #168);
+        // two boxes — one asleep — now show it, so the fixture is one box.
+        fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
         fake.replies["recent_folders"] = foldersReply("""{"folders":[{"path":"/home/dan/app","last_used":100}]}""")
         val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
@@ -157,6 +159,8 @@ class NewChatViewModelTest {
     @Test
     fun start_errorCopyTable() = runBlocking {
         val cases = listOf(
+            // `agent_unreachable` is retried through the start wake loop
+            // (apple #168) and, once that gives up, reads as before.
             RPCReply.Failure("agent_unreachable", null) to "The agent didn't answer — is the box awake?",
             RPCReply.Failure("not_ready", null) to "The agent didn't answer — is the box awake?",
             RPCReply.Failure("bad_workdir", "/nope") to "That folder doesn't exist on the box.",
@@ -168,7 +172,7 @@ class NewChatViewModelTest {
             fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
             fake.replies["recent_folders"] = foldersReply("""{"folders":[]}""")
             fake.replies["start"] = reply
-            val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
+            val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache(), wakeSleep = {})
             vm.load()
             vm.start("/x")
             assertEquals(expected, vm.errorMessage.value)
@@ -264,7 +268,7 @@ class NewChatViewModelTest {
             listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true)),
         )
         fake.repliesByDevice[1] = foldersReply("""{"folders":[],"activity":{"live_sessions":1}}""")
-        fake.repliesByDevice[2] = RPCReply.Failure("agent_unreachable", null)
+        fake.repliesByDevice[2] = RPCReply.Failure("internal", null)
         val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
         assertEquals(1, vm.capacities.value[1L]?.liveSessions)
@@ -292,7 +296,7 @@ class NewChatViewModelTest {
         val fake = FakeAgentRPCProvider()
         val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
         fake.devicesResult = Result.success(agents)
-        fake.repliesByDevice[1] = RPCReply.Failure("agent_unreachable", null)
+        fake.repliesByDevice[1] = RPCReply.Failure("internal", null)
         fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
         val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache())
         vm.load()
@@ -315,7 +319,7 @@ class NewChatViewModelTest {
         fake.foldersSequenceByDevice[1] = ArrayDeque(
             listOf(
                 foldersReply("""{"folders":[{"path":"/w/app","last_used":100}]}"""), // fan-out, parked
-                RPCReply.Failure("agent_unreachable", null), // select()'s live call
+                RPCReply.Failure("internal", null), // select()'s live call
             ),
         )
         fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
@@ -350,7 +354,7 @@ class NewChatViewModelTest {
         fake.foldersSequenceByDevice[1] = ArrayDeque(
             listOf(
                 foldersReply("""{"folders":[{"path":"/w/app","last_used":100}]}"""), // fan-out
-                RPCReply.Failure("agent_unreachable", null), // select()'s live call
+                RPCReply.Failure("internal", null), // select()'s live call
             ),
         )
         fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")

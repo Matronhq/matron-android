@@ -44,7 +44,7 @@ class NewChatViewModelOfflineCapacityTest {
         accountEmail = email,
     )
 
-    private fun makeVM(fake: Fake, cache: InMemoryBoxCapacityCache) = NewChatViewModel(fake, cache) { now }
+    private fun makeVM(fake: Fake, cache: InMemoryBoxCapacityCache) = NewChatViewModel(fake, cache, now = { now })
 
     private fun twoAwakeOneAsleep(fake: Fake, asleepName: String = "sleeping") {
         fake.devicesResult = Result.success(
@@ -155,7 +155,7 @@ class NewChatViewModelOfflineCapacityTest {
     @Test
     fun select_persistsCapacityFromTheLiveFolderReply() = runBlocking {
         val fake = Fake()
-        fake.devicesResult = Result.success(listOf(agent(9, "only", true), agent(2, "b", false)))
+        fake.devicesResult = Result.success(listOf(agent(9, "only", true)))
         fake.replies["recent_folders"] = ok("""{"folders":[{"path":"/w","last_used":1}],"activity":{"live_sessions":3},"account":{"email":"pat@yearbook.com"}}""")
         val cache = InMemoryBoxCapacityCache()
         makeVM(fake, cache).load()

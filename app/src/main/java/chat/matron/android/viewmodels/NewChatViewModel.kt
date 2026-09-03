@@ -11,6 +11,7 @@ import chat.matron.android.journal.objects
 import chat.matron.android.journal.stringOrNull
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -55,6 +56,8 @@ class NewChatViewModel(
     private val capacityCache: BoxCapacityCaching,
     /// Injected clock (epoch ms), so tests can pin capture times.
     private val now: () -> Long = System::currentTimeMillis,
+    /// Injected wake-retry sleep (ms), so the wake loops run at test speed.
+    private val wakeSleep: suspend (Long) -> Unit = { delay(it) },
 ) {
     sealed interface Phase {
         data object LoadingAgents : Phase
@@ -77,6 +80,35 @@ class NewChatViewModel(
 
     private val _isStarting = MutableStateFlow(false)
     val isStarting: StateFlow<Boolean> = _isStarting.asStateFlow()
+
+    // MARK: wake-on-pick (apple #168)
+    //
+    // The journal boots an idle-stopped box whenever an `agent_request`
+    // targets it and refuses with `agent_unreachable`, so the client's job is
+    // to keep re-asking until the bridge connects. `agent_unreachable` is the
+    // ONLY retried failure for `start` — the server refuses it before anything
+    // reaches the bridge, so a retry can never double-start; the folder loop
+    // also retries a timeout (mid-boot the socket can be up while the bridge
+    // is still starting).
+
+    /// True while a wake loop (folders or start) is re-asking a sleeping box.
+    private val _isWakingBox = MutableStateFlow(false)
+    val isWakingBox: StateFlow<Boolean> = _isWakingBox.asStateFlow()
+
+    /// When the current wake began (epoch ms), for the banner's elapsed time.
+    private val _wakeStartedAt = MutableStateFlow<Long?>(null)
+    val wakeStartedAt: StateFlow<Long?> = _wakeStartedAt.asStateFlow()
+
+    /// The last wake ran out of attempts or time; the sheet offers Try Again.
+    private val _wakeGaveUp = MutableStateFlow(false)
+    val wakeGaveUp: StateFlow<Boolean> = _wakeGaveUp.asStateFlow()
+
+    /// Ownership token per wake loop: a superseded loop (another box picked,
+    /// back to the roster, sheet dismissed) sees the token move and exits
+    /// without touching the flags the newer owner holds.
+    private var wakeToken = 0
+    private var wakeAgentID: Long? = null
+    private var isAbandoned = false
 
     /// Capacity per connected agent device id, filled by the roster fan-out.
     /// A box with no entry simply has no capacity to show (never asked, or its
@@ -119,10 +151,11 @@ class NewChatViewModel(
             // otherwise sit in the cache forever with its quota and account
             // email (CodeRabbit, #51).
             capacityCache.prune(keeping = agents.map { it.id }.toSet())
-            if (connected.size == 1) {
+            if (agents.size == 1) {
                 // Auto-skip straight to the folder step: there's no roster to
-                // decorate, so no fan-out.
-                select(connected[0])
+                // decorate, so no fan-out. Asleep or not — a single-box roster
+                // would be a dead stop, and a pick wakes it (apple #168).
+                select(agents[0])
             } else {
                 _phase.value = Phase.Agents(sorted(agents))
                 // The roster is already on screen (the phase flow was set
@@ -154,26 +187,41 @@ class NewChatViewModel(
     }
 
     suspend fun select(agent: DeviceDTO) {
+        // An impatient re-tap on the box already waking must not start a
+        // second loop — one wake per box.
+        if (_isWakingBox.value && sameFolderAgent(agent)) return
+        retireWakeOwner()
+        _errorMessage.value = null
+        _wakeGaveUp.value = false
         _phase.value = Phase.Folders(agent)
         _folders.value = emptyList()
         _foldersError.value = null
+        if (!agent.connected) {
+            // The first ask has already booted the box server-side; keep
+            // asking until the bridge connects.
+            wakeAndFetchFolders(agent)
+            return
+        }
         folderCache[agent.id]?.let {
             _folders.value = it
             return
         }
         try {
             val reply = api.agentRequest(agent.id, "recent_folders", "{}")
-            // A fleet with one connected box auto-skips the roster and never
-            // fans out, so this is the only reply that box's capacity can be
-            // learned from before it goes to sleep. Recorded off the answer
-            // rather than off the phase — BEFORE the switched-away check — so
-            // a start fired from the custom-folder field while this reply was
-            // still in flight can't discard it (Bugbot, #51).
-            if (reply is RPCReply.Ok) capacityCache.save(BoxCapacity.parse(reply.result), agent.id, now())
+            // A fleet with one box auto-skips the roster and never fans out,
+            // so this is the only reply that box's capacity can be learned
+            // from before it goes to sleep. Recorded off the answer rather
+            // than off the phase: it is true whether or not the user has
+            // moved on since.
+            recordCapacity(reply, agent.id)
             if (!sameFolderAgent(agent)) return // switched away meanwhile
             when (reply) {
                 is RPCReply.Ok -> _folders.value = parseFolders(reply.result)
-                is RPCReply.Failure -> folderFetchFailed(agent)
+                // The roster's `connected` is a snapshot; a box idle-stopped
+                // since then answers agent_unreachable — which has already
+                // fired its wake, so it gets the wake loop, not the degrade copy.
+                is RPCReply.Failure ->
+                    if (reply.code == AGENT_UNREACHABLE) wakeAndFetchFolders(agent) else folderFetchFailed(agent)
             }
         } catch (cancel: CancellationException) {
             throw cancel
@@ -181,6 +229,99 @@ class NewChatViewModel(
             if (!sameFolderAgent(agent)) return
             folderFetchFailed(agent)
         }
+    }
+
+    /// Try Again after a wake gave up: runs the folder wake loop once more.
+    suspend fun retryWake() {
+        val phaseNow = _phase.value
+        if (phaseNow !is Phase.Folders || _isWakingBox.value || _isStarting.value) return
+        _errorMessage.value = null
+        _wakeGaveUp.value = false
+        wakeAndFetchFolders(phaseNow.agent)
+    }
+
+    /// The sheet went away: retire every wake loop and stop the start
+    /// re-asks — a retried start landing minutes later would silently open a
+    /// session (and a live Claude process) on a box nobody is looking at.
+    fun abandon() {
+        isAbandoned = true
+        retireWakeOwner()
+    }
+
+    private fun retireWakeOwner() {
+        wakeToken += 1
+        _isWakingBox.value = false
+        _wakeStartedAt.value = null
+        wakeAgentID = null
+    }
+
+    private fun beginWake(agentID: Long): Int {
+        wakeToken += 1
+        _isWakingBox.value = true
+        // Same box again (a start retry during its folder wake) keeps the
+        // clock running; a different box restarts it.
+        if (_wakeStartedAt.value == null || wakeAgentID != agentID) _wakeStartedAt.value = now()
+        wakeAgentID = agentID
+        return wakeToken
+    }
+
+    private fun endWake(token: Int) {
+        if (token != wakeToken) return // a newer owner holds the flags
+        _isWakingBox.value = false
+        _wakeStartedAt.value = null
+        wakeAgentID = null
+    }
+
+    private fun stillOwns(token: Int, agent: DeviceDTO): Boolean = token == wakeToken && sameFolderAgent(agent)
+
+    private suspend fun wakeAndFetchFolders(agent: DeviceDTO) {
+        val token = beginWake(agent.id)
+        try {
+            val wakeBegan = now()
+            for (attempt in 1..WAKE_ATTEMPT_LIMIT) {
+                try {
+                    val reply = api.agentRequest(agent.id, "recent_folders", "{}")
+                    recordCapacity(reply, agent.id)
+                    if (!stillOwns(token, agent)) return
+                    when (reply) {
+                        is RPCReply.Ok -> {
+                            _folders.value = parseFolders(reply.result)
+                            return
+                        }
+                        is RPCReply.Failure -> if (reply.code != AGENT_UNREACHABLE) {
+                            _foldersError.value = FOLDERS_ERROR_COPY
+                            return
+                        } // else still booting — go around
+                    }
+                } catch (timeout: RPCRequestError.Timeout) {
+                    // Mid-boot the socket can be up while the bridge is still
+                    // starting: a wake in progress, not a dead end.
+                    if (!stillOwns(token, agent)) return
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (error: Throwable) {
+                    if (!stillOwns(token, agent)) return
+                    _foldersError.value = FOLDERS_ERROR_COPY
+                    return
+                }
+                // Attempts cost RPC + sleep, so a timeout streak would otherwise
+                // run many minutes of banner: the wall-clock deadline cuts in
+                // long before the attempt limit.
+                if (attempt >= WAKE_ATTEMPT_LIMIT || now() - wakeBegan >= WAKE_DEADLINE_MS) break
+                wakeSleep(WAKE_RETRY_DELAY_MS)
+                if (!stillOwns(token, agent)) return
+            }
+            if (!stillOwns(token, agent)) return
+            // Never bury a start error the user still needs to read.
+            if (_errorMessage.value == null) _errorMessage.value = WAKE_GAVE_UP_MESSAGE
+            _wakeGaveUp.value = true
+        } finally {
+            endWake(token)
+        }
+    }
+
+    private fun recordCapacity(reply: RPCReply, agentID: Long) {
+        if (reply is RPCReply.Ok) capacityCache.save(BoxCapacity.parse(reply.result), agentID, now())
     }
 
     /// The live `recent_folders` call for the folder step failed. The roster
@@ -193,7 +334,7 @@ class NewChatViewModel(
             _foldersError.value = null
             return
         }
-        _foldersError.value = "Couldn't fetch recent folders — you can still type a path."
+        _foldersError.value = FOLDERS_ERROR_COPY
     }
 
     /// Fires `start {workdir?, browser?}` at the picked agent. A `null`/blank
@@ -203,15 +344,28 @@ class NewChatViewModel(
         if (phaseNow !is Phase.Folders || _isStarting.value) return
         val agent = phaseNow.agent
         _isStarting.value = true
+        var startWakeToken: Int? = null
         try {
             _errorMessage.value = null
+            _wakeGaveUp.value = false
             val trimmed = workdir?.trim() ?: ""
             val params = buildJsonObject {
                 if (trimmed.isNotEmpty()) put("workdir", trimmed)
                 if (browserEnabled) put("browser", true)
             }
             try {
-                val reply = api.agentRequest(agent.id, "start", params.toString())
+                var reply = api.agentRequest(agent.id, "start", params.toString())
+                // `agent_unreachable` is refused before delivery, so re-asking
+                // is provably safe; a timeout is NOT retried (the start may
+                // have landed). Keep the banner up while the box boots.
+                var attempts = 1
+                while (attempts < WAKE_ATTEMPT_LIMIT && isUnreachable(reply) && !isAbandoned) {
+                    if (startWakeToken == null) startWakeToken = beginWake(agent.id)
+                    wakeSleep(WAKE_RETRY_DELAY_MS)
+                    if (isAbandoned || !sameFolderAgent(agent)) return
+                    reply = api.agentRequest(agent.id, "start", params.toString())
+                    attempts += 1
+                }
                 when (reply) {
                     is RPCReply.Ok -> {
                         val convoID = (reply.result as? JsonObject)?.stringOrNull("convo_id")
@@ -233,8 +387,12 @@ class NewChatViewModel(
             }
         } finally {
             _isStarting.value = false
+            startWakeToken?.let { endWake(it) }
         }
     }
+
+    private fun isUnreachable(reply: RPCReply): Boolean =
+        reply is RPCReply.Failure && reply.code == AGENT_UNREACHABLE
 
     /// Back from the folder step to the roster.
     suspend fun backToAgents() = load()
@@ -297,6 +455,17 @@ class NewChatViewModel(
     }
 
     companion object {
+        /// The journal's refusal for an idle-stopped box — its wake has
+        /// already fired server-side by the time this arrives.
+        const val AGENT_UNREACHABLE = "agent_unreachable"
+        const val WAKE_RETRY_DELAY_MS = 3_000L
+        const val WAKE_ATTEMPT_LIMIT = 40
+        /// Wall-clock bound on a wake: a mid-boot timeout streak runs ~18s per
+        /// attempt, so the attempt limit alone would mean ~12 minutes of banner.
+        const val WAKE_DEADLINE_MS = 120_000L
+        const val WAKE_GAVE_UP_MESSAGE = "The box didn't wake — try again."
+        const val FOLDERS_ERROR_COPY = "Couldn't fetch recent folders — you can still type a path."
+
         /// How stale a cached capacity may be before it stops being worth
         /// showing: past this, every limit window it describes has rolled over
         /// several times, so the percentages say nothing about the box today.
