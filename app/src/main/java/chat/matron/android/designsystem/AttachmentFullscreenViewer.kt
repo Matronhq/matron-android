@@ -57,11 +57,14 @@ fun AttachmentFullscreenViewer(gallery: ImageGallery, onDismiss: () -> Unit) {
         }
         var scale by remember(index) { mutableFloatStateOf(1f) }
         var offsetY by remember(index) { mutableFloatStateOf(0f) }
-        // A pinch's two-finger centroid must not reach the drag as a
-        // fit-scale swipe, or a drifting pinch pages to the neighbour: the
-        // drag classifier reads the scale committed before the gesture began.
-        var committedScale by remember(index) { mutableFloatStateOf(1f) }
+        // A pinch's two-finger centroid also reaches the drag detector. Two
+        // guards keep it from paging: the classifier reads the LIVE scale at
+        // drag end (a zoomed image never pages), and any pinch during the
+        // gesture marks it so a drifting pinch that lands back near 1× is
+        // still not a swipe (Bugbot, #58).
+        var pinchedThisGesture by remember(index) { mutableStateOf(false) }
         val transformState = rememberTransformableState { zoomChange, _, _ ->
+            if (zoomChange != 1f) pinchedThisGesture = true
             scale = (scale * zoomChange).coerceIn(MIN_SCALE, MAX_SCALE)
         }
         val entries = gallery.entries
@@ -82,7 +85,6 @@ fun AttachmentFullscreenViewer(gallery: ImageGallery, onDismiss: () -> Unit) {
 
         val entry = entries[index]
         val model = resolved.value[index]
-        val isZoomed = committedScale > MIN_SCALE + 0.01f
 
         Box(
             Modifier
@@ -97,14 +99,15 @@ fun AttachmentFullscreenViewer(gallery: ImageGallery, onDismiss: () -> Unit) {
                     translationY = offsetY
                 }
                 .transformable(transformState)
-                .pointerInput(gallery, index, isZoomed) {
+                .pointerInput(gallery, index) {
                     var dx = 0f
                     var dy = 0f
                     detectDragGestures(
-                        onDragStart = { dx = 0f; dy = 0f },
+                        onDragStart = { dx = 0f; dy = 0f; pinchedThisGesture = false },
                         onDragEnd = {
-                            if (isZoomed) {
-                                committedScale = scale
+                            val zoomed = scale > MIN_SCALE + 0.01f
+                            if (zoomed || pinchedThisGesture) {
+                                offsetY = 0f
                                 return@detectDragGestures
                             }
                             when (ImageGalleryNavigation.swipeIntent(dx, dy, SWIPE_THRESHOLD_PX)) {
@@ -116,16 +119,16 @@ fun AttachmentFullscreenViewer(gallery: ImageGallery, onDismiss: () -> Unit) {
                                 ImageGalleryNavigation.SwipeIntent.NONE -> {}
                             }
                             offsetY = 0f
-                            committedScale = scale
                         },
-                        onDragCancel = { offsetY = 0f; committedScale = scale },
+                        onDragCancel = { offsetY = 0f },
                         onDrag = { change, dragAmount ->
                             change.consume()
                             dx += dragAmount.x
                             dy += dragAmount.y
                             // Only a downward drag on an un-zoomed image shifts
                             // it — a swipe down dismisses.
-                            if (!isZoomed && abs(dy) > abs(dx)) offsetY = dy.coerceAtLeast(0f)
+                            val zoomed = scale > MIN_SCALE + 0.01f
+                            if (!zoomed && !pinchedThisGesture && abs(dy) > abs(dx)) offsetY = dy.coerceAtLeast(0f)
                         },
                     )
                 }

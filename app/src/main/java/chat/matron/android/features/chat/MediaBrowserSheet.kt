@@ -141,7 +141,14 @@ fun MediaBrowserSheet(
                                         entries = entries,
                                         startIndex = mediaItems.indexOfFirst { it.url == url }.coerceAtLeast(0),
                                         initial = bytes,
-                                    ) { u -> vm.openMedia(u) }
+                                    ) { u ->
+                                        // Neighbour prefetch: the thumbnail
+                                        // path, which never raises the tap
+                                        // path's attachmentError for an
+                                        // image the user hasn't opened
+                                        // (Bugbot, #58).
+                                        vm.thumbnail(u)
+                                    }
                                 }
                             } finally {
                                 openingMedia = openingMedia - url
