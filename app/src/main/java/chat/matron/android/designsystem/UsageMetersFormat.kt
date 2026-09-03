@@ -93,6 +93,16 @@ object UsageMetersFormat {
     /// "CPU 12% · RAM 63%" — the bridge host's vitals as one quiet caption
     /// line. Either half can be missing (CPU needs two sampler ticks after a
     /// bridge boot); null when neither is known so callers drop the line.
+    /// "opus" / "opus · high" — the session's model with its effort level
+    /// beside it. An unknown effort adds nothing at all: no separator, no
+    /// placeholder, nothing for a layout to reserve space for. The bridge
+    /// publishes no effort rather than a guess, so absent is the normal state
+    /// and must read as normal (apple #163).
+    fun modelLine(model: String, effort: String?): String {
+        val trimmed = effort?.trim().orEmpty()
+        return if (trimmed.isEmpty()) model else "$model · $trimmed"
+    }
+
     fun vitalsLine(vitals: SessionStatus.Vitals): String? {
         val parts = buildList {
             vitals.cpuPct?.let { add("CPU $it%") }

@@ -1226,12 +1226,12 @@ class ChatViewModelTest {
         waitUntil { fake.sessionStatusFlow.subscriptionCount.value > 0 }
 
         fake.emitStatus(
-            SessionStatusUpdate("!r:s", null, SessionStatus.Context(100_000, 1_000_000, 10), null, null, null, null, null),
+            SessionStatusUpdate("!r:s", null, SessionStatus.Context(100_000, 1_000_000, 10), null, null, null, null, null, modelOptions = null, effortLevels = null, effort = null),
         )
         waitUntil { vm.sessionStatus.value?.context != null }
         assertEquals(10, vm.sessionStatus.value?.context?.pct)
 
-        fake.emitStatus(SessionStatusUpdate("!r:s", "claude-fable-5", null, null, null, null, null, null))
+        fake.emitStatus(SessionStatusUpdate("!r:s", "claude-fable-5", null, null, null, null, null, null, modelOptions = null, effortLevels = null, effort = null))
         waitUntil { vm.sessionStatus.value?.model != null }
         assertEquals("claude-fable-5", vm.sessionStatus.value?.model)
         assertEquals(10, vm.sessionStatus.value?.context?.pct)
@@ -1255,11 +1255,11 @@ class ChatViewModelTest {
         waitUntil { emissions.isNotEmpty() } // initial null
 
         fake.emitStatus(
-            SessionStatusUpdate("!r:s", null, SessionStatus.Context(100_000, 1_000_000, 10), null, null, null, null, null),
+            SessionStatusUpdate("!r:s", null, SessionStatus.Context(100_000, 1_000_000, 10), null, null, null, null, null, modelOptions = null, effortLevels = null, effort = null),
         )
         waitUntil { emissions.size >= 2 }
 
-        fake.emitStatus(SessionStatusUpdate("!r:s", "claude-fable-5", null, null, null, null, null, null))
+        fake.emitStatus(SessionStatusUpdate("!r:s", "claude-fable-5", null, null, null, null, null, null, modelOptions = null, effortLevels = null, effort = null))
         waitUntil { emissions.size >= 3 }
 
         assertEquals(3, emissions.size)
@@ -1278,7 +1278,7 @@ class ChatViewModelTest {
         waitUntil { fake.sessionStatusFlow.subscriptionCount.value > 0 }
 
         fake.emitStatus(
-            SessionStatusUpdate("!r:s", null, SessionStatus.Context(100_000, 1_000_000, 10), null, null, null, null, null),
+            SessionStatusUpdate("!r:s", null, SessionStatus.Context(100_000, 1_000_000, 10), null, null, null, null, null, modelOptions = null, effortLevels = null, effort = null),
         )
         waitUntil { vm.sessionStatus.value?.context != null }
         assertEquals(10, vm.sessionStatus.value?.context?.pct)

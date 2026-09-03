@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import chat.matron.android.journal.db.MatronDatabase
 import chat.matron.android.models.SyncConnectionState
+import chat.matron.android.models.SessionStatusUpdate
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -928,6 +929,30 @@ class JournalSyncEngineTest {
         socket.serve(journalLine(4))
         engine.waitUntilReady()
         assertEquals(4L, store.cursor())
+        engine.endSync()
+    }
+
+    /// The replay cache merges field-by-field, so it has to honour the effort
+    /// clear the same way `SessionStatus.merged` does: a null effort must
+    /// overwrite the tracked level in the cache, not be skipped as an absent
+    /// field — or a client attaching after a restart is replayed the stale
+    /// level the bridge just disowned (apple #163).
+    @Test
+    fun sessionStatusReplayCacheHonorsEffortClear() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(0))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+        socket.serve("""{"kind":"ephemeral","convo_id":"c1","status":{"model":"opus","effort":"xhigh"}}""")
+        socket.serve("""{"kind":"ephemeral","convo_id":"c1","status":{"effort":null}}""")
+        delay(50)
+        val probe = FlowProbe(this, engine.sessionStatus("c1"))
+        val replayed = probe.next()
+        assertEquals(SessionStatusUpdate.Effort.Cleared, replayed.effort)
+        assertEquals("opus", replayed.model)
+        probe.cancel()
         engine.endSync()
     }
 }

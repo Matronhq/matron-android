@@ -5,6 +5,7 @@ import chat.matron.android.chat.SendGate
 import chat.matron.android.models.ArgSuggestion
 import chat.matron.android.models.BotCommand
 import chat.matron.android.models.BotCommandCatalog
+import chat.matron.android.models.SessionStatus
 import java.io.File
 import java.nio.file.Files
 import kotlin.time.Duration.Companion.seconds
@@ -1078,5 +1079,89 @@ class ComposerViewModelTest {
         repeat(4) { vm.paletteMoveDown() }
         assertTrue(vm.confirmPaletteSelection())
         assertEquals("/start ~/proj", vm.input)
+    }
+
+    // MARK: - Session-derived argument suggestions (apple #163)
+
+    /// Stands in for the `ChatViewModel` the composer reads its session status
+    /// from — the pair is created together by the chat-list VM cache, and the
+    /// composer holds a closure back to the chat half.
+    private class StatusHolder(var status: SessionStatus?) {
+        var reads = 0
+            private set
+        fun read(): SessionStatus? { reads++; return status }
+    }
+
+    private fun composer(holder: StatusHolder) = ComposerViewModel(
+        "!r", FakeTimelineService(), BotCommandCatalog.claudeBridge, emptyRecentFolders(), stagingDir(),
+        sessionStatus = { holder.read() },
+    )
+
+    /// The status is read only once a session-derived command has matched —
+    /// reading it eagerly would have the composer observe every status frame
+    /// while the user types ordinary prose.
+    @Test
+    fun ordinaryTypingDoesNotReadTheSessionStatus() {
+        val holder = StatusHolder(SessionStatus(modelOptions = listOf(SessionStatus.Option("opus", "Opus"))))
+        val vm = composer(holder)
+        vm.input = "just chatting about /model"
+        vm.showPalette
+        vm.input = "/restart --f"
+        vm.showPalette
+        assertEquals(0, holder.reads)
+        vm.input = "/model "
+        vm.showPalette
+        assertTrue(holder.reads > 0)
+    }
+
+    @Test
+    fun modelAndEffort_offerTheSessionsLists() {
+        val holder = StatusHolder(SessionStatus(
+            modelOptions = listOf(SessionStatus.Option("opus", "Opus"), SessionStatus.Option("sonnet", "Sonnet")),
+            effortLevels = listOf(SessionStatus.Option("high", "High")),
+        ))
+        val vm = composer(holder)
+        vm.input = "/model "
+        assertTrue(vm.showPalette)
+        assertEquals(listOf("opus", "sonnet"), argumentValues(vm))
+        assertEquals(2, vm.paletteItemCount)
+        vm.input = "/effort "
+        assertEquals(listOf("high"), argumentValues(vm))
+    }
+
+    /// The composer reads the status live rather than holding a copy, so a
+    /// later status frame reaches the palette without anything pushing it.
+    @Test
+    fun laterStatusFrame_reachesThePalette() {
+        val holder = StatusHolder(null)
+        val vm = composer(holder)
+        vm.input = "/model "
+        assertEquals(emptyList<String>(), argumentValues(vm))
+        holder.status = SessionStatus(modelOptions = listOf(SessionStatus.Option("opus", "Opus")))
+        assertEquals(listOf("opus"), argumentValues(vm))
+    }
+
+    @Test
+    fun selectingASessionValue_insertsItAndDismisses() {
+        val holder = StatusHolder(SessionStatus(modelOptions = listOf(SessionStatus.Option("opus", "Opus"))))
+        val vm = composer(holder)
+        vm.input = "/model op"
+        vm.selectSuggestion(PaletteSuggestion.Argument(ArgSuggestion("opus", label = "Opus")))
+        assertEquals("/model opus ", vm.input)
+        assertFalse(vm.showPalette)
+    }
+
+    /// Keyboard selection walks the same rows as a tap.
+    @Test
+    fun confirmPaletteSelection_picksASessionValue() {
+        val holder = StatusHolder(SessionStatus(
+            modelOptions = listOf(SessionStatus.Option("opus", "Opus"), SessionStatus.Option("sonnet", "Sonnet")),
+        ))
+        val vm = composer(holder)
+        vm.input = "/model "
+        vm.paletteMoveDown()
+        vm.paletteMoveDown()
+        assertTrue(vm.confirmPaletteSelection())
+        assertEquals("/model sonnet ", vm.input)
     }
 }

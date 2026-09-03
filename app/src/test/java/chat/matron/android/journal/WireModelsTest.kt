@@ -2,6 +2,7 @@ package chat.matron.android.journal
 
 import chat.matron.android.models.AttachmentBatchTag
 import chat.matron.android.models.SessionStatus
+import chat.matron.android.models.SessionStatusUpdate
 import java.time.Instant
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
@@ -389,5 +390,62 @@ class WireModelsTest {
         val update = (ServerFrame.decode(text) as ServerFrame.SessionStatusFrame).update
         assertEquals("m", update.model)
         assertNull(update.vitals)
+    }
+
+    // MARK: - session-derived argument lists + effort (apple #163)
+
+    private fun status(text: String) = (ServerFrame.decode(text) as ServerFrame.SessionStatusFrame).update
+
+    @Test
+    fun decodeSessionStatusCarriesSuggestionListsAndEffort() {
+        val update = status("""{"kind":"ephemeral","convo_id":"c1","status":{"model":"opus","effort":"high","model_options":[{"value":"opus","label":"Opus"},{"value":"sonnet","label":"Sonnet"}],"effort_levels":[{"value":"low","label":"Low"},{"value":"xhigh"}]}}""")
+        assertEquals(SessionStatusUpdate.Effort.Set("high"), update.effort)
+        assertEquals(listOf(SessionStatus.Option("opus", "Opus"), SessionStatus.Option("sonnet", "Sonnet")), update.modelOptions)
+        assertEquals(listOf(SessionStatus.Option("low", "Low"), SessionStatus.Option("xhigh", null)), update.effortLevels)
+    }
+
+    /// Absent and empty are different statements and must stay different in
+    /// the model: an older bridge omits the field entirely (null — "doesn't
+    /// say"), while an agent with nothing to offer sends `[]` ("offers
+    /// nothing"). Deliberately unlike `limits`, which collapses an empty array.
+    @Test
+    fun decodeSessionStatusDistinguishesAbsentFromEmptyOptionLists() {
+        val absent = status("""{"kind":"ephemeral","convo_id":"c1","status":{"model":"opus"}}""")
+        assertNull(absent.modelOptions)
+        assertNull(absent.effortLevels)
+        assertNull(absent.effort)
+        val empty = status("""{"kind":"ephemeral","convo_id":"c1","status":{"model_options":[],"effort_levels":[]}}""")
+        assertEquals(emptyList<SessionStatus.Option>(), empty.modelOptions)
+        assertEquals(emptyList<SessionStatus.Option>(), empty.effortLevels)
+        // An entry without a `value` carries nothing selectable and is skipped.
+        val mixed = status("""{"kind":"ephemeral","convo_id":"c1","status":{"model_options":[{"label":"Nameless"},{"value":"opus"}]}}""")
+        assertEquals(listOf("opus"), mixed.modelOptions?.map { it.value })
+    }
+
+    /// A non-empty array whose entries ALL fail to parse is a malformed frame,
+    /// not the agent saying it offers nothing — it degrades to null (silence)
+    /// so the held list stands. A wire `[]` is still a statement.
+    @Test
+    fun decodeSessionStatusAllMalformedOptionsSayNothing() {
+        val garbled = status("""{"kind":"ephemeral","convo_id":"c1","status":{"model_options":[{"label":"Nameless"}],"effort_levels":["low"]}}""")
+        assertNull(garbled.modelOptions)
+        assertNull(garbled.effortLevels)
+        var held = SessionStatus(modelOptions = listOf(SessionStatus.Option("opus", "Opus")))
+        held = held.merged(garbled)
+        assertEquals(listOf("opus"), held.modelOptions?.map { it.value })
+        held = held.merged(status("""{"kind":"ephemeral","convo_id":"c1","status":{"model_options":[]}}"""))
+        assertEquals(emptyList<SessionStatus.Option>(), held.modelOptions)
+    }
+
+    /// `effort` is the one tri-state field: missing is silence, null is the
+    /// bridge saying it is no longer tracking a level.
+    @Test
+    fun decodeSessionStatusEffortIsTriState() {
+        assertEquals(SessionStatusUpdate.Effort.Set("xhigh"), status("""{"kind":"ephemeral","convo_id":"c1","status":{"effort":"xhigh"}}""").effort)
+        val cleared = status("""{"kind":"ephemeral","convo_id":"c1","status":{"model":"opus","effort":null}}""")
+        assertEquals(SessionStatusUpdate.Effort.Cleared, cleared.effort)
+        assertEquals("opus", cleared.model)
+        assertNull(status("""{"kind":"ephemeral","convo_id":"c1","status":{"model":"gpt-5"}}""").effort)
+        assertNull("a non-string, non-null effort is not a statement", status("""{"kind":"ephemeral","convo_id":"c1","status":{"effort":7}}""").effort)
     }
 }
