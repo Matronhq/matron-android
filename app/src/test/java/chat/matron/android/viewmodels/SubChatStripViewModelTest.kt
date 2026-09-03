@@ -209,4 +209,15 @@ class SubChatStripViewModelTest {
             SubChatStripViewModel.pathReplacingCurrentChild(listOf("other"), "p:sub:a", "p:sub:b"),
         )
     }
+
+    /// apple #167: the probe skips leading whitespace without copying the
+    /// body, and still tolerates it on both sides of the indicator.
+    @Test
+    fun subtaskDescription_toleratesSurroundingWhitespace_withoutFullTrim() {
+        val prefix = "🔀 Subtask: "
+        assertEquals("fix the build", SubChatStripViewModel.subtaskDescription("  \n$prefix fix the build  \n"))
+        assertEquals("fix the build", SubChatStripViewModel.subtaskDescription("$prefix fix the build"))
+        assertNull(SubChatStripViewModel.subtaskDescription("   "))
+        assertNull(SubChatStripViewModel.subtaskDescription("plain message $prefix nope"))
+    }
 }

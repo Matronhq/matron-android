@@ -51,7 +51,7 @@ object DateSeparatorLabel {
 
         // Older — localised medium date ("24 Feb 2026").
         return date.atZone(zone).format(
-            DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(locale)
+            mediumDateFormatter(locale)
         )
     }
 
@@ -84,3 +84,11 @@ fun DateSeparator(label: String, modifier: Modifier = Modifier) {
         }
     }
 }
+
+/// Per-locale cache for the separator's date formatter: every visible day
+/// boundary formats on every list-body evaluation, and `ofLocalizedDate`
+/// resolves the locale pattern each time it's built (apple #167).
+private val mediumDateFormatters = java.util.concurrent.ConcurrentHashMap<java.util.Locale, DateTimeFormatter>()
+
+private fun mediumDateFormatter(locale: java.util.Locale): DateTimeFormatter =
+    mediumDateFormatters.getOrPut(locale) { DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(locale) }
