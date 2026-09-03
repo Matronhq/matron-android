@@ -11,6 +11,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 /// Thin labelled progress strip for attachment uploads, rendered by the
@@ -37,12 +38,43 @@ fun UploadProgressBar(label: String, fraction: Double, modifier: Modifier = Modi
             progress = { clamped.toFloat() },
             modifier = Modifier.weight(1f),
         )
+        // Two texts, not one: the filename may truncate (pasted photos get
+        // UUID temp names wider than the screen), the percent never does.
+        // The label is middle-truncated so the extension survives, and gets
+        // at most half the row so the bar keeps its share; an end ellipsis
+        // backs that up on very narrow widths (port of apple #156).
         Text(
-            "$label $percent%",
+            uploadLabelDisplay(label),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
-            modifier = Modifier.padding(start = 8.dp),
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .weight(1f, fill = false)
+                .padding(start = 8.dp),
+        )
+        Text(
+            "$percent%",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            modifier = Modifier.padding(start = 4.dp),
         )
     }
+}
+
+/// Maximum characters of the upload label before it is middle-truncated.
+internal const val UPLOAD_LABEL_MAX_CHARS = 28
+
+/// Middle-truncates [label] to [maxChars] with a single ellipsis, keeping the
+/// head and the tail (so a filename's extension stays readable). Compose's
+/// `TextOverflow` has no middle mode at our BOM, so this is done in the
+/// string; pure and top-level so it's unit-testable. Deviation from Apple's
+/// `.truncationMode(.middle)`, which is width-based.
+internal fun uploadLabelDisplay(label: String, maxChars: Int = UPLOAD_LABEL_MAX_CHARS): String {
+    if (label.length <= maxChars) return label
+    val keep = maxChars - 1
+    val tail = keep / 2
+    val head = keep - tail
+    return label.take(head) + "\u2026" + label.takeLast(tail)
 }

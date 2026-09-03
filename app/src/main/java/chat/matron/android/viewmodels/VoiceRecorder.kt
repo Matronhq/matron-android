@@ -26,6 +26,11 @@ class VoiceRecorder(
     private val requestPermission: suspend () -> Boolean,
     private val makeRecorder: (File) -> AudioRecording,
     private val tempDirectory: File,
+    /// `true` while capture is live, `false` once it ends — keeps the screen
+    /// from auto-locking mid-recording (locking suspends the app and kills the
+    /// capture). Injectable so tests can observe the claim/release pair; the
+    /// UI stage wires the window's KEEP_SCREEN_ON flag (port of apple #159).
+    private val setKeepScreenAwake: (Boolean) -> Unit = {},
 ) {
     sealed interface State {
         data object Idle : State
@@ -90,6 +95,7 @@ class VoiceRecorder(
                 val started = Instant.now()
                 startedAt = started
                 _state.value = State.Recording(started)
+                setKeepScreenAwake(true)
             } catch (error: Throwable) {
                 // A failed recorder construction or start must not leave an orphan
                 // temp file behind.
@@ -117,6 +123,7 @@ class VoiceRecorder(
         fileURL = null
         startedAt = null
         _state.value = State.Finished
+        setKeepScreenAwake(false)
         if (!succeeded) {
             file.delete()
             return null
@@ -134,6 +141,7 @@ class VoiceRecorder(
         fileURL = null
         startedAt = null
         _state.value = State.Idle
+        setKeepScreenAwake(false)
     }
 }
 
