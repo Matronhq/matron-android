@@ -1,5 +1,6 @@
 package chat.matron.android.chat
 
+import chat.matron.android.models.AttachmentBatchTag
 import chat.matron.android.models.SessionStatusUpdate
 import chat.matron.android.models.SyncConnectionState
 import java.time.Instant
@@ -53,6 +54,23 @@ interface TimelineService {
     suspend fun sendFile(
         data: ByteArray, filename: String, mimeType: String, caption: String?, progress: ((Double) -> Unit)?,
     ) = sendFile(data, filename, mimeType, caption)
+
+    /// Batch-tagged variants, used by the composer when one send carries
+    /// several attachments. [batch] marks each upload's place in that send so
+    /// the journal bridge can gather the frames back into one prompt
+    /// ([AttachmentBatchTag]). The defaults drop the tag and forward to the
+    /// progress sends, so fakes and transports without batch delivery (where
+    /// each attachment simply arrives as its own message, today's behavior)
+    /// compile unchanged; [JournalTimelineService] overrides both.
+    suspend fun sendImage(
+        data: ByteArray, filename: String, mimeType: String, caption: String?,
+        batch: AttachmentBatchTag?, progress: ((Double) -> Unit)?,
+    ) = sendImage(data, filename, mimeType, caption, progress)
+
+    suspend fun sendFile(
+        data: ByteArray, filename: String, mimeType: String, caption: String?,
+        batch: AttachmentBatchTag?, progress: ((Double) -> Unit)?,
+    ) = sendFile(data, filename, mimeType, caption, progress)
 
     /// Retries a pending/failed own-message (the timeline's tap-to-retry
     /// affordance). [itemID] is the timeline item's id. Implementations

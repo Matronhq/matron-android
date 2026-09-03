@@ -173,6 +173,180 @@ class MarkdownAttributedTest {
         assertTrue(doc.annotated.text.contains("let a = 1\n\nlet b = 2"))
     }
 
+    // MARK: - Tables (port of apple #134)
+
+    private val tableSource = "| Repo | PR |\n| :--- | ---: |\n| bridge | **215** |\n| apple | 133 |"
+
+    /// Port of Apple `test_tableCell_classifiedWithRowColumnHeader`: the
+    /// header/body/alignment structure the Swift `BlockKind.tableCell` carries
+    /// per cell lives on the Android block's [MarkdownTable].
+    @Test
+    fun table_parsesHeaderBodyAndAlignments() {
+        val doc = parse(tableSource)
+        assertEquals(1, doc.blocks.size)
+        val block = doc.blocks.first()
+        assertEquals(MarkdownBlockKind.Table, block.kind)
+        val table = block.table!!
+        assertEquals(2, table.columnCount)
+        assertEquals(
+            listOf(MarkdownTableAlignment.Left, MarkdownTableAlignment.Right),
+            table.alignments,
+        )
+        assertEquals(listOf("Repo", "PR"), table.header.map { it.text })
+        assertEquals(2, table.rows.size)
+        assertEquals(listOf("bridge", "215"), table.rows[0].map { it.text })
+        assertEquals(listOf("apple", "133"), table.rows[1].map { it.text })
+    }
+
+    /// Port of Apple `test_table_cellsCarryTableBlocks` (styling half):
+    /// header cells bold, body cells not.
+    @Test
+    fun table_headerCellsBoldBodyCellsNot() {
+        val table = parse(tableSource).blocks.first().table!!
+        assertEquals(FontWeight.Bold, table.header[0].styleAt("Repo").fontWeight)
+        assertTrue(table.rows[1][0].styleAt("apple").fontWeight != FontWeight.Bold)
+    }
+
+    /// Port of Apple `test_inlineStylesInsideCells_keepAttributes`: `**215**`
+    /// inside a cell keeps its bold span (and loses its markers).
+    @Test
+    fun table_inlineStylesInsideCellsKeepSpans() {
+        val table = parse(tableSource).blocks.first().table!!
+        val cell = table.rows[0][1]
+        assertEquals("215", cell.text)
+        assertEquals(FontWeight.Bold, cell.styleAt("215").fontWeight)
+    }
+
+    /// Port of Apple `test_twoAdjacentTables_getSeparateTextTables`: two
+    /// blank-line-separated tables parse as two Table blocks, each with its
+    /// own column count.
+    @Test
+    fun table_twoAdjacentTablesStaySeparateBlocks() {
+        val doc = parse(tableSource + "\n\n| X |\n| --- |\n| y |")
+        val tables = doc.blocks.filter { it.kind == MarkdownBlockKind.Table }
+        assertEquals(2, tables.size)
+        assertEquals(2, tables[0].table!!.columnCount)
+        assertEquals(1, tables[1].table!!.columnCount)
+        assertEquals("y", tables[1].table!!.rows[0][0].text)
+    }
+
+    /// Port of Apple `test_reconstruct_fullTable_roundTripsPipesAndAlignment`
+    /// adapted to the flat-copy model: the table block degrades to pipe text
+    /// with the delimiter row rebuilt from alignments (left stays plain
+    /// `---`). Inline markers are gone — the Android flat string is display
+    /// text with spans, unlike the Mac's marker-reconstructing copy path.
+    @Test
+    fun table_annotatedDegradesToPipeText() {
+        assertEquals(
+            "| Repo | PR |\n| --- | ---: |\n| bridge | 215 |\n| apple | 133 |",
+            parse(tableSource).annotated.text,
+        )
+    }
+
+    /// Port of Apple `test_reconstruct_tableBetweenParagraphs_blankLineSeparated`
+    /// (Android's flat string joins blocks with a single newline, not a blank
+    /// line — the existing [MarkdownDocument.annotated] convention).
+    @Test
+    fun table_betweenParagraphsKeepsBlockOrder() {
+        val doc = parse("Before.\n\n| A | B |\n| --- | --- |\n| c | d |\n\nAfter.")
+        assertEquals(
+            listOf(MarkdownBlockKind.Paragraph, MarkdownBlockKind.Table, MarkdownBlockKind.Paragraph),
+            doc.blocks.map { it.kind },
+        )
+        assertEquals("Before.\n| A | B |\n| --- | --- |\n| c | d |\nAfter.", doc.annotated.text)
+    }
+
+    /// Port of Apple `test_messageEndingInTable_keepsSingleTerminatorNewline`,
+    /// adapted: the Android flat model needs no cell terminator, so a message
+    /// ending in a table simply must not end with a newline.
+    @Test
+    fun table_messageEndingInTableHasNoTrailingNewline() {
+        val doc = parse("Intro.\n\n" + tableSource)
+        assertTrue(doc.annotated.text.endsWith("| apple | 133 |"))
+        assertTrue(!doc.annotated.text.endsWith("\n"))
+    }
+
+    // MARK: - Table parsing edge cases (GFM rules Apple inherits from cmark-gfm)
+
+    /// A delimiter row whose cell count differs from the header's is not a
+    /// table — the lines stay paragraphs (GFM rejects the table).
+    @Test
+    fun table_delimiterColumnMismatchStaysParagraph() {
+        val doc = parse("| A | B |\n| --- |\n| c | d |")
+        assertTrue(doc.blocks.none { it.kind == MarkdownBlockKind.Table })
+    }
+
+    /// Header + delimiter alone is a valid, body-less table.
+    @Test
+    fun table_headerAndDelimiterOnlyYieldsEmptyBody() {
+        val table = parse("| A | B |\n| --- | --- |").blocks.first().table!!
+        assertEquals(listOf("A", "B"), table.header.map { it.text })
+        assertTrue(table.rows.isEmpty())
+    }
+
+    /// GFM row normalisation: short rows pad with empty cells, long rows drop
+    /// the excess.
+    @Test
+    fun table_rowsNormaliseToHeaderColumnCount() {
+        val table = parse("| A | B |\n| --- | --- |\n| only |\n| c | d | extra |").blocks.first().table!!
+        assertEquals(listOf("only", ""), table.rows[0].map { it.text })
+        assertEquals(listOf("c", "d"), table.rows[1].map { it.text })
+    }
+
+    /// `\|` is a literal pipe inside a cell, not a cell boundary.
+    @Test
+    fun table_escapedPipeStaysInsideCell() {
+        val table = parse("| A | B |\n| --- | --- |\n| a \\| b | c |").blocks.first().table!!
+        assertEquals("a | b", table.rows[0][0].text)
+    }
+
+    /// GFM makes the outer pipes optional.
+    @Test
+    fun table_outerPipesOptional() {
+        val table = parse("A | B\n--- | ---\n1 | 2").blocks.first().table!!
+        assertEquals(2, table.columnCount)
+        assertEquals(listOf("1", "2"), table.rows[0].map { it.text })
+    }
+
+    /// GFM tables interrupt paragraphs — no blank line required before the
+    /// header row.
+    @Test
+    fun table_interruptsParagraph() {
+        val doc = parse("Intro line\n| A | B |\n| --- | --- |\n| c | d |")
+        assertEquals(
+            listOf(MarkdownBlockKind.Paragraph, MarkdownBlockKind.Table),
+            doc.blocks.map { it.kind },
+        )
+        assertEquals("Intro line", doc.blocks[0].text.text)
+    }
+
+    /// GFM spec example 205: a plain line directly after the table (no blank
+    /// line) is swallowed as a one-cell row.
+    @Test
+    fun table_plainLineWithoutBlankBecomesRow() {
+        val table = parse("| A | B |\n| --- | --- |\n| c | d |\nplain").blocks.first().table!!
+        assertEquals(2, table.rows.size)
+        assertEquals(listOf("plain", ""), table.rows[1].map { it.text })
+    }
+
+    /// A pipe-bearing line NOT followed by a delimiter row is an ordinary
+    /// paragraph.
+    @Test
+    fun table_pipeLineWithoutDelimiterStaysParagraph() {
+        val doc = parse("a | b\nnot a delimiter")
+        assertEquals(listOf(MarkdownBlockKind.Paragraph), doc.blocks.map { it.kind })
+    }
+
+    /// A link inside a cell keeps its URL annotation for the tappable path.
+    @Test
+    fun table_linkInsideCellKeepsAnnotation() {
+        val table = parse("| Repo | PR |\n| --- | --- |\n| bridge | [#215](https://example.com) |")
+            .blocks.first().table!!
+        val cell = table.rows[0][1]
+        val idx = cell.text.indexOf("#215")
+        assertEquals("https://example.com", cell.getStringAnnotations("URL", idx, idx + 1).firstOrNull()?.item)
+    }
+
     // MARK: - Cache
 
     @Test

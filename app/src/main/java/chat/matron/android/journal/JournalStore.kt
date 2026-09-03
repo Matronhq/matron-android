@@ -1,6 +1,7 @@
 package chat.matron.android.journal
 
 import androidx.room.withTransaction
+import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.journal.db.ConversationEntity
 import chat.matron.android.journal.db.EventEntity
 import chat.matron.android.journal.db.MatronDatabase
@@ -236,6 +237,10 @@ class JournalStore(
     /// wall clock so every read reflects the current time (read-time TTL).
     suspend fun conversations(now: Long = System.currentTimeMillis()): List<ConversationEntity> =
         conversationDao.visibleTopLevel().map { applyReadTimeSnippetTTL(it, now) }
+
+    /// Every conversation id, most recent activity first — the search
+    /// backfill sweep's walk order (see [chat.matron.android.search.SearchBackfillCoordinator]).
+    suspend fun allConversationIDs(): List<String> = conversationDao.allConversationIDs()
 
     suspend fun children(parentConvoID: String): List<ConversationEntity> =
         conversationDao.children(parentConvoID)
@@ -473,16 +478,25 @@ class JournalStore(
         JournalEventType.TEXT -> (event.body() ?: "").take(120)
         JournalEventType.PROMPT -> "? " + (event.payload.stringOrNull("question") ?: "").take(110)
         JournalEventType.PERMISSION_REQUEST ->
-            // The agent-chat consent card carries no `description`, so the
-            // generic branch produced a bare "permission: " in the chat list —
-            // and disagreed with the server, whose snippetOf returns this
-            // string for the same event. A snapshot and a live frame must not
-            // render the same row two different ways.
-            if (event.payload.stringOrNull("kind") == "agent_chat") {
-                "🤝 Agent chat request"
-            } else {
-                "permission: " + (event.payload.stringOrNull("description") ?: "").take(100)
+            // The agent-chat/agent-spawn consent cards carry no `description`,
+            // so the generic branch produced a bare "permission: " in the chat
+            // list — and disagreed with the server, whose snippetOf returns
+            // these strings for the same events. A snapshot and a live frame
+            // must not render the same row two different ways.
+            when (event.payload.stringOrNull("kind")) {
+                "agent_chat" -> "🤝 Agent chat request"
+                "agent_spawn" -> "🤝 Agent spawn request"
+                else -> "permission: " + (event.payload.stringOrNull("description") ?: "").take(100)
             }
+        // baseSnippet, NOT displayLine: this path also renders snapshot rows
+        // whose snippet the server itself minted via its byte-exact
+        // snippetOf (bare "❌ Spawn failed", "[spawn_outcome]" for an
+        // unrecognised outcome) — displayLine's errorCode suffix and neutral
+        // "resolved" copy are for the live-mapped timeline row only, and
+        // would flip-flop this row between renders if used here.
+        JournalEventType.SPAWN_OUTCOME ->
+            SpawnOutcome.parse(event.payload)?.let { SpawnOutcome.baseSnippet(it.outcome) }
+                ?: (event.snippet()?.take(120) ?: "[${event.type}]")
         else -> event.snippet()?.take(120) ?: "[${event.type}]"
     }
 

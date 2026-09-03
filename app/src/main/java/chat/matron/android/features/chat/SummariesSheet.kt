@@ -33,7 +33,10 @@ import chat.matron.android.chat.ConversationSummaryEntry
 import chat.matron.android.viewmodels.ChatViewModel
 import java.time.Instant
 import java.time.ZoneId
+import java.time.chrono.IsoChronology
 import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeFormatterBuilder
+import java.time.format.FormatStyle
 import java.util.Locale
 
 /**
@@ -155,9 +158,16 @@ internal fun toggleExpandedSeq(current: Long?, tapped: Long): Long? =
 
 /// Row timestamp caption, mirroring the iOS
 /// `.dateTime.month().day().hour().minute()` format ("Aug 16, 2:30 PM").
-/// [zone]/[locale] injectable for tests.
+/// Month + day are fixed; the clock half comes from the locale's SHORT time
+/// pattern so 24-hour locales read "Aug 16, 14:30" rather than being forced
+/// onto a 12-hour clock (CodeRabbit, #37). [zone]/[locale] injectable for tests.
 internal fun summaryTimestampLabel(
     date: Instant,
     zone: ZoneId = ZoneId.systemDefault(),
     locale: Locale = Locale.getDefault(),
-): String = DateTimeFormatter.ofPattern("MMM d, h:mm a", locale).format(date.atZone(zone))
+): String {
+    val time = DateTimeFormatterBuilder.getLocalizedDateTimePattern(
+        null, FormatStyle.SHORT, IsoChronology.INSTANCE, locale,
+    )
+    return DateTimeFormatter.ofPattern("MMM d, $time", locale).format(date.atZone(zone))
+}

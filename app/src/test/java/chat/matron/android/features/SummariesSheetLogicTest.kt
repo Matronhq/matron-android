@@ -38,7 +38,16 @@ class SummariesSheetLogicTest {
     @Test fun timestampLabelFormatsMonthDayHourMinute() {
         // 2026-08-16 14:30 UTC.
         val date = Instant.parse("2026-08-16T14:30:00Z")
-        assertEquals("Aug 16, 2:30 PM", summaryTimestampLabel(date, ZoneOffset.UTC, Locale.US))
+        // JDK 20+ CLDR data puts a narrow no-break space before AM/PM; the
+        // glyph choice is the locale's, not ours, so normalise it away.
+        assertEquals("Aug 16, 2:30 PM", summaryTimestampLabel(date, ZoneOffset.UTC, Locale.US).replace('\u202f', ' '))
+    }
+
+    /// The clock half follows the locale (CodeRabbit, #37): a 24-hour locale
+    /// must not be forced onto "h:mm a".
+    @Test fun timestampLabelFollowsLocaleClockStyle() {
+        val date = Instant.parse("2026-08-16T14:30:00Z")
+        assertEquals("Aug 16, 14:30", summaryTimestampLabel(date, ZoneOffset.UTC, Locale.UK))
     }
 
     // MARK: summaryScrollIndex — the jump-to-point LazyColumn index

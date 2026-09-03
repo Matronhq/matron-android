@@ -43,6 +43,7 @@ class ChatVMCache(
             answeredPromptStore = deps.preferences,
             haptics = deps.haptics,
             agentChat = deps.agentChatService(session),
+            agentSpawn = deps.agentSpawnService(session),
         ) to ComposerViewModel(
             roomID = roomID,
             timeline = timeline,

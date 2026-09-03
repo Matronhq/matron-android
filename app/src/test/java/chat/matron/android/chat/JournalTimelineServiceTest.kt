@@ -878,6 +878,7 @@ private class RecordingSearchService : SearchService {
     override suspend fun wipe() {}
     override suspend fun recordBackfillProgress(roomID: String, indexedCount: Int, oldestEventID: String?, complete: Boolean) {}
     override suspend fun backfillComplete(roomID: String): Boolean = true
+    override suspend fun backfillOldestEventID(roomID: String): String? = null
     override suspend fun eventCount(roomID: String): Int = 0
     override suspend fun contains(eventID: String): Boolean = false
 }
