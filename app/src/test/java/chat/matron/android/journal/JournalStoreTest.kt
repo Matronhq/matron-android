@@ -834,6 +834,20 @@ class JournalStoreTest {
         assertEquals(listOf(1L), store.events("c1").map { it.seq })
     }
 
+    /// Bugbot (#38): a wipe must take the agent roster with it, or a server
+    /// that predates `agents` (replaceAgents(null) keeps what's there) would
+    /// leave stale box names — and the ≥2-boxes chip gate — standing over an
+    /// empty mirror.
+    @Test
+    fun wipeClearsAgentRoster() = runBlocking {
+        val store = makeStore()
+        store.replaceAgents(listOf(AgentDTO(7, "dev-y"), AgentDTO(9, "dev-z")))
+        store.wipe()
+        assertTrue(store.agentNames().isEmpty())
+        store.replaceAgents(null)
+        assertTrue(store.agentNames().isEmpty())
+    }
+
     /// Port of matron-apple `JournalStoreTests.testWipeClearsSummaryEntries`.
     @Test
     fun wipeClearsSummaryEntries() = runBlocking {

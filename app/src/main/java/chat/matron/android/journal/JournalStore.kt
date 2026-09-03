@@ -328,6 +328,11 @@ class JournalStore(
             conversationDao.deleteAll()
             metaDao.deleteAll()
             summaryEntryDao.deleteAll()
+            // The roster goes too: a `snapshot_required` re-snapshot refills it
+            // in the same pass, and a server that predates `agents` must not
+            // keep stale box names holding chips (and the ≥2-boxes gate) open
+            // against an otherwise-empty mirror (Bugbot, #38).
+            agentDao.deleteAll()
         }
     }
 
