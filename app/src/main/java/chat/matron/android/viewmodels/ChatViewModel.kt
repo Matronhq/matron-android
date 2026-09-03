@@ -22,6 +22,7 @@ import chat.matron.android.models.SessionStatus
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.platform.Haptics
 import chat.matron.android.storage.LRUCache
+import chat.matron.android.search.SearchService
 import java.io.File
 import java.time.Instant
 import java.time.LocalDate
@@ -91,7 +92,71 @@ class ChatViewModel(
     /// [agentChat]. Unlike [agentChat], resolution is never remembered by
     /// this view model — see [agentSpawnState].
     private val agentSpawn: AgentSpawnAnswering? = null,
+    /// Backs the in-conversation search (apple #172). Nullable: fakes and a
+    /// failed index open leave the entry point a no-op — the bar must not
+    /// come up reporting bogus emptiness.
+    private val search: SearchService? = null,
 ) {
+    // MARK: - In-conversation search (apple #172)
+
+    /// The search bar's state: the submitted query, its matches as seqs
+    /// (newest first), and the focused index into them.
+    data class ChatSearchState(val query: String, val matchSeqs: List<Long>, val index: Int)
+
+    private val _chatSearch = MutableStateFlow<ChatSearchState?>(null)
+    val chatSearch: StateFlow<ChatSearchState?> = _chatSearch.asStateFlow()
+
+    /// A jump armed while the stream wasn't live (the results tap runs before
+    /// the destination's start(), or a cached VM whose previous view already
+    /// ran stop()): fires on the restarted stream's first delivery. Focusing
+    /// against a dead stream would sample paginate growth against nothing and
+    /// falsely latch `reachedHistoryStart`.
+    private var pendingChatSearchFocusSeq: Long? = null
+
+    /// Runs the room-scoped query, focuses the NEWEST match, and arms the bar.
+    /// A re-query disarms the previous query's parked jump.
+    suspend fun beginChatSearch(query: String) {
+        val service = search ?: return
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return
+        val hits = runCatching { service.query(trimmed, roomID, CHAT_SEARCH_MATCH_LIMIT) }.getOrDefault(emptyList())
+        // A hit whose id is not a seq (the index only ever stores seqs) is
+        // dropped rather than derailing navigation.
+        val seqs = hits.mapNotNull { it.id.toLongOrNull() }
+        _chatSearch.value = ChatSearchState(trimmed, seqs, 0)
+        pendingChatSearchFocusSeq = null
+        val newest = seqs.firstOrNull() ?: run { focusTask?.cancel(); return }
+        focusOrPark(newest)
+    }
+
+    private suspend fun focusOrPark(seq: Long) {
+        if (_hasReceivedFirstSnapshot.value && observationTask?.isActive == true) {
+            pendingChatSearchFocusSeq = null
+            focus(seq)
+        } else {
+            pendingChatSearchFocusSeq = seq
+        }
+    }
+
+    /// ∧ steps OLDER (higher index — matches are newest-first), ∨ steps back
+    /// toward the newest; clamped at both ends without re-focusing.
+    suspend fun stepChatSearch(older: Boolean) {
+        val state = _chatSearch.value ?: return
+        val next = state.index + (if (older) 1 else -1)
+        if (next !in state.matchSeqs.indices) return
+        _chatSearch.value = state.copy(index = next)
+        focusOrPark(state.matchSeqs[next])
+    }
+
+    /// Dismisses the bar and abandons any jump in flight — a deep hit's
+    /// pagination would otherwise land `pendingFocusID` after the user closed
+    /// search, scrolling the transcript out from under them.
+    fun endChatSearch() {
+        _chatSearch.value = null
+        pendingChatSearchFocusSeq = null
+        focusTask?.cancel()
+    }
+
     // MARK: - Published state
 
     private val _items = MutableStateFlow<List<TimelineItem>>(emptyList())
@@ -679,8 +744,13 @@ class ChatViewModel(
     }
 
     private suspend fun performFocus(seq: Long) {
+        var paginates = 0
         while (nearestMessageID(atOrBefore = seq) == null && !reachedHistoryStart) {
             if (!currentCoroutineContext().isActive) return
+            // A search hit can sit arbitrarily deep; bound the walk so a
+            // stale index entry can't page forever (apple #172).
+            if (paginates >= MAX_FOCUS_PAGINATES) break
+            paginates += 1
             val beforeCount = _items.value.size
             paginateBackward()
             val madeProgress = _items.value.size != beforeCount || reachedHistoryStart
@@ -793,6 +863,12 @@ class ChatViewModel(
                     applySnapshot(snapshot)
                     _error.value = null
                     _hasReceivedFirstSnapshot.value = true
+                    // A search jump parked while the stream was dead fires
+                    // now that a delivery proves it live (apple #172).
+                    pendingChatSearchFocusSeq?.let { seq ->
+                        pendingChatSearchFocusSeq = null
+                        scope.launch { focus(seq) }
+                    }
                     updateSettledEmpty(snapshot.isEmpty())
                     // Content → empty is the signature of a mirror wipe under an
                     // open view; refetch the newest page (nothing else does).
@@ -1254,6 +1330,13 @@ class ChatViewModel(
     companion object {
         /// Cap for both [resolvedImages] and [failedRequests].
         const val MEDIA_CACHE_LIMIT = 100
+
+        /// Most matches the in-conversation search walks (apple #172).
+        const val CHAT_SEARCH_MATCH_LIMIT = 500
+
+        /// Most backward pages a single focus(seq) will fetch before landing
+        /// on the oldest available row (apple #172).
+        const val MAX_FOCUS_PAGINATES = 20
 
         /// Prefix of the hidden answer-row key the mapper files a bridge
         /// `queued_release` reply under (see [JournalTimelineMapper.queuedReleaseAnswerKey]).

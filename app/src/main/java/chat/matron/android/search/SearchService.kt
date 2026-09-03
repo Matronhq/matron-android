@@ -40,6 +40,36 @@ interface SearchService : SearchIndexer {
     /// Queries by free-text. Returns at most [limit] hits, newest first.
     suspend fun query(text: String, limit: Int): List<SearchHit>
 
+    /// Queries by free-text, grouped per conversation: at most [limit] rooms,
+    /// each carrying its total match count and its newest hit, ordered by
+    /// that newest hit's recency. The unit of the search UI's Messages
+    /// section. Default for fakes groups a flat query in memory;
+    /// [SearchServiceLive] overrides with a single grouped SQL pass — this
+    /// fallback's counts are only as complete as the flat query's limit.
+    suspend fun queryGrouped(text: String, limit: Int): List<SearchChatHit> {
+        val hits = query(text, 1_000)
+        val order = mutableListOf<String>()
+        val counts = mutableMapOf<String, Int>()
+        val newest = mutableMapOf<String, SearchHit>()
+        for (hit in hits) { // newest-first, so the first per room wins
+            if (counts.containsKey(hit.roomID)) {
+                counts[hit.roomID] = counts.getValue(hit.roomID) + 1
+            } else {
+                counts[hit.roomID] = 1
+                newest[hit.roomID] = hit
+                order.add(hit.roomID)
+            }
+        }
+        return order.take(limit).map { SearchChatHit(it, counts.getValue(it), newest.getValue(it)) }
+    }
+
+    /// Queries by free-text within ONE conversation. Returns at most [limit]
+    /// hits, newest first — the in-conversation search's match list. Default
+    /// for fakes filters a flat query; live uses a room-scoped SQL query so
+    /// [limit] applies post-filter.
+    suspend fun query(text: String, roomID: String, limit: Int): List<SearchHit> =
+        query(text, 1_000).filter { it.roomID == roomID }.take(limit)
+
     /// Wipes all data (used on sign-out).
     suspend fun wipe()
 

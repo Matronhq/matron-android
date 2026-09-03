@@ -3,6 +3,7 @@ package chat.matron.android.viewmodels
 import chat.matron.android.chat.ChatSummary
 import chat.matron.android.chat.SessionTag
 import chat.matron.android.models.MatronDebug
+import chat.matron.android.search.SearchChatHit
 import chat.matron.android.search.SearchHit
 import chat.matron.android.search.SearchService
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,8 +20,16 @@ class SearchViewModel(
     /// User-editable query.
     var query: String = ""
 
-    private val _messageHits = MutableStateFlow<List<SearchHit>>(emptyList())
-    val messageHits: StateFlow<List<SearchHit>> = _messageHits.asStateFlow()
+    /// Message results grouped one-per-conversation (match count + newest
+    /// hit's snippet). A flat per-message list drowned every other chat the
+    /// moment the query was a common word; drilling into a chat's individual
+    /// matches is the in-conversation search's job (apple #172).
+    private val _messageHits = MutableStateFlow<List<SearchChatHit>>(emptyList())
+    val messageHits: StateFlow<List<SearchChatHit>> = _messageHits.asStateFlow()
+
+    /// The current query, ready to hand to the opened chat's in-conversation
+    /// search when the user taps a grouped message row.
+    val trimmedQuery: String get() = query.trim()
 
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
@@ -136,7 +145,7 @@ class SearchViewModel(
         }
         _isSearching.value = true
         try {
-            val result = runCatching { search.query(trimmed, limit = 100) }
+            val result = runCatching { search.queryGrouped(trimmed, limit = 50) }
             result.onFailure { MatronDebug.breadcrumb("SearchViewModel: search failed for query \"$trimmed\": $it") }
             _searchFailed.value = result.isFailure
             _messageHits.value = result.getOrDefault(emptyList())

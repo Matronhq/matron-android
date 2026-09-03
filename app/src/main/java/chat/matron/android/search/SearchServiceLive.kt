@@ -79,6 +79,39 @@ class SearchServiceLive(private val db: SearchDatabase) : SearchService {
         }
     }
 
+    override suspend fun queryGrouped(text: String, limit: Int): List<SearchChatHit> {
+        val pattern = buildPattern(text) ?: return emptyList()
+        val groups = dao.searchGrouped(pattern, limit)
+        if (groups.isEmpty()) return emptyList()
+        val snippets = dao.snippetsFor(pattern, groups.map { it.newestRowid }).associate { it.id to it.snippet }
+        return groups.map { row ->
+            SearchChatHit(
+                roomID = row.roomID,
+                count = row.hitCount,
+                newestHit = SearchHit(
+                    id = row.newestEventId,
+                    roomID = row.roomID,
+                    sender = row.newestSender,
+                    timestamp = Instant.ofEpochSecond(row.newestTs),
+                    snippet = snippets[row.newestEventId] ?: "",
+                ),
+            )
+        }
+    }
+
+    override suspend fun query(text: String, roomID: String, limit: Int): List<SearchHit> {
+        val pattern = buildPattern(text) ?: return emptyList()
+        return dao.searchInRoom(pattern, roomID, limit).map {
+            SearchHit(
+                id = it.id,
+                roomID = it.roomID,
+                sender = it.sender,
+                timestamp = Instant.ofEpochSecond(it.timestamp),
+                snippet = it.snippet,
+            )
+        }
+    }
+
     override suspend fun wipe() {
         db.withTransaction {
             dao.deleteAllMessages()

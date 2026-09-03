@@ -129,4 +129,65 @@ class SearchServiceLiveTest {
         assertEquals(null, svc.backfillOldestEventID("!r:s"))
         assertEquals(1, svc.query("needle", 10).size)
     }
+
+    // MARK: Grouped + room-scoped queries (apple #172)
+
+    /// Seeds three rooms: rA has 3 hits (newest at t=400), rB has 1 hit
+    /// (t=300), rC has none for the term.
+    private suspend fun seedGroupedFixture() {
+        fun at(t: Long) = Instant.ofEpochSecond(t)
+        svc.index("rA", "1", "@a:s", at(100), "deploy the app")
+        svc.index("rA", "2", "@a:s", at(200), "deploy again")
+        svc.index("rB", "3", "@b:s", at(300), "one deploy here")
+        svc.index("rA", "4", "@c:s", at(400), "final deploy done")
+        svc.index("rC", "5", "@a:s", at(500), "unrelated words")
+    }
+
+    @Test
+    fun queryGrouped_onePerRoom_countAndNewestSnippet() = runBlocking {
+        seedGroupedFixture()
+        val groups = svc.queryGrouped("deploy", 10)
+        assertEquals(listOf("rA", "rB"), groups.map { it.roomID })
+        assertEquals(listOf(3, 1), groups.map { it.count })
+        assertEquals("4", groups[0].newestHit.id)
+        assertEquals("@c:s", groups[0].newestHit.sender)
+        assertEquals(400L, groups[0].newestHit.timestamp.epochSecond)
+        assertTrue(groups[0].newestHit.snippet, groups[0].newestHit.snippet.contains("<mark>deploy</mark>"))
+        assertTrue(groups[0].newestHit.snippet, groups[0].newestHit.snippet.contains("final"))
+        assertEquals("3", groups[1].newestHit.id)
+    }
+
+    /// Pins the load-bearing SQLite bare-column rule: with a single MAX()
+    /// aggregate, event_id/sender come from the max-timestamp row even when
+    /// that row was inserted FIRST.
+    @Test
+    fun queryGrouped_newestWinsRegardlessOfInsertOrder() = runBlocking {
+        svc.index("rD", "d-new", "@new:s", Instant.ofEpochSecond(1_000), "deploy freshest")
+        svc.index("rD", "d-old", "@old:s", Instant.ofEpochSecond(900), "deploy stale")
+        val groups = svc.queryGrouped("deploy", 10)
+        assertEquals(listOf("rD"), groups.map { it.roomID })
+        assertEquals(2, groups[0].count)
+        assertEquals("d-new", groups[0].newestHit.id)
+        assertEquals("@new:s", groups[0].newestHit.sender)
+        assertTrue(groups[0].newestHit.snippet, groups[0].newestHit.snippet.contains("freshest"))
+    }
+
+    @Test
+    fun queryGrouped_respectsRoomLimit() = runBlocking {
+        seedGroupedFixture()
+        val groups = svc.queryGrouped("deploy", 1)
+        assertEquals(listOf("rA"), groups.map { it.roomID })
+        assertEquals(3, groups[0].count)
+    }
+
+    @Test
+    fun queryScopedToRoom_limitAppliesPostFilter() = runBlocking {
+        seedGroupedFixture()
+        val hits = svc.query("deploy", "rA", 2)
+        assertEquals(listOf("4", "2"), hits.map { it.id })
+        assertTrue(hits.all { it.roomID == "rA" })
+        val all = svc.query("deploy", "rA", 10)
+        assertEquals(listOf("4", "2", "1"), all.map { it.id })
+        assertTrue(all[0].snippet.contains("<mark>deploy</mark>"))
+    }
 }
