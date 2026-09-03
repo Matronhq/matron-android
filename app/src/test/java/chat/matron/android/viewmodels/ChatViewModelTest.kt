@@ -1317,7 +1317,10 @@ class ChatViewModelTest {
         val base = Instant.parse("2026-08-20T10:00:00Z")
         fake.emit((0 until 600).map { textItem("m$it", "msg $it", timestamp = base.plusSeconds(it.toLong())) })
         val vm = ChatViewModel("!r:s", fake, FakeMediaService(), scope, InMemoryKeyValueStore())
-        vm.start().join()
+        // start() returns the live collection job; this fake's flow never
+        // completes, so joining it would hang. start() itself already awaits
+        // the first snapshot.
+        vm.start()
         waitUntil { vm.rows.value.size == 600 }
         return vm
     }
@@ -1331,15 +1334,16 @@ class ChatViewModelTest {
         assertEquals(360, messageIDs(vm).size)
         assertEquals("m599", messageIDs(vm).last())
         // At the cap the window slides instead of growing: the newest edge
-        // moves up by a step and pins to a row identity.
+        // moves up by a step and pins to a row identity (row ids carry the
+        // "msg:" prefix; the rendered ids below are bare item ids).
         vm.extendHistoryWindow()
         assertEquals(360, messageIDs(vm).size)
         assertFalse(vm.windowContainsTail)
-        assertEquals("m479", vm.windowTailAnchorID.value)
+        assertEquals("msg:m479", vm.windowTailAnchorID.value)
         assertEquals("m479", messageIDs(vm).last())
         assertEquals("m120", messageIDs(vm).first())
         vm.extendHistoryWindow()
-        assertEquals("m359", vm.windowTailAnchorID.value)
+        assertEquals("msg:m359", vm.windowTailAnchorID.value)
         assertEquals("m0", messageIDs(vm).first())
         // Nothing older is loaded now: the next extend paginates (the fake
         // has nothing) and the window holds.
@@ -1352,10 +1356,10 @@ class ChatViewModelTest {
     fun revealNewerHistory_slidesDown_andReattachesAtTail() = vmTest { scope ->
         val vm = bigVM(scope)
         repeat(4) { vm.extendHistoryWindow() }
-        assertEquals("m359", vm.windowTailAnchorID.value)
+        assertEquals("msg:m359", vm.windowTailAnchorID.value)
         vm.revealNewerHistory()
         waitUntil { !vm.isExtendingWindow.value }
-        assertEquals("m479", vm.windowTailAnchorID.value)
+        assertEquals("msg:m479", vm.windowTailAnchorID.value)
         assertEquals("m479", messageIDs(vm).last())
         vm.revealNewerHistory()
         waitUntil { !vm.isExtendingWindow.value }
@@ -1372,12 +1376,12 @@ class ChatViewModelTest {
         val fake = AppendableFakeTimelineService()
         val vm = bigVM(scope, fake)
         repeat(3) { vm.extendHistoryWindow() }
-        assertEquals("m479", vm.windowTailAnchorID.value)
+        assertEquals("msg:m479", vm.windowTailAnchorID.value)
         val before = messageIDs(vm)
         fake.emit(vm.items.value + textItem("m600", "new", timestamp = Instant.parse("2026-08-20T11:00:00Z")))
         waitUntil { vm.rows.value.size == 601 }
         assertEquals(before, messageIDs(vm))
-        assertEquals("m479", vm.windowTailAnchorID.value)
+        assertEquals("msg:m479", vm.windowTailAnchorID.value)
         vm.stop()
     }
 
@@ -1389,10 +1393,10 @@ class ChatViewModelTest {
         val fake = AppendableFakeTimelineService()
         val vm = bigVM(scope, fake)
         repeat(3) { vm.extendHistoryWindow() }
-        assertEquals("m479", vm.windowTailAnchorID.value)
+        assertEquals("msg:m479", vm.windowTailAnchorID.value)
         fake.emit(vm.items.value.filterNot { it.id == "m479" })
         waitUntil { vm.rows.value.size == 599 }
-        assertEquals("m478", vm.windowTailAnchorID.value)
+        assertEquals("msg:m478", vm.windowTailAnchorID.value)
         assertEquals("m478", messageIDs(vm).last())
         vm.stop()
     }
