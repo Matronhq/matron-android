@@ -1,8 +1,9 @@
 package chat.matron.android.chat
 
 /// The compact per-conversation tag rendered ahead of chat titles:
-/// `A:bc` — one colored letter for the box, two characters of the agent's
-/// session id. Replaces the trailing `BoxChip` in list rows, which put the
+/// `A:bc` — one colored letter for the box, the leading characters of the
+/// agent's session id (two historically, three from matron-bridge's
+/// three-character short onward; see [shortLengths]). Replaces the trailing `BoxChip` in list rows, which put the
 /// machine at the END of the eye scan and spent a full capsule on it.
 /// Ported from matron-apple's `SessionTag` (apple #152).
 ///
@@ -29,11 +30,20 @@ object SessionTag {
     /// marker is ever dropped, and only beside a rendered room tag.
     internal val titleMarkers = roomMarkers + "🐣 "
 
+    /// How many characters a session short may have. Two is what every
+    /// bridge emitted through 2026-09 and what every existing title
+    /// carries for ever (titles only rewrite on rename); three is the
+    /// bridge's newer short — two hex characters gave 256 handles, which
+    /// collided between live rooms on one busy box. Both parse
+    /// indefinitely for the same reason the 🔗 marker does.
+    val shortLengths: IntRange = 2..3
+
     /// Peels the bridge's `[bc] ` session-short prefix off a published
     /// title. Returns the short (without brackets) and the remaining title.
     /// Titles without the prefix come back unchanged with a null short —
-    /// including bracketed text that isn't a short (wrong length, spaces,
-    /// no trailing separator), which stays part of the visible title.
+    /// including bracketed text that isn't a short (a length outside
+    /// [shortLengths], spaces, no trailing separator), which stays part of
+    /// the visible title.
     /// Room and spawned-session titles carry the short BEHIND their emoji
     /// marker; the short is peeled from there and the marker stays with the
     /// title, so the meaning survives even for users who get no styled tag.
@@ -48,7 +58,7 @@ object SessionTag {
         val close = raw.indexOf(']')
         if (close == -1) return null to raw
         val short = raw.substring(1, close)
-        if (short.length != 2 || !short.all { it.isLetterOrDigit() }) return null to raw
+        if (short.length !in shortLengths || !short.all { it.isLetterOrDigit() }) return null to raw
         val rest = raw.substring(close + 1)
         if (!rest.startsWith(" ")) return null to raw
         val title = rest.drop(1)

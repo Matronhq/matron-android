@@ -20,13 +20,27 @@ class SessionTagTest {
         assertEquals("css token migration", title)
     }
 
+    /// Ports matron-apple's `testSplitTitlePeelsAThreeCharacterShort`: the
+    /// bridge's newer short is three characters; two-character titles
+    /// already published never rewrite, so both must parse.
+    @Test
+    fun splitTitlePeelsAThreeCharacterShort() {
+        val (short, title) = SessionTag.splitTitle("[b5f] css token migration")
+        assertEquals("b5f", short)
+        assertEquals("css token migration", title)
+
+        val (roomShort, roomTitle) = SessionTag.splitTitle("↔️ [ab1] mac ↔ dev-z — ci triage")
+        assertEquals("ab1", roomShort)
+        assertEquals("↔️ mac ↔ dev-z — ci triage", roomTitle)
+    }
+
     /// Ports matron-apple's `testSplitTitleLeavesUnprefixedTitlesAlone`.
     @Test
     fun splitTitleLeavesUnprefixedTitlesAlone() {
         for (raw in listOf(
             "css token migration",         // no prefix at all
             "[b5]no space after bracket",
-            "[b5f] three chars is not a short",
+            "[b5f0] four chars is not a short",
             "[b] one char is not a short",
             "[b ] spaces are not a short",
             "[b5] ",                       // nothing after the prefix
