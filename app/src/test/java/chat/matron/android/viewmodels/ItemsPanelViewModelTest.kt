@@ -22,10 +22,14 @@ import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
 import java.time.Instant
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -76,12 +80,14 @@ internal open class FakeItemsSync : ItemsSyncing {
     val refreshed = mutableListOf<ItemsScope>()
     val created = mutableListOf<NewItem>()
     val refetched = mutableListOf<String>()
+    val applied = mutableListOf<TrackerItem>()
     val comments = mutableListOf<Triple<String, String, List<TrackerAttachment>>>()
     var createSucceeds = true
     var refreshOutcome: ItemsRefreshOutcome = ItemsRefreshOutcome.Succeeded
     override val isSupported = MutableStateFlow(true)
     override suspend fun refresh(scope: ItemsScope): ItemsRefreshOutcome { refreshed += scope; return refreshOutcome }
     override suspend fun refreshItem(id: String) { refetched += id }
+    override suspend fun applyItem(item: TrackerItem) { applied += item }
     override suspend fun enqueueComment(itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>) {
         comments += Triple(itemID, body, attachments)
     }
@@ -276,6 +282,49 @@ class ItemsPanelViewModelTest {
         store.items.emit(listOf(t("a", 1, rank = 1.0), t("b", 2, rank = 2.0)))
         waitUntil(200) { vm.sections.value.tasks.size == 2 }
         assertEquals("a matching-generation stop cancels the observation", listOf("a"), vm.sections.value.tasks.map { it.id })
+    }
+
+    @Test
+    fun cancelledRefreshNeverClearsItsSuccessorsSpinner() = runBlocking {
+        val store = FakeItemsStore()
+        // A refresh whose fetch is already in flight: the real one is a network
+        // call, so a cancellation only lands once the call itself returns —
+        // which can be well after the replacement pass has started.
+        val gates = mutableListOf<CompletableDeferred<Unit>>()
+        val sync = object : FakeItemsSync() {
+            override suspend fun refresh(scope: ItemsScope): ItemsRefreshOutcome {
+                refreshed += scope
+                val gate = CompletableDeferred<Unit>()
+                gates += gate
+                withContext(NonCancellable) { gate.await() }
+                return ItemsRefreshOutcome.Succeeded
+            }
+        }
+        val vm = ItemsPanelViewModel("c1", store, FakeItemsApi(), sync, this)
+        // Every gate is released whatever happens: a failing assertion must
+        // not leave a `NonCancellable` await holding this `runBlocking` open.
+        try {
+            vm.start()
+            waitUntil { gates.size == 1 && vm.isRefreshing.value }
+            assertTrue(vm.isRefreshing.value)
+
+            // Switching This chat / All resubscribes: the first pass is
+            // cancelled and a second starts while the first is still unwinding.
+            vm.setScope(ItemsScope.All)
+            waitUntil { gates.size == 2 }
+            assertEquals(listOf(ItemsScope.Convo("c1"), ItemsScope.All), sync.refreshed)
+
+            gates[0].complete(Unit)
+            repeat(50) { yield() }
+            assertTrue("the cancelled pass must not hide the spinner mid-refresh", vm.isRefreshing.value)
+
+            gates[1].complete(Unit)
+            waitUntil { !vm.isRefreshing.value }
+            assertFalse("the owning pass still clears it when it finishes", vm.isRefreshing.value)
+        } finally {
+            gates.forEach { it.complete(Unit) }
+            vm.stop()
+        }
     }
 
     @Test

@@ -200,10 +200,25 @@ class ItemDetailViewModel(
         _error.value = message
     }
 
-    private suspend fun run(op: suspend () -> Unit) {
+    /// Runs a mutating call and lands whatever item it returned before the
+    /// refetch. The journal answers close/reopen with the updated item, and
+    /// that answer is the only part of the round trip that can't fail
+    /// silently: `refreshItem` swallows its own failures, so a close whose
+    /// refetch then failed used to leave the thread looking open — and the
+    /// retry that invited hit a conflict with nothing local to explain it.
+    /// The refetch still runs afterwards; it is what brings the comment
+    /// thread (including the close's own system comment) down.
+    private suspend fun run(op: suspend () -> TrackerItem?) {
         _isBusy.value = true
         try {
-            op()
+            val updated = op()
+            if (updated != null) {
+                sync.applyItem(updated)
+                // Mirrored into this screen's own state too, so the item
+                // reads correctly even if the local write itself failed; the
+                // store's flow is still the source of truth from here on.
+                _item.value = updated
+            }
             sync.refreshItem(itemID)
         } catch (cancel: CancellationException) {
             throw cancel

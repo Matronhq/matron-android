@@ -146,10 +146,18 @@ fun pendingCommentSendState(attempts: Int, lastError: String?): SendStateGlyph =
 /// [now] (not the ambient clock) so tests are deterministic. Falls back to an
 /// absolute short date once the comment is more than 7 days older than
 /// [now] — "3 mo. ago" reads worse than an actual date at that range.
-fun itemRelativeDate(date: Instant, now: Instant, zone: ZoneId = ZoneId.systemDefault()): String {
+/// [zone] and [locale] default to the reader's, and are parameters for the
+/// same reason [now] is: the absolute fallback's month name is locale-bound,
+/// so a test that asserts one has to say which locale it means.
+fun itemRelativeDate(
+    date: Instant,
+    now: Instant,
+    zone: ZoneId = ZoneId.systemDefault(),
+    locale: Locale = Locale.getDefault(),
+): String {
     val elapsed = Duration.between(date, now)
     if (elapsed > Duration.ofDays(7)) {
-        return DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()).withZone(zone).format(date)
+        return DateTimeFormatter.ofPattern("d MMM yyyy", locale).withZone(zone).format(date)
     }
     val seconds = elapsed.seconds
     return when {
@@ -166,6 +174,24 @@ fun itemRelativeDate(date: Instant, now: Instant, zone: ZoneId = ZoneId.systemDe
 /// the bottom.
 fun itemThreadShowsJumpToBottom(placed: Boolean, scrollable: Boolean, atBottom: Boolean): Boolean =
     placed && scrollable && !atBottom
+
+/// The one-time opening placement for an item: scroll to the tail first for a
+/// reader who left the thread at its bottom, and only then report the
+/// placement through [onPlaced]. The order matters — [itemThreadShowsJumpToBottom]
+/// is gated on that flag precisely so the button can't appear during the
+/// opening scroll, and a long thread reopened at its tail measures as "not at
+/// bottom" until the scroll lands, so flagging the placement first flashes the
+/// button at the top of the thread for a frame. A reader who isn't starting at
+/// the bottom has nothing to scroll and is placed straight away (staying at
+/// the top still arms follow-tail).
+suspend fun itemThreadPlaceInitially(
+    startsAtBottom: Boolean,
+    scrollToBottom: suspend () -> Unit,
+    onPlaced: () -> Unit,
+) {
+    if (startsAtBottom) scrollToBottom()
+    onPlaced()
+}
 
 /// The follow-tail decision for a thread that just grew. Only re-pins when
 /// the growth started from a thread that was already loaded — [oldCount] at
@@ -237,8 +263,7 @@ fun ItemDetailView(
     val lastIndex = 1 + (if (hasMeta) 1 else 0) + (if (hasBody) 1 else 0) + 1 + rowCount
 
     LaunchedEffect(item.id) {
-        placed = true
-        if (startsAtBottom) listState.scrollToItem(lastIndex)
+        itemThreadPlaceInitially(startsAtBottom, { listState.scrollToItem(lastIndex) }) { placed = true }
     }
     var previousCount by remember(item.id) { mutableStateOf(rowCount) }
     LaunchedEffect(rowCount) {

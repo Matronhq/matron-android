@@ -185,6 +185,16 @@ class ItemsPanelViewModel(
         refreshJob = scope.launch { runRefresh(surfaceFailure = false) }
     }
 
+    /// Identifies the refresh pass that currently owns [_isRefreshing]. Every
+    /// call to [refresh] claims it; only the claimant clears the flag on the
+    /// way out. Without that check the spinner races its own successor: a
+    /// scope switch (This chat / All) or a remount cancels [refreshJob] and
+    /// starts another straight away, and the cancelled pass — whose fetch is
+    /// a network call, so its cancellation only lands when that call returns
+    /// — would run its `finally` after the fresh pass had already raised the
+    /// flag, hiding the spinner mid-refresh.
+    private var refreshToken: Long = 0
+
     /// Pull to refresh. A failed fetch surfaces through [error] (spec §7:
     /// "refresh failure surfaces via the view model's existing error") —
     /// otherwise a stale or empty list and badge stay on screen with no
@@ -193,6 +203,7 @@ class ItemsPanelViewModel(
     suspend fun refresh() = runRefresh(surfaceFailure = true)
 
     private suspend fun runRefresh(surfaceFailure: Boolean) {
+        val token = ++refreshToken
         _isRefreshing.value = true
         try {
             val outcome = sync.refresh(_itemsScope.value)
@@ -200,9 +211,9 @@ class ItemsPanelViewModel(
             // later success (or an unsupported journal, carried by
             // isSupported) clears it — otherwise a retry that just updated
             // the list would leave the stale row up (Bugbot, #75).
-            if (surfaceFailure) _error.value = (outcome as? ItemsRefreshOutcome.Failed)?.message
+            if (surfaceFailure && refreshToken == token) _error.value = (outcome as? ItemsRefreshOutcome.Failed)?.message
         } finally {
-            _isRefreshing.value = false
+            if (refreshToken == token) _isRefreshing.value = false
         }
     }
 
