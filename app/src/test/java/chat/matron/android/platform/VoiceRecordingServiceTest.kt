@@ -86,6 +86,25 @@ class VoiceRecordingServiceTest {
         assertTrue(shadow.isForegroundStopped)
     }
 
+    /// Cancel, then record again straight away: the queued stop must be
+    /// guarded by its own startId (`stopSelfResult`) so a newer start the
+    /// system has already registered keeps the service — and the second
+    /// recording's mic session — alive (CodeRabbit, android #70).
+    @Test
+    fun stopCommand_isGuardedByItsStartId_soALaterStartSurvives() {
+        val controller = Robolectric.buildService(VoiceRecordingService::class.java)
+        val service = controller.create().startCommand(0, 1).get()
+        val shadow = shadowOf(service)
+        val stop = Intent(service, VoiceRecordingService::class.java).setAction(VoiceRecordingService.ACTION_STOP)
+
+        controller.withIntent(stop).startCommand(0, 2)
+        assertEquals("stop is scoped to its own start request", 2, shadow.stopSelfResultId)
+
+        controller.withIntent(Intent(service, VoiceRecordingService::class.java)).startCommand(0, 3)
+        assertEquals(VoiceRecordingService.NOTIFICATION_ID, shadow.lastForegroundNotificationId)
+        assertFalse(shadow.isForegroundStopped)
+    }
+
     /// Tapping the notification must bring the existing task forward, not
     /// stack a second MainActivity with a fresh recorder over the one holding
     /// the note (Bugbot, android #70): the launcher's own MAIN/LAUNCHER intent.

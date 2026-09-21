@@ -142,27 +142,56 @@ class VoiceRecorder(
             // silence, not an error.
             if (generation != cancelGeneration) return
             val file = File(tempDirectory, "voice-note-${UUID.randomUUID()}.m4a")
+            // Everything acquired below is released again, in reverse, if a
+            // later step throws: a live MediaRecorder with the state back at
+            // Idle, or a held screen/mic-session claim with no recording to
+            // release it, would outlive the failure.
+            var liveRecorder: AudioRecording? = null
+            var screenClaimed = false
+            var sessionClaimed = false
+            var unsubscribe: (() -> Unit)? = null
             try {
                 val newRecorder = makeRecorder(file)
                 if (!newRecorder.record()) throw RecorderError.RecordFailed
+                liveRecorder = newRecorder
                 recorder = newRecorder
                 fileURL = file
                 val started = now()
                 startedAt = started
                 _state.value = State.Recording(started)
+                screenClaimed = true
                 setKeepScreenAwake(true)
+                sessionClaimed = true
                 holdRecordingSession(true)
                 isInterrupted = false
                 pausedSince = null
                 pausedTotal = java.time.Duration.ZERO
-                stopObservingInterruptions = observeInterruptions { event -> handleInterruption(event) }
-                log("start: ${describeInputRoute()}")
+                unsubscribe = observeInterruptions { event -> handleInterruption(event) }
+                stopObservingInterruptions = unsubscribe
+                log("start: ${routeDescription()}")
             } catch (error: Throwable) {
+                runCatching { unsubscribe?.invoke() }
+                stopObservingInterruptions = null
+                // A claim whose call threw may or may not have taken effect;
+                // releasing it is harmless either way, leaving it held is not.
+                if (sessionClaimed) runCatching { holdRecordingSession(false) }
+                if (screenClaimed) runCatching { setKeepScreenAwake(false) }
+                runCatching { liveRecorder?.stop() }
+                recorder = null
+                fileURL = null
+                startedAt = null
+                isInterrupted = false
+                pausedSince = null
+                pausedTotal = java.time.Duration.ZERO
+                _state.value = State.Idle
                 // A failed recorder construction or start must not leave an orphan
                 // temp file behind.
                 file.delete()
                 log("start failed: $error")
-                throw error
+                // The composer handles RecorderError; anything else (a refused
+                // foreground-service start, say) is the same outcome to the
+                // user — no recording — and must not escape as a crash.
+                throw error as? RecorderError ?: RecorderError.RecordFailed
             }
         } finally {
             isStarting = false
@@ -190,7 +219,7 @@ class VoiceRecorder(
         val bytes = if (file.exists()) file.length() else -1L
         log(
             "stop: ok=$succeeded duration=${duration.inWholeMilliseconds}ms paused=${paused.toMillis()}ms " +
-                "bytes=$bytes peak=$peak ${describeInputRoute()}",
+                "bytes=$bytes peak=$peak ${routeDescription()}",
         )
         recorder = null
         fileURL = null
@@ -272,7 +301,7 @@ class VoiceRecorder(
                 pausedTotal = pausedTotal.plus(java.time.Duration.between(since, now()))
                 pausedSince = null
                 _state.value = current.copy(isPaused = false)
-                log("resume: ${describeInputRoute()}")
+                log("resume: ${routeDescription()}")
             }
         }
     }
@@ -284,6 +313,9 @@ class VoiceRecorder(
         pausedSince = null
         pausedTotal = java.time.Duration.ZERO
     }
+
+    /// The diagnostics seam must never be the reason a recording fails.
+    private fun routeDescription(): String = runCatching { describeInputRoute() }.getOrElse { "route=error:$it" }
 
     /// Breadcrumbs for the "note came back silent" class of report (apple
     /// #181: three notes in a row carried no voice at all while the mic still

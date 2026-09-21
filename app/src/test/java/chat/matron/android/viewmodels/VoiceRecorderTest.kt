@@ -86,13 +86,15 @@ class VoiceRecorderTest {
         sessionCalls: MutableList<Boolean> = mutableListOf(),
         interruptions: FakeInterruptions = FakeInterruptions(),
         now: () -> Instant = Instant::now,
+        holdRecordingSession: (Boolean) -> Unit = { sessionCalls.add(it) },
+        observeInterruptions: ((AudioInterruption) -> Unit) -> (() -> Unit) = interruptions::source,
     ) = VoiceRecorder(
         requestPermission = { permission },
         makeRecorder = { fake },
         tempDirectory = tempDir(),
         setKeepScreenAwake = { keepAwakeCalls.add(it) },
-        holdRecordingSession = { sessionCalls.add(it) },
-        observeInterruptions = interruptions::source,
+        holdRecordingSession = holdRecordingSession,
+        observeInterruptions = observeInterruptions,
         describeInputRoute = { "inputs=[fake-mic]" },
         now = now,
     )
@@ -327,6 +329,85 @@ class VoiceRecorderTest {
         val rec = makeRecorder(fake = FakeAudioRecorder(recordReturn = false), sessionCalls = calls)
         runCatching { rec.start() }
         assertTrue(calls.isEmpty())
+    }
+
+    // MARK: Rollback when a later start step fails (CodeRabbit, android #70)
+
+    /// A refused foreground-service start must not leave a live recorder,
+    /// a Recording state, or a held screen claim behind — and must surface
+    /// as the RecorderError the composer handles, not a crash.
+    @Test
+    fun start_whenHoldRecordingSessionThrows_rollsEverythingBackToIdle() = runBlocking {
+        val fake = FakeAudioRecorder()
+        val keepAwake = mutableListOf<Boolean>()
+        val sessions = mutableListOf<Boolean>()
+        val interruptions = FakeInterruptions()
+        val rec = makeRecorder(
+            fake = fake,
+            keepAwakeCalls = keepAwake,
+            interruptions = interruptions,
+            holdRecordingSession = { held -> sessions.add(held); if (held) throw IllegalStateException("not allowed") },
+        )
+        val error = runCatching { rec.start() }.exceptionOrNull()
+        assertEquals(VoiceRecorder.RecorderError.RecordFailed, error)
+        assertEquals(VoiceRecorder.State.Idle, rec.state.value)
+        assertEquals("the started recorder is stopped again", 1, fake.stopCalls)
+        assertEquals(listOf(true, false), keepAwake)
+        assertEquals("the attempted claim is released either way", listOf(true, false), sessions)
+        assertNull("never subscribed", interruptions.handler)
+    }
+
+    @Test
+    fun start_whenObserveInterruptionsThrows_releasesTheClaimsAndReturnsToIdle() = runBlocking {
+        val fake = FakeAudioRecorder()
+        val keepAwake = mutableListOf<Boolean>()
+        val sessions = mutableListOf<Boolean>()
+        val rec = makeRecorder(
+            fake = fake,
+            keepAwakeCalls = keepAwake,
+            sessionCalls = sessions,
+            observeInterruptions = { throw IllegalStateException("no audio manager") },
+        )
+        assertEquals(VoiceRecorder.RecorderError.RecordFailed, runCatching { rec.start() }.exceptionOrNull())
+        assertEquals(VoiceRecorder.State.Idle, rec.state.value)
+        assertEquals(1, fake.stopCalls)
+        assertEquals(listOf(true, false), keepAwake)
+        assertEquals(listOf(true, false), sessions)
+    }
+
+    @Test
+    fun start_afterARolledBackStart_recordsAgainCleanly() = runBlocking {
+        val dir = tempDir()
+        val fake = FakeAudioRecorder()
+        var refuse = true
+        val rec = VoiceRecorder(
+            requestPermission = { true },
+            makeRecorder = { fake },
+            tempDirectory = dir,
+            holdRecordingSession = { held -> if (held && refuse) throw IllegalStateException("not allowed") },
+        )
+        runCatching { rec.start() }
+        assertTrue("no orphan temp file", dir.listFiles()?.isEmpty() ?: true)
+
+        refuse = false
+        rec.start()
+        assertTrue(rec.state.value is VoiceRecorder.State.Recording)
+        assertEquals(2, fake.recordCalls)
+    }
+
+    /// The diagnostics seam is breadcrumbs, never a reason to fail a note.
+    @Test
+    fun start_whenRouteDiagnosticsThrow_stillRecords() = runBlocking {
+        val log = captureLog()
+        val rec = VoiceRecorder(
+            requestPermission = { true },
+            makeRecorder = { FakeAudioRecorder() },
+            tempDirectory = tempDir(),
+            describeInputRoute = { throw IllegalStateException("boom") },
+        )
+        rec.start()
+        assertTrue(rec.state.value is VoiceRecorder.State.Recording)
+        assertTrue(log.toString(), log.any { it.startsWith("${VoiceRecorder.LOG_PREFIX} start:") && it.contains("route=error") })
     }
 
     // MARK: Interruptions (calls, the assistant, another app taking the mic)

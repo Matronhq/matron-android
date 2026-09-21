@@ -40,8 +40,13 @@ class VoiceRecordingService : Service() {
         // `startForeground` satisfy the `startForegroundService` contract
         // first. `stopService()` racing that contract killed the process with
         // ForegroundServiceDidNotStartInTimeException.
+        //
+        // Guarded by this command's startId: a newer start (cancel, then
+        // record again straight away) may already be registered when the stop
+        // is processed, and an unguarded stopSelf() would bring the service —
+        // and the newer recording's microphone session — down with it.
         if (intent?.action == ACTION_STOP) {
-            stopSelf()
+            stopSelfResult(startId)
             return START_NOT_STICKY
         }
         ensureChannel(this)
