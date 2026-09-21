@@ -105,6 +105,18 @@ class MissionsSync(
     @Volatile
     internal var refetchJoins = 0
         private set
+    /// Test-only observability: incremented when a per-mission refetch run
+    /// has finished EVERY write and deregistered — the completion signal a
+    /// test waits on instead of polling one store row (the first of three
+    /// writes) and then asserting the rest.
+    @Volatile
+    internal var refetchesCompleted = 0
+        private set
+    /// The user-close writes in flight, so [stop] can cancel and join them
+    /// like the refetches: the API call is the caller's, but the store
+    /// write it leads to must never land after a sign-out wipe (Bugbot, #79).
+    private val closeWrites = mutableSetOf<Job>()
+    internal val closeWritesInFlight: Int get() = synchronized(lock) { closeWrites.size }
 
     /// Set by [stop], cleared by [start]. Every write site re-checks it
     /// immediately after its await, before touching the store.
@@ -140,7 +152,7 @@ class MissionsSync(
         val toJoin: List<Job>
         synchronized(lock) {
             stopped = true
-            toJoin = listOfNotNull(markerJob, stateJob, inFlightRefresh) + inFlightRefetches.values
+            toJoin = listOfNotNull(markerJob, stateJob, inFlightRefresh) + inFlightRefetches.values + closeWrites
             markerJob = null; stateJob = null
         }
         toJoin.forEach { it.cancel() }
@@ -248,6 +260,7 @@ class MissionsSync(
                         outcome
                     } finally {
                         if (!deregistered) synchronized(lock) { if (inFlightRefetches[id] === self) inFlightRefetches.remove(id) }
+                        refetchesCompleted += 1
                     }
                 }
                 inFlightRefetches[id] = self
@@ -303,13 +316,37 @@ class MissionsSync(
     /// older, still-open snapshot.
     override suspend fun closeMission(id: String, summary: String): Mission {
         val mission = api.closeMission(id, summary)
-        if (stopped) return mission
-        writes.withLock {
-            // Same ordering as `refreshMissionOnce`: protect first, write
-            // second, both under the write lock.
-            synchronized(lock) { protectedSinceListStart.add(mission.id) }
-            store.upsertMissions(listOf(mission))
+        // The write runs as a job on this sync's scope, registered under the
+        // lock in the same critical section that checks `stopped`, so a
+        // `stop()` landing at any point after this either cancels it or
+        // joins it — and the wipe that follows `stop()` can never be beaten
+        // by a close committing the previous session's row.
+        val write: Job
+        synchronized(lock) {
+            if (stopped) return mission
+            lateinit var self: Job
+            self = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    writes.withLock {
+                        // Re-checked under the write lock, right before the
+                        // upsert: a stop that won the race to the lock wins.
+                        if (stopped) return@withLock
+                        // Same ordering as `refreshMissionOnce`: protect
+                        // first, write second, both under the write lock.
+                        synchronized(lock) { protectedSinceListStart.add(mission.id) }
+                        store.upsertMissions(listOf(mission))
+                    }
+                } finally {
+                    synchronized(lock) { closeWrites.remove(self) }
+                }
+            }
+            closeWrites.add(self)
+            write = self
         }
+        write.start()
+        // A caller cancelled while waiting leaves the write for `stop()` to
+        // own; a write `stop()` cancelled simply never lands.
+        write.join()
         return mission
     }
 }

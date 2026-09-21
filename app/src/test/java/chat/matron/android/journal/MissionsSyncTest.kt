@@ -48,10 +48,12 @@ private class FakeMissions : MissionsProviding {
     private val _closed = mutableListOf<Pair<String, String>>()
     private var _detailGate: CompletableDeferred<Unit>? = null
     private var _listGate: CompletableDeferred<Unit>? = null
+    private var _closeGate: CompletableDeferred<Unit>? = null
 
     @Volatile var listError: Throwable? = null
     @Volatile var blockNextDetail = false
     @Volatile var blockNextList = false
+    @Volatile var blockNextClose = false
 
     var list: List<Mission>
         get() = synchronized(lock) { _list }
@@ -64,10 +66,12 @@ private class FakeMissions : MissionsProviding {
     val closed: List<Pair<String, String>> get() = synchronized(lock) { _closed.toList() }
     val isDetailGated: Boolean get() = synchronized(lock) { _detailGate != null }
     val isListGated: Boolean get() = synchronized(lock) { _listGate != null }
+    val isCloseGated: Boolean get() = synchronized(lock) { _closeGate != null }
 
     fun detail(id: String, d: MissionDetail) = synchronized(lock) { _details[id] = d }
     fun releaseDetailGate() = synchronized(lock) { val g = _detailGate; _detailGate = null; g }?.complete(Unit)
     fun releaseListGate() = synchronized(lock) { val g = _listGate; _listGate = null; g }?.complete(Unit)
+    fun releaseCloseGate() = synchronized(lock) { val g = _closeGate; _closeGate = null; g }?.complete(Unit)
 
     override suspend fun listMissions(query: MissionsListQuery): MissionsListDecode {
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
@@ -93,7 +97,11 @@ private class FakeMissions : MissionsProviding {
     override suspend fun milestones(convoID: String): List<Milestone> = emptyList()
 
     override suspend fun closeMission(id: String, summary: String): Mission {
-        synchronized(lock) { _closed.add(id to summary) }
+        val gate = synchronized(lock) {
+            _closed.add(id to summary)
+            if (blockNextClose) { blockNextClose = false; CompletableDeferred<Unit>().also { _closeGate = it } } else null
+        }
+        gate?.await()
         val m = synchronized(lock) { _details[id]?.mission } ?: throw JournalApiError.NotFound
         return m.copy(state = MissionState.CLOSED, closeSummary = summary, closedBy = ItemAuthor.USER, closedOverOpenItems = 1, closedAt = Instant.ofEpochSecond(99))
     }
@@ -227,7 +235,9 @@ class MissionsSyncTest {
         rig.markers.emit(
             "c1" to MissionMarker.Milestone(MilestoneMarkerEvent("ml_1", 62, MilestoneKind.USER_INPUT, "step", missionID = "ms_1", missionNum = 61, missionTitle = null)),
         )
-        waitUntil { rig.store.mission("ms_1") != null }
+        // Wait for the refetch run to have finished EVERY write (the mission
+        // row is only the first of three), not for one store row to appear.
+        waitUntil { rig.sync.refetchesCompleted >= 1 }
         assertEquals(listOf("ms_1"), api.detailCalls)
         assertEquals(listOf(400L), rig.store.milestones("ms_1").map { it.seq })
         assertEquals(listOf("c1"), rig.store.missionConversations("ms_1").map { it.id })
@@ -467,5 +477,47 @@ class MissionsSyncTest {
         assertEquals("the older, still-open detail row must not reopen the mission", MissionState.CLOSED, rig.store.mission("ms_1")?.state)
         assertEquals("Done.", rig.store.mission("ms_1")?.closeSummary)
         rig.sync.stop()
+    }
+
+    /// Bugbot (#79): the close's store write was the one write `stop()`
+    /// neither cancelled nor joined. Now it is a tracked job: a `stop()`
+    /// landing after the API returned but before the upsert committed
+    /// (here: the write parked on the write lock) cancels or joins it, so
+    /// the wipe that follows finds nothing landing behind it.
+    @Test
+    fun stopDuringACloseWriteKeepsItOutOfTheWipedStore() = runBlocking {
+        val api = FakeMissions()
+        api.detail("ms_1", detail(mission("ms_1", 61)))
+        val rig = make(api)
+        rig.store.upsertMissions(listOf(mission("ms_1", 61)))
+        api.blockNextClose = true
+        val closeTask = async(Dispatchers.Default) { rig.sync.closeMission("ms_1", "Done.") }
+        waitUntil { api.isCloseGated }
+        val stopTask = rig.sync.writes.withLock {
+            // The API answers while the write lock is held: the close passes
+            // its first `stopped` check and parks its tracked write.
+            api.releaseCloseGate()
+            waitUntil { rig.sync.closeWritesInFlight == 1 }
+            val stopTask = async(Dispatchers.Default) { rig.sync.stop() }
+            delay(50)
+            stopTask
+        }
+        stopTask.await()
+        assertEquals("the caller still gets the server's answer", MissionState.CLOSED, closeTask.await().state)
+        rig.store.wipeMissions()
+        delay(50)
+        assertNull("nothing lands after stop() + wipe", rig.store.mission("ms_1"))
+        assertEquals(0, rig.sync.closeWritesInFlight)
+        // And a close whose API call is still in flight when stop() lands
+        // never writes either.
+        rig.store.upsertMissions(listOf(mission("ms_1", 61)))
+        api.blockNextClose = true
+        val late = async(Dispatchers.Default) { rig.sync.closeMission("ms_1", "Later.") }
+        waitUntil { api.isCloseGated }
+        rig.sync.stop()
+        rig.store.wipeMissions()
+        api.releaseCloseGate()
+        assertEquals(MissionState.CLOSED, late.await().state)
+        assertNull(rig.store.mission("ms_1"))
     }
 }

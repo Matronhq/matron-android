@@ -240,6 +240,10 @@ class AppShellNavigation(var host: Host? = null) {
     /// item). Never changes the tab.
     fun pushMissionItem(itemID: String) {
         val value = itemRoute(itemID)
+        // Same guard as `pushDecision`: the controller's own push no-ops
+        // for the item already on top, so the mirror must not grow nor a
+        // token dangle (Bugbot, #79).
+        if (missionsPath.lastOrNull() == value) return
         missionsPath = missionsPath + value
         navigateExpecting(AppTab.MISSIONS, value) { host?.pushMissionItem(itemID) }
     }

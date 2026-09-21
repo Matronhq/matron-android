@@ -194,4 +194,23 @@ class MissionsNavigationTest {
         assertEquals(MissionOpenConversationOutcome.Push("c-third"), missionOpenConversationOutcome("c-third", current = "c-other", coordinatorConvoID = "c-coord"))
         assertEquals(MissionOpenConversationOutcome.Push("c-third"), missionOpenConversationOutcome("c-third", current = "c-other", coordinatorConvoID = null))
     }
+
+    /// Same guard as `pushDecision` (Bugbot, #79): a double tap on a
+    /// mission's open item — the controller's own push refuses the
+    /// duplicate — must not grow the mirror nor leave a dangling token
+    /// that would swallow the next genuine report of that value.
+    @Test
+    fun pushMissionItemIsIdempotentForTheItemOnTop() {
+        val (nav, host) = nav()
+        nav.noteDestination(AppTab.MISSIONS, "e0", null)
+        nav.pushMission("ms_1")
+        nav.pushMissionItem("it_1")
+        nav.pushMissionItem("it_1")
+        assertEquals(listOf("mission/ms_1", "item/it_1"), nav.missionsPath)
+        assertEquals(1, host.commands.count { it == "pushMissionItem:it_1" })
+        // No dangling token: the controller's later report of a DIFFERENT
+        // destination is appended, not bound to the top.
+        nav.noteDestination(AppTab.MISSIONS, "e3", "item/it_2")
+        assertEquals(listOf("mission/ms_1", "item/it_1", "item/it_2"), nav.missionsPath)
+    }
 }
