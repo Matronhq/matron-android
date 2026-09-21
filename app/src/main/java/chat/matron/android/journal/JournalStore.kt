@@ -5,10 +5,17 @@ import chat.matron.android.journal.db.AgentEntity
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.journal.db.ConversationEntity
 import chat.matron.android.journal.db.EventEntity
+import chat.matron.android.journal.db.ItemCommentEntity
+import chat.matron.android.journal.db.ItemEntity
+import chat.matron.android.journal.db.ItemOutboxEntity
 import chat.matron.android.journal.db.MatronDatabase
 import chat.matron.android.journal.db.MetaEntity
 import chat.matron.android.journal.db.OutboxEntity
 import chat.matron.android.journal.db.SummaryEntryEntity
+import chat.matron.android.models.ItemsScope
+import chat.matron.android.models.TrackerComment
+import chat.matron.android.models.TrackerItem
+import java.time.Instant
 import kotlin.math.max
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -42,13 +49,16 @@ interface MediaBrowserStoreReading {
 class JournalStore(
     private val db: MatronDatabase,
     private val ownSender: String,
-) : MediaBrowserStoreReading {
+) : MediaBrowserStoreReading, ItemsStoreReading {
     private val conversationDao = db.conversationDao()
     private val eventDao = db.eventDao()
     private val metaDao = db.metaDao()
     private val outboxDao = db.outboxDao()
     private val agentDao = db.agentDao()
     private val summaryEntryDao = db.summaryEntryDao()
+    private val itemDao = db.itemDao()
+    private val itemCommentDao = db.itemCommentDao()
+    private val itemOutboxDao = db.itemOutboxDao()
 
     /// Test-only failure injection, checked before the transaction opens so the
     /// cursor is left untouched on a simulated failure — the same shape a real
@@ -372,6 +382,12 @@ class JournalStore(
             // keep stale box names holding chips (and the ≥2-boxes gate) open
             // against an otherwise-empty mirror (Bugbot, #38).
             agentDao.deleteAll()
+            // The tracker cache goes with the mirror (the next refresh is a
+            // full fetch — `meta` above took the per-scope watermarks with
+            // it), but `item_outbox` stays: a replay-gap wipe must not eat a
+            // reply written offline any more than a queued text message.
+            itemCommentDao.deleteAll()
+            itemDao.deleteAll()
         }
     }
 
@@ -446,8 +462,152 @@ class JournalStore(
     }
 
     /// Sign-out hygiene: the next account on this database file must not
-    /// inherit (or send) the previous user's queued messages.
-    suspend fun wipeOutbox() = outboxDao.deleteAll()
+    /// inherit (or send) the previous user's queued messages — tracker
+    /// comments and creates included.
+    suspend fun wipeOutbox() {
+        db.withTransaction {
+            outboxDao.deleteAll()
+            itemOutboxDao.deleteAll()
+        }
+    }
+
+    // MARK: Task & decision tracker
+    //
+    // Tracker cache (spec 2026-09-08-items-tracker-apps, task 4). Filled from
+    // GET /items responses (ItemsSync), never from the event log — the `item`
+    // marker event is only an invalidation signal. Ported from matron-apple's
+    // `JournalStore+Items.swift`.
+
+    suspend fun upsertItems(items: List<TrackerItem>) {
+        if (items.isEmpty()) return
+        itemDao.upsertAll(items.map(ItemEntity::from))
+    }
+
+    suspend fun replaceComments(itemID: String, comments: List<TrackerComment>) {
+        db.withTransaction {
+            itemCommentDao.deleteForItem(itemID)
+            itemCommentDao.upsertAll(comments.map(ItemCommentEntity::from))
+        }
+    }
+
+    /// Idempotent upsert for one or more comments — unlike [replaceComments],
+    /// this does NOT delete existing rows for the affected item(s) first. Used
+    /// by `ItemsSync`'s outbox drain to keep a just-posted reply visible
+    /// locally the instant the server accepts it, without waiting on (or being
+    /// erased by) the coalesced `refreshItem` GET that follows.
+    suspend fun insertComments(comments: List<TrackerComment>) {
+        if (comments.isEmpty()) return
+        itemCommentDao.upsertAll(comments.map(ItemCommentEntity::from))
+    }
+
+    suspend fun item(id: String): TrackerItem? = itemDao.byId(id)?.toItem()
+
+    /// Lookup by the human-facing item NUMBER (`#65`) rather than its id.
+    /// `null` when this device has never synced that item.
+    suspend fun item(num: Int): TrackerItem? = itemDao.byNum(num)?.toItem()
+
+    suspend fun items(scope: ItemsScope): List<TrackerItem> = when (scope) {
+        ItemsScope.All -> itemDao.all()
+        is ItemsScope.Convo -> itemDao.forConversation(scope.id)
+    }.map { it.toItem() }
+
+    override fun itemsFlow(scope: ItemsScope): Flow<List<TrackerItem>> = when (scope) {
+        ItemsScope.All -> itemDao.allFlow()
+        is ItemsScope.Convo -> itemDao.forConversationFlow(scope.id)
+    }.map { list -> list.map { it.toItem() } }.distinctUntilChanged()
+
+    override fun itemFlow(id: String): Flow<TrackerItem?> =
+        itemDao.byIdFlow(id).map { it?.toItem() }.distinctUntilChanged()
+
+    /// One-shot read of an item's thread, in the same order as [commentsFlow].
+    override suspend fun comments(itemID: String): List<TrackerComment> =
+        itemCommentDao.forItem(itemID).map { it.toComment() }
+
+    override fun commentsFlow(itemID: String): Flow<List<TrackerComment>> =
+        itemCommentDao.forItemFlow(itemID).map { list -> list.map { it.toComment() } }.distinctUntilChanged()
+
+    suspend fun itemsMaxUpdatedAt(): Instant? = itemDao.maxUpdatedAt()?.let(Instant::ofEpochMilli)
+
+    /// `meta` key for the per-scope refresh watermark. A shared GLOBAL
+    /// `MAX(updated_at)` watermark was wrong on two counts — a `.convo`
+    /// refresh using it could skip older items of a convo that had never
+    /// been fetched before, and a mid-pagination failure would still leave
+    /// whatever partial rows DID land, so a "read MAX from the table"
+    /// watermark silently believed it was caught up past a gap it never
+    /// actually fetched. Each scope gets its own persisted key, advanced by
+    /// `ItemsSync.refresh` only after a full, successful pagination run.
+    private fun itemsWatermarkKey(scope: ItemsScope): String = when (scope) {
+        ItemsScope.All -> ITEMS_WATERMARK_ALL_KEY
+        is ItemsScope.Convo -> "$ITEMS_WATERMARK_CONVO_PREFIX${scope.id}"
+    }
+
+    /// The persisted refresh watermark for this scope, or `null` if it has
+    /// never completed a full pagination run (⇒ the next refresh is a full fetch).
+    suspend fun itemsWatermark(scope: ItemsScope): Instant? =
+        metaDao.value(itemsWatermarkKey(scope))?.toLongOrNull()?.let(Instant::ofEpochMilli)
+
+    suspend fun setItemsWatermark(value: Instant, scope: ItemsScope) =
+        metaDao.upsert(MetaEntity(itemsWatermarkKey(scope), value.toEpochMilli().toString()))
+
+    suspend fun itemOutboxInsert(row: ItemOutboxEntity) = itemOutboxDao.insertIgnore(row)
+
+    suspend fun itemOutboxPending(): List<ItemOutboxEntity> = itemOutboxDao.pending()
+
+    suspend fun itemOutboxRows(itemID: String): List<ItemOutboxEntity> = itemOutboxDao.forItem(itemID)
+
+    override fun itemOutboxFlow(itemID: String): Flow<List<ItemOutboxEntity>> = itemOutboxDao.forItemFlow(itemID)
+
+    override fun itemOutboxCreatesFlow(): Flow<List<ItemOutboxEntity>> = itemOutboxDao.createsFlow()
+
+    suspend fun itemOutboxMarkAttempt(localID: String, error: String?) = itemOutboxDao.markAttempt(localID, error)
+
+    suspend fun itemOutboxDelete(localID: String) = itemOutboxDao.delete(localID)
+
+    /// One transaction for a drained outbox row: the server's item (and
+    /// comment, for replies) lands in the same write that removes the pending
+    /// row, so the flows never show the item in the "Pending" section and its
+    /// real section for one tick.
+    suspend fun commitOutboxResult(item: TrackerItem, comment: TrackerComment? = null, deletingLocalID: String) {
+        db.withTransaction {
+            itemDao.upsertAll(listOf(ItemEntity.from(item)))
+            if (comment != null) itemCommentDao.upsertAll(listOf(ItemCommentEntity.from(comment)))
+            itemOutboxDao.delete(deletingLocalID)
+        }
+    }
+
+    /// Clears the whole tracker cache AND its outbox — the sign-out path
+    /// (`wipe()`, the replay-gap path, clears the cache but keeps the outbox).
+    suspend fun wipeItems() {
+        db.withTransaction {
+            itemCommentDao.deleteAll()
+            itemDao.deleteAll()
+            itemOutboxDao.deleteAll()
+            // The cache is gone, so any persisted refresh watermark is stale
+            // too — clearing it forces the next refresh to be a full fetch.
+            metaDao.deleteWithPrefix(ITEMS_WATERMARK_PREFIX)
+        }
+    }
+
+    /// `"<box name> · <title>"` when a conversation has a known, non-empty
+    /// agent box name, else the title alone. The one place this formatting
+    /// happens, so the list rows and the item-detail origin button can never
+    /// drift apart on separator or fallback rule.
+    private fun originLabel(title: String, agentName: String?): String =
+        if (agentName.isNullOrEmpty()) title else "$agentName \u00B7 $title"
+
+    /// Every conversation's origin label, keyed by id: feeds the "All" scope's
+    /// origin captions. Rows with an empty (not yet set) title are omitted so
+    /// a miss reads the same whether the conversation is unknown or just
+    /// untitled — the list's "Another chat" fallback covers both.
+    suspend fun conversationOriginLabels(): Map<String, String> =
+        conversationDao.originLabelRows()
+            .filter { it.title.isNotEmpty() }
+            .associate { it.id to originLabel(it.title, it.agentName) }
+
+    /// Same label as [conversationOriginLabels], for one conversation — feeds
+    /// the item-detail origin button. `null` when unknown or untitled.
+    suspend fun conversationOriginLabel(id: String): String? =
+        conversationDao.originLabelRow(id)?.takeIf { it.title.isNotEmpty() }?.let { originLabel(it.title, it.agentName) }
 
     // MARK: Agent roster
 
@@ -659,5 +819,8 @@ class JournalStore(
     private companion object {
         const val CURSOR_KEY = "cursor"
         const val TTL_MS = 24L * 3600 * 1000
+        const val ITEMS_WATERMARK_PREFIX = "items_watermark_"
+        const val ITEMS_WATERMARK_ALL_KEY = "items_watermark_all"
+        const val ITEMS_WATERMARK_CONVO_PREFIX = "items_watermark_convo_"
     }
 }

@@ -3,7 +3,12 @@ package chat.matron.android.journal
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
+import chat.matron.android.journal.db.ItemOutboxEntity
 import chat.matron.android.journal.db.MatronDatabase
+import chat.matron.android.models.ItemAuthor
+import chat.matron.android.models.ItemKind
+import chat.matron.android.models.TrackerComment
+import chat.matron.android.models.TrackerItem
 import java.io.File
 import java.time.Instant
 import kotlinx.coroutines.runBlocking
@@ -320,6 +325,43 @@ class MatronDatabaseMigrationTest {
             assertEquals(emptyMap<Long, String>(), store.agentTags())
             store.applyDeviceMeta(7, "dev-y", tagChar = "Q", tagCharKnown = true)
             assertEquals(mapOf(7L to "Q"), store.agentTags())
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
+    /// The exact v6 schema (v5 + `agent.tag_char`), stamped user_version = 6.
+    private fun buildV6(file: File) {
+        buildV5(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL("ALTER TABLE `agent` ADD COLUMN `tag_char` TEXT")
+            db.version = 6
+        }
+    }
+
+    /// MIGRATION_6_7 (the task & decision tracker cache, port of
+    /// matron-apple's GRDB v9): a v6 file gains `item`, `item_comment` and
+    /// `item_outbox`, pre-existing rows survive, and all three tables are
+    /// fully usable after open — Room validates the hand-written CREATEs
+    /// against the entities here, so a drift fails this test rather than
+    /// every upgrading install.
+    @Test
+    fun migratesV6FileToV7AndTrackerTablesWork() = runBlocking {
+        val file = File.createTempFile("migration-test-v6", ".sqlite").also { it.delete() }
+        buildV6(file)
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:dan")
+            assertEquals("pre-migration rows survive", "mac ↔ dev-z", store.conversation("room")?.title)
+            store.upsertItems(
+                listOf(TrackerItem(id = "it_1", num = 1, kind = ItemKind.TASK, title = "T", originConvoID = "room")),
+            )
+            assertEquals("T", store.item("it_1")?.title)
+            store.replaceComments("it_1", listOf(TrackerComment("ic_1", "it_1", ItemAuthor.USER, body = "x")))
+            assertEquals(listOf("ic_1"), store.comments("it_1").map { it.id })
+            store.itemOutboxInsert(ItemOutboxEntity("L1", "it_1", ItemOutboxEntity.OP_COMMENT, "{}", 0, 0, null))
+            assertEquals(listOf("L1"), store.itemOutboxPending().map { it.localID })
         } finally {
             database.close()
             file.delete()

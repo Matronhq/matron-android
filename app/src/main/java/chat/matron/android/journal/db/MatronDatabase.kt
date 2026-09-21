@@ -34,12 +34,18 @@ import java.io.File
 /// the journal's owner + joined participant device ids, NULL for everything
 /// that is not a room. Additive like v3: existing rows keep NULL and chip as
 /// before until the next snapshot / membership convo_meta fills them in.
+///
+/// v7 adds the task & decision tracker cache (matron-apple's v9): `item` and
+/// `item_comment` mirror the journal's rows (filled from `GET /items`, never
+/// from the event log), and `item_outbox` queues comments/creates written
+/// offline. Additive; all three start empty and the first refresh fills them.
 @Database(
     entities = [
         ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
         SummaryEntryEntity::class, AgentEntity::class,
+        ItemEntity::class, ItemCommentEntity::class, ItemOutboxEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -49,6 +55,9 @@ abstract class MatronDatabase : RoomDatabase() {
     abstract fun outboxDao(): OutboxDao
     abstract fun summaryEntryDao(): SummaryEntryDao
     abstract fun agentDao(): AgentDao
+    abstract fun itemDao(): ItemDao
+    abstract fun itemCommentDao(): ItemCommentDao
+    abstract fun itemOutboxDao(): ItemOutboxDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -140,10 +149,42 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
+        /// v7 (matron-apple's v9, #185): the tracker cache and its outbox.
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `item` (" +
+                        "`id` TEXT NOT NULL, `num` INTEGER NOT NULL, `kind` TEXT NOT NULL, `state` TEXT NOT NULL, " +
+                        "`resolution` TEXT, `awaiting` TEXT, `rank` REAL NOT NULL, `title` TEXT NOT NULL, " +
+                        "`body` TEXT NOT NULL, `labels_json` TEXT NOT NULL, `links_json` TEXT NOT NULL, " +
+                        "`attachments_json` TEXT NOT NULL, `supersedes` TEXT, `origin_convo_id` TEXT NOT NULL, " +
+                        "`created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, " +
+                        "`closed_at` INTEGER, `comment_count` INTEGER NOT NULL, `last_comment_at` INTEGER, " +
+                        "`has_image` INTEGER NOT NULL, `mission_id` TEXT, `mission_num` INTEGER, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_item_origin_convo_id` ON `item` (`origin_convo_id`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `item_comment` (" +
+                        "`id` TEXT NOT NULL, `item_id` TEXT NOT NULL, `author` TEXT NOT NULL, " +
+                        "`device_id` INTEGER NOT NULL, `kind` TEXT NOT NULL, `body` TEXT NOT NULL, " +
+                        "`attachments_json` TEXT NOT NULL, `meta_json` TEXT, `created_at` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_item_comment_item_id` ON `item_comment` (`item_id`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `item_outbox` (" +
+                        "`local_id` TEXT NOT NULL, `item_id` TEXT, `op` TEXT NOT NULL, `payload_json` TEXT NOT NULL, " +
+                        "`created_at` INTEGER NOT NULL, `attempts` INTEGER NOT NULL, `last_error` TEXT, " +
+                        "PRIMARY KEY(`local_id`))"
+                )
+            }
+        }
+
         /// Production, file-backed at the given path.
         fun open(context: Context, file: File): MatronDatabase =
             Room.databaseBuilder(context.applicationContext, MatronDatabase::class.java, file.absolutePath)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .build()
 
         /// Test/ephemeral, memory-backed. Cleared when the last connection closes.
