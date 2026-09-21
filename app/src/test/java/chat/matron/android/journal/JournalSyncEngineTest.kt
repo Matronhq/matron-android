@@ -40,6 +40,12 @@ class JournalSyncEngineTest {
 
     private fun helloOK(head: Long) = """{"kind":"control","op":"hello_ok","seq":$head}"""
 
+    /// A `convo_meta` as an agent's bridge sends it — always titled (the
+    /// journal emits no meta for an absent title; its own membership fan is
+    /// the one titleless meta, see [participantsMetaAheadOfTheTitleDoesNotOpenARoom]).
+    private fun metaLine(seq: Long, convo: String, title: String = "new session") =
+        """{"kind":"journal","seq":$seq,"convo_id":"$convo","ts":${seq * 1000},"sender":"agent:a","type":"convo_meta","payload":{"title":"$title","parent_convo_id":null,"agent_device_id":8}}"""
+
     private suspend fun seededStore(): JournalStore {
         val store = JournalStore(MatronDatabase.inMemory(context), ownSender = "user:dan")
         store.applyColdSnapshot(listOf(ConvoSummaryDTO("c1", "", "running", 0, "", 0)), headSeq = 0)
@@ -351,6 +357,211 @@ class JournalSyncEngineTest {
         delay(50)
         socket.serve("""{"kind":"journal","seq":2,"convo_id":"cTop","ts":2000,"sender":"agent:a","type":"convo_meta","payload":{"title":"new session"}}""")
         assertEquals("cTop", probe.next())
+        probe.cancel()
+        engine.endSync()
+    }
+
+    /// An agent-chat room born live must NOT auto-open. The bridge mints a
+    /// room when an agent calls `agent_chat_start`, and its frames land as
+    /// session_status → convo_meta (title led by the room marker `↔️ `) →
+    /// the opening text → the consent card. Auto-opening it yanked the Mac's
+    /// selection into the room the instant it existed and marked the consent
+    /// card read before the user ever saw it (2026-09-06: four rooms went
+    /// "invisible" this way). The engine must hold its decision until the
+    /// title arrives and then skip the room; a normal convo born right after
+    /// still fires, proving the room was filtered rather than delayed.
+    @Test
+    fun liveBornAgentRoomDoesNotAutoOpen() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(1))
+        socket.serve(journalLine(1)) // c1 — existing, drives us to running
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+
+        val probe = FlowProbe(this, engine.newConversations())
+        delay(50)
+        socket.serve(journalLine(2, convo = "room", type = "session_status")) // first frame, no title yet
+        socket.serve(metaLine(3, convo = "room", title = "↔️ [ab] mac ↔ dev-z")) // room → must NOT emit
+        socket.serve(journalLine(4, convo = "room")) // the opening message → still not
+        socket.serve(metaLine(5, convo = "cLive")) // normal new convo → emit
+        assertEquals(
+            "a live-born agent-chat room must not auto-open; only the user's own new session does",
+            "cLive", probe.next(),
+        )
+        probe.cancel()
+        engine.endSync()
+    }
+
+    /// The journal fans a titleless `convo_meta` (`payload: { participants }`
+    /// only) on every membership change, and for a room that can land ahead
+    /// of the title-bearing meta. A meta without a title proves nothing about
+    /// room-ness, so it must park the verdict like a status frame — not pass
+    /// the room as "a normal session" and open it (Bugbot, apple #184).
+    @Test
+    fun participantsMetaAheadOfTheTitleDoesNotOpenARoom() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(1))
+        socket.serve(journalLine(1))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+
+        val probe = FlowProbe(this, engine.newConversations())
+        delay(50)
+        // First frame, titleless → park.
+        socket.serve("""{"kind":"journal","seq":2,"convo_id":"room","ts":2000,"sender":"journal","type":"convo_meta","payload":{"participants":[8,9]}}""")
+        socket.serve(metaLine(3, convo = "room", title = "↔️ [ab] mac ↔ dev-z")) // room → must NOT emit
+        socket.serve(journalLine(4, convo = "room")) // opening message → still not
+        socket.serve(metaLine(5, convo = "cLive")) // normal titled meta → emit
+        assertEquals("a titleless membership meta must not settle a room as a normal session", "cLive", probe.next())
+        probe.cancel()
+        engine.endSync()
+    }
+
+    /// Rooms minted before matron-bridge#228 carry the legacy `🔗 ` marker
+    /// and may arrive with the convo_meta as their very first frame. Same
+    /// rule: never auto-open a room, whichever marker and whichever frame
+    /// comes first.
+    @Test
+    fun liveBornLegacyRoomMetaFirstDoesNotAutoOpen() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(1))
+        socket.serve(journalLine(1))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+
+        val probe = FlowProbe(this, engine.newConversations())
+        delay(50)
+        socket.serve("""{"kind":"journal","seq":2,"convo_id":"room","ts":2000,"sender":"agent:a","type":"convo_meta","payload":{"title":"🔗 [ab] mac ↔ dev-z"}}""") // room → must NOT emit
+        socket.serve(metaLine(3, convo = "cLive")) // normal new convo → emit
+        assertEquals("a legacy-marked room must not auto-open either", "cLive", probe.next())
+        probe.cancel()
+        engine.endSync()
+    }
+
+    /// The other side of holding the decision for the title: a genuine new
+    /// session whose first frame is a session_status (not its convo_meta)
+    /// must still auto-open — once the meta lands with a plain title. The
+    /// /start UX must survive the room filter.
+    @Test
+    fun liveBornSessionWithStatusFirstStillAutoOpensOnMeta() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(1))
+        socket.serve(journalLine(1))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+
+        val probe = FlowProbe(this, engine.newConversations())
+        delay(50)
+        socket.serve(journalLine(2, convo = "cTop", type = "session_status")) // first frame, title unknown
+        socket.serve(metaLine(3, convo = "cTop", title = "yearbook-app")) // plain title → emit now
+        assertEquals("a status-first session must auto-open once its plain-titled meta arrives", "cTop", probe.next())
+        probe.cancel()
+        engine.endSync()
+    }
+
+    /// A parked verdict must not outlive its socket. A room whose first frame
+    /// (session_status) landed just before a drop was left parked; after the
+    /// reconnect its next live message settled it as "open" and MainActivity
+    /// navigated into the room (Bugbot, PR #67). The parked set is cleared on
+    /// connect: the convo already has its store row, so post-reconnect it is
+    /// simply a known convo whose frames never auto-open — like a convo born
+    /// in a reconnect backlog. A genuinely new convo after it still emits.
+    @Test
+    fun parkedAutoOpenDoesNotSurviveReconnect() = runBlocking {
+        val first = FakeWebSocketConnection()
+        first.serve(helloOK(1))
+        first.serve(journalLine(1))
+        val second = FakeWebSocketConnection()
+        second.serve(helloOK(2)) // nothing to replay: cursor already at 2
+        val store = seededStore()
+        val connector = FakeConnector(listOf(first, second))
+        val engine = makeEngine(store, connector)
+        engine.beginSync()
+        engine.waitUntilReady()
+
+        val probe = FlowProbe(this, engine.newConversations())
+        delay(50)
+        first.serve(journalLine(2, convo = "room", type = "session_status")) // parked, title unknown
+        waitUntil { store.cursor() >= 2 }
+        first.closeFromServer()
+        waitUntil { connector.connectCount == 2 }
+        engine.waitUntilReady()
+
+        second.serve(journalLine(3, convo = "room")) // live message on the parked convo → must NOT emit
+        second.serve(metaLine(4, convo = "cLive")) // normal new convo → emit
+        assertEquals("a verdict parked on the dead socket must not open the convo after reconnect", "cLive", probe.next())
+        probe.cancel()
+        engine.endSync()
+    }
+
+    /// Same drop, but the room's titled meta arrives in the reconnect REPLAY
+    /// (batched through flushReplay, which never publishes). The parked id
+    /// must be settled by the replay, not left for the next live frame.
+    @Test
+    fun parkedAutoOpenSettledByReconnectReplayNotByNextLiveMessage() = runBlocking {
+        val first = FakeWebSocketConnection()
+        first.serve(helloOK(1))
+        first.serve(journalLine(1))
+        val second = FakeWebSocketConnection()
+        second.serve(helloOK(4))
+        second.serve(journalLine(3, convo = "room", type = "read_marker")) // replayed
+        second.serve(metaLine(4, convo = "room", title = "↔️ [ab] mac ↔ dev-z")) // replayed: the title
+        val store = seededStore()
+        val connector = FakeConnector(listOf(first, second))
+        val engine = makeEngine(store, connector)
+        engine.beginSync()
+        engine.waitUntilReady()
+
+        val probe = FlowProbe(this, engine.newConversations())
+        delay(50)
+        first.serve(journalLine(2, convo = "room", type = "session_status")) // parked
+        waitUntil { store.cursor() >= 2 }
+        first.closeFromServer()
+        waitUntil { connector.connectCount == 2 }
+        engine.waitUntilReady()
+        waitUntil { store.cursor() >= 4 }
+
+        second.serve(journalLine(5, convo = "room")) // live message → must NOT emit
+        second.serve(metaLine(6, convo = "cLive")) // normal new convo → emit
+        assertEquals("a room whose title replayed after a drop must not open on its next live message", "cLive", probe.next())
+        probe.cancel()
+        engine.endSync()
+    }
+
+    /// endSync drops parked verdicts with the connection: a convo parked
+    /// before a stop must not auto-open from its next live message after a
+    /// later start.
+    @Test
+    fun endSyncClearsParkedAutoOpen() = runBlocking {
+        val first = FakeWebSocketConnection()
+        first.serve(helloOK(1))
+        first.serve(journalLine(1))
+        val second = FakeWebSocketConnection()
+        second.serve(helloOK(2))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(first, second)))
+        engine.beginSync()
+        engine.waitUntilReady()
+
+        val probe = FlowProbe(this, engine.newConversations())
+        delay(50)
+        first.serve(journalLine(2, convo = "room", type = "session_status")) // parked
+        waitUntil { store.cursor() >= 2 }
+        engine.endSync()
+
+        engine.beginSync()
+        engine.waitUntilReady()
+        second.serve(journalLine(3, convo = "room")) // live message → must NOT emit
+        second.serve(metaLine(4, convo = "cLive")) // normal new convo → emit
+        assertEquals("endSync must drop a parked verdict", "cLive", probe.next())
         probe.cancel()
         engine.endSync()
     }
