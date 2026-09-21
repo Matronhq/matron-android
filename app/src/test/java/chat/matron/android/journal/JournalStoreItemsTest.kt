@@ -218,6 +218,44 @@ class JournalStoreItemsTest {
         assertTrue(store.itemOutboxPending().isEmpty())
     }
 
+    private fun fallbackTwin(seq: Long, sender: String = "agent:a") = JournalEvent(
+        seq, "c1", Instant.ofEpochMilli(seq * 1000), sender, JournalEventType.TEXT,
+        buildJsonObject {
+            put("body", "📌 Needs you — question #12: Which auth?"); put("fallback_for", "item")
+            put("item_id", "it_1"); put("num", 12); put("action", "created")
+        },
+    )
+
+    /// The item marker's old-client `fallback_for` text twin is hidden from
+    /// the timeline, so it must not act as a message anywhere the user could
+    /// notice: no snippet, no unread bump, no activity timestamp, no search
+    /// body — live, on a read-marker recount, and on a history recount alike
+    /// (Bugbot, #71).
+    @Test
+    fun fallbackTwinDoesNotBumpUnreadSnippetOrActivity() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(JournalEvent(1, "c1", Instant.ofEpochMilli(1_000), "agent:a", JournalEventType.TEXT, buildJsonObject { put("body", "real message") }))
+        val before = store.conversation("c1")!!
+        assertEquals(1, before.unreadCount); assertEquals("real message", before.snippet)
+
+        assertTrue(store.applyJournal(fallbackTwin(2)))
+        val after = store.conversation("c1")!!
+        assertEquals("the twin is a stored journal row", 2L, after.lastSeq)
+        assertEquals("but not a message: unread unchanged", 1, after.unreadCount)
+        assertEquals("snippet unchanged", "real message", after.snippet)
+        assertEquals("activity unchanged", before.lastActivityTS, after.lastActivityTS)
+        assertNull("never indexed for search", fallbackTwin(2).previewText())
+
+        // A read-marker recount (the SQL path) agrees with the incremental count.
+        store.applyJournal(JournalEvent(3, "c1", Instant.ofEpochMilli(3_000), "user:dan", JournalEventType.READ_MARKER, buildJsonObject { put("up_to_seq", 0) }))
+        assertEquals(1, store.conversation("c1")!!.unreadCount)
+
+        // And the history path's recount.
+        store.insertHistory(listOf(fallbackTwin(4)))
+        assertEquals(1, store.conversation("c1")!!.unreadCount)
+        assertEquals("a real text still counts", "real message", store.conversation("c1")!!.snippet)
+    }
+
     @Test
     fun conversationOriginLabelsNameTheBox() = runBlocking {
         val store = makeStore()

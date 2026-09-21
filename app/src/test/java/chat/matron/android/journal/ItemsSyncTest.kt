@@ -57,6 +57,11 @@ private class FakeItems : ItemsProviding {
     @Volatile var listError: Throwable? = null
     @Volatile var blockNextList = false
     @Volatile var blockNextItem = false
+    /// Like [blockNextItem], but the held call does NOT observe cancellation
+    /// (the way a response already in hand doesn't): it resumes normally when
+    /// released, so a test can prove the post-await `stopped` guard alone
+    /// keeps the write out — and that `stop()` waited for it.
+    @Volatile var blockNextItemUncancellable = false
     @Volatile var blockNextComment = false
     @Volatile var blockNextCreate = false
 
@@ -101,11 +106,18 @@ private class FakeItems : ItemsProviding {
 
     override suspend fun item(id: String): ItemDetail {
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
+        var uncancellable = false
         val gate = synchronized(lock) {
             _itemCalls += 1
-            if (blockNextItem) { blockNextItem = false; CompletableDeferred<Unit>().also { _itemGate = it } } else null
+            when {
+                blockNextItem -> { blockNextItem = false; CompletableDeferred<Unit>().also { _itemGate = it } }
+                blockNextItemUncancellable -> { blockNextItemUncancellable = false; uncancellable = true; CompletableDeferred<Unit>().also { _itemGate = it } }
+                else -> null
+            }
         }
-        gate?.await()
+        if (gate != null) {
+            if (uncancellable) kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { gate.await() } else gate.await()
+        }
         return synchronized(lock) { _detail[id] } ?: throw JournalApiError.NotFound
     }
 
@@ -482,6 +494,62 @@ class ItemsSyncTest {
         assertEquals("the row is left exactly as it was", listOf("L1"), rig.store.itemOutboxPending().map { it.localID })
         assertEquals(0, rig.store.itemOutboxRows("it_1").first().attempts)
         assertTrue("nothing lands after stop()", rig.store.comments("it_1").isEmpty())
+    }
+
+    /// A per-item refetch in flight at `stop()` never writes after `stop()`
+    /// returns (Bugbot, #71): the job is cancelled and joined like a refresh.
+    @Test
+    fun stopCancelsAnInFlightRefetchSoItsDataNeverLands() = runBlocking {
+        val api = FakeItems()
+        api.detail("it_1", item("it_1", 1, 5_000), listOf(TrackerComment("ic_1", "it_1", ItemAuthor.USER, body = "x")))
+        api.blockNextItem = true
+        val rig = make(api)
+        rig.sync.start()
+        val refetch = launch(Dispatchers.Default) { rig.sync.refreshItem("it_1") }
+        waitUntil { api.isItemGated }
+        withTimeout(2_000) { rig.sync.stop() }
+        api.releaseItemGate()
+        withTimeout(2_000) { refetch.join() }
+        assertNull("nothing lands after stop()", rig.store.item("it_1"))
+        assertTrue(rig.store.comments("it_1").isEmpty())
+    }
+
+    /// The harder shape: the refetch's network call has already returned by
+    /// the time `stop()` runs (it can't observe cancellation any more).
+    /// `stop()` must WAIT for it, and the resumed refetch must not write.
+    @Test
+    fun stopWaitsForARefetchPastItsNetworkCallAndItStillWritesNothing() = runBlocking {
+        val api = FakeItems()
+        api.detail("it_1", item("it_1", 1, 5_000), emptyList())
+        api.blockNextItemUncancellable = true
+        val rig = make(api)
+        rig.sync.start()
+        val refetch = launch(Dispatchers.Default) { rig.sync.refreshItem("it_1") }
+        waitUntil { api.isItemGated }
+        var stopped = false
+        val stop = launch(Dispatchers.Default) { rig.sync.stop(); stopped = true }
+        delay(200)
+        assertFalse("stop() must not return while a refetch can still write", stopped)
+        api.releaseItemGate()
+        withTimeout(2_000) { stop.join(); refetch.join() }
+        assertNull("the resumed refetch saw `stopped` and wrote nothing", rig.store.item("it_1"))
+    }
+
+    /// The background drain `enqueueCreate` kicks (and never awaits) is
+    /// cancelled and joined by `stop()` too.
+    @Test
+    fun stopCancelsTheBackgroundDrainAnEnqueueCreateStarted() = runBlocking {
+        val api = FakeItems()
+        api.blockNextCreate = true
+        val rig = make(api)
+        rig.sync.refresh(ItemsScope.All) // proves support so the drain attempts the row
+        assertTrue(rig.sync.enqueueCreate("L1", NewItem(kind = ItemKind.TASK, title = "T", convoID = "c1")))
+        waitUntil { api.isCreateGated }
+        withTimeout(2_000) { rig.sync.stop() }
+        api.releaseCreateGate()
+        delay(100)
+        assertEquals("the row is left queued, untouched", listOf("L1"), rig.store.itemOutboxPending().map { it.localID })
+        assertNull("the create's result never lands after stop()", rig.store.item("it_new"))
     }
 
     @Test

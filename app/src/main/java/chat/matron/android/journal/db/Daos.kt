@@ -156,9 +156,14 @@ interface EventDao {
     @Query("SELECT MAX(seq) FROM event WHERE convo_id = :convoID AND type IN (:messageTypes)")
     suspend fun newestMessageSeq(convoID: String, messageTypes: Collection<String>): Long?
 
+    /// The item marker's hidden `fallback_for` text twin is excluded (the
+    /// live apply path skips it too — see `JournalEvent.isItemFallbackText`),
+    /// so a read-marker recount agrees with the incremental count. Payload is
+    /// stored as compact JSON text, so the key's quoted form is a safe LIKE.
     @Query(
         "SELECT COUNT(*) FROM event WHERE convo_id = :convoID AND seq > :afterSeq " +
-            "AND type IN (:messageTypes) AND sender != :ownSender"
+            "AND type IN (:messageTypes) AND sender != :ownSender " +
+            "AND NOT (type = 'text' AND payload LIKE '%\"fallback_for\"%')"
     )
     suspend fun countUnread(convoID: String, afterSeq: Long, messageTypes: Collection<String>, ownSender: String): Int
 

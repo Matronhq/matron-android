@@ -174,11 +174,16 @@ class JournalStore(
         )
 
         convo = convo.copy(lastSeq = max(convo.lastSeq, event.seq))
+        // The item marker's old-client text twin is stored (it is a journal
+        // row) but hidden from the timeline, so it must not act as a message
+        // here: no activity bump, no snippet, no unread — the user could
+        // never find the row those would point at (Bugbot, #71).
+        val isMessage = event.type in JournalEventType.MESSAGE_TYPES && !event.isItemFallbackText()
         // Only real message traffic counts as "activity" for the chat
         // list's timestamp; bookkeeping frames (read_marker, session_status,
         // convo_meta) must not fake aliveness. lastSeq still tracks every
         // frame (mirrors the server's last_seq for snapshot ordering).
-        if (event.type in JournalEventType.MESSAGE_TYPES) {
+        if (isMessage) {
             convo = convo.copy(lastActivityTS = event.ts.toEpochMilli())
         }
 
@@ -223,7 +228,7 @@ class JournalStore(
                     ),
                 )
             }
-            event.type in JournalEventType.MESSAGE_TYPES -> {
+            isMessage -> {
                 convo = convo.copy(snippet = snippet(event))
                 if (event.sender != ownSender && event.seq > convo.readUpToSeq) {
                     convo = convo.copy(unreadCount = convo.unreadCount + 1)
