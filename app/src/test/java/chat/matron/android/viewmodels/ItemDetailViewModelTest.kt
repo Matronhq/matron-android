@@ -28,9 +28,18 @@ class ItemDetailViewModelTest {
         private var gate: CompletableDeferred<Unit>? = null
         val isHeld: Boolean get() = gate != null
         fun releaseRefresh() { val g = gate; gate = null; g?.complete(Unit) }
+        /// The order of the store writes a mutation makes: `apply` is the
+        /// item the journal handed straight back, `refetch` the follow-up
+        /// that brings the comment thread down.
+        val log = mutableListOf<String>()
         override suspend fun refreshItem(id: String) {
+            log += "refetch"
             if (holdRefresh) { holdRefresh = false; val g = CompletableDeferred<Unit>(); gate = g; g.await() }
             refetched += id
+        }
+        override suspend fun applyItem(item: TrackerItem) {
+            log += "apply"
+            super.applyItem(item)
         }
     }
 
@@ -259,6 +268,25 @@ class ItemDetailViewModelTest {
         assertFalse("an empty recording's temp file must not be orphaned", file.exists())
         assertTrue(sync.comments.isEmpty())
         assertTrue(api.uploads.isEmpty())
+    }
+
+    @Test
+    fun closeAndReopenLandTheReturnedItemBeforeTheRefetch() = runBlocking {
+        val api = Api(); val sync = Sync(); val store = FakeItemsStore()
+        val vm = ItemDetailViewModel("it_1", store, api, sync, this)
+        // No `start()`: nothing is feeding the store's item flow, which is
+        // exactly the case the refetch can't rescue — it swallows its failures.
+        vm.close(ItemResolution.DONE, null)
+        assertEquals("the returned item lands before the refetch", listOf("apply", "refetch"), sync.log)
+        assertEquals(listOf(ItemState.CLOSED), sync.applied.map { it.state })
+        assertEquals("the screen shows the item as closed straight away", ItemState.CLOSED, vm.item.value?.state)
+
+        sync.log.clear()
+        vm.reopen()
+        assertEquals(listOf("apply", "refetch"), sync.log)
+        assertEquals(ItemState.OPEN, sync.applied.last().state)
+        assertEquals(ItemState.OPEN, vm.item.value?.state)
+        assertNull(vm.error.value)
     }
 
     @Test
