@@ -348,7 +348,7 @@ private fun SignedInApp(
             // out the in-process timer, which does not tick while the
             // process is frozen. Watermark-gated, so a fresh foreground costs
             // one `meta` read; the launch hold keeps it off a cold start.
-            launch { runCatching { deps.journalMaintenance(session).runIfDue() } }
+            launch { deps.journalMaintenance(session).runIfDue() }
             sync.stateStream.collect { state ->
                 connectionState = syncBannerStateFrom(state)
                 if (state is SyncConnectionState.Running) hasEverConnected = true

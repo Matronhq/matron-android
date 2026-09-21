@@ -44,10 +44,11 @@ class OutboxCatchUpWorker(
         // worker-started process has no first paint to protect), and is
         // bounded: the sweeps commit per 500-row chunk and resume from
         // their watermark, so abandoning the wait loses nothing.
-        withTimeoutOrNull(MAINTENANCE_BUDGET_MS) {
-            runCatching { deps.journalMaintenance(session).runIfDue(ignoreLaunchHold = true) }
-                .onFailure { MatronDebug.breadcrumb("OutboxCatchUpWorker: maintenance failed: $it") }
-        }
+        runCatching {
+            withTimeoutOrNull(MAINTENANCE_BUDGET_MS) {
+                deps.journalMaintenance(session).runIfDue(ignoreLaunchHold = true)
+            }
+        }.onFailure { MatronDebug.breadcrumb("OutboxCatchUpWorker: maintenance failed: $it") }
         return Result.success()
     }
 
