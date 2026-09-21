@@ -146,10 +146,18 @@ fun pendingCommentSendState(attempts: Int, lastError: String?): SendStateGlyph =
 /// [now] (not the ambient clock) so tests are deterministic. Falls back to an
 /// absolute short date once the comment is more than 7 days older than
 /// [now] — "3 mo. ago" reads worse than an actual date at that range.
-fun itemRelativeDate(date: Instant, now: Instant, zone: ZoneId = ZoneId.systemDefault()): String {
+/// [zone] and [locale] default to the reader's, and are parameters for the
+/// same reason [now] is: the absolute fallback's month name is locale-bound,
+/// so a test that asserts one has to say which locale it means.
+fun itemRelativeDate(
+    date: Instant,
+    now: Instant,
+    zone: ZoneId = ZoneId.systemDefault(),
+    locale: Locale = Locale.getDefault(),
+): String {
     val elapsed = Duration.between(date, now)
     if (elapsed > Duration.ofDays(7)) {
-        return DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()).withZone(zone).format(date)
+        return DateTimeFormatter.ofPattern("d MMM yyyy", locale).withZone(zone).format(date)
     }
     val seconds = elapsed.seconds
     return when {

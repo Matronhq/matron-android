@@ -67,17 +67,33 @@ import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.MatronJson
 import chat.matron.android.models.ItemState
 import chat.matron.android.models.TrackerAttachment
+import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.ItemDetailViewModel
 import chat.matron.android.viewmodels.ItemReadMemory
 import chat.matron.android.viewmodels.MediaRecorderAudioRecording
 import chat.matron.android.viewmodels.OutgoingAttachment
 import chat.matron.android.viewmodels.VoiceRecorder
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
+
+/// `runCatching` for suspending work: a real failure becomes `null` (the
+/// caller turns that into a banner), while cancellation is rethrown —
+/// `runCatching` would swallow it, letting a cancelled load carry on writing
+/// to state and be reported to the reader as a failure. The same rule
+/// `ItemsSync` and the tracker view models already follow. `internal` as a
+/// test seam.
+internal suspend fun <T> nullOnFailure(op: suspend () -> T): T? = try {
+    op()
+} catch (cancel: CancellationException) {
+    throw cancel
+} catch (_: Throwable) {
+    null
+}
 
 /// One tracker item as its own navigation route (the iOS `ItemDetailHost`
 /// pushed inside the drawer's `NavigationStack`; here a top-level
@@ -131,9 +147,19 @@ fun ItemDetailScreen(
         for (a in imageAttachments) {
             if (a.blobRef in images || !inFlight.add(a.blobRef)) continue
             launch {
-                val bytes = runCatching { media.image(mediaURL(a)) }.getOrNull()
-                images[a.blobRef] = bytes
-                inFlight.remove(a.blobRef)
+                try {
+                    // A miss is deliberately NOT cached: `images` doubles as
+                    // the "already handled" set above, so storing `null` for a
+                    // failed load would retire that blob for the life of the
+                    // screen — one flaky fetch and the image never appears.
+                    // Leaving the key out lets the next pass try again.
+                    val bytes = nullOnFailure { media.image(mediaURL(a)) }
+                    if (bytes != null) images[a.blobRef] = bytes
+                } finally {
+                    // Cleared whatever happened (including cancellation) so a
+                    // blob is never stuck "in flight" with nothing running.
+                    inFlight.remove(a.blobRef)
+                }
             }
         }
     }
@@ -195,19 +221,36 @@ fun ItemDetailScreen(
         if (openingBlob != null) return
         openingBlob = a.blobRef
         scope.launch {
-            val bytes = runCatching { media.image(mediaURL(a)) }.getOrNull()
-            if (bytes == null) {
+            // Cleared in a `finally`: a download or a cache write that throws
+            // must not leave the flag set, which would make every later
+            // attachment tap on this screen a silent no-op.
+            try {
+                val bytes = nullOnFailure { media.image(mediaURL(a)) }
+                if (bytes == null) {
+                    viewModel.reportError("Couldn't download the attachment.")
+                    return@launch
+                }
+                val file = nullOnFailure {
+                    withContext(Dispatchers.IO) {
+                        val dir = File(context.cacheDir, "item-attachments").apply { mkdirs() }
+                        // The name comes from the server's attachment metadata,
+                        // so it gets the same sanitising as a chat attachment: a
+                        // `sub/file` or `../../x` would otherwise aim the write
+                        // at a missing (or escaped) directory and throw.
+                        val name = ChatViewModel.sanitisedAttachmentFilename(
+                            a.name.ifEmpty { if (a.isAudio) "voice-note.m4a" else "attachment" },
+                        )
+                        File(dir, "${a.blobRef.take(12)}-$name").also { it.writeBytes(bytes) }
+                    }
+                }
+                if (file == null) {
+                    viewModel.reportError("Couldn't open the attachment.")
+                    return@launch
+                }
+                runCatching { openAttachment(context, file) }
+            } finally {
                 openingBlob = null
-                viewModel.reportError("Couldn't download the attachment.")
-                return@launch
             }
-            val file = withContext(Dispatchers.IO) {
-                val dir = File(context.cacheDir, "item-attachments").apply { mkdirs() }
-                val name = a.name.ifEmpty { if (a.isAudio) "voice-note.m4a" else "attachment" }
-                File(dir, "${a.blobRef.take(12)}-$name").also { it.writeBytes(bytes) }
-            }
-            openingBlob = null
-            runCatching { openAttachment(context, file) }
         }
     }
 

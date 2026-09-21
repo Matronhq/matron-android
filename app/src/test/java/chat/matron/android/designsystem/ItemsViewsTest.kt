@@ -10,6 +10,7 @@ import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.Locale
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -96,7 +97,16 @@ class ItemsViewsTest {
         assertEquals("3 hr ago", itemRelativeDate(now.minusSeconds(3 * 3600), now))
         assertEquals("1 day ago", itemRelativeDate(now.minusSeconds(86_400), now))
         assertEquals("2 days ago", itemRelativeDate(now.minusSeconds(2 * 86_400), now))
-        assertEquals("3 Sep 2026", itemRelativeDate(now.minusSeconds(18 * 86_400), now, ZoneOffset.UTC))
+        // The month name is locale-bound (CLDR even spells it differently in
+        // en-US and en-GB: "Sep" vs "Sept"), so the assertion names the locale
+        // it means rather than inheriting the host's.
+        assertEquals("3 Sep 2026", itemRelativeDate(now.minusSeconds(18 * 86_400), now, ZoneOffset.UTC, Locale.US))
+        // And that the parameter is actually honoured, without pinning another
+        // locale's exact CLDR spelling.
+        assertTrue(
+            itemRelativeDate(now.minusSeconds(18 * 86_400), now, ZoneOffset.UTC, Locale.FRANCE) !=
+                itemRelativeDate(now.minusSeconds(18 * 86_400), now, ZoneOffset.UTC, Locale.US),
+        )
     }
 
     @Test
