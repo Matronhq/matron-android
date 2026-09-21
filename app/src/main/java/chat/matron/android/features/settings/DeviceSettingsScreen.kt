@@ -21,15 +21,19 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.AppearancePicker
 import chat.matron.android.designsystem.MatronAppearance
+import chat.matron.android.designsystem.StorageSettingsRows
 import chat.matron.android.models.UserSession
 import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.AppLockTimeout
@@ -39,8 +43,9 @@ import kotlinx.coroutines.launch
 /**
  * Settings → Device. Ports Features/Settings/DeviceSettingsView.swift: a
  * read-only account summary (userID, deviceID, homeserver host), a Manage
- * Devices link, the appearance picker, and the Privacy section hosting the app
- * lock. Verification/recovery-key sections were Matrix-SDK-only and are absent
+ * Devices link, the appearance picker, the Storage diagnostics section
+ * (apple #212), and the Privacy section hosting the app lock.
+ * Verification/recovery-key sections were Matrix-SDK-only and are absent
  * from the journal stack.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
@@ -57,6 +62,10 @@ fun DeviceSettingsScreen(
     /// `null` in hosts that have no lock (and in previews); the Privacy section
     /// then doesn't render at all.
     appLock: AppLockController? = null,
+    /// Loads the Storage section's model — on demand only: two file stats and
+    /// two `COUNT(*)`s when the user opens this screen, never on the launch
+    /// path. `null` in hosts without a store (previews) hides the section.
+    loadStorage: (suspend () -> StorageSettingsRows.Model)? = null,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -123,6 +132,8 @@ fun DeviceSettingsScreen(
             SettingsSection("Appearance") {
                 AppearancePicker(selected = appearance, onSelect = onAppearanceChange)
             }
+
+            if (loadStorage != null) StorageSection(loadStorage)
 
             if (appLock != null) AppLockSection(appLock)
         }
@@ -210,6 +221,19 @@ private fun AppLockSection(appLock: AppLockController) {
             )
         }
     }
+}
+
+/**
+ * Settings › Storage: store sizes on disk, row counts, this launch's
+ * timings and the last maintenance pass. The read starts as soon as the
+ * screen composes regardless of scroll position; `null` renders as a
+ * spinner until it returns.
+ */
+@Composable
+private fun StorageSection(loadStorage: suspend () -> StorageSettingsRows.Model) {
+    var storage by remember { mutableStateOf<StorageSettingsRows.Model?>(null) }
+    LaunchedEffect(loadStorage) { storage = loadStorage() }
+    SettingsSection("Storage") { StorageSettingsRows(storage) }
 }
 
 @Composable

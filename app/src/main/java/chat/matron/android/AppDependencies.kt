@@ -18,6 +18,7 @@ import chat.matron.android.journal.AgentSpawnAnswering
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalMaintenance
 import chat.matron.android.journal.JournalStore
+import chat.matron.android.journal.StoreDiagnostics
 import chat.matron.android.journal.JournalSyncEngine
 import chat.matron.android.journal.OkHttpWebSocketConnector
 import chat.matron.android.journal.db.MatronDatabase
@@ -169,6 +170,8 @@ class AppDependencies(
     class JournalCore(
         val api: JournalApi,
         val db: MatronDatabase,
+        /** Where the mirror lives on disk — the Storage section's size row. */
+        val dbFile: File,
         val store: JournalStore,
         val engine: JournalSyncEngine,
         /**
@@ -250,7 +253,7 @@ class AppDependencies(
             search = search,
         )
         val maintenance = JournalMaintenance(store = store, search = search)
-        val core = JournalCore(api, db, store, engine, maintenance)
+        val core = JournalCore(api, db, dbFile, store, engine, maintenance)
         cores[session.userID] = core
         // Nothing proportional to store history runs on the launch path any
         // more (apple #212): the tool-output TTL sweep that used to be
@@ -280,6 +283,20 @@ class AppDependencies(
      * periodic worker call `runIfDue()` on it.
      */
     fun journalMaintenance(session: UserSession): JournalMaintenance = core(session).maintenance
+
+    /**
+     * Settings › Storage's numbers: on-disk size of the journal mirror and
+     * the FTS index (`.sqlite` + `-wal` + `-shm`), row counts, and the last
+     * maintenance stamp. On demand only, off the main thread.
+     */
+    suspend fun storeSizes(session: UserSession): StoreDiagnostics.Sizes {
+        val core = core(session)
+        return StoreDiagnostics.sizes(
+            store = core.store,
+            journalFile = core.dbFile,
+            searchFile = if (search != null) StoragePaths.searchDb(appSupport) else null,
+        )
+    }
 
     /**
      * Kicks off the background search-history backfill for a session's core:

@@ -33,6 +33,7 @@ import androidx.navigation.navArgument
 import chat.matron.android.designsystem.AppLockShield
 import chat.matron.android.designsystem.MatronAppearance
 import chat.matron.android.designsystem.MatronTheme
+import chat.matron.android.designsystem.StorageSettingsRows
 import chat.matron.android.designsystem.SyncBannerState
 import chat.matron.android.designsystem.syncBannerStateFrom
 import chat.matron.android.features.chat.ChatScreen
@@ -48,6 +49,8 @@ import chat.matron.android.features.settings.DeviceSettingsScreen
 import chat.matron.android.features.settings.AgentChatScreen
 import chat.matron.android.features.settings.DevicesScreen
 import chat.matron.android.journal.RelayApi
+import chat.matron.android.journal.StoreDiagnostics
+import chat.matron.android.models.LaunchTimeline
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.sync.OutboxCatchUpWorker
 import chat.matron.android.models.SyncConnectionState
@@ -247,6 +250,25 @@ fun openConversationCallback(
     }
 }
 
+/**
+ * Settings › Storage's model (apple #212): store sizes and counts from the
+ * composition root, "This launch" from the persisted launch record (the one
+ * describing the launch the user is in — it is written on every mark, not
+ * at exit), and the last maintenance pass as a relative time.
+ */
+private suspend fun storageSettingsModel(deps: AppDependencies, session: UserSession): StorageSettingsRows.Model {
+    val sizes = deps.storeSizes(session)
+    val launch = LaunchTimeline.currentLaunch(deps.preferences) ?: LaunchTimeline.shared.record
+    return StorageSettingsRows.Model(
+        journalBytes = sizes.journalBytes,
+        searchBytes = sizes.searchBytes,
+        events = sizes.eventCount,
+        conversations = sizes.conversationCount,
+        launchText = LaunchTimeline.summary(launch),
+        maintenanceText = StoreDiagnostics.lastMaintenanceText(sizes.lastMaintenance, System.currentTimeMillis()),
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SignedInApp(
@@ -424,6 +446,7 @@ private fun SignedInApp(
                 onLinkDevice = { nav.navigate("link-device") },
                 onAgentChats = { nav.navigate("agent-chats") },
                 appLock = appLock,
+                loadStorage = { storageSettingsModel(deps, session) },
                 onBack = { nav.popBackStack() },
             )
         }
