@@ -10,6 +10,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -322,6 +325,137 @@ class MatronDatabaseMigrationTest {
             assertEquals(mapOf(7L to "Q"), store.agentTags())
         } finally {
             database.close()
+            file.delete()
+        }
+    }
+
+    /// The exact v6 schema (v5 + `agent.tag_char`), stamped user_version = 6.
+    private fun buildV6(file: File) {
+        buildV5(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL("ALTER TABLE `agent` ADD COLUMN `tag_char` TEXT")
+            db.version = 6
+        }
+    }
+
+    private fun indexNames(database: MatronDatabase, table: String): List<String> =
+        database.openHelper.readableDatabase.query("PRAGMA index_list('$table')").use { cursor ->
+            val nameColumn = cursor.getColumnIndexOrThrow("name")
+            buildList { while (cursor.moveToNext()) add(cursor.getString(nameColumn)) }
+        }
+
+    private fun indexColumns(database: MatronDatabase, index: String): List<String> =
+        database.openHelper.readableDatabase.query("PRAGMA index_info('$index')").use { cursor ->
+            val nameColumn = cursor.getColumnIndexOrThrow("name")
+            buildList { while (cursor.moveToNext()) add(cursor.getString(nameColumn)) }
+        }
+
+    /// MIGRATION_6_7 (launch performance, port of matron-apple's GRDB v11 /
+    /// #212): the `event(type, ts)` index the sweeps range-scan exists with
+    /// its columns in the order the range scan needs.
+    @Test
+    fun migratesV6FileToV7AndCreatesTheTypeTsIndex() = runBlocking {
+        val file = File.createTempFile("migration-test-v6", ".sqlite").also { it.delete() }
+        buildV6(file)
+        val database = MatronDatabase.open(context, file)
+        try {
+            val names = indexNames(database, "event")
+            assertTrue("the sweep's covering index is missing: $names", "event_type_ts" in names)
+            assertEquals(
+                "column order decides whether the range scan works",
+                listOf("type", "ts"), indexColumns(database, "event_type_ts"),
+            )
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
+    /// The v7 backfill: `last_message_type` / `expired_snippet` are derived
+    /// from the NEWEST message-type event of each conversation already in
+    /// the mirror — a bookkeeping frame after it must not win, a text
+    /// newest gets no command stub, and a conversation with no message-type
+    /// event at all stays NULL/NULL.
+    @Test
+    fun migrationBackfillsLastMessageTypeAndExpiredSnippetFromStoredEvents() = runBlocking {
+        val file = File.createTempFile("migration-test-v6", ".sqlite").also { it.delete() }
+        buildV6(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            for (id in listOf("c1", "c2", "c3", "c4", "c5")) {
+                db.execSQL(
+                    "INSERT INTO conversation VALUES ('$id', 'T-$id', 'running', 0, '', 0, NULL, 0, 0, 0, 0, NULL, NULL, NULL)"
+                )
+            }
+            // c1: newest message-type row is a live-log tool_output; the
+            // read_marker after it is not a message.
+            db.execSQL("INSERT INTO event VALUES (1, 'c1', 1000, 'agent:a', 'text', '{\"body\": \"hi\"}')")
+            db.execSQL(
+                "INSERT INTO event VALUES (2, 'c1', 2000, 'agent:a', 'tool_output', " +
+                    "'{\"command\": \"make test\", \"live_log\": true, \"snippet\": \"out\"}')"
+            )
+            db.execSQL("INSERT INTO event VALUES (3, 'c1', 3000, 'user:dan', 'read_marker', '{\"up_to_seq\": 2}')")
+            // c2: newest message-type row is plain text.
+            db.execSQL(
+                "INSERT INTO event VALUES (4, 'c2', 4000, 'agent:a', 'tool_output', " +
+                    "'{\"command\": \"ls\", \"live_log\": true}')"
+            )
+            db.execSQL("INSERT INTO event VALUES (5, 'c2', 5000, 'agent:a', 'text', '{\"body\": \"after\"}')")
+            // c3: no message-type event at all.
+            db.execSQL("INSERT INTO event VALUES (6, 'c3', 6000, 'agent:a', 'session_status', '{\"state\": \"idle\"}')")
+            // c4: a legacy tool_output (no live_log, not expired) keeps its
+            // durable snippet — no stub, or the read path would hide it.
+            db.execSQL(
+                "INSERT INTO event VALUES (7, 'c4', 7000, 'agent:a', 'tool_output', " +
+                    "'{\"command\": \"legacy\", \"snippet\": \"kept\"}')"
+            )
+            // c5: a server-tombstoned row — the list has only the command to show.
+            db.execSQL(
+                "INSERT INTO event VALUES (8, 'c5', 8000, 'agent:a', 'tool_output', " +
+                    "'{\"command\": \"make build\", \"expired\": true}')"
+            )
+        }
+
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:dan")
+            assertEquals("tool_output", store.conversation("c1")?.lastMessageType)
+            assertEquals("$ make test", store.conversation("c1")?.expiredSnippet)
+            assertEquals("text", store.conversation("c2")?.lastMessageType)
+            assertNull("only tool_output gets a command stub", store.conversation("c2")?.expiredSnippet)
+            assertNull("no message-type event means no last message type", store.conversation("c3")?.lastMessageType)
+            assertNull(store.conversation("c3")?.expiredSnippet)
+            assertEquals("tool_output", store.conversation("c4")?.lastMessageType)
+            assertNull("a legacy payload keeps its real snippet", store.conversation("c4")?.expiredSnippet)
+            assertEquals("$ make build", store.conversation("c5")?.expiredSnippet)
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
+    /// `open(onOpened:)` reports how long the migration chain took on the
+    /// open that ran it (the launch timeline's nested `migration` interval)
+    /// and `null` on a later open of the same, now up-to-date file.
+    @Test
+    fun openReportsMigrationDurationOnceAndNullOnReopen() = runBlocking {
+        val file = File.createTempFile("migration-test-timing", ".sqlite").also { it.delete() }
+        buildV6(file)
+        var reported: Long? = -1
+        val database = MatronDatabase.open(context, file) { reported = it }
+        try {
+            JournalStore(database, ownSender = "user:dan").cursor() // forces the lazy open
+            assertNotNull("the v6 → v7 step ran on this open, so a duration is reported", reported)
+            assertTrue("a duration, not the sentinel", (reported ?: -1) >= 0)
+        } finally {
+            database.close()
+        }
+        reported = -1
+        val reopened = MatronDatabase.open(context, file) { reported = it }
+        try {
+            JournalStore(reopened, ownSender = "user:dan").cursor()
+            assertNull("reopening an up-to-date store runs no migrations", reported)
+        } finally {
+            reopened.close()
             file.delete()
         }
     }

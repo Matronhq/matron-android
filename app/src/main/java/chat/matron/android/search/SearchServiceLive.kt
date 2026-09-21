@@ -66,6 +66,20 @@ class SearchServiceLive(private val db: SearchDatabase) : SearchService {
         dao.rowidFor(eventID)?.let { dao.deleteByRowid(it) }
     }
 
+    override suspend fun removeAll(eventIDs: List<String>) {
+        if (eventIDs.isEmpty()) return
+        // ONE TRANSACTION PER CHUNK, not one for the whole batch (spec §3.4,
+        // "one search write transaction per sweep chunk"). A single
+        // transaction deleting every retired row would hold the index's
+        // write connection for the whole delete and dirty the same kind of
+        // page volume as the 2026-08-10 backfill incident [indexBatch]
+        // carries a comment about. The caller passes the whole list; the
+        // chunking is ours.
+        for (chunk in removalChunks(eventIDs)) {
+            db.withTransaction { dao.deleteByEventIds(chunk) }
+        }
+    }
+
     override suspend fun query(text: String, limit: Int): List<SearchHit> {
         val pattern = buildPattern(text) ?: return emptyList()
         return dao.search(pattern, limit).map {
@@ -160,6 +174,18 @@ class SearchServiceLive(private val db: SearchDatabase) : SearchService {
     override suspend fun eventCount(roomID: String): Int = dao.countForRoom(roomID)
 
     override suspend fun contains(eventID: String): Boolean = dao.contains(eventID)
+
+    companion object {
+        /// Ids per write transaction. 500 keeps the `IN (…)` list well inside
+        /// `SQLITE_MAX_VARIABLE_NUMBER` and, more importantly, keeps each
+        /// transaction short: a first retention pass retires on the order of
+        /// 10^5 rows.
+        const val REMOVAL_CHUNK_SIZE = 500
+
+        /// Pure split, so the transaction count is unit-testable without
+        /// instrumenting Room.
+        fun removalChunks(eventIDs: List<String>): List<List<String>> = eventIDs.chunked(REMOVAL_CHUNK_SIZE)
+    }
 
     /// Builds the FTS4 MATCH pattern: each free-text token becomes a prefix
     /// query joined by implicit AND (`auth bug` → `auth* bug*`). This deviates

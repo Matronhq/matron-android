@@ -90,13 +90,37 @@ fun JournalEvent.body(): String? = payload.stringOrNull("body")
 fun JournalEvent.snippet(): String? = payload.stringOrNull("snippet")
 fun JournalEvent.diff(): String? = payload.stringOrNull("diff")
 
-/// Text fed to the full-text search index and backward-pagination indexer:
-/// TEXT→body, TOOL_OUTPUT→snippet, DIFF→diff-then-snippet; nothing else indexes.
-fun JournalEvent.previewText(): String? = when (type) {
-    JournalEventType.TEXT -> body()
-    JournalEventType.TOOL_OUTPUT -> snippet()
-    JournalEventType.DIFF -> diff() ?: snippet()
-    else -> null
+/// Text fed to the full-text search index by all three feeders — live sync
+/// (`JournalSyncEngine`), backward pagination (`JournalTimelineService`) and
+/// the history backfill (`SearchBackfillCoordinator`): TEXT→body,
+/// TOOL_OUTPUT→snippet, DIFF→diff-then-snippet; nothing else indexes. The
+/// analogue of matron-apple's `JournalEvent.searchableBody(now:)`.
+///
+/// [now] exists because what the store no longer HOLDS must never be
+/// indexed. Two rules, mirroring [EventTombstone]: nothing older than the
+/// 30-day retention window for `tool_output`/`diff` (the backfill and
+/// backward-pagination feeders fetch from the server, which keeps bodies
+/// forever, so without this the very next pass would re-add exactly what the
+/// maintenance sweep just removed), and nothing past the 24 h tool-log TTL
+/// for a `live_log` `tool_output` — that half matters for the LIVE feeder
+/// too: `applyJournal`/`applyJournalBatch` hand their callers the ORIGINAL
+/// events while the store keeps the tombstoned ones (apple #212).
+fun JournalEvent.previewText(now: Instant = Instant.now()): String? {
+    val tsMs = ts.toEpochMilli()
+    val nowMs = now.toEpochMilli()
+    when (type) {
+        JournalEventType.TOOL_OUTPUT -> {
+            if (tsMs + EventTombstone.RETENTION_WINDOW_MS <= nowMs) return null
+            if (payload.boolOrNull("live_log") == true && tsMs + EventTombstone.TOOL_LOG_TTL_MS <= nowMs) return null
+        }
+        JournalEventType.DIFF -> if (tsMs + EventTombstone.RETENTION_WINDOW_MS <= nowMs) return null
+    }
+    return when (type) {
+        JournalEventType.TEXT -> body()
+        JournalEventType.TOOL_OUTPUT -> snippet()
+        JournalEventType.DIFF -> diff() ?: snippet()
+        else -> null
+    }
 }
 
 /// A streaming-output update. Never persisted; lost updates are harmless (the

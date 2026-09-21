@@ -16,10 +16,13 @@ import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineService
 import chat.matron.android.journal.AgentSpawnAnswering
 import chat.matron.android.journal.JournalApi
+import chat.matron.android.journal.JournalMaintenance
 import chat.matron.android.journal.JournalStore
+import chat.matron.android.journal.StoreDiagnostics
 import chat.matron.android.journal.JournalSyncEngine
 import chat.matron.android.journal.OkHttpWebSocketConnector
 import chat.matron.android.journal.db.MatronDatabase
+import chat.matron.android.models.LaunchTimeline
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.UserSession
 import chat.matron.android.push.JournalPushService
@@ -89,7 +92,17 @@ class AppDependencies(
      * build the whole graph with an in-memory store + in-memory Room.
      */
     private val sessionStoreFactory: (Context) -> SessionStore = { EncryptedPrefsSessionStore.create(it) },
-    private val journalDatabaseFactory: (Context, File) -> MatronDatabase = { c, f -> MatronDatabase.open(c, f) },
+    private val journalDatabaseFactory: (Context, File) -> MatronDatabase = { c, f ->
+        // Room opens on first access, off the main thread; the launch
+        // timeline's store-open interval closes there, with the migration
+        // (if one ran) recorded nested inside it — the one launch that runs
+        // v7 pays its index build and backfill here, and that contrast is
+        // the headline number of apple #212.
+        MatronDatabase.open(c, f) { migrationMillis ->
+            LaunchTimeline.shared.endStoreOpen()
+            migrationMillis?.let { LaunchTimeline.shared.recordMigration(it) }
+        }
+    },
     private val searchDatabaseFactory: (Context, File) -> SearchDatabase = { c, f -> SearchDatabase.open(c, f) },
     /**
      * Background scope for startup sweeps and sign-out teardown. Injectable so
@@ -157,10 +170,17 @@ class AppDependencies(
     class JournalCore(
         val api: JournalApi,
         val db: MatronDatabase,
+        /** Where the mirror lives on disk — the Storage section's size row. */
+        val dbFile: File,
         val store: JournalStore,
         val engine: JournalSyncEngine,
-        /** Boot-time TTL sweep; teardown joins it before wiping the same DB. */
-        var purgeJob: Job? = null,
+        /**
+         * Background store housekeeping (TTL + retention sweeps and the
+         * matching search removal). Replaces the boot-time purge the
+         * composition root used to launch at store creation; stopped (and
+         * its in-flight pass awaited) by sign-out before the wipe.
+         */
+        val maintenance: JournalMaintenance,
         /**
          * Background search-history backfill sweep for this session (see
          * [SearchBackfillCoordinator]). Cancelled on sign-out, and joined by
@@ -192,6 +212,7 @@ class AppDependencies(
 
         val prefs = context.getSharedPreferences("matron-kv", Context.MODE_PRIVATE)
         preferences = SharedPreferencesKeyValueStore(prefs)
+        LaunchTimeline.shared.attachStore(preferences)
         recentStartFolders = RecentStartFolders(preferences)
         boxLetterOverrides = BoxLetterOverrides(preferences)
 
@@ -220,6 +241,7 @@ class AppDependencies(
             token = session.accessToken,
         )
         val dbFile = File(journalDirectory, "${session.userID.sanitizedForFilename()}.sqlite")
+        LaunchTimeline.shared.beginStoreOpen()
         val db = journalDatabaseFactory(context, dbFile)
         val store = JournalStore(db = db, ownSender = "user:${session.userID}")
         val engine = JournalSyncEngine(
@@ -230,20 +252,50 @@ class AppDependencies(
             ownSender = "user:${session.userID}",
             search = search,
         )
-        val core = JournalCore(api, db, store, engine)
+        val maintenance = JournalMaintenance(store = store, search = search)
+        val core = JournalCore(api, db, dbFile, store, engine, maintenance)
         cores[session.userID] = core
-        // Boot-time TTL sweep of expired tool-output snippets. Kotlin constructors
-        // can't suspend, so the composition root drives it once the store exists —
-        // documented on JournalStore.purgeExpiredToolOutputSnippets. Tracked on
-        // the core so sign-out teardown joins it before wipe()/close() — an
-        // untracked sweep could race the wipe on the same database (bugbot
-        // "Boot purge races sign-out wipe").
-        core.purgeJob = appScope.launch {
-            runCatching { store.purgeExpiredToolOutputSnippets() }
-                .onFailure { MatronDebug.breadcrumb("AppDependencies: boot purge failed: $it") }
+        // Nothing proportional to store history runs on the launch path any
+        // more (apple #212): the tool-output TTL sweep that used to be
+        // launched here at store creation — a full `event` scan in one write
+        // transaction on every launch — now runs watermarked and chunked
+        // inside JournalMaintenance, 10 s after this core is built or as soon
+        // as the first catch-up reaches the live cursor, whichever comes
+        // first, then hourly, and on every foreground when the last pass is
+        // older than an hour.
+        engine.attachMaintenance(maintenance)
+        engine.setCatchUpCompleteHandler {
+            // The engine must not call LaunchTimeline itself; this hook lets
+            // the app layer record the mark the first time the replay
+            // reaches the live cursor — and lets maintenance past its launch
+            // hold early, since catch-up reaching the cursor is the signal
+            // the launch path is over.
+            LaunchTimeline.shared.mark(LaunchTimeline.Mark.CATCH_UP_COMPLETE)
+            appScope.launch { maintenance.runAfterCatchUp() }
         }
+        maintenance.start()
         core.backfillJob = startBackfill(search = search, api = api, store = store)
         return core
+    }
+
+    /**
+     * The session's background sweeper — the foreground trigger and the
+     * periodic worker call `runIfDue()` on it.
+     */
+    fun journalMaintenance(session: UserSession): JournalMaintenance = core(session).maintenance
+
+    /**
+     * Settings › Storage's numbers: on-disk size of the journal mirror and
+     * the FTS index (`.sqlite` + `-wal` + `-shm`), row counts, and the last
+     * maintenance stamp. On demand only, off the main thread.
+     */
+    suspend fun storeSizes(session: UserSession): StoreDiagnostics.Sizes {
+        val core = core(session)
+        return StoreDiagnostics.sizes(
+            store = core.store,
+            journalFile = core.dbFile,
+            searchFile = if (search != null) StoragePaths.searchDb(appSupport) else null,
+        )
     }
 
     /**
@@ -463,7 +515,13 @@ class AppDependencies(
                 // after the search wipe below.
                 core.backfillJob?.cancel()
                 core.backfillJob?.join()
-                core.purgeJob?.join()
+                // Stop the sweeper too, and WAIT for a pass already running:
+                // one suspended in `search.removeAll` would otherwise resume
+                // after the wipe below and stamp `maintenance_last_run` on an
+                // empty `meta`. stop() also fences every later trigger, so a
+                // Running transition during the seconds of push deregistration
+                // below can't open a fresh pass against the doomed store.
+                core.maintenance.stop()
                 val pushResult = withTimeoutOrNull(5_000) { runCatching { core.api.unregisterPush() } }
                 when {
                     pushResult == null ->

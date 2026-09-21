@@ -1,13 +1,18 @@
 package chat.matron.android.journal.db
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import chat.matron.android.journal.JournalEventType
+import chat.matron.android.journal.JournalStore
+import chat.matron.android.journal.parseJsonObjectOrNull
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /// Room database backing the journal mirror. Schema v1 already includes
 /// `parent_convo_id` (the Apple original added it in a v2 migration; a fresh
@@ -34,12 +39,18 @@ import java.io.File
 /// the journal's owner + joined participant device ids, NULL for everything
 /// that is not a room. Additive like v3: existing rows keep NULL and chip as
 /// before until the next snapshot / membership convo_meta fills them in.
+///
+/// v7 is the launch-performance migration (matron-apple's v11, #212): the
+/// `event(type, ts)` index the background sweeps range-scan, plus two derived
+/// `conversation` columns (`last_message_type`, `expired_snippet`) backfilled
+/// from the stored events so the chat list's first paint reads only the
+/// `conversation` table. Additive and self-contained (one `Migration`).
 @Database(
     entities = [
         ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
         SummaryEntryEntity::class, AgentEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -140,11 +151,85 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
-        /// Production, file-backed at the given path.
-        fun open(context: Context, file: File): MatronDatabase =
-            Room.databaseBuilder(context.applicationContext, MatronDatabase::class.java, file.absolutePath)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+        /// v7 (matron-apple's v11, #212): the `event(type, ts)` index plus
+        /// `conversation.last_message_type` / `expired_snippet`, backfilled
+        /// one conversation at a time over the existing `convo_id` index —
+        /// the newest message-type row decides both columns, exactly as the
+        /// live write path (`JournalStore.applyJournal`) computes them.
+        /// Payloads are parsed in Kotlin rather than SQLite's json_extract
+        /// (JSON1 availability varies by API level), like MIGRATION_2_3.
+        /// This is the one-off cost of the migration: an index build over
+        /// the whole `event` table plus one indexed point lookup per
+        /// conversation; `LaunchTimeline` records how long it took.
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS `event_type_ts` ON `event` (`type`, `ts`)")
+                db.execSQL("ALTER TABLE `conversation` ADD COLUMN `last_message_type` TEXT")
+                db.execSQL("ALTER TABLE `conversation` ADD COLUMN `expired_snippet` TEXT")
+                val messageTypes = JournalEventType.MESSAGE_TYPES.toList()
+                val placeholders = messageTypes.joinToString(",") { "?" }
+                val ids = db.query("SELECT `id` FROM `conversation`").use { cursor ->
+                    buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+                }
+                for (id in ids) {
+                    db.query(
+                        "SELECT `type`, `payload` FROM `event` WHERE `convo_id` = ? AND `type` IN ($placeholders) " +
+                            "ORDER BY `seq` DESC LIMIT 1",
+                        arrayOf<Any>(id, *messageTypes.toTypedArray()),
+                    ).use { cursor ->
+                        if (!cursor.moveToFirst()) return@use
+                        val type = cursor.getString(0)
+                        val payload = parseJsonObjectOrNull(cursor.getString(1))
+                        db.execSQL(
+                            "UPDATE `conversation` SET `last_message_type` = ?, `expired_snippet` = ? WHERE `id` = ?",
+                            arrayOf(type, JournalStore.expiredSnippet(type, payload), id),
+                        )
+                    }
+                }
+            }
+        }
+
+        private val MIGRATIONS = listOf(
+            MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
+        )
+
+        /// Production, file-backed at the given path. [onOpened] fires from
+        /// Room's `onOpen` callback — i.e. on the FIRST ACTUAL open, which
+        /// Room defers to the first query, off the main thread — with the
+        /// total time the migration chain took on that open, or `null` when
+        /// none ran. The launch timeline turns that into its nested
+        /// `migration` interval (apple #212).
+        fun open(context: Context, file: File, onOpened: ((migrationMillis: Long?) -> Unit)? = null): MatronDatabase {
+            val timing = MigrationTiming()
+            return Room.databaseBuilder(context.applicationContext, MatronDatabase::class.java, file.absolutePath)
+                .addMigrations(*MIGRATIONS.map(timing::wrap).toTypedArray())
+                .addCallback(object : RoomDatabase.Callback() {
+                    override fun onOpen(db: SupportSQLiteDatabase) {
+                        onOpened?.invoke(timing.totalOrNull())
+                    }
+                })
                 .build()
+        }
+
+        /// Sums the wall time of every migration step Room actually runs on
+        /// an open. `SystemClock.elapsedRealtime` (not the wall clock) because
+        /// this is an elapsed-time measurement: an NTP step landing
+        /// mid-migration must not skew it.
+        private class MigrationTiming {
+            private val total = AtomicLong(0)
+            private val ran = AtomicBoolean(false)
+
+            fun wrap(migration: Migration): Migration = object : Migration(migration.startVersion, migration.endVersion) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    val began = SystemClock.elapsedRealtime()
+                    migration.migrate(db)
+                    total.addAndGet(SystemClock.elapsedRealtime() - began)
+                    ran.set(true)
+                }
+            }
+
+            fun totalOrNull(): Long? = if (ran.get()) total.get() else null
+        }
 
         /// Test/ephemeral, memory-backed. Cleared when the last connection closes.
         fun inMemory(context: Context): MatronDatabase =

@@ -46,6 +46,19 @@ data class ConversationEntity(
     /// [participantIDs]. Replaced wholesale when the wire sends the key,
     /// untouched when it doesn't (see `ConvoSummaryDTO.participants`).
     val participants: String? = null,
+    /// The `type` of the newest message-type event in this conversation
+    /// (`JournalEventType.MESSAGE_TYPES`), or `null` when none has landed.
+    /// Maintained on write (`applyJournal`, `insertHistory`, the sweeps) so
+    /// the chat list's read-time tool-output TTL is pure column logic —
+    /// before v7 it ran a `MAX(seq)` sub-query plus a row fetch on `event`
+    /// per stale conversation (apple #212, GRDB v11).
+    @ColumnInfo(name = "last_message_type") val lastMessageType: String? = null,
+    /// What the list must show instead of [snippet] once that newest
+    /// message-type event's 24 h tool-log TTL has passed: `"$ <command>"`,
+    /// capped at 120 characters like every other snippet. `null` whenever
+    /// substitution does not apply (not a tool_output, no command, or a
+    /// legacy payload that was never a live log and is not tombstoned).
+    @ColumnInfo(name = "expired_snippet") val expiredSnippet: String? = null,
 ) {
     /// Decoded [participants]. Empty for anything that is not a known
     /// multi-agent room (null column, or a value that fails to decode).
@@ -81,7 +94,14 @@ data class AgentEntity(
 
 /// One durable journal row. `payload` is stored as a JSON TEXT string (the
 /// Apple original uses a BLOB; TEXT is the decided Android representation).
-@Entity(tableName = "event", indices = [Index("convo_id")])
+///
+/// `event_type_ts` (named to match the Apple v11 index) is what makes the
+/// maintenance sweeps incremental: a `(type, ts)` range scan from the last
+/// watermark instead of a full-table read on every pass.
+@Entity(
+    tableName = "event",
+    indices = [Index("convo_id"), Index(value = ["type", "ts"], name = "event_type_ts")],
+)
 data class EventEntity(
     @PrimaryKey
     val seq: Long,

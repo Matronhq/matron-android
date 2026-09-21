@@ -131,6 +131,17 @@ class JournalSyncEngine(
     private var attempt = 0
     private var pathChangeReconnect = false
     private var storeEpoch = 0
+    /// Background store housekeeping for this session. Attached after
+    /// construction (it is built from the same store) and poked when a
+    /// replay reaches the live cursor — the "whichever comes first" half of
+    /// the first-run rule, with `JournalMaintenance.start()`'s delay as the
+    /// other half (apple #212).
+    private var maintenance: JournalMaintenance? = null
+    /// App-layer hook for the launch timeline: fired exactly once, on the
+    /// first replay that reaches the live cursor, and cleared right after so
+    /// a later reconnect's Running transition never re-fires it. The engine
+    /// itself never touches `LaunchTimeline` (Apple's R7).
+    private var catchUpCompleteHandler: (() -> Unit)? = null
     private val readyWaiters = mutableListOf<CancellableContinuation<Unit>>()
     private val lastSessionStatus = mutableMapOf<String, SessionStatusUpdate>()
 
@@ -188,6 +199,29 @@ class JournalSyncEngine(
     /// Signals the run loop's frame collection to exit on `snapshot_required`
     /// after the mirror has been wiped, falling through to reconnect.
     private class SnapshotRequiredExit : Exception()
+
+    fun attachMaintenance(sweeper: JournalMaintenance) {
+        synchronized(lock) {
+            if (maintenance == null) maintenance = sweeper
+        }
+    }
+
+    /// The composition root installs this from a coroutine that races the
+    /// UI's `start()` — if the engine is already Running by the time it
+    /// lands, storing it would leave it waiting for a transition that
+    /// already happened and, absent a reconnect, never happens again. Fire
+    /// immediately in that case instead of storing it.
+    fun setCatchUpCompleteHandler(handler: () -> Unit) {
+        val fireNow = synchronized(lock) {
+            if (_state.value is SyncConnectionState.Running) {
+                true
+            } else {
+                catchUpCompleteHandler = handler
+                false
+            }
+        }
+        if (fireNow) handler()
+    }
 
     // MARK: Lifecycle
     //
@@ -566,16 +600,29 @@ class JournalSyncEngine(
     // MARK: State plumbing
 
     private fun setState(new: SyncConnectionState) {
+        var caughtUpHandler: (() -> Unit)? = null
+        var sweeper: JournalMaintenance? = null
         val toResume: List<CancellableContinuation<Unit>> = synchronized(lock) {
             if (_state.value == new) return
             _state.value = new
             if (new is SyncConnectionState.Running) {
+                // First time the replay reaches the live cursor: take the
+                // handler so a later reconnect's Running transition does not
+                // re-invoke it.
+                caughtUpHandler = catchUpCompleteHandler
+                catchUpCompleteHandler = null
+                sweeper = maintenance
                 val w = readyWaiters.toList(); readyWaiters.clear(); w
             } else {
                 emptyList()
             }
         }
         toResume.forEach { it.resumeWith(Result.success(Unit)) }
+        caughtUpHandler?.invoke()
+        // Caught up with the live cursor: the disk is free again, so the
+        // sweeper may run. `runIfDue` is watermark-gated, so the reconnects
+        // that also land here cost one `meta` read.
+        sweeper?.let { m -> scope.launch { m.runIfDue() } }
     }
 
     private fun failReadyWaiters(error: Throwable) {

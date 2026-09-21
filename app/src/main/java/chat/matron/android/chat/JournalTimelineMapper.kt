@@ -8,6 +8,7 @@ import chat.matron.android.events.LiveOutputEvent
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.journal.ActivityUpdate
+import chat.matron.android.journal.EventTombstone
 import chat.matron.android.journal.JournalEvent
 import chat.matron.android.journal.JournalEventType
 import chat.matron.android.journal.arrayOrNull
@@ -28,8 +29,10 @@ import kotlinx.serialization.json.JsonPrimitive
 object JournalTimelineMapper {
     /// The journal server's tool-log TTL: live-streamed output is purged
     /// server-side 24h after the event; the client rules bind the same TTL on
-    /// local caches.
-    const val TOOL_LOG_TTL_SECONDS: Long = 24L * 3600
+    /// local caches. Defined once, in `EventTombstone` — the store's sweeps
+    /// and this mapper share it so the render-time guard and the on-disk
+    /// rewrite can never drift apart (apple #212).
+    const val TOOL_LOG_TTL_SECONDS: Long = EventTombstone.TOOL_LOG_TTL_MS / 1000
 
     /// Payload `kind` shared by a bridge busy-queue card (`prompt`) and its
     /// durable release (`prompt_reply`).

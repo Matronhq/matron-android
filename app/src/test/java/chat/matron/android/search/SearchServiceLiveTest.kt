@@ -190,4 +190,48 @@ class SearchServiceLiveTest {
         assertEquals(listOf("4", "2", "1"), all.map { it.id })
         assertTrue(all[0].snippet.contains("<mark>deploy</mark>"))
     }
+
+    // MARK: removeAll — the retention sweep's batch form (apple #212)
+
+    @Test
+    fun removeAllDropsEveryListedRowAndLeavesTheRest() = runBlocking {
+        for (seq in 1..5) {
+            svc.index("c1", seq.toString(), "agent:dev-2", Instant.ofEpochSecond(seq.toLong()), "body number $seq")
+        }
+        svc.removeAll(listOf("2", "4"))
+        assertEquals(setOf("1", "3", "5"), svc.query("body", 50).map { it.id }.toSet())
+    }
+
+    @Test
+    fun removeAllIgnoresUnknownIDsAndAnEmptyBatch() = runBlocking {
+        svc.index("c1", "1", "agent:dev-2", Instant.ofEpochSecond(1), "kept")
+        svc.removeAll(emptyList())
+        svc.removeAll(listOf("nope", "also-nope"))
+        assertEquals(listOf("1"), svc.query("kept", 10).map { it.id })
+    }
+
+    /// Spec §3.4: "one search write transaction per sweep chunk". The chunk
+    /// boundary lives inside `removeAll` — `JournalMaintenance` hands it the
+    /// whole list — so the chunk COUNT is the transaction count.
+    @Test
+    fun removalChunksAreFiveHundredIDsEach() {
+        val ids = (1..1001).map { it.toString() }
+        assertEquals("1,001 ids must cost three write transactions, not one",
+            listOf(500, 500, 1), SearchServiceLive.removalChunks(ids).map { it.size })
+        assertEquals(0, SearchServiceLive.removalChunks(emptyList()).size)
+        assertEquals("chunking must not drop or reorder ids", ids, SearchServiceLive.removalChunks(ids).flatten())
+    }
+
+    @Test
+    fun removeAllHandlesMoreThanOneChunk() = runBlocking {
+        val entries = (1..600).map {
+            SearchIndexEntry(roomID = "c1", eventID = it.toString(), sender = "agent:dev-2",
+                timestamp = Instant.ofEpochSecond(it.toLong()), body = "row $it")
+        }
+        svc.indexBatch(entries)
+        svc.removeAll((1..550).map { it.toString() })
+        assertEquals(50, svc.query("row", 500).size)
+        assertFalse(svc.contains("550"))
+        assertTrue(svc.contains("551"))
+    }
 }
