@@ -654,8 +654,26 @@ class JournalStore(
         else -> event.snippet()?.take(120) ?: "[${event.type}]"
     }
 
-    private companion object {
-        const val CURSOR_KEY = "cursor"
-        const val TTL_MS = 24L * 3600 * 1000
+    companion object {
+        private const val CURSOR_KEY = "cursor"
+        private const val TTL_MS = 24L * 3600 * 1000
+
+        /// The chat-list preview a tool_output falls back to once its output
+        /// is gone — the server's own `"$ <command>"` shape, capped at the
+        /// same 120 characters as [snippet].
+        ///
+        /// Returns `null` unless the payload is a tool_output that is either
+        /// a live log (the only shape the 24 h TTL applies to) or already
+        /// tombstoned (`expired: true`, server-side or by the retention
+        /// sweep). A legacy/offloaded tool_output with a durable snippet and
+        /// no `live_log` keeps showing that snippet forever, which is the
+        /// behaviour `purgeLeavesYoungAndNonLiveLogRows` pins. Shared by the
+        /// v7 migration backfill and the write path.
+        internal fun expiredSnippet(type: String, payload: JsonObject?): String? {
+            if (type != JournalEventType.TOOL_OUTPUT || payload == null) return null
+            if (payload.boolOrNull("live_log") != true && payload.boolOrNull("expired") != true) return null
+            val command = payload.stringOrNull("command")?.takeIf { it.isNotEmpty() } ?: return null
+            return "$ $command".take(120)
+        }
     }
 }
