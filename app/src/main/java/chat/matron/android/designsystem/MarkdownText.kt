@@ -39,11 +39,13 @@ fun rememberMatronMarkdownColors(): MarkdownColors {
 /// handler; `matrix:`/`mxc:` links carry no click annotation (rendered as
 /// accent text) so they no-op until in-app resolution lands.
 ///
-/// Text size: with no [textStyle] the body renders at the theme's `bodyLarge`
-/// (the chat scale); an explicit [textStyle] WINS over it — see
-/// [markdownBodyStyle] — so a surface that wants a different size (the item
-/// thread's reading scale, a title) actually gets it. [paragraphSpacing]
-/// overrides the gap after each paragraph, in dp.
+/// Text size: with no [textStyle] the body renders at the parser's base size
+/// (the chat scale, `MarkdownAttributed.baseFontSize`); an explicit
+/// [textStyle] WINS — its font size is handed to the parser as the body span
+/// size (headers and inline code scale with it) and the resolved style
+/// ([markdownBodyStyle]) covers everything else — so a surface that wants a
+/// different size (the item thread's reading scale, a title) actually gets
+/// it. [paragraphSpacing] overrides the gap after each paragraph, in dp.
 @Composable
 fun MarkdownText(
     raw: String,
@@ -53,8 +55,13 @@ fun MarkdownText(
     paragraphSpacing: Float? = null,
 ) {
     val colors = rememberMatronMarkdownColors()
-    val document = remember(raw, colors) { MarkdownAttributed.parse(raw, colors) }
     val bodyStyle = markdownBodyStyle(MaterialTheme.typography.bodyLarge, LocalTextStyle.current, textStyle)
+    // The body size rides into the parser: it bakes a size into every body
+    // span, and span sizes win over the paragraph style, so a caller's
+    // size that stopped at `bodyStyle` would never reach the screen (Bugbot
+    // on #74). Default (no caller style) stays the parser's own base.
+    val bodySize = if (textStyle != null && bodyStyle.fontSize.isSp) bodyStyle.fontSize.value else MarkdownAttributed.baseFontSize
+    val document = remember(raw, colors, bodySize) { MarkdownAttributed.parse(raw, colors, bodySize) }
     val uriHandler = LocalUriHandler.current
     val openItem = LocalOpenTrackerItem.current
     val external: (String) -> Unit = onLinkClick ?: { url -> runCatching { uriHandler.openUri(url) } }
