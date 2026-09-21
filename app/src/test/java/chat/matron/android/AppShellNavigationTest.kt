@@ -257,6 +257,98 @@ class AppShellNavigationTest {
         assertEquals(AppTab.DECISIONS, nav.tab.value)
     }
 
+    /// A host that behaves like the controller: every navigation reports
+    /// its new destination back through `noteDestination` synchronously,
+    /// as `NavController` does from inside `navigate()`.
+    private class SimulatedControllerHost : AppShellNavigation.Host {
+        lateinit var nav: AppShellNavigation
+        val commands = mutableListOf<String>()
+        private var nextID = 0
+        private fun report(tab: AppTab, value: String?) { nav.noteDestination(tab, "e${nextID++}", value) }
+        override fun switchTab(tab: AppTab) { commands += "switch:${tab.name}"; report(tab, null) }
+        override fun replaceChats(roomID: String) { commands += "replace:$roomID"; report(AppTab.CONVERSATIONS, roomID) }
+        override fun pushChat(tab: AppTab, roomID: String) { commands += "pushChat:${tab.name}:$roomID"; report(tab, roomID) }
+        override fun pushDecision(itemID: String) { commands += "pushDecision:$itemID"; report(AppTab.DECISIONS, "item/$itemID") }
+        override fun popToRoot(tab: AppTab) { commands += "popToRoot:${tab.name}"; report(tab, null) }
+        override fun popChats(count: Int) { commands += "popChats:$count" }
+    }
+
+    /// Bugbot (#75): the rules update the path FIRST and the controller then
+    /// reports the same destination as a new entry — the mirror must bind
+    /// it, not append a duplicate, or the sole-open-chat check stops
+    /// matching and a repeated deep link remounts the screen.
+    @Test
+    fun modelDrivenNavigationIsMirroredOnce_andARepeatedOpenChatIsANoOp() {
+        val host = SimulatedControllerHost()
+        val nav = AppShellNavigation(host).also { host.nav = it }
+        nav.noteDestination(AppTab.CONVERSATIONS, "root", null)
+        nav.openChat("!r:s")
+        assertEquals("one entry, not [id, id]", listOf("!r:s"), nav.chatPath)
+        assertEquals(listOf("replace:!r:s"), host.commands)
+        host.commands.clear()
+        nav.openChat("!r:s")
+        assertTrue("the sheet's onCreated plus the newConversations echo must not remount the chat", host.commands.isEmpty())
+        assertEquals(listOf("!r:s"), nav.chatPath)
+        // Back pops cleanly to the list.
+        nav.noteDestination(AppTab.CONVERSATIONS, "root", null)
+        assertTrue(nav.isAtRoot)
+    }
+
+    @Test
+    fun deepLinkOverAnExistingStackIsMirroredOnce() {
+        val host = SimulatedControllerHost()
+        val nav = AppShellNavigation(host).also { host.nav = it }
+        nav.noteDestination(AppTab.CONVERSATIONS, "root", null)
+        nav.noteDestination(AppTab.CONVERSATIONS, "old", "!old:s")
+        nav.noteDestination(AppTab.CONVERSATIONS, "child", "!child:s")
+        nav.openChat("!new:s")
+        assertEquals(listOf("!new:s"), nav.chatPath)
+        host.commands.clear()
+        nav.openChat("!new:s")
+        assertTrue(host.commands.isEmpty())
+        // A later external push and a pop still line up with the controller's ids.
+        nav.noteDestination(AppTab.CONVERSATIONS, "sub", "!sub:s")
+        assertEquals(listOf("!new:s", "!sub:s"), nav.chatPath)
+        nav.noteDestination(AppTab.CONVERSATIONS, "e0", "!new:s") // back
+        assertEquals(listOf("!new:s"), nav.chatPath)
+        // A model-driven push (sub-chat, spawn card, origin link) mirrors once too.
+        host.commands.clear()
+        nav.pushChat("!again:s")
+        assertEquals(listOf("!new:s", "!again:s"), nav.chatPath)
+        nav.pushChat("!again:s")
+        assertEquals("a repeated push of the top chat is a no-op", listOf("!new:s", "!again:s"), nav.chatPath)
+        assertEquals(listOf("pushChat:CONVERSATIONS:!again:s"), host.commands)
+    }
+
+    @Test
+    fun decisionsHandOffAndPushDecisionAreMirroredOnce() {
+        val host = SimulatedControllerHost()
+        val nav = AppShellNavigation(host).also { host.nav = it }
+        nav.noteDestination(AppTab.CONVERSATIONS, "root", null)
+        nav.selectTab(AppTab.DECISIONS)
+        nav.pushDecision("it_1")
+        assertEquals(listOf("item/it_1"), nav.decisionsPath)
+        nav.openConversationFromDecisions("!r:s")
+        assertEquals(AppTab.CONVERSATIONS, nav.tab.value)
+        assertEquals(listOf("!r:s"), nav.chatPath)
+        assertEquals("the Decisions stack is left where it was", listOf("item/it_1"), nav.decisionsPath)
+        host.commands.clear()
+        nav.openConversationFromDecisions("!r:s")
+        assertEquals("no duplicate push for the chat already on top", listOf("!r:s"), nav.chatPath)
+        assertTrue(host.commands.isEmpty())
+    }
+
+    /// An expectation is one-shot and value-bound: a different destination
+    /// arriving instead (the controller went somewhere else) is a real push.
+    @Test
+    fun expectationDoesNotSwallowAnUnrelatedDestination() {
+        val nav = AppShellNavigation(RecordingHost())
+        nav.noteDestination(AppTab.CONVERSATIONS, "root", null)
+        nav.openChat("!r:s") // recording host: no mirror yet
+        nav.noteDestination(AppTab.CONVERSATIONS, "e9", "settings")
+        assertEquals(listOf("!r:s", "settings"), nav.chatPath)
+    }
+
     /// The controller's destination changes mirror into the paths: a new
     /// entry id is a push, a known one a pop, a root empties the stack —
     /// and the tab follows the destination (system back out of Decisions).
