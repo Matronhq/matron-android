@@ -178,6 +178,12 @@ class JournalStore(
         // list's timestamp; bookkeeping frames (read_marker, session_status,
         // convo_meta) must not fake aliveness. lastSeq still tracks every
         // frame (mirrors the server's last_seq for snapshot ordering).
+        //
+        // The item marker's old-client `fallback_for` text twin deliberately
+        // counts here like any text (spec "Old-client fallback": unread and
+        // snippet follow the server; Apple's store does the same): it is the
+        // signal that an agent filed a question while the chat was closed,
+        // and the inline marker card (#72) is what the reader then sees.
         if (event.type in JournalEventType.MESSAGE_TYPES) {
             convo = convo.copy(lastActivityTS = event.ts.toEpochMilli())
         }
