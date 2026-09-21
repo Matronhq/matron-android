@@ -272,4 +272,21 @@ class JournalStoreMissionsTest {
         assertNull("an unsynced conversation carries no tag rather than an empty one", tags["unsynced"])
         assertTrue(store.sessionTags(emptySet()).isEmpty())
     }
+
+    /// Bugbot (#79) suspected `NOT IN ()` fails on an empty keep set.
+    /// SQLite accepts an empty IN list (its documented extension), so a
+    /// successful `GET /missions` answering with no rows sweeps the cache.
+    @Test
+    fun replaceMissionsWithAnEmptyListSweepsEverything() = runBlocking {
+        val store = makeStore()
+        store.upsertMissions(listOf(mission("ms_1", 61), mission("ms_2", 62)))
+        store.replaceMilestones("ms_1", listOf(milestone("ml_1", "ms_1", 1, seq = 1, created = 1)))
+        store.replaceMissions(emptyList())
+        assertTrue(store.missions(null).isEmpty())
+        assertTrue(store.milestones("ms_1").isEmpty())
+        // And an empty set with a protected id keeps only that id.
+        store.upsertMissions(listOf(mission("ms_1", 61), mission("ms_2", 62)))
+        store.replaceMissions(emptyList(), protectedIDs = setOf("ms_2"))
+        assertEquals(listOf("ms_2"), store.missions(null).map { it.id })
+    }
 }

@@ -11,6 +11,7 @@ import chat.matron.android.models.Milestone
 import chat.matron.android.models.MilestoneKind
 import chat.matron.android.models.Mission
 import chat.matron.android.models.MissionConversation
+import chat.matron.android.models.MissionLastMilestone
 import chat.matron.android.models.MissionState
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.TrackerItem
@@ -23,6 +24,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -357,6 +359,91 @@ class MissionsSyncTest {
         api.releaseListGate()
         assertEquals(MissionsRefreshOutcome.Succeeded, listTask.await())
         assertEquals("the closed mission survives the now-stale, still-open list response", MissionState.CLOSED, rig.store.mission("ms_1")?.state)
+        rig.sync.stop()
+    }
+
+    /// Bugbot (#79): a detail refresh or close that COMMITS between the
+    /// list refresh's protected-set snapshot and its `replaceMissions` used
+    /// to be unprotected. Both now run under one write lock, and the id is
+    /// registered before the write. Pinned by holding that lock: the list
+    /// response and the detail response both arrive while it is held, the
+    /// detail (queued first) writes first, and the list's snapshot — taken
+    /// only once it holds the lock — already carries the id.
+    @Test
+    fun detailWriteQueuedBehindTheListReplaceIsStillProtected() = runBlocking {
+        val api = FakeMissions()
+        api.list = listOf(Mission(id = "ms_2", num = 62, title = "stale title from an earlier snapshot", originConvoID = "c1"))
+        api.detail("ms_2", detail(mission("ms_2", 62)))
+        val rig = make(api)
+        api.blockNextList = true
+        val listTask = async(Dispatchers.Default) { rig.sync.refresh() }
+        waitUntil { api.isListGated }
+        rig.sync.writes.withLock {
+            // The detail response lands and parks on the lock, unregistered.
+            val detailTask = async(Dispatchers.Default) { rig.sync.refreshMission("ms_2") }
+            waitUntil { api.detailCalls == listOf("ms_2") }
+            delay(50)
+            assertNull("nothing may be written while the lock is held", rig.store.mission("ms_2"))
+            // Now the stale list response lands and parks behind it.
+            api.releaseListGate()
+            delay(50)
+            assertNull(rig.store.mission("ms_2"))
+            detailTask
+        }.let { detailTask ->
+            assertEquals(MissionsRefreshOutcome.Succeeded, detailTask.await())
+            assertEquals(MissionsRefreshOutcome.Succeeded, listTask.await())
+        }
+        assertEquals("the detail write registered itself before writing, so the list's later snapshot protected it", "M62", rig.store.mission("ms_2")?.title)
+        rig.sync.stop()
+    }
+
+    /// Same lock, close path: a user close parked behind an in-flight list
+    /// replace is protected from that (older, still-open) response.
+    @Test
+    fun closeQueuedBehindTheListReplaceIsStillProtected() = runBlocking {
+        val api = FakeMissions()
+        api.list = listOf(mission("ms_1", 61))
+        api.detail("ms_1", detail(mission("ms_1", 61)))
+        val rig = make(api)
+        rig.store.upsertMissions(listOf(mission("ms_1", 61)))
+        api.blockNextList = true
+        val listTask = async(Dispatchers.Default) { rig.sync.refresh() }
+        waitUntil { api.isListGated }
+        val closeTask = rig.sync.writes.withLock {
+            val closeTask = async(Dispatchers.Default) { rig.sync.closeMission("ms_1", "Done.") }
+            waitUntil { api.closed.size == 1 }
+            api.releaseListGate()
+            delay(50)
+            assertEquals("still open: nothing written while the lock is held", MissionState.OPEN, rig.store.mission("ms_1")?.state)
+            closeTask
+        }
+        assertEquals(MissionState.CLOSED, closeTask.await().state)
+        assertEquals(MissionsRefreshOutcome.Succeeded, listTask.await())
+        assertEquals("the close survives the older, still-open list row", MissionState.CLOSED, rig.store.mission("ms_1")?.state)
+        rig.sync.stop()
+    }
+
+    /// Bugbot (#79) asked whether a detail fetch or a close zeroes the list
+    /// aggregates. The journal's `GET /missions/:id` and `POST …/close`
+    /// both select the same `countsSql` as `GET /missions`, so the decoded
+    /// row carries `needs_you` / `last_milestone` and the upsert keeps them.
+    @Test
+    fun detailAndCloseRowsCarryTheListAggregates() = runBlocking {
+        val api = FakeMissions()
+        val counted = mission("ms_1", 61).copy(
+            needsYou = 2, openItems = 3, conversationCount = 1, milestoneCount = 4,
+            lastMilestone = MissionLastMilestone(65, "step", MilestoneKind.USER_INPUT, Instant.ofEpochSecond(3)),
+        )
+        api.detail("ms_1", detail(counted))
+        val rig = make(api)
+        assertEquals(MissionsRefreshOutcome.Succeeded, rig.sync.refreshMission("ms_1"))
+        val fetched = rig.store.mission("ms_1")!!
+        assertEquals(2, fetched.needsYou); assertEquals("step", fetched.lastMilestone?.title)
+        assertEquals(Instant.ofEpochSecond(3), fetched.lastMilestoneAt)
+        val closed = rig.sync.closeMission("ms_1", "Done.")
+        assertEquals(2, closed.needsYou)
+        assertEquals("the close response is a counted row too", 2, rig.store.mission("ms_1")?.needsYou)
+        assertEquals("step", rig.store.mission("ms_1")?.lastMilestone?.title)
         rig.sync.stop()
     }
 }

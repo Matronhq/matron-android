@@ -21,6 +21,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /// What a [MissionsSync.refresh] / [MissionsSync.refreshMission] pass did.
 /// [Unsupported] is a real answer from an old journal (404 on
@@ -88,6 +90,15 @@ class MissionsSync(
     /// "the list doesn't have it, so it's gone", and its fresher row is not
     /// reverted by the stale list row either.
     private val protectedSinceListStart = mutableSetOf<String>()
+    /// Serialises every store write this sync makes — the list replace
+    /// (with the protected-set snapshot it reads) and the detail / close
+    /// upserts (with the registration they make). Apple's `MissionsSync` is
+    /// an actor over a synchronous GRDB queue, so nothing can interleave a
+    /// detail write between the snapshot and the replace; Room writes
+    /// suspend, so without this a detail refresh or a user close committing
+    /// in that window would not be in the snapshot and the older list row
+    /// would overwrite it (Bugbot, #79). Internal so a test can hold it.
+    internal val writes = Mutex()
     /// Test-only observability: incremented the instant a joiner registers
     /// against an in-flight refetch, so a test can wait for that
     /// registration deterministically instead of sleeping.
@@ -181,8 +192,12 @@ class MissionsSync(
             // linger — except one a concurrent detail refresh just wrote that
             // this (now stale) response predates, or one this device merely
             // failed to DECODE this time.
-            val protected = synchronized(lock) { protectedSinceListStart.toSet() } + decoded.droppedIDs
-            store.replaceMissions(decoded.missions, protected)
+            // Snapshot and replace under the write lock: no detail write can
+            // register or commit between the two.
+            writes.withLock {
+                val protected = synchronized(lock) { protectedSinceListStart.toSet() } + decoded.droppedIDs
+                store.replaceMissions(decoded.missions, protected)
+            }
             _isSupported.value = true
             MissionsRefreshOutcome.Succeeded
         } catch (cancel: CancellationException) {
@@ -247,14 +262,24 @@ class MissionsSync(
         return try {
             val detail = api.mission(id)
             if (stopped) return MissionsRefreshOutcome.Stopped
-            store.upsertMissions(listOf(detail.mission))
-            store.replaceMilestones(detail.mission.id, detail.milestones)
-            store.replaceMissionConversations(detail.mission.id, detail.conversations)
-            // The detail's items are ordinary tracker rows carrying
-            // `mission_id`; upserting them keeps the tracker cache and the
-            // mission page in agreement without a second /items fetch.
-            if (detail.items.isNotEmpty()) store.upsertItems(detail.items)
-            synchronized(lock) { protectedSinceListStart.add(detail.mission.id) }
+            writes.withLock {
+                // Registered BEFORE the write, under the same lock the list
+                // replace snapshots under, so the id is protected from the
+                // moment the write is decided — never a window in which the
+                // row is committed but a concurrent, older list response
+                // could still sweep or overwrite it.
+                synchronized(lock) { protectedSinceListStart.add(detail.mission.id) }
+                // The detail row carries the same aggregates as a list row
+                // (the journal's `getMission` selects `countsSql`), so this
+                // upsert never zeroes `needs_you` / `last_milestone`.
+                store.upsertMissions(listOf(detail.mission))
+                store.replaceMilestones(detail.mission.id, detail.milestones)
+                store.replaceMissionConversations(detail.mission.id, detail.conversations)
+                // The detail's items are ordinary tracker rows carrying
+                // `mission_id`; upserting them keeps the tracker cache and the
+                // mission page in agreement without a second /items fetch.
+                if (detail.items.isNotEmpty()) store.upsertItems(detail.items)
+            }
             _isSupported.value = true
             MissionsRefreshOutcome.Succeeded
         } catch (cancel: CancellationException) {
@@ -279,8 +304,12 @@ class MissionsSync(
     override suspend fun closeMission(id: String, summary: String): Mission {
         val mission = api.closeMission(id, summary)
         if (stopped) return mission
-        store.upsertMissions(listOf(mission))
-        synchronized(lock) { protectedSinceListStart.add(mission.id) }
+        writes.withLock {
+            // Same ordering as `refreshMissionOnce`: protect first, write
+            // second, both under the write lock.
+            synchronized(lock) { protectedSinceListStart.add(mission.id) }
+            store.upsertMissions(listOf(mission))
+        }
         return mission
     }
 }
