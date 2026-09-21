@@ -227,33 +227,32 @@ class JournalStoreItemsTest {
     )
 
     /// The item marker's old-client `fallback_for` text twin is hidden from
-    /// the timeline, so it must not act as a message anywhere the user could
-    /// notice: no snippet, no unread bump, no activity timestamp, no search
-    /// body — live, on a read-marker recount, and on a history recount alike
-    /// (Bugbot, #71).
+    /// the timeline and never indexed for search, but it deliberately still
+    /// counts as a message for the chat list — unread, activity and snippet
+    /// follow the server (spec "Old-client fallback"; Apple's store is the
+    /// same): it is the signal that an agent filed a question while the chat
+    /// was closed, and the inline marker card (#72) is what the reader then
+    /// sees on opening it.
     @Test
-    fun fallbackTwinDoesNotBumpUnreadSnippetOrActivity() = runBlocking {
+    fun fallbackTwinCountsForTheChatListButNotForSearch() = runBlocking {
         val store = makeStore()
         store.applyJournal(JournalEvent(1, "c1", Instant.ofEpochMilli(1_000), "agent:a", JournalEventType.TEXT, buildJsonObject { put("body", "real message") }))
         val before = store.conversation("c1")!!
         assertEquals(1, before.unreadCount); assertEquals("real message", before.snippet)
 
-        assertTrue(store.applyJournal(fallbackTwin(2)))
+        val twin = fallbackTwin(2)
+        assertTrue(store.applyJournal(twin))
         val after = store.conversation("c1")!!
-        assertEquals("the twin is a stored journal row", 2L, after.lastSeq)
-        assertEquals("but not a message: unread unchanged", 1, after.unreadCount)
-        assertEquals("snippet unchanged", "real message", after.snippet)
-        assertEquals("activity unchanged", before.lastActivityTS, after.lastActivityTS)
-        assertNull("never indexed for search", fallbackTwin(2).previewText())
+        assertEquals(2L, after.lastSeq)
+        assertEquals("an agent's filed question bumps unread", 2, after.unreadCount)
+        assertEquals("and sets the snippet, like the server's snippetOf", "📌 Needs you — question #12: Which auth?", after.snippet)
+        assertEquals("and the activity timestamp", 2_000L, after.lastActivityTS)
+        assertNull("but is never indexed for search", twin.previewText())
+        assertTrue("and the mapper hides it (the card renders instead)", twin.isItemFallbackText())
 
-        // A read-marker recount (the SQL path) agrees with the incremental count.
+        // The read-marker recount agrees with the incremental count.
         store.applyJournal(JournalEvent(3, "c1", Instant.ofEpochMilli(3_000), "user:dan", JournalEventType.READ_MARKER, buildJsonObject { put("up_to_seq", 0) }))
-        assertEquals(1, store.conversation("c1")!!.unreadCount)
-
-        // And the history path's recount.
-        store.insertHistory(listOf(fallbackTwin(4)))
-        assertEquals(1, store.conversation("c1")!!.unreadCount)
-        assertEquals("a real text still counts", "real message", store.conversation("c1")!!.snippet)
+        assertEquals(2, store.conversation("c1")!!.unreadCount)
     }
 
     @Test
