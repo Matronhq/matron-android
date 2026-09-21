@@ -330,7 +330,10 @@ class ItemsSyncTest {
         rig.sync.start()
         waitUntil { rig.markers.subscriptionCount.value > 0 }
         rig.markers.emit("c1" to ItemMarkerEvent("it_1", 1, ItemKind.TASK, "T", ItemMarkerEvent.Action.COMMENTED, ItemAuthor.USER))
-        waitUntil { rig.store.item("it_1") != null }
+        // The refetch lands as two writes (item, then comments); waiting on the
+        // item alone can observe the gap between them under load.
+        waitUntil { rig.store.comments("it_1").isNotEmpty() }
+        assertNotNull(rig.store.item("it_1"))
         assertEquals(listOf("ic_1"), rig.store.comments("it_1").map { it.id })
         rig.sync.stop()
     }
