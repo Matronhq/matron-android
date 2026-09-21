@@ -156,6 +156,19 @@ interface EventDao {
     @Query("SELECT MAX(seq) FROM event WHERE convo_id = :convoID AND type IN (:messageTypes)")
     suspend fun newestMessageSeq(convoID: String, messageTypes: Collection<String>): Long?
 
+    /// A batch of the user's own composer rows (`type IN (:types)` from
+    /// [ownSender]) strictly older than [beforeSeq], newest first — one step
+    /// of `JournalStore.newestOwnMessageSeq`'s scan (apple #202). The
+    /// `fallback_for` exclusion happens in Kotlin, so the caller pages with
+    /// [beforeSeq] until it finds a real message or the batch comes up short.
+    @Query(
+        "SELECT * FROM event WHERE convo_id = :convoID AND sender = :ownSender " +
+            "AND type IN (:types) AND seq < :beforeSeq ORDER BY seq DESC LIMIT :limit"
+    )
+    suspend fun ownMessagesBeforeNewestFirst(
+        convoID: String, ownSender: String, types: Collection<String>, beforeSeq: Long, limit: Int,
+    ): List<EventEntity>
+
     @Query(
         "SELECT COUNT(*) FROM event WHERE convo_id = :convoID AND seq > :afterSeq " +
             "AND type IN (:messageTypes) AND sender != :ownSender"

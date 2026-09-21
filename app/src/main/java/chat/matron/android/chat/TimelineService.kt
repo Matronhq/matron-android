@@ -86,6 +86,15 @@ interface TimelineService {
     /// Marks the most recent visible event as read.
     suspend fun markAsRead()
 
+    /// Seq of the newest message the user themself sent in this conversation,
+    /// across the whole locally-mirrored history — not just the loaded window
+    /// — or null when the transport can't say. `ChatViewModel.jumpToLastOwnMessage()`
+    /// asks this before scanning loaded rows, so an hours-long agent run can't
+    /// hide the answer behind pagination (apple #202, item #60). Default: no
+    /// mirror to ask — the view model falls back to the rows it has loaded;
+    /// [JournalTimelineService] overrides.
+    suspend fun newestOwnMessageSeq(): Long? = null
+
     /// Per-convo stream of session-status updates. Default: an empty stream, so
     /// fakes without a status source need no override.
     fun sessionStatus(): Flow<SessionStatusUpdate> = emptyFlow()
