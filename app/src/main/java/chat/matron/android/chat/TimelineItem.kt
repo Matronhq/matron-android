@@ -6,6 +6,8 @@ import chat.matron.android.events.AskUserEvent
 import chat.matron.android.events.DiffEvent
 import chat.matron.android.events.ItemMarkerEvent
 import chat.matron.android.events.LiveOutputEvent
+import chat.matron.android.events.MilestoneMarkerEvent
+import chat.matron.android.events.MissionMarkerEvent
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.models.TimelineSendState
@@ -138,6 +140,14 @@ data class TimelineItem(
         /// journal seq — there is no underlying Matrix event to correlate
         /// against, the row exists purely to surface the marker inline.
         data class ItemMarker(val eventID: String, val marker: ItemMarkerEvent) : Kind
+        /// Mission milestone marker (spec 2026-09-10, apple #209). The
+        /// event's own seq is the milestone's anchor, so this row IS the jump
+        /// target — a `focus(seq)` for that seq lands exactly here. `eventID`
+        /// is the journal seq, as for [ItemMarker].
+        data class MilestoneMarker(val eventID: String, val marker: MilestoneMarkerEvent) : Kind
+        /// Mission lifecycle marker — a one-line inline notice. Apps use it
+        /// only as an invalidation signal beyond that.
+        data class MissionMarker(val eventID: String, val marker: MissionMarkerEvent) : Kind
         /// Transient typing / tool-use indicator. Not persisted; appended as a
         /// trailing overlay row while the agent is thinking or running a tool.
         data class ActivityIndicator(val label: String) : Kind

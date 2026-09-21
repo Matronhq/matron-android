@@ -139,6 +139,15 @@ fun ChatScreen(
     /// inline marker card in the timeline (apple #186). `null`
     /// (previews/tests) leaves the cards tap-inert.
     onOpenItem: ((String) -> Unit)? = null,
+    /// Which mission this conversation belongs to (spec: Transcript and
+    /// title), derived locally from the mission cache — `null` until the
+    /// first missions refresh lands, which is exactly when the title-tap
+    /// affordance should appear. With no mission the title is not a button.
+    missionID: String? = null,
+    /// Opens a mission page: the title tap (this conversation's mission)
+    /// and a tapped milestone card / mission notice in the timeline (apple
+    /// #209). `null` (previews/tests) leaves both inert.
+    onOpenMission: ((String) -> Unit)? = null,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val chatSearch by chatVM.chatSearch.collectAsStateWithLifecycle()
@@ -151,8 +160,7 @@ fun ChatScreen(
 
     var showSessionStatus by remember { mutableStateOf(false) }
     var showMediaBrowser by remember { mutableStateOf(false) }
-    /// Tappable title → summaries TOC sheet (jump-to-point navigation).
-    var showSummaries by remember { mutableStateOf(false) }
+    var showSwitcher by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var previewModel by remember { mutableStateOf<Any?>(null) }
     val compactScope = rememberCoroutineScope()
@@ -207,13 +215,18 @@ fun ChatScreen(
                 // list summary (same gate as the row chip); the path arrives
                 // with the first session-status frame, home-abbreviated like
                 // the info sheet.
-                // Tappable title → summaries TOC sheet, mirroring iOS's
-                // principal-item title button (apple #124).
+                // Tappable title → this conversation's mission (spec:
+                // Transcript and title, apple #209). This replaced the
+                // summaries TOC sheet; with no mission the title is not a
+                // button — same content, just inert.
                 title = {
+                    val openMission = onOpenMission
                     Column(
-                        modifier = Modifier.clickable(
-                            onClickLabel = "Show conversation summaries",
-                        ) { showSummaries = true },
+                        modifier = if (missionID != null && openMission != null) {
+                            Modifier.clickable(onClickLabel = "Open this conversation's mission") { openMission(missionID) }
+                        } else {
+                            Modifier
+                        },
                     ) {
                         // `A:bc Title` (or `A↔B:bc Title` for a multi-agent
                         // room) as one styled line — same composition and
@@ -374,26 +387,13 @@ fun ChatScreen(
                     onPreviewImage = { previewModel = it },
                     modifier = Modifier.weight(1f),
                     onOpenItem = onOpenItem,
+                    onOpenMission = onOpenMission,
                 )
                 ComposerView(viewModel = composerVM)
             }
         }
     }
 
-    if (showSummaries) {
-        val sheetState = rememberModalBottomSheetState()
-        ModalBottomSheet(onDismissRequest = { showSummaries = false }, sheetState = sheetState) {
-            SummariesSheet(
-                viewModel = chatVM,
-                onSelect = { seq ->
-                    // Dismiss first, then jump — same order as the iOS sheet
-                    // (`dismiss(); Task { await viewModel.focus(seq:) }`).
-                    showSummaries = false
-                    compactScope.launch { chatVM.focus(seq) }
-                },
-            )
-        }
-    }
     if (showSessionStatus) {
         val sheetState = rememberModalBottomSheetState()
         ModalBottomSheet(onDismissRequest = { showSessionStatus = false }, sheetState = sheetState) {
@@ -472,6 +472,9 @@ fun TimelineList(
     /// cards render tap-inert — the same scope decision as apple's
     /// `SubChatView` (#186).
     onOpenItem: ((String) -> Unit)? = null,
+    /// Opens a mission from a milestone card / mission notice. Main chat
+    /// pane only, like [onOpenItem].
+    onOpenMission: ((String) -> Unit)? = null,
     // Floating stop button — supplied only by the main chat pane (sub-chat
     // viewers are read-only, matching matron-apple). Visible while the durable
     // session_state says a turn is running, with the ephemeral activity label
@@ -555,8 +558,8 @@ fun TimelineList(
         }
     }
 
-    // Summaries TOC jump target — same consumer shape as iOS ChatView's
-    // `pendingFocusID` observer (apple #124): disengage tail-follow (or the
+    // Focus jump target (a milestone tap, an in-chat search hit) — same
+    // consumer shape as iOS ChatView's `pendingFocusID` observer (apple #124): disengage tail-follow (or the
     // pin-to-tail effect would yank the viewport straight back), widen the
     // window so the target is composed, scroll it to the top, clear. The
     // 200ms re-assert covers the widened window's layout pass, guarded on
@@ -570,12 +573,12 @@ fun TimelineList(
             followTail = false
             latestFocusTarget = target
             chatVM.ensureWindowContains(target)
-            summaryScrollIndex(chatVM.windowedRows.value, target)?.let { listState.scrollToItem(it) }
+            focusScrollIndex(chatVM.windowedRows.value, target)?.let { listState.scrollToItem(it) }
             chatVM.clearPendingFocus()
             reassertScope.launch {
                 delay(200)
                 if (!followTail && latestFocusTarget == target) {
-                    summaryScrollIndex(chatVM.windowedRows.value, target)?.let { listState.scrollToItem(it) }
+                    focusScrollIndex(chatVM.windowedRows.value, target)?.let { listState.scrollToItem(it) }
                 }
             }
         }
@@ -635,6 +638,7 @@ fun TimelineList(
                         onPreviewImage = onPreviewImage,
                         onTapFile = onTapFile,
                         onOpenItem = onOpenItem,
+                        onOpenMission = onOpenMission,
                     )
                 }
                 if (activityLabel != null) {
@@ -730,6 +734,7 @@ private fun TimelineRowView(
     onPreviewImage: (Any) -> Unit,
     onTapFile: (url: String, filename: String) -> Unit,
     onOpenItem: ((String) -> Unit)?,
+    onOpenMission: ((String) -> Unit)?,
 ) {
     // Collected so a consent card's in-flight / answered state redraws: the
     // answer is an HTTP call with no journal event behind it, so nothing in the
@@ -812,6 +817,7 @@ private fun TimelineRowView(
                     },
                     onOpenSpawnedRoom = onOpenConversation,
                     onOpenItem = onOpenItem,
+                    onOpenMission = onOpenMission,
                     hasMultipleSenders = hasMultipleSenders,
                 )
             }
@@ -824,7 +830,7 @@ private fun TimelineRowView(
  * `null` when it isn't in the window. Row i of [rows] sits at list index
  * i + 1 — index 0 is the always-present "paginating" item.
  */
-internal fun summaryScrollIndex(rows: List<TimelineRow>, targetItemID: String): Int? {
+internal fun focusScrollIndex(rows: List<TimelineRow>, targetItemID: String): Int? {
     val index = rows.indexOfFirst { it is TimelineRow.Message && it.item.id == targetItemID }
     return if (index >= 0) index + 1 else null
 }

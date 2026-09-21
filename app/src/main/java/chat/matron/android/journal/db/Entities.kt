@@ -14,6 +14,12 @@ import chat.matron.android.models.ItemAwaiting
 import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.ItemState
+import chat.matron.android.models.MilestoneKind
+import chat.matron.android.models.Mission
+import chat.matron.android.models.MissionConversation
+import chat.matron.android.models.MissionLastMilestone
+import chat.matron.android.models.MissionState
+import chat.matron.android.models.Milestone
 import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
@@ -195,7 +201,7 @@ data class OutboxEntity(
 /// an invalidation signal. Column names match matron-apple's `ItemRecord`.
 /// JSON-list columns (labels, links, attachments) are stored as text so the
 /// schema stays flat and additive, exactly like `conversation.participants`.
-@Entity(tableName = "item", indices = [Index("origin_convo_id")])
+@Entity(tableName = "item", indices = [Index("origin_convo_id"), Index("mission_id", "state", "awaiting")])
 data class ItemEntity(
     @PrimaryKey val id: String,
     val num: Int,
@@ -335,3 +341,140 @@ data class ItemOutboxEntity(
 /// reads as empty rather than poisoning the whole row.
 private fun <T> decodeList(raw: String, serializer: kotlinx.serialization.KSerializer<List<T>>): List<T> =
     runCatching { MatronJson.decodeFromString(serializer, raw) }.getOrElse { emptyList() }
+
+// MARK: Missions & milestones (matron-apple GRDB v10)
+
+/// Local mirror of one mission row plus the `GET /missions` list counts,
+/// filled from `GET /missions` / `GET /missions/:id` by `MissionsSync` —
+/// never from the event log: the `mission`/`milestone` markers are
+/// invalidation signals, and the journal omits their titles when they cross
+/// the privacy boundary, so a marker is never a source of truth for a name.
+/// Column names match matron-apple's `MissionRecord`; `last_milestone_json`
+/// holds the wire-shaped `last_milestone` object as text, like the other
+/// JSON columns here.
+@Entity(
+    tableName = "mission",
+    indices = [Index("state", "last_milestone_at"), Index("origin_convo_id")],
+)
+data class MissionEntity(
+    @PrimaryKey val id: String,
+    val num: Int,
+    val state: String,
+    val title: String,
+    val body: String,
+    @ColumnInfo(name = "close_summary") val closeSummary: String?,
+    @ColumnInfo(name = "closed_by") val closedBy: String?,
+    @ColumnInfo(name = "closed_over_open_items") val closedOverOpenItems: Int,
+    @ColumnInfo(name = "origin_convo_id") val originConvoID: String,
+    @ColumnInfo(name = "origin_device_id") val originDeviceID: Long,
+    @ColumnInfo(name = "created_by") val createdBy: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long,
+    @ColumnInfo(name = "last_milestone_at") val lastMilestoneAt: Long?,
+    @ColumnInfo(name = "closed_at") val closedAt: Long?,
+    @ColumnInfo(name = "open_items") val openItems: Int,
+    @ColumnInfo(name = "needs_you") val needsYou: Int,
+    @ColumnInfo(name = "conversation_count") val conversationCount: Int,
+    @ColumnInfo(name = "milestone_count") val milestoneCount: Int,
+    @ColumnInfo(name = "last_milestone_json") val lastMilestoneJson: String?,
+) {
+    /// Serializable mirror of `MissionLastMilestone` with wire-shaped keys,
+    /// so the stored JSON reads the same as the payload it came from.
+    @Serializable
+    private data class LastMilestone(
+        val num: Int,
+        val title: String,
+        val kind: String,
+        @kotlinx.serialization.SerialName("created_at") val createdAt: Long,
+    )
+
+    fun toMission(): Mission {
+        val last = lastMilestoneJson
+            ?.let { runCatching { MatronJson.decodeFromString(LastMilestone.serializer(), it) }.getOrNull() }
+            ?.let { l ->
+                val kind = MilestoneKind.fromWire(l.kind) ?: return@let null
+                MissionLastMilestone(num = l.num, title = l.title, kind = kind, createdAt = Instant.ofEpochMilli(l.createdAt))
+            }
+        return Mission(
+            id = id, num = num, state = MissionState.fromWire(state) ?: MissionState.OPEN, title = title, body = body,
+            closeSummary = closeSummary, closedBy = ItemAuthor.fromWire(closedBy), closedOverOpenItems = closedOverOpenItems,
+            originConvoID = originConvoID, originDeviceID = originDeviceID,
+            createdBy = ItemAuthor.fromWire(createdBy) ?: ItemAuthor.AGENT,
+            createdAt = Instant.ofEpochMilli(createdAt), updatedAt = Instant.ofEpochMilli(updatedAt),
+            lastMilestoneAt = lastMilestoneAt?.let(Instant::ofEpochMilli), closedAt = closedAt?.let(Instant::ofEpochMilli),
+            openItems = openItems, needsYou = needsYou, conversationCount = conversationCount,
+            milestoneCount = milestoneCount, lastMilestone = last,
+        )
+    }
+
+    companion object {
+        fun from(m: Mission): MissionEntity = MissionEntity(
+            id = m.id, num = m.num, state = m.state.wire, title = m.title, body = m.body,
+            closeSummary = m.closeSummary, closedBy = m.closedBy?.wire, closedOverOpenItems = m.closedOverOpenItems,
+            originConvoID = m.originConvoID, originDeviceID = m.originDeviceID, createdBy = m.createdBy.wire,
+            createdAt = m.createdAt.toEpochMilli(), updatedAt = m.updatedAt.toEpochMilli(),
+            lastMilestoneAt = m.lastMilestoneAt?.toEpochMilli(), closedAt = m.closedAt?.toEpochMilli(),
+            openItems = m.openItems, needsYou = m.needsYou, conversationCount = m.conversationCount,
+            milestoneCount = m.milestoneCount,
+            lastMilestoneJson = m.lastMilestone?.let {
+                MatronJson.encodeToString(
+                    LastMilestone.serializer(),
+                    LastMilestone(it.num, it.title, it.kind.wire, it.createdAt.toEpochMilli()),
+                )
+            },
+        )
+    }
+}
+
+/// One milestone of a mission. `seq` is the anchor — the `milestone` marker
+/// event's own seq in `convo_id`.
+@Entity(
+    tableName = "milestone",
+    indices = [Index("mission_id", "created_at"), Index("convo_id", "seq")],
+)
+data class MilestoneEntity(
+    @PrimaryKey val id: String,
+    @ColumnInfo(name = "mission_id") val missionID: String,
+    val num: Int,
+    val kind: String,
+    val title: String,
+    val body: String,
+    @ColumnInfo(name = "convo_id") val convoID: String,
+    val seq: Long,
+    @ColumnInfo(name = "device_id") val deviceID: Long,
+    @ColumnInfo(name = "created_by") val createdBy: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+) {
+    fun toMilestone(): Milestone = Milestone(
+        id = id, missionID = missionID, num = num, kind = MilestoneKind.fromWire(kind) ?: MilestoneKind.PROGRESS,
+        title = title, body = body, convoID = convoID, seq = seq, deviceID = deviceID,
+        createdBy = ItemAuthor.fromWire(createdBy) ?: ItemAuthor.AGENT, createdAt = Instant.ofEpochMilli(createdAt),
+    )
+
+    companion object {
+        fun from(m: Milestone): MilestoneEntity = MilestoneEntity(
+            id = m.id, missionID = m.missionID, num = m.num, kind = m.kind.wire, title = m.title, body = m.body,
+            convoID = m.convoID, seq = m.seq, deviceID = m.deviceID, createdBy = m.createdBy.wire,
+            createdAt = m.createdAt.toEpochMilli(),
+        )
+    }
+}
+
+/// A conversation belonging to a mission, as `GET /missions/:id` lists it —
+/// the authoritative membership list (origin, joined, inherited), which the
+/// snapshot never carries.
+@Entity(tableName = "mission_conversation", primaryKeys = ["mission_id", "convo_id"])
+data class MissionConversationEntity(
+    @ColumnInfo(name = "mission_id") val missionID: String,
+    @ColumnInfo(name = "convo_id") val convoID: String,
+    val title: String,
+    val box: String?,
+    val state: String,
+) {
+    fun toConversation(): MissionConversation = MissionConversation(id = convoID, title = title, box = box, state = state)
+
+    companion object {
+        fun from(missionID: String, c: MissionConversation): MissionConversationEntity =
+            MissionConversationEntity(missionID = missionID, convoID = c.id, title = c.title, box = c.box, state = c.state)
+    }
+}

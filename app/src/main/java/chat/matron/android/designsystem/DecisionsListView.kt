@@ -5,7 +5,6 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,9 +21,9 @@ import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -98,26 +97,22 @@ fun DecisionsListView(
                 title = "Nothing needs you",
                 description = "Questions and decisions waiting on you, from every conversation, appear here.",
             )
-            DecisionsListState.POPULATED -> LazyColumn(
-                Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
+            // Inbox-style rows (apple #213): one hairline separator per row,
+            // the full width of the list, with the breathing room on the row
+            // content itself — the same chrome the Missions list uses, so
+            // the two tabs read alike. `ItemRow` stays untouched since
+            // `ItemsListView` also renders it.
+            DecisionsListState.POPULATED -> LazyColumn(Modifier.fillMaxSize()) {
                 items(model.rows, key = { it.id }) { row ->
                     var menuOpen by remember { mutableStateOf(false) }
-                    Surface(
-                        shape = MaterialTheme.shapes.medium,
-                        color = MatronThemeColors.current.bubbleBot,
-                        shadowElevation = 1.dp,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
+                    Column(Modifier.fillMaxWidth()) {
                         Box {
                             ItemRow(
                                 row.item,
                                 origin = decisionsRowOrigin(row),
                                 modifier = Modifier
                                     .combinedClickable(onClick = { onSelect(row.item.id) }, onLongClick = { menuOpen = true })
-                                    .padding(12.dp),
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
                             )
                             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                                 DropdownMenuItem(
@@ -126,6 +121,7 @@ fun DecisionsListView(
                                 )
                             }
                         }
+                        HorizontalDivider()
                     }
                 }
             }

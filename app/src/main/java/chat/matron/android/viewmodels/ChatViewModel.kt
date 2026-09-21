@@ -1,7 +1,6 @@
 package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.MediaFetchOutcome
-import chat.matron.android.chat.ConversationSummaryEntry
 import chat.matron.android.chat.JournalTimelineMapper
 import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineItem
@@ -114,11 +113,17 @@ class ChatViewModel(
     /// and the last-own-message jump; [focusOwner] says whose it is.
     private var pendingChatSearchFocusSeq: Long? = null
 
-    /// Which feature started the jump [focusOrPark] is running or has parked.
-    /// Dismissing the search bar must abort only search's own jump — a "jump
-    /// to my last message" in flight while the bar happens to be up would
-    /// otherwise die with it (Bugbot, apple #202).
-    private enum class FocusOwner { Search, LastOwnMessage }
+    /// Which feature started the jump that is currently RUNNING (or, for the
+    /// two owners that share [pendingChatSearchFocusSeq], parked). Dismissing
+    /// the search bar must abort only search's own jump — a "jump to my last
+    /// message" or a milestone jump in flight while the bar happens to be up
+    /// would otherwise die with it (Bugbot, apple #202 and #209).
+    ///
+    /// Nothing clears this when a jump finishes, so it names the last claimant
+    /// rather than a live claim: every path that takes over [focusTask] has to
+    /// claim it, or a stale `Search` left by an earlier query makes
+    /// [endChatSearch] cancel a jump that is not search's.
+    private enum class FocusOwner { Search, LastOwnMessage, Milestone }
     private var focusOwner: FocusOwner? = null
 
     /// Bumped by every [beginChatSearch] and [endChatSearch]; an in-flight
@@ -177,6 +182,46 @@ class ChatViewModel(
             focus(seq)
         } else {
             pendingChatSearchFocusSeq = seq
+        }
+    }
+
+    // MARK: - Jump to a milestone (apple #209)
+
+    /// A milestone jump parked until the stream is live — its OWN slot, not
+    /// search's: `endChatSearch` clears only search's parked jump, so
+    /// dismissing the search bar cannot kill a milestone jump in flight
+    /// (Apple's `FocusOwner.milestone`).
+    private var pendingMilestoneFocusSeq: Long? = null
+
+    /// Takes over [focusTask] for a milestone jump, claiming [focusOwner] with
+    /// it. The claim is what stops an unrelated [endChatSearch] from cancelling
+    /// the jump mid-pagination: the bar survives `stop()` on Android (Apple's
+    /// `stop()` dismisses it), so after a title tap into a mission and back the
+    /// bar is still up over a room whose [focusOwner] may still read `Search`
+    /// from the query that raised it, and the user's dismissal would otherwise
+    /// abort the milestone jump they just asked for (Bugbot, #79).
+    ///
+    /// Claimed only where the jump actually RUNS. A milestone jump that *parks*
+    /// must not claim: its park lives in [pendingMilestoneFocusSeq], so taking
+    /// ownership would strand a search park in [pendingChatSearchFocusSeq] that
+    /// [endChatSearch] still has to clear.
+    private suspend fun focusAsMilestone(seq: Long) {
+        focusOwner = FocusOwner.Milestone
+        focus(seq)
+    }
+
+    /// Scrolls the transcript to a milestone's anchor — the `seq` of its own
+    /// `milestone` marker event (spec 2026-09-10). Rides the same
+    /// park-until-live jump as in-conversation search, so a tap made from
+    /// the Missions tab BEFORE this room's stream is up lands once the first
+    /// snapshot arrives. A seq that no longer exists lands on the nearest
+    /// earlier row ([focus]'s existing fallback).
+    suspend fun jumpToMilestone(seq: Long) {
+        if (_hasReceivedFirstSnapshot.value && observationTask?.isActive == true) {
+            pendingMilestoneFocusSeq = null
+            focusAsMilestone(seq)
+        } else {
+            pendingMilestoneFocusSeq = seq
         }
     }
 
@@ -268,12 +313,6 @@ class ChatViewModel(
 
     private val _sessionStatus = MutableStateFlow<SessionStatus?>(null)
     val sessionStatus: StateFlow<SessionStatus?> = _sessionStatus.asStateFlow()
-
-    /// TOC summary entries for this conversation, newest-first — mirrors
-    /// `TimelineService.summaryEntriesStream()`. Empty until the journal
-    /// replays the room's summary rows (or forever, on backends without one).
-    private val _summaryEntries = MutableStateFlow<List<ConversationSummaryEntry>>(emptyList())
-    val summaryEntries: StateFlow<List<ConversationSummaryEntry>> = _summaryEntries.asStateFlow()
 
     private val _rows = MutableStateFlow<List<TimelineRow>>(emptyList())
     val rows: StateFlow<List<TimelineRow>> = _rows.asStateFlow()
@@ -390,7 +429,6 @@ class ChatViewModel(
     private var observationTask: Job? = null
     private var statusTask: Job? = null
     private var sessionStateTask: Job? = null
-    private var summaryEntriesTask: Job? = null
     private var connectionTask: Job? = null
     private var emptyDebounceTask: Job? = null
     private var resumeTask: Job? = null
@@ -913,7 +951,7 @@ class ChatViewModel(
         }
     }
 
-    // MARK: - Summaries TOC jump-to-message
+    // MARK: - Jump-to-message (a milestone tap, a search hit)
 
     /// Pending scroll anchor for a TOC jump. The timeline observes this exactly
     /// like the Apple views observe `pendingFocusID`: disengage tail-follow,
@@ -941,7 +979,7 @@ class ChatViewModel(
     private var focusTask: Job? = null
 
     /// Navigates the transcript to the message nearest (at or before) [seq] —
-    /// the summaries TOC sheet's jump-to-message action. Pages history
+    /// the jump-to-message action behind milestone taps and search hits. Pages history
     /// backward until the target region is loaded locally, giving up when
     /// [reachedHistoryStart] latches; at that point it lands on the oldest row
     /// actually available rather than doing nothing. Port of the Apple
@@ -1081,6 +1119,12 @@ class ChatViewModel(
                         pendingChatSearchFocusSeq = null
                         scope.launch { focus(seq) }
                     }
+                    pendingMilestoneFocusSeq?.let { seq ->
+                        pendingMilestoneFocusSeq = null
+                        // Claims [focusOwner] as it supersedes any search jump
+                        // fired just above — same reason as the live path.
+                        scope.launch { focusAsMilestone(seq) }
+                    }
                     updateSettledEmpty(snapshot.isEmpty())
                     // Content → empty is the signature of a mirror wipe under an
                     // open view; refetch the newest page (nothing else does).
@@ -1119,13 +1163,6 @@ class ChatViewModel(
             }
         }
 
-        summaryEntriesTask?.cancel()
-        summaryEntriesTask = scope.launch {
-            timeline.summaryEntriesStream().collect { entries ->
-                _summaryEntries.value = entries
-            }
-        }
-
         // A prior failed image fetch only means "unreachable then" — once the
         // sync connection comes back up, give it another chance rather than
         // negative-caching it for the rest of the VM's (session-long) lifetime.
@@ -1157,8 +1194,6 @@ class ChatViewModel(
         statusTask = null
         sessionStateTask?.cancel()
         sessionStateTask = null
-        summaryEntriesTask?.cancel()
-        summaryEntriesTask = null
         connectionTask?.cancel()
         connectionTask = null
         emptyDebounceTask?.cancel()

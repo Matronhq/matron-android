@@ -19,6 +19,10 @@ import chat.matron.android.journal.ItemsProviding
 import chat.matron.android.designsystem.TrackerItemLinkOutcome
 import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.ItemsSyncing
+import chat.matron.android.journal.MissionsSync
+import chat.matron.android.journal.MissionsSyncing
+import chat.matron.android.viewmodels.MissionDetailViewModel
+import chat.matron.android.viewmodels.MissionsListViewModel
 import chat.matron.android.viewmodels.TrackerItemLinkResolver
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalStore
@@ -171,6 +175,11 @@ class AppDependencies(
          * before the sign-out wipe so no in-flight fetch writes into it.
          */
         val itemsSync: ItemsSync,
+        /**
+         * Keeps the mission cache fresh off the engine's mission/milestone
+         * markers and connection state; same lifecycle as [itemsSync].
+         */
+        val missionsSync: MissionsSync,
         /** Boot-time TTL sweep; teardown joins it before wiping the same DB. */
         var purgeJob: Job? = null,
         /**
@@ -248,12 +257,20 @@ class AppDependencies(
             markers = { engine.itemMarkers() },
             connectionStates = { engine.stateStream },
         )
-        val core = JournalCore(api, db, store, engine, itemsSync)
+        val missionsSync = MissionsSync(
+            api = api,
+            store = store,
+            markers = { engine.missionMarkers() },
+            connectionStates = { engine.stateStream },
+        )
+        val core = JournalCore(api, db, store, engine, itemsSync, missionsSync)
         cores[session.userID] = core
         // Subscribes to markers and connection state; the first `Running`
         // runs the probe refresh (a 404 hides the tracker UI) and drains any
         // outbox rows left from the previous run.
         itemsSync.start()
+        // Same probe for `/missions`: a 404 hides the Missions tab.
+        missionsSync.start()
         // Boot-time TTL sweep of expired tool-output snippets. Kotlin constructors
         // can't suspend, so the composition root drives it once the store exists —
         // documented on JournalStore.purgeExpiredToolOutputSnippets. Tracked on
@@ -366,6 +383,33 @@ class AppDependencies(
 
     /** The tracker's sync for a session, for the panel and detail view models. */
     fun itemsSync(session: UserSession): ItemsSyncing = core(session).itemsSync
+
+    fun missionsSync(session: UserSession): MissionsSyncing = core(session).missionsSync
+
+    /**
+     * The one Missions list instance per signed-in session (apple #209):
+     * feeds the Missions tab, its badge and the shell's support gate.
+     * Created and started by the shell, stopped when the shell leaves the
+     * composition on sign-out — like [makeDecisionsViewModel].
+     */
+    fun makeMissionsListViewModel(session: UserSession, scope: CoroutineScope): MissionsListViewModel {
+        val c = core(session)
+        return MissionsListViewModel(store = c.store, sync = c.missionsSync, scope = scope)
+    }
+
+    /** A fresh detail VM per mission page (not cached: one page, one mission). */
+    fun makeMissionDetailViewModel(session: UserSession, missionID: String, scope: CoroutineScope): MissionDetailViewModel {
+        val c = core(session)
+        return MissionDetailViewModel(missionID = missionID, store = c.store, sync = c.missionsSync, scope = scope)
+    }
+
+    /**
+     * Which mission a conversation belongs to, live (spec: Transcript and
+     * title). `null` until the first missions refresh lands — exactly when
+     * the title-tap affordance should appear.
+     */
+    fun missionIDFlow(session: UserSession, convoID: String): kotlinx.coroutines.flow.Flow<String?> =
+        core(session).store.missionIDFlow(convoID)
 
     /** The tracker's network surface — the session's API client. */
     fun itemsApi(session: UserSession): ItemsProviding = core(session).api
@@ -542,6 +586,8 @@ class AppDependencies(
                 // the wipe below and write the old account's items back.
                 runCatching { core.itemsSync.stop() }
                     .onFailure { MatronDebug.breadcrumb("signOut: itemsSync.stop failed: $it") }
+                runCatching { core.missionsSync.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: missionsSync.stop failed: $it") }
                 core.engine.endSync()
                 runCatching { core.store.wipe() }
                     .onFailure { MatronDebug.breadcrumb("signOut: store.wipe failed: $it") }
@@ -549,6 +595,10 @@ class AppDependencies(
                 // the text outbox; sign-out clears the whole tracker cache.
                 runCatching { core.store.wipeItems() }
                     .onFailure { MatronDebug.breadcrumb("signOut: store.wipeItems failed: $it") }
+                // wipe() already cleared the mission tables; this is the
+                // belt for a wipe() that threw partway.
+                runCatching { core.store.wipeMissions() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: store.wipeMissions failed: $it") }
                 // wipe() deliberately preserves the offline outbox (a
                 // snapshot_required mirror wipe must not eat unsent messages);
                 // sign-out must clear it so the next account can't inherit —

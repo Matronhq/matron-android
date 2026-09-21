@@ -10,9 +10,19 @@ import chat.matron.android.journal.db.ItemEntity
 import chat.matron.android.journal.db.ItemOutboxEntity
 import chat.matron.android.journal.db.MatronDatabase
 import chat.matron.android.journal.db.MetaEntity
+import chat.matron.android.journal.db.MilestoneEntity
+import chat.matron.android.journal.db.MissionConversationEntity
+import chat.matron.android.journal.db.MissionEntity
 import chat.matron.android.journal.db.OutboxEntity
 import chat.matron.android.journal.db.SummaryEntryEntity
+import chat.matron.android.chat.JournalChatService
+import chat.matron.android.chat.SessionTag
 import chat.matron.android.models.ItemsScope
+import chat.matron.android.models.Milestone
+import chat.matron.android.models.Mission
+import chat.matron.android.models.MissionConversation
+import chat.matron.android.models.MissionState
+import chat.matron.android.models.SessionTagInputs
 import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
 import java.time.Instant
@@ -49,7 +59,7 @@ interface MediaBrowserStoreReading {
 class JournalStore(
     private val db: MatronDatabase,
     private val ownSender: String,
-) : MediaBrowserStoreReading, ItemsStoreReading, TrackerItemNumberReading {
+) : MediaBrowserStoreReading, ItemsStoreReading, TrackerItemNumberReading, MissionsStoreReading {
     private val conversationDao = db.conversationDao()
     private val eventDao = db.eventDao()
     private val metaDao = db.metaDao()
@@ -59,6 +69,9 @@ class JournalStore(
     private val itemDao = db.itemDao()
     private val itemCommentDao = db.itemCommentDao()
     private val itemOutboxDao = db.itemOutboxDao()
+    private val missionDao = db.missionDao()
+    private val milestoneDao = db.milestoneDao()
+    private val missionConversationDao = db.missionConversationDao()
 
     /// Test-only failure injection, checked before the transaction opens so the
     /// cursor is left untouched on a simulated failure — the same shape a real
@@ -419,6 +432,9 @@ class JournalStore(
             // reply written offline any more than a queued text message.
             itemCommentDao.deleteAll()
             itemDao.deleteAll()
+            // Mission cache — same rule as the tracker cache above; one
+            // bootstrap later, `GET /missions` refills it.
+            wipeMissionTables()
         }
     }
 
@@ -649,6 +665,174 @@ class JournalStore(
     /// the item-detail origin button. `null` when unknown or untitled.
     suspend fun conversationOriginLabel(id: String): String? =
         conversationDao.originLabelRow(id)?.takeIf { it.title.isNotEmpty() }?.let { originLabel(it.title, it.agentName) }
+
+    // MARK: Missions & milestones
+    //
+    // Mission cache (spec 2026-09-10 missions-milestones). Filled from
+    // GET /missions and GET /missions/:id by `MissionsSync` — never from the
+    // event log. Ported from matron-apple's `JournalStore+Missions.swift`.
+
+    /// Closed is terminal (protocol: no reopen route, `PATCH` / `join` /
+    /// `POST /milestones` all 409 on a closed mission), so an incoming OPEN
+    /// row never overwrites a cached CLOSED one: a detail `GET` issued
+    /// before a user close but answered after it would otherwise flip the
+    /// just-closed mission back to open until the next refresh (Bugbot,
+    /// #79 — a window Apple's actor has too). The cached row is kept as is;
+    /// the next list refresh carries the closed row with fresh counts.
+    suspend fun upsertMissions(missions: List<Mission>) {
+        if (missions.isEmpty()) return
+        db.withTransaction { upsertMissionsGuarded(missions) }
+    }
+
+    private suspend fun upsertMissionsGuarded(missions: List<Mission>) {
+        val reopening = missions.filter { it.state == MissionState.OPEN }.map { it.id }
+        val closed = if (reopening.isEmpty()) emptySet() else missionDao.closedAmong(reopening).toSet()
+        val rows = missions.filter { it.state == MissionState.CLOSED || it.id !in closed }
+        if (rows.isNotEmpty()) missionDao.upsertAll(rows.map(MissionEntity::from))
+    }
+
+    /// The full-list refresh's write (`MissionsSync.refreshOnce`) IS
+    /// authoritative — `GET /missions` always answers with the complete
+    /// set — so unlike [upsertMissions] (used by the detail/marker path,
+    /// which only ever touches one mission at a time) a mission cached
+    /// locally but absent from [missions] no longer exists for this device
+    /// and must not linger (CodeRabbit apple #209). One transaction: upsert
+    /// the given rows, then delete every cached `mission` row outside that
+    /// set along with its dependent cache rows — `milestone` /
+    /// `mission_conversation` have no `ON DELETE CASCADE`, so those two
+    /// tables are swept explicitly — and clear the mission off any tracker
+    /// row still pointing at it, or the item's `#num` badge and the mission
+    /// page's item lookup would resolve a dangling id.
+    ///
+    /// [protectedIDs]: a list `GET` can be in flight when a mission that
+    /// didn't exist yet at request time is created and a marker-driven
+    /// detail fetch for it completes FIRST — without an exclusion this call
+    /// would see that mission absent from [missions] (the response predates
+    /// it) and delete the row the detail fetch just wrote. Such an id is
+    /// neither deleted NOR upserted: the stale list row must not revert the
+    /// fields the detail fetch (or a user close) just wrote either.
+    suspend fun replaceMissions(missions: List<Mission>, protectedIDs: Set<String> = emptySet()) {
+        db.withTransaction {
+            val fresh = missions.filter { it.id !in protectedIDs }
+            if (fresh.isNotEmpty()) upsertMissionsGuarded(fresh)
+            val keep = missions.map { it.id }.toSet() + protectedIDs
+            val stale = missionDao.idsNotIn(keep.toList())
+            if (stale.isEmpty()) return@withTransaction
+            missionDao.deleteByIds(stale)
+            milestoneDao.deleteForMissions(stale)
+            missionConversationDao.deleteForMissions(stale)
+            itemDao.clearMission(stale)
+        }
+    }
+
+    suspend fun missions(state: MissionState?): List<Mission> = when (state) {
+        MissionState.OPEN -> missionDao.open()
+        MissionState.CLOSED -> missionDao.closed()
+        null -> missionDao.all()
+    }.map { it.toMission() }
+
+    override fun missionsFlow(state: MissionState?): Flow<List<Mission>> = when (state) {
+        MissionState.OPEN -> missionDao.openFlow()
+        MissionState.CLOSED -> missionDao.closedFlow()
+        null -> missionDao.allFlow()
+    }.map { list -> list.map { it.toMission() } }.distinctUntilChanged()
+
+    suspend fun mission(id: String): Mission? = missionDao.byId(id)?.toMission()
+
+    /// Lookup by the human-facing `#N`. Numbers are unique across items,
+    /// missions and milestones, so at most one row can match.
+    suspend fun mission(num: Int): Mission? = missionDao.byNum(num)?.toMission()
+
+    override fun missionFlow(id: String): Flow<Mission?> =
+        missionDao.byIdFlow(id).map { it?.toMission() }.distinctUntilChanged()
+
+    /// Wholesale replace for one mission, mirroring [replaceComments]: the
+    /// detail fetch is the authority, so a milestone the server no longer
+    /// returns (sieved, or the mission repointed) must not linger.
+    suspend fun replaceMilestones(missionID: String, milestones: List<Milestone>) {
+        db.withTransaction {
+            milestoneDao.deleteForMission(missionID)
+            milestoneDao.upsertAll(milestones.map(MilestoneEntity::from))
+        }
+    }
+
+    suspend fun milestones(missionID: String): List<Milestone> = milestoneDao.forMission(missionID).map { it.toMilestone() }
+
+    override fun milestonesFlow(missionID: String): Flow<List<Milestone>> =
+        milestoneDao.forMissionFlow(missionID).map { list -> list.map { it.toMilestone() } }.distinctUntilChanged()
+
+    /// The per-conversation view (`GET /milestones?convo=`), newest first.
+    suspend fun milestonesForConversation(convoID: String): List<Milestone> = milestoneDao.forConversation(convoID).map { it.toMilestone() }
+
+    suspend fun replaceMissionConversations(missionID: String, conversations: List<MissionConversation>) {
+        db.withTransaction {
+            missionConversationDao.deleteForMission(missionID)
+            missionConversationDao.upsertAll(conversations.map { MissionConversationEntity.from(missionID, it) })
+        }
+    }
+
+    suspend fun missionConversations(missionID: String): List<MissionConversation> =
+        missionConversationDao.forMission(missionID).map { it.toConversation() }
+
+    override fun missionConversationsFlow(missionID: String): Flow<List<MissionConversation>> =
+        missionConversationDao.forMissionFlow(missionID).map { list -> list.map { it.toConversation() } }.distinctUntilChanged()
+
+    /// The mission page's open items, awaiting-you first (see `ItemDao.forMission`).
+    suspend fun missionItems(missionID: String): List<TrackerItem> = itemDao.forMission(missionID).map { it.toItem() }
+
+    override fun missionItemsFlow(missionID: String): Flow<List<TrackerItem>> =
+        itemDao.forMissionFlow(missionID).map { list -> list.map { it.toItem() } }.distinctUntilChanged()
+
+    /// Which mission a conversation belongs to, derived locally — see
+    /// `MissionDao.missionIDForConversation`. `null` until the first
+    /// missions refresh lands, which is exactly when the title-tap
+    /// affordance should appear.
+    suspend fun missionID(convoID: String): String? = missionDao.missionIDForConversation(convoID)
+
+    fun missionIDFlow(convoID: String): Flow<String?> =
+        missionDao.missionIDForConversationFlow(convoID).distinctUntilChanged()
+
+    /// Derived from reads the store already has: the conversation row, the
+    /// box roster ([agentNames]) and the journal-held tag overrides
+    /// ([agentTags]) — the latter two hoisted out of the per-conversation
+    /// loop. This is the same derivation `JournalChatService.summary` runs
+    /// for a chat-list row, including its two gates: a box letter only means
+    /// something when the user has two or more boxes, and the session short
+    /// is peeled off the stored title by `SessionTag.splitTitle`. Room tags
+    /// come from the same `roomTags` rule the chat list uses, so a
+    /// multi-agent room renders `A↔B:bc` on the mission page too.
+    override suspend fun sessionTags(convoIDs: Set<String>): Map<String, SessionTagInputs> {
+        if (convoIDs.isEmpty()) return emptyMap()
+        val names = agentNames()
+        val letters = SessionTag.boxLetters(names, agentTags())
+        val tags = mutableMapOf<String, SessionTagInputs>()
+        for (convoID in convoIDs) {
+            val record = conversationDao.byId(convoID) ?: continue
+            val boxName = JournalChatService.boxName(record, names)
+            val boxLetter = if (boxName != null) record.agentDeviceID?.let(letters::get) else null
+            val sessionShort = SessionTag.splitTitle(record.title).first
+            val room = JournalChatService.roomTags(record, names, letters)
+            if (boxLetter == null && sessionShort == null && room.isEmpty()) continue
+            tags[convoID] = SessionTagInputs(
+                boxLetter = boxLetter, boxName = boxName, sessionShort = sessionShort,
+                roomBoxNames = room.map { it.first }, roomBoxShorts = room.map { it.second },
+            )
+        }
+        return tags
+    }
+
+    /// Sign-out clear for the mission cache alone. [wipe] clears the same
+    /// tables inline — both go through [wipeMissionTables], so "the mission
+    /// cache" is defined once.
+    suspend fun wipeMissions() {
+        db.withTransaction { wipeMissionTables() }
+    }
+
+    private suspend fun wipeMissionTables() {
+        missionDao.deleteAll()
+        milestoneDao.deleteAll()
+        missionConversationDao.deleteAll()
+    }
 
     // MARK: Agent roster
 

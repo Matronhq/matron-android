@@ -334,6 +334,26 @@ interface ItemDao {
     )
     fun needsUserCountsFlow(): Flow<List<NeedsUserCountRow>>
 
+    /// The mission page's open items: awaiting-you first (that is the
+    /// section the page leads with), then newest activity. Closed items are
+    /// excluded — the page shows what is still outstanding.
+    @Query(
+        "SELECT * FROM item WHERE mission_id = :missionID AND state = 'open' " +
+            "ORDER BY (awaiting = 'user') DESC, updated_at DESC, num DESC"
+    )
+    suspend fun forMission(missionID: String): List<ItemEntity>
+
+    @Query(
+        "SELECT * FROM item WHERE mission_id = :missionID AND state = 'open' " +
+            "ORDER BY (awaiting = 'user') DESC, updated_at DESC, num DESC"
+    )
+    fun forMissionFlow(missionID: String): Flow<List<ItemEntity>>
+
+    /// Tracker rows must stop pointing at a mission that no longer exists
+    /// in the cache (`JournalStore.replaceMissions`).
+    @Query("UPDATE item SET mission_id = NULL, mission_num = NULL WHERE mission_id IN (:missionIDs)")
+    suspend fun clearMission(missionIDs: List<String>)
+
     @Query("DELETE FROM item")
     suspend fun deleteAll()
 }
@@ -390,5 +410,139 @@ interface ItemOutboxDao {
     suspend fun delete(localID: String)
 
     @Query("DELETE FROM item_outbox")
+    suspend fun deleteAll()
+}
+
+// MARK: Missions & milestones
+
+@Dao
+interface MissionDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(missions: List<MissionEntity>)
+
+    @Query("SELECT * FROM mission WHERE id = :id")
+    suspend fun byId(id: String): MissionEntity?
+
+    @Query("SELECT * FROM mission WHERE id = :id")
+    fun byIdFlow(id: String): Flow<MissionEntity?>
+
+    /// Lookup by the human-facing `#num`. Numbers are unique across items,
+    /// missions and milestones, so at most one row can match.
+    @Query("SELECT * FROM mission WHERE num = :num ORDER BY id LIMIT 1")
+    suspend fun byNum(num: Int): MissionEntity?
+
+    /// Open missions sort newest-activity first with never-checkpointed
+    /// missions last (`last_milestone_at DESC NULLS LAST, created_at DESC`,
+    /// the journal's own order). SQLite has no NULLS LAST, so the `IS NULL`
+    /// term does it.
+    @Query("SELECT * FROM mission WHERE state = 'open' ORDER BY last_milestone_at IS NULL, last_milestone_at DESC, created_at DESC")
+    suspend fun open(): List<MissionEntity>
+
+    @Query("SELECT * FROM mission WHERE state = 'open' ORDER BY last_milestone_at IS NULL, last_milestone_at DESC, created_at DESC")
+    fun openFlow(): Flow<List<MissionEntity>>
+
+    /// Closed ones sort newest-closed first.
+    @Query("SELECT * FROM mission WHERE state = 'closed' ORDER BY closed_at DESC, num DESC")
+    suspend fun closed(): List<MissionEntity>
+
+    @Query("SELECT * FROM mission WHERE state = 'closed' ORDER BY closed_at DESC, num DESC")
+    fun closedFlow(): Flow<List<MissionEntity>>
+
+    /// `state DESC` puts 'open' before 'closed' (SQLite: 'closed' < 'open'),
+    /// so a direct reader never sees closed-first.
+    @Query("SELECT * FROM mission ORDER BY state DESC, last_milestone_at IS NULL, last_milestone_at DESC, created_at DESC")
+    suspend fun all(): List<MissionEntity>
+
+    @Query("SELECT * FROM mission ORDER BY state DESC, last_milestone_at IS NULL, last_milestone_at DESC, created_at DESC")
+    fun allFlow(): Flow<List<MissionEntity>>
+
+    /// Every cached id outside [ids] — the authoritative replace's sweep.
+    @Query("SELECT id FROM mission WHERE id NOT IN (:ids)")
+    suspend fun idsNotIn(ids: List<String>): List<String>
+
+    @Query("DELETE FROM mission WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<String>)
+
+    /// The ids among [ids] whose cached row is already closed — see
+    /// `JournalStore.upsertMissions`' "closed is terminal" guard.
+    @Query("SELECT id FROM mission WHERE id IN (:ids) AND state = 'closed'")
+    suspend fun closedAmong(ids: List<String>): List<String>
+
+    /// Which mission a conversation belongs to, derived locally (the
+    /// snapshot does not carry `conversations.mission_id`). Three lookups,
+    /// in order: origin; `mission_conversation`, the authoritative
+    /// membership list a detail fetch populates the moment a `join` marker
+    /// or a server-side inheritance names this conversation; then any
+    /// milestone posted in the conversation, which still matters as a
+    /// fallback until the owning mission's own detail fetch has ever
+    /// landed. One statement so Room's invalidation tracker re-fires it on
+    /// a write to any of the three tables. The journal never lets a
+    /// conversation originate or join a second mission (its `mission_id` is
+    /// never cleared), but should the cache ever hold several, the OPEN one
+    /// wins, then the newest — a title tap must never land on a closed
+    /// mission while a live one exists (Bugbot, #79).
+    @Query(
+        "SELECT COALESCE(" +
+            "(SELECT id FROM mission WHERE origin_convo_id = :convoID ORDER BY (state = 'open') DESC, created_at DESC, id LIMIT 1), " +
+            "(SELECT mc.mission_id FROM mission_conversation mc LEFT JOIN mission m ON m.id = mc.mission_id WHERE mc.convo_id = :convoID ORDER BY (m.state = 'open') DESC, m.created_at DESC, mc.mission_id LIMIT 1), " +
+            "(SELECT mission_id FROM milestone WHERE convo_id = :convoID ORDER BY seq DESC LIMIT 1))"
+    )
+    suspend fun missionIDForConversation(convoID: String): String?
+
+    @Query(
+        "SELECT COALESCE(" +
+            "(SELECT id FROM mission WHERE origin_convo_id = :convoID ORDER BY (state = 'open') DESC, created_at DESC, id LIMIT 1), " +
+            "(SELECT mc.mission_id FROM mission_conversation mc LEFT JOIN mission m ON m.id = mc.mission_id WHERE mc.convo_id = :convoID ORDER BY (m.state = 'open') DESC, m.created_at DESC, mc.mission_id LIMIT 1), " +
+            "(SELECT mission_id FROM milestone WHERE convo_id = :convoID ORDER BY seq DESC LIMIT 1))"
+    )
+    fun missionIDForConversationFlow(convoID: String): Flow<String?>
+
+    @Query("DELETE FROM mission")
+    suspend fun deleteAll()
+}
+
+@Dao
+interface MilestoneDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(milestones: List<MilestoneEntity>)
+
+    @Query("SELECT * FROM milestone WHERE mission_id = :missionID ORDER BY created_at DESC, num DESC")
+    suspend fun forMission(missionID: String): List<MilestoneEntity>
+
+    @Query("SELECT * FROM milestone WHERE mission_id = :missionID ORDER BY created_at DESC, num DESC")
+    fun forMissionFlow(missionID: String): Flow<List<MilestoneEntity>>
+
+    /// The per-conversation view (`GET /milestones?convo=`), newest first.
+    @Query("SELECT * FROM milestone WHERE convo_id = :convoID ORDER BY seq DESC")
+    suspend fun forConversation(convoID: String): List<MilestoneEntity>
+
+    @Query("DELETE FROM milestone WHERE mission_id = :missionID")
+    suspend fun deleteForMission(missionID: String)
+
+    @Query("DELETE FROM milestone WHERE mission_id IN (:missionIDs)")
+    suspend fun deleteForMissions(missionIDs: List<String>)
+
+    @Query("DELETE FROM milestone")
+    suspend fun deleteAll()
+}
+
+@Dao
+interface MissionConversationDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(rows: List<MissionConversationEntity>)
+
+    @Query("SELECT * FROM mission_conversation WHERE mission_id = :missionID ORDER BY convo_id")
+    suspend fun forMission(missionID: String): List<MissionConversationEntity>
+
+    @Query("SELECT * FROM mission_conversation WHERE mission_id = :missionID ORDER BY convo_id")
+    fun forMissionFlow(missionID: String): Flow<List<MissionConversationEntity>>
+
+    @Query("DELETE FROM mission_conversation WHERE mission_id = :missionID")
+    suspend fun deleteForMission(missionID: String)
+
+    @Query("DELETE FROM mission_conversation WHERE mission_id IN (:missionIDs)")
+    suspend fun deleteForMissions(missionIDs: List<String>)
+
+    @Query("DELETE FROM mission_conversation")
     suspend fun deleteAll()
 }
