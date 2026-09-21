@@ -32,9 +32,12 @@ fun rememberMatronMarkdownColors(): MarkdownColors {
 /// is the render seam — code blocks route through [CodeBlock] (copy button,
 /// horizontal scroll), everything else renders as tappable text.
 ///
-/// Link policy mirrors the Swift `MarkdownText.handle`: `http(s)` links open via
-/// the platform URI handler; `matrix:`/`mxc:` links carry no click annotation
-/// (rendered as accent text) so they no-op until in-app resolution lands.
+/// Link policy mirrors the Swift `MarkdownText.handle` ([handleMessageLink]):
+/// `matron://item/<n>` opens that tracker item through [LocalOpenTrackerItem]
+/// and is swallowed when no host installed one (the scheme is not registered
+/// with the OS); `http(s)` links open via [onLinkClick] or the platform URI
+/// handler; `matrix:`/`mxc:` links carry no click annotation (rendered as
+/// accent text) so they no-op until in-app resolution lands.
 @Composable
 fun MarkdownText(
     raw: String,
@@ -45,7 +48,9 @@ fun MarkdownText(
     val colors = rememberMatronMarkdownColors()
     val document = remember(raw, colors) { MarkdownAttributed.parse(raw, colors) }
     val uriHandler = LocalUriHandler.current
-    val click: (String) -> Unit = onLinkClick ?: { url -> runCatching { uriHandler.openUri(url) } }
+    val openItem = LocalOpenTrackerItem.current
+    val external: (String) -> Unit = onLinkClick ?: { url -> runCatching { uriHandler.openUri(url) } }
+    val click: (String) -> Unit = { url -> handleMessageLink(url, openItem, external) }
 
     Column(modifier) {
         document.blocks.forEach { block ->
@@ -69,3 +74,4 @@ fun MarkdownText(
         }
     }
 }
+

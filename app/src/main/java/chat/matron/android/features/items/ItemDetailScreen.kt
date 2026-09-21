@@ -50,7 +50,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -60,6 +59,9 @@ import chat.matron.android.designsystem.ItemDetailModel
 import chat.matron.android.designsystem.ItemDetailView
 import chat.matron.android.designsystem.ItemGlyph
 import chat.matron.android.designsystem.ItemResolveControl
+import chat.matron.android.designsystem.TrackerItemLinkHost
+import chat.matron.android.designsystem.TrackerItemLinkOutcome
+import chat.matron.android.designsystem.rememberMessageLinkOpener
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.PendingCommentModel
 import chat.matron.android.features.chat.openAttachment
@@ -96,10 +98,18 @@ fun ItemDetailScreen(
     readMemory: ItemReadMemory,
     onBack: () -> Unit,
     onOpenConversation: (String) -> Unit,
+    /// Resolves a `[#12](matron://item/12)` link tapped inside this item's
+    /// body or a comment (`AppDependencies.trackerItemLinkOutcome`, tracker
+    /// item #115). `null` (previews/tests) leaves item links inert — never
+    /// handed to the OS either way.
+    resolveItemLink: (suspend (Int) -> TrackerItemLinkOutcome)? = null,
+    /// Opens ANOTHER tracker item from such a link by PUSHING it onto the
+    /// same stack this screen sits on, so Back returns to the item the link
+    /// was tapped in.
+    onOpenItem: ((String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val uriHandler = LocalUriHandler.current
     val item by viewModel.item.collectAsStateWithLifecycle()
     val comments by viewModel.comments.collectAsStateWithLifecycle()
     val pending by viewModel.pendingComments.collectAsStateWithLifecycle()
@@ -211,106 +221,121 @@ fun ItemDetailScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(current?.let { "#${it.num} · ${ItemGlyph.label(it.kind)}" } ?: "Item") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
-                },
-                actions = {
-                    if (current != null) {
-                        ItemResolveControl(
-                            isOpen = current.state == ItemState.OPEN,
-                            resolutions = viewModel.availableResolutions,
-                            isBusy = isBusy,
-                            onClose = { r -> scope.launch { viewModel.close(r) } },
-                            onReopen = { scope.launch { viewModel.reopen() } },
-                        )
-                    }
-                },
-            )
+    // Item links inside the body / comments / link chips (tracker item
+    // #115, apple #208) — one install for this whole screen, shadowing the
+    // chat's host so a link pushes onto THIS stack. A link to the item
+    // already on screen is a no-op rather than a second identical push.
+    TrackerItemLinkHost(
+        resolve = { num ->
+            val resolve = resolveItemLink ?: return@TrackerItemLinkHost TrackerItemLinkOutcome.Ignore
+            val outcome = resolve(num)
+            if (outcome is TrackerItemLinkOutcome.Open && outcome.itemID == viewModel.itemID) TrackerItemLinkOutcome.Ignore else outcome
         },
-    ) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
-            MatronTimelineBackground()
-            if (current == null) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-            } else {
-                Column(Modifier.fillMaxSize()) {
-                    error?.let { message ->
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                            IconButton(onClick = { viewModel.dismissError() }) { Icon(Icons.Filled.Close, contentDescription = "Dismiss") }
-                        }
-                    }
-                    Box(Modifier.weight(1f)) {
-                        ItemDetailView(
-                            model = ItemDetailModel(
-                                item = current,
-                                comments = comments,
-                                pending = pending.map { row ->
-                                    val payload = runCatching { MatronJson.decodeFromString(ItemsSync.CommentPayload.serializer(), row.payloadJson) }.getOrNull()
-                                    PendingCommentModel(
-                                        id = row.localID, body = payload?.body ?: "", attachmentCount = payload?.attachments?.size ?: 0,
-                                        attempts = row.attempts, lastError = row.lastError,
-                                    )
-                                },
-                                originTitle = origin,
-                                availableResolutions = viewModel.availableResolutions,
+        open = { id -> onOpenItem?.invoke(id) },
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text(current?.let { "#${it.num} · ${ItemGlyph.label(it.kind)}" } ?: "Item") },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
+                    },
+                    actions = {
+                        if (current != null) {
+                            ItemResolveControl(
+                                isOpen = current.state == ItemState.OPEN,
+                                resolutions = viewModel.availableResolutions,
                                 isBusy = isBusy,
-                                loadedCommentCount = loadedCount,
-                            ),
-                            draft = draft,
-                            onDraftChange = { draft = it; viewModel.draft = it },
-                            image = { a -> images[a.blobRef] },
-                            onOpenAttachment = ::openAttachment,
-                            onOpenLink = { url -> runCatching { uriHandler.openUri(url) } },
-                            onOpenConversation = onOpenConversation,
-                            onSubmit = { scope.launch { viewModel.submitComment(); draft = viewModel.draft } },
-                            onAttach = { attachMenu = true },
-                            onVoiceNote = {
-                                scope.launch {
-                                    try {
-                                        recorder.start()
-                                    } catch (e: VoiceRecorder.RecorderError) {
-                                        viewModel.reportError(
-                                            when (e) {
-                                                VoiceRecorder.RecorderError.PermissionDenied -> "Microphone access is needed to record a voice note."
-                                                VoiceRecorder.RecorderError.RecordFailed -> "Couldn't start recording."
-                                                VoiceRecorder.RecorderError.AlreadyRecording -> "Already recording."
-                                            },
-                                        )
-                                    }
-                                }
-                            },
-                            startsAtBottom = startsAtBottom,
-                            onBottomVisibilityChange = { atBottom -> readMemory.store(viewModel.itemID, atBottom) },
-                        )
-                        // The attach menu anchors at the composer's bottom-left.
-                        Box(Modifier.align(Alignment.BottomStart).padding(start = 8.dp)) {
-                            DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("Photo or video") },
-                                    leadingIcon = { Icon(Icons.Outlined.PhotoLibrary, contentDescription = null) },
-                                    onClick = {
-                                        attachMenu = false
-                                        photoLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("File") },
-                                    leadingIcon = { Icon(Icons.Outlined.InsertDriveFile, contentDescription = null) },
-                                    onClick = { attachMenu = false; fileLauncher.launch("*/*") },
-                                )
+                                onClose = { r -> scope.launch { viewModel.close(r) } },
+                                onReopen = { scope.launch { viewModel.reopen() } },
+                            )
+                        }
+                    },
+                )
+            },
+        ) { padding ->
+            Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
+                MatronTimelineBackground()
+                if (current == null) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                } else {
+                    Column(Modifier.fillMaxSize()) {
+                        error?.let { message ->
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                                IconButton(onClick = { viewModel.dismissError() }) { Icon(Icons.Filled.Close, contentDescription = "Dismiss") }
                             }
                         }
-                        if (recorderState is VoiceRecorder.State.Recording) {
-                            RecordingBar(
-                                modifier = Modifier.align(Alignment.BottomCenter),
-                                onCancel = { recorder.cancel() },
-                                onSend = { recorder.stop()?.let { note -> scope.launch { viewModel.sendVoiceNote(note.file) } } },
+                        Box(Modifier.weight(1f)) {
+                            ItemDetailView(
+                                model = ItemDetailModel(
+                                    item = current,
+                                    comments = comments,
+                                    pending = pending.map { row ->
+                                        val payload = runCatching { MatronJson.decodeFromString(ItemsSync.CommentPayload.serializer(), row.payloadJson) }.getOrNull()
+                                        PendingCommentModel(
+                                            id = row.localID, body = payload?.body ?: "", attachmentCount = payload?.attachments?.size ?: 0,
+                                            attempts = row.attempts, lastError = row.lastError,
+                                        )
+                                    },
+                                    originTitle = origin,
+                                    availableResolutions = viewModel.availableResolutions,
+                                    isBusy = isBusy,
+                                    loadedCommentCount = loadedCount,
+                                ),
+                                draft = draft,
+                                onDraftChange = { draft = it; viewModel.draft = it },
+                                image = { a -> images[a.blobRef] },
+                                onOpenAttachment = ::openAttachment,
+                                // Through the shared policy, so an item link in a link chip opens
+                                    // in-app and no matron:// URL is ever handed to the OS.
+                                    onOpenLink = rememberMessageLinkOpener(),
+                                onOpenConversation = onOpenConversation,
+                                onSubmit = { scope.launch { viewModel.submitComment(); draft = viewModel.draft } },
+                                onAttach = { attachMenu = true },
+                                onVoiceNote = {
+                                    scope.launch {
+                                        try {
+                                            recorder.start()
+                                        } catch (e: VoiceRecorder.RecorderError) {
+                                            viewModel.reportError(
+                                                when (e) {
+                                                    VoiceRecorder.RecorderError.PermissionDenied -> "Microphone access is needed to record a voice note."
+                                                    VoiceRecorder.RecorderError.RecordFailed -> "Couldn't start recording."
+                                                    VoiceRecorder.RecorderError.AlreadyRecording -> "Already recording."
+                                                },
+                                            )
+                                        }
+                                    }
+                                },
+                                startsAtBottom = startsAtBottom,
+                                onBottomVisibilityChange = { atBottom -> readMemory.store(viewModel.itemID, atBottom) },
                             )
+                            // The attach menu anchors at the composer's bottom-left.
+                            Box(Modifier.align(Alignment.BottomStart).padding(start = 8.dp)) {
+                                DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
+                                    DropdownMenuItem(
+                                        text = { Text("Photo or video") },
+                                        leadingIcon = { Icon(Icons.Outlined.PhotoLibrary, contentDescription = null) },
+                                        onClick = {
+                                            attachMenu = false
+                                            photoLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("File") },
+                                        leadingIcon = { Icon(Icons.Outlined.InsertDriveFile, contentDescription = null) },
+                                        onClick = { attachMenu = false; fileLauncher.launch("*/*") },
+                                    )
+                                }
+                            }
+                            if (recorderState is VoiceRecorder.State.Recording) {
+                                RecordingBar(
+                                    modifier = Modifier.align(Alignment.BottomCenter),
+                                    onCancel = { recorder.cancel() },
+                                    onSend = { recorder.stop()?.let { note -> scope.launch { viewModel.sendVoiceNote(note.file) } } },
+                                )
+                            }
                         }
                     }
                 }
