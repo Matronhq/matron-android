@@ -142,6 +142,28 @@ class ItemsViewsTest {
         assertFalse(itemThreadShowsJumpToBottom(placed = true, scrollable = true, atBottom = true))
     }
 
+    /// apple #200: a drag on the composer row hides the keyboard only when
+    /// it is a deliberate pull-down.
+    @Test
+    fun dragDownDismissesTheKeyboardOnlyForADeliberatePullDown() {
+        assertTrue(KeyboardDismiss.shouldDismiss(dx = 0f, dy = 24f))
+        assertTrue(KeyboardDismiss.shouldDismiss(dx = 10f, dy = 60f))
+        assertFalse("below the drop", KeyboardDismiss.shouldDismiss(dx = 0f, dy = 23f))
+        assertFalse("an upward drag never counts", KeyboardDismiss.shouldDismiss(dx = 0f, dy = -60f))
+        assertFalse("a sideways slip toward the send button never counts", KeyboardDismiss.shouldDismiss(dx = 80f, dy = 30f))
+        assertFalse(KeyboardDismiss.shouldDismiss(dx = -40f, dy = 40f))
+    }
+
+    /// apple #198: attached-keyboard Enter sends, Shift+Enter newlines, an
+    /// empty draft's Enter falls through.
+    @Test
+    fun enterSendsOnlyAPlainEnterWithSomethingToSend() {
+        assertTrue(itemCommentEnterSends(isEnter = true, shift = false, draft = "ok"))
+        assertFalse(itemCommentEnterSends(isEnter = true, shift = true, draft = "ok"))
+        assertFalse(itemCommentEnterSends(isEnter = true, shift = false, draft = "  \n"))
+        assertFalse(itemCommentEnterSends(isEnter = false, shift = false, draft = "ok"))
+    }
+
     @Test
     fun composerAndBadgeCopy() {
         assertFalse(itemCommentCanSubmit("   \n"))
