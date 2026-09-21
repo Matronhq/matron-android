@@ -1093,65 +1093,78 @@ private fun ChatRoute(
     roomBoxNames: List<String> = emptyList(),
     roomBoxShorts: List<String> = emptyList(),
 ) {
-    // Observed, not one-shot: the mirror can learn parent_convo_id AFTER this
-    // route composes (convo_meta or a snapshot upsert), and the route must
-    // switch to the read-only sub-chat presentation when it does (bugbot
-    // "Sub-chat parent never refreshes"). Linkage is immutable once set, so
-    // emissions only ever go null → parent.
-    val lookup by produceState<ParentLookup?>(initialValue = null, convoID) {
-        deps.parentConvoIDFlow(session, convoID).collect { value = ParentLookup(it) }
-    }
-    val resolved = lookup
-    if (resolved == null) {
-        LoadingScreen()
-        return
-    }
-    val parent = resolved.parent
-    if (parent != null) {
-        val (chatVM, stripVM) = vmCache.subChatViewModels(convoID, parent)
-        SubChatView(
-            chatVM = chatVM,
-            stripVM = stripVM,
-            childID = convoID,
-            fallbackTitle = "Subagent",
-            onBack = onBack,
-            // A coordinator that is itself a sub-chat (or learns its parent
-            // later) is still the tab's root: no back control there either
-            // (Apple hides it on the whole ChatDestinationView).
-            showsBackButton = showsBackButton,
-            onSwitchTo = onSwitchTo,
-            onOpenConversation = onOpenConversation,
-        )
-    } else {
-        val (chatVM, composerVM) = vmCache.viewModels(convoID)
-        val stripVM = vmCache.stripViewModel(convoID)
-        // The per-room items panel VM runs while the chat is open so the
-        // top-bar badge is live; the generation guard keeps a stale
-        // disposal (this route re-entered from the tasks page) from
-        // cancelling the successor's observation.
-        val itemsVM = remember(convoID) { vmCache.itemsPanelViewModel(convoID) }
-        DisposableEffect(itemsVM) {
-            itemsVM.start()
-            val generation = itemsVM.observationGeneration
-            onDispose { itemsVM.stop(generation) }
+    // `[#65](matron://item/65)` links in any message body (apple #208):
+    // resolved through the session's store + sync, opened where an inline
+    // item card opens it; a miss stays put and explains itself.
+    //
+    // Installed over the WHOLE route, not just the full-chat branch: a
+    // sub-chat renders its bodies through the same [MarkdownText], so an
+    // item link there is underlined, accent and tappable exactly like one
+    // in the parent chat. With the host only on the [ChatScreen] branch the
+    // tap found a null `LocalOpenTrackerItem` and was swallowed — a link
+    // that looks live and does nothing, with no navigation and no miss
+    // alert (Bugbot on #78). One install per destination, so the gate's
+    // "last tap wins" rule spans the whole route, including the flip from
+    // the full chat to the sub-chat presentation.
+    TrackerItemLinkHost(
+        resolve = { num -> deps.trackerItemLinkOutcome(num, session) },
+        open = onOpenItem,
+    ) { gatedOpenItem ->
+        // Observed, not one-shot: the mirror can learn parent_convo_id AFTER this
+        // route composes (convo_meta or a snapshot upsert), and the route must
+        // switch to the read-only sub-chat presentation when it does (bugbot
+        // "Sub-chat parent never refreshes"). Linkage is immutable once set, so
+        // emissions only ever go null → parent.
+        val lookup by produceState<ParentLookup?>(initialValue = null, convoID) {
+            deps.parentConvoIDFlow(session, convoID).collect { value = ParentLookup(it) }
         }
-        val needsYouCount by itemsVM.needsYouCount.collectAsStateWithLifecycle()
-        val itemsSupported by itemsVM.isSupported.collectAsStateWithLifecycle()
-        // Which mission this conversation belongs to (spec: Transcript and
-        // title), derived locally from the mission cache — null until the
-        // first missions refresh lands, which is exactly when the title-tap
-        // affordance should appear. Keyed on convoID so a re-used route
-        // never shows the previous room's mission for a frame.
-        val missionID by produceState<String?>(initialValue = null, convoID) {
-            deps.missionIDFlow(session, convoID).collect { value = it }
+        val resolved = lookup
+        if (resolved == null) {
+            LoadingScreen()
+            return@TrackerItemLinkHost
         }
-        // `[#65](matron://item/65)` links in any message body (apple #208):
-        // resolved through the session's store + sync, opened where an
-        // inline item card opens it; a miss stays put and explains itself.
-        TrackerItemLinkHost(
-            resolve = { num -> deps.trackerItemLinkOutcome(num, session) },
-            open = onOpenItem,
-        ) { gatedOpenItem ->
+        val parent = resolved.parent
+        if (parent != null) {
+            val (chatVM, stripVM) = vmCache.subChatViewModels(convoID, parent)
+            // No `onOpenItem` here: an inline item CARD stays tap-inert in a
+            // sub-chat (apple #186's scope decision, [TimelineList]). Only
+            // the body links this host serves navigate out of it.
+            SubChatView(
+                chatVM = chatVM,
+                stripVM = stripVM,
+                childID = convoID,
+                fallbackTitle = "Subagent",
+                onBack = onBack,
+                // A coordinator that is itself a sub-chat (or learns its parent
+                // later) is still the tab's root: no back control there either
+                // (Apple hides it on the whole ChatDestinationView).
+                showsBackButton = showsBackButton,
+                onSwitchTo = onSwitchTo,
+                onOpenConversation = onOpenConversation,
+            )
+        } else {
+            val (chatVM, composerVM) = vmCache.viewModels(convoID)
+            val stripVM = vmCache.stripViewModel(convoID)
+            // The per-room items panel VM runs while the chat is open so the
+            // top-bar badge is live; the generation guard keeps a stale
+            // disposal (this route re-entered from the tasks page) from
+            // cancelling the successor's observation.
+            val itemsVM = remember(convoID) { vmCache.itemsPanelViewModel(convoID) }
+            DisposableEffect(itemsVM) {
+                itemsVM.start()
+                val generation = itemsVM.observationGeneration
+                onDispose { itemsVM.stop(generation) }
+            }
+            val needsYouCount by itemsVM.needsYouCount.collectAsStateWithLifecycle()
+            val itemsSupported by itemsVM.isSupported.collectAsStateWithLifecycle()
+            // Which mission this conversation belongs to (spec: Transcript and
+            // title), derived locally from the mission cache — null until the
+            // first missions refresh lands, which is exactly when the title-tap
+            // affordance should appear. Keyed on convoID so a re-used route
+            // never shows the previous room's mission for a frame.
+            val missionID by produceState<String?>(initialValue = null, convoID) {
+                deps.missionIDFlow(session, convoID).collect { value = it }
+            }
             ChatScreen(
                 chatVM = chatVM,
                 composerVM = composerVM,
