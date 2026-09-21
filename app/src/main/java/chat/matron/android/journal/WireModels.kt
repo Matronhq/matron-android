@@ -100,8 +100,11 @@ data class JournalEvent(
 fun JournalEvent.body(): String? = payload.stringOrNull("body")
 
 /// True for the journal's old-client twin of an `item` marker (a `text`
-/// event flagged `fallback_for`). Hidden from the timeline and skipped by
-/// outbox delivery confirmation — the marker already carries the turn.
+/// event flagged `fallback_for`). Hidden from the timeline (the marker card
+/// is what renders), never indexed for search, and skipped by outbox
+/// delivery confirmation — but it still bumps unread, activity and the
+/// snippet like any text, per the spec's "Old-client fallback": that is how
+/// a question filed while the chat was closed reaches the chat list.
 fun JournalEvent.isItemFallbackText(): Boolean =
     type == JournalEventType.TEXT && payload.stringOrNull(JournalEventType.FALLBACK_FOR_KEY) != null
 fun JournalEvent.snippet(): String? = payload.stringOrNull("snippet")
@@ -110,7 +113,10 @@ fun JournalEvent.diff(): String? = payload.stringOrNull("diff")
 /// Text fed to the full-text search index and backward-pagination indexer:
 /// TEXT→body, TOOL_OUTPUT→snippet, DIFF→diff-then-snippet; nothing else indexes.
 fun JournalEvent.previewText(): String? = when (type) {
-    JournalEventType.TEXT -> body()
+    // The item marker's `fallback_for` twin is hidden from the timeline, so
+    // a search hit on it would land on a row that never renders (the journal
+    // server's own indexer skips it the same way).
+    JournalEventType.TEXT -> if (isItemFallbackText()) null else body()
     JournalEventType.TOOL_OUTPUT -> snippet()
     JournalEventType.DIFF -> diff() ?: snippet()
     else -> null
