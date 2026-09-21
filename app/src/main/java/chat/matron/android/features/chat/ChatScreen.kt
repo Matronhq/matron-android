@@ -132,6 +132,9 @@ fun ChatScreen(
     /// `GET /items`) hides it too. [needsYouCount] is the button's badge —
     /// open items in THIS chat awaiting the user.
     onOpenItems: (() -> Unit)? = null,
+    /// `false` at the Coordinator tab's root (apple #197): that chat IS the
+    /// tab, full screen with no back button — the bottom bar is the way out.
+    showsBackButton: Boolean = true,
     itemsSupported: Boolean = true,
     needsYouCount: Int = 0,
 ) {
@@ -258,8 +261,10 @@ fun ChatScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    if (showsBackButton) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
                     }
                 },
                 actions = {

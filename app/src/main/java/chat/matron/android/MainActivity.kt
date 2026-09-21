@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.SupervisorAccount
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CircularProgressIndicator
@@ -42,6 +43,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavController
 import androidx.navigation.NavDestination
 import androidx.navigation.NavDestination.Companion.hierarchy
+import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -58,6 +60,10 @@ import chat.matron.android.designsystem.SyncBannerState
 import chat.matron.android.designsystem.needsYouBadgeText
 import chat.matron.android.designsystem.syncBannerStateFrom
 import chat.matron.android.designsystem.tabRootSwipe
+import chat.matron.android.features.coordinator.CoordinatorChooserSheet
+import chat.matron.android.features.coordinator.CoordinatorRoot
+import chat.matron.android.features.coordinator.CoordinatorSetupView
+import chat.matron.android.features.coordinator.coordinatorRoot
 import chat.matron.android.features.decisions.DecisionsScreen
 import chat.matron.android.features.chat.ChatScreen
 import chat.matron.android.features.chat.ChatVMCache
@@ -71,6 +77,7 @@ import chat.matron.android.viewmodels.ItemReadMemory
 import chat.matron.android.features.onboarding.SignInScreen
 import chat.matron.android.features.search.SearchScreen
 import chat.matron.android.features.settings.DeviceLinkScreen
+import chat.matron.android.features.settings.CoordinatorSettingRowModel
 import chat.matron.android.features.settings.DeviceSettingsScreen
 import chat.matron.android.features.settings.AgentChatScreen
 import chat.matron.android.features.settings.DevicesScreen
@@ -83,6 +90,7 @@ import chat.matron.android.platform.AndroidBiometricAuthenticator
 import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.KeyValueBoxCapacityCache
 import chat.matron.android.viewmodels.ChatListViewModel
+import chat.matron.android.viewmodels.CoordinatorSetting
 import chat.matron.android.viewmodels.LinkSignInViewModel
 import chat.matron.android.viewmodels.MediaBrowserViewModel
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -281,7 +289,7 @@ private val tabRootRoutes: Set<String> = AppTab.entries.map { it.rootRoute }.toS
 
 /// Which tab a destination belongs to, from its graph hierarchy.
 private fun NavDestination.appTab(): AppTab =
-    if (hierarchy.any { it.route == AppTab.DECISIONS.route }) AppTab.DECISIONS else AppTab.CONVERSATIONS
+    AppTab.entries.firstOrNull { tab -> hierarchy.any { it.route == tab.route } } ?: AppTab.CONVERSATIONS
 
 /// [AppShellNavigation.Host] over the `NavController`: the idiomatic
 /// per-tab back stacks (`saveState` / `restoreState` on the tab switch),
@@ -302,16 +310,24 @@ private class NavControllerShellHost(private val nav: NavHostController) : AppSh
         }
     }
 
-    override fun pushChat(roomID: String) {
-        nav.navigate("chat/$roomID")
+    override fun pushChat(tab: AppTab, roomID: String) {
+        nav.navigate("${tab.routePrefix}chat/$roomID")
     }
 
     override fun pushDecision(itemID: String) {
-        nav.navigate("decision/$itemID")
+        nav.navigate("${AppTab.DECISIONS.routePrefix}item/$itemID")
     }
 
     override fun popToRoot(tab: AppTab) {
         nav.popBackStack(tab.rootRoute, inclusive = false)
+    }
+
+    /// The Conversations stack may be saved away (another tab showing):
+    /// restore it first, then pop; the rule that asked for this switches
+    /// to the Coordinator tab right after.
+    override fun popChats(count: Int) {
+        if (nav.currentDestination?.appTab() != AppTab.CONVERSATIONS) switchTab(AppTab.CONVERSATIONS)
+        repeat(count) { nav.popBackStack() }
     }
 }
 
@@ -337,10 +353,15 @@ private fun SignedInApp(
     val vmCache = remember(session.userID) { ChatVMCache(deps, session, sessionScope) }
     val chatListVM = remember(session.userID) { ChatListViewModel(deps.chatService(session), sessionScope) }
     val decisionsVM = remember(session.userID) { deps.makeDecisionsViewModel(session, sessionScope) }
+    // The coordinator conversation (spec §5b), one live setting per session
+    // shared by the tab, Settings and the nav rules.
+    val coordinatorSetting = remember(session.userID) { CoordinatorSetting(session.userID, deps.preferences) }
+    val coordinatorConvoID by coordinatorSetting.convoID.collectAsStateWithLifecycle()
 
     var connectionState by remember { mutableStateOf<SyncBannerState>(SyncBannerState.Connecting) }
     var hasEverConnected by remember { mutableStateOf(false) }
-    var showNewChat by remember { mutableStateOf(false) }
+    var newChatTarget by remember { mutableStateOf<NewChatTarget?>(null) }
+    var showCoordinatorChooser by remember { mutableStateOf(false) }
 
     val groups by chatListVM.groups.collectAsStateWithLifecycle()
     val allChats = remember(groups) { groups.flatMap { it.summaries } }
@@ -364,6 +385,9 @@ private fun SignedInApp(
         decisionsVM.start()
         onDispose { decisionsVM.stop() }
     }
+    // The nav rules route the coordinator conversation to its own tab
+    // (Bugbot, apple #197): mirror the setting into the shell.
+    LaunchedEffect(shell, coordinatorConvoID) { shell.coordinatorConvoID = coordinatorConvoID }
 
     // Agent-spawn card / SpawnOutcomeRow "Open" deep link. remembered (keyed
     // on session.userID, matching vmCache/chatListVM above) because
@@ -388,12 +412,10 @@ private fun SignedInApp(
             // "the same" — opening a spawned room from its parent chat would
             // REPLACE the parent's back-stack entry (Back then skips to the
             // list and the parent's state is lost) instead of pushing.
-            navigate = { id ->
-                val entry = nav.currentBackStackEntry
-                val alreadyOpen = entry?.destination?.route == "chat/{convoID}" &&
-                    entry.arguments?.getString("convoID") == id
-                if (!alreadyOpen) nav.navigate("chat/$id")
-            },
+            // The shell's push rule keeps the guard (the chat already on top
+            // of the selected tab's stack is a no-op) and adds the
+            // coordinator hand-off (apple #197).
+            navigate = { id -> shell.pushChat(id) },
         )
     }
     // "Open conversation" from a Decisions row or its detail: the shell's
@@ -449,6 +471,74 @@ private fun SignedInApp(
     val atTabRoot = currentEntry?.destination?.route in tabRootRoutes
     val selectedTab by shell.tab.collectAsStateWithLifecycle()
     val awaitingYouCount by decisionsVM.awaitingYouCount.collectAsStateWithLifecycle()
+    // The chat-list unread rule as a dot on the Coordinator tab.
+    val coordinatorHasUnread = coordinatorConvoID?.let { id -> (currentSummary(groups, id)?.unreadCount ?: 0) > 0 } ?: false
+    val coordinatorTitle = coordinatorConvoID?.let { id -> currentSummary(groups, id)?.title?.ifEmpty { null } ?: id }
+
+    /// One chat / tasks / item-detail destination set per tab that hosts
+    /// chats (Conversations, Coordinator), under the tab's route prefix.
+    fun NavGraphBuilder.chatDestinations(tab: AppTab) {
+        val prefix = tab.routePrefix
+        composable(
+            route = "${prefix}chat/{convoID}",
+            arguments = listOf(navArgument("convoID") { type = NavType.StringType }),
+        ) { entry ->
+            val convoID = entry.arguments?.getString("convoID") ?: return@composable
+            ChatRoute(
+                deps = deps,
+                session = session,
+                convoID = convoID,
+                vmCache = vmCache,
+                title = currentSummary(groups, convoID)?.title ?: "",
+                boxName = currentSummary(groups, convoID)?.boxName,
+                sessionShort = currentSummary(groups, convoID)?.sessionShort,
+                boxShort = currentSummary(groups, convoID)?.boxShort,
+                roomBoxNames = currentSummary(groups, convoID)?.roomBoxNames ?: emptyList(),
+                roomBoxShorts = currentSummary(groups, convoID)?.roomBoxShorts ?: emptyList(),
+                onBack = { nav.popBackStack() },
+                onOpenChild = { shell.pushChat(it) },
+                onSwitchTo = { sibling ->
+                    nav.navigate("${prefix}chat/$sibling") {
+                        popUpTo("${prefix}chat/$convoID") { inclusive = true }
+                    }
+                },
+                onOpenConversation = onOpenConversation,
+                onOpenItems = { nav.navigate("${prefix}items/$convoID") },
+            )
+        }
+
+        // The conversation's tasks page (apple #185 / #194): the items panel
+        // as its own destination, reached from the chat top bar.
+        composable(
+            route = "${prefix}items/{convoID}",
+            arguments = listOf(navArgument("convoID") { type = NavType.StringType }),
+        ) { entry ->
+            val convoID = entry.arguments?.getString("convoID") ?: return@composable
+            val itemsVM = remember(convoID) { vmCache.itemsPanelViewModel(convoID) }
+            ItemsScreen(
+                viewModel = itemsVM,
+                originLabels = { deps.journalStore(session).conversationOriginLabels() },
+                onBack = { nav.popBackStack() },
+                onSelect = { item -> nav.navigate("${prefix}item/${item.id}") },
+                onOpenConversation = onOpenConversation,
+            )
+        }
+
+        // One item's thread. Its own route (not a sheet inside the list) so
+        // the system back returns to the list and a later port can deep-link
+        // `matron://item/N` straight here.
+        composable(
+            route = "${prefix}item/{itemID}",
+            arguments = listOf(navArgument("itemID") { type = NavType.StringType }),
+        ) { entry ->
+            val itemID = entry.arguments?.getString("itemID") ?: return@composable
+            ItemDetailRoute(
+                deps = deps, session = session, vmCache = vmCache, itemID = itemID,
+                onBack = { nav.popBackStack() },
+                onOpenConversation = onOpenConversation,
+            )
+        }
+    }
 
     Scaffold(
         // Only the bottom bar contributes padding; each screen keeps its own
@@ -456,7 +546,12 @@ private fun SignedInApp(
         contentWindowInsets = WindowInsets(0),
         bottomBar = {
             if (atTabRoot) {
-                AppTabBar(selected = selectedTab, awaitingYouCount = awaitingYouCount, onSelect = { shell.selectTab(it) })
+                AppTabBar(
+                    selected = selectedTab,
+                    awaitingYouCount = awaitingYouCount,
+                    coordinatorHasUnread = coordinatorHasUnread,
+                    onSelect = { shell.selectTab(it) },
+                )
             }
         },
     ) { padding ->
@@ -467,6 +562,40 @@ private fun SignedInApp(
             // navigation bar, so the screens beneath must not pad for it again.
             modifier = Modifier.padding(padding).consumeWindowInsets(padding),
         ) {
+            // The Coordinator tab (spec §3, §5b): its own graph, rooted at the
+            // setup view or the coordinator chat — full screen, no back
+            // button, the bar visible (it is the only way out of the tab).
+            // Sub-chats, the tasks page and items opened from it push here.
+            navigation(route = AppTab.COORDINATOR.route, startDestination = AppTab.COORDINATOR.rootRoute) {
+                composable(AppTab.COORDINATOR.rootRoute) {
+                    when (val root = coordinatorRoot(coordinatorConvoID)) {
+                        CoordinatorRoot.Setup -> CoordinatorSetupView(onChoose = { showCoordinatorChooser = true }, modifier = rootSwipe)
+                        is CoordinatorRoot.Chat -> {
+                            val convoID = root.convoID
+                            ChatRoute(
+                                deps = deps,
+                                session = session,
+                                convoID = convoID,
+                                vmCache = vmCache,
+                                title = currentSummary(groups, convoID)?.title ?: "",
+                                boxName = currentSummary(groups, convoID)?.boxName,
+                                sessionShort = currentSummary(groups, convoID)?.sessionShort,
+                                boxShort = currentSummary(groups, convoID)?.boxShort,
+                                roomBoxNames = currentSummary(groups, convoID)?.roomBoxNames ?: emptyList(),
+                                roomBoxShorts = currentSummary(groups, convoID)?.roomBoxShorts ?: emptyList(),
+                                onBack = {},
+                                showsBackButton = false,
+                                onOpenChild = { shell.pushChat(it) },
+                                onSwitchTo = { sibling -> shell.pushChat(sibling) },
+                                onOpenConversation = onOpenConversation,
+                                onOpenItems = { nav.navigate("${AppTab.COORDINATOR.routePrefix}items/$convoID") },
+                            )
+                        }
+                    }
+                }
+                chatDestinations(AppTab.COORDINATOR)
+            }
+
             navigation(route = AppTab.CONVERSATIONS.route, startDestination = AppTab.CONVERSATIONS.rootRoute) {
                 composable(AppTab.CONVERSATIONS.rootRoute) {
                     ChatListScreen(
@@ -476,7 +605,7 @@ private fun SignedInApp(
                         searchAvailable = deps.search != null,
                         chat = deps.chatService(session),
                         onOpenChat = { shell.openChat(it) },
-                        onNewChat = { showNewChat = true },
+                        onNewChat = { newChatTarget = NewChatTarget.CONVERSATIONS },
                         onOpenSearch = { nav.navigate("search") },
                         onOpenSettings = { nav.navigate("settings") },
                         onSignOut = onSignOut,
@@ -484,65 +613,7 @@ private fun SignedInApp(
                     )
                 }
 
-                composable(
-                    route = "chat/{convoID}",
-                    arguments = listOf(navArgument("convoID") { type = NavType.StringType }),
-                ) { entry ->
-                    val convoID = entry.arguments?.getString("convoID") ?: return@composable
-                    ChatRoute(
-                        deps = deps,
-                        session = session,
-                        convoID = convoID,
-                        vmCache = vmCache,
-                        title = currentSummary(groups, convoID)?.title ?: "",
-                        boxName = currentSummary(groups, convoID)?.boxName,
-                        sessionShort = currentSummary(groups, convoID)?.sessionShort,
-                        boxShort = currentSummary(groups, convoID)?.boxShort,
-                        roomBoxNames = currentSummary(groups, convoID)?.roomBoxNames ?: emptyList(),
-                        roomBoxShorts = currentSummary(groups, convoID)?.roomBoxShorts ?: emptyList(),
-                        onBack = { nav.popBackStack() },
-                        onOpenChild = { nav.navigate("chat/$it") },
-                        onSwitchTo = { sibling ->
-                            nav.navigate("chat/$sibling") {
-                                popUpTo("chat/$convoID") { inclusive = true }
-                            }
-                        },
-                        onOpenConversation = onOpenConversation,
-                        onOpenItems = { nav.navigate("items/$convoID") },
-                    )
-                }
-
-                // The conversation's tasks page (apple #185 / #194): the items panel
-                // as its own destination, reached from the chat top bar.
-                composable(
-                    route = "items/{convoID}",
-                    arguments = listOf(navArgument("convoID") { type = NavType.StringType }),
-                ) { entry ->
-                    val convoID = entry.arguments?.getString("convoID") ?: return@composable
-                    val itemsVM = remember(convoID) { vmCache.itemsPanelViewModel(convoID) }
-                    ItemsScreen(
-                        viewModel = itemsVM,
-                        originLabels = { deps.journalStore(session).conversationOriginLabels() },
-                        onBack = { nav.popBackStack() },
-                        onSelect = { item -> nav.navigate("item/${item.id}") },
-                        onOpenConversation = onOpenConversation,
-                    )
-                }
-
-                // One item's thread. Its own route (not a sheet inside the list) so
-                // the system back returns to the list and a later port can deep-link
-                // `matron://item/N` straight here.
-                composable(
-                    route = "item/{itemID}",
-                    arguments = listOf(navArgument("itemID") { type = NavType.StringType }),
-                ) { entry ->
-                    val itemID = entry.arguments?.getString("itemID") ?: return@composable
-                    ItemDetailRoute(
-                        deps = deps, session = session, vmCache = vmCache, itemID = itemID,
-                        onBack = { nav.popBackStack() },
-                        onOpenConversation = onOpenConversation,
-                    )
-                }
+                chatDestinations(AppTab.CONVERSATIONS)
 
                 composable("search") {
                     val searchService = deps.search
@@ -587,6 +658,11 @@ private fun SignedInApp(
                         onLinkDevice = { nav.navigate("link-device") },
                         onAgentChats = { nav.navigate("agent-chats") },
                         appLock = appLock,
+                        coordinator = CoordinatorSettingRowModel(
+                            title = coordinatorTitle,
+                            onChoose = { showCoordinatorChooser = true },
+                            onClear = { coordinatorSetting.set(null) },
+                        ),
                         onBack = { nav.popBackStack() },
                     )
                 }
@@ -630,7 +706,7 @@ private fun SignedInApp(
                     )
                 }
                 composable(
-                    route = "decision/{itemID}",
+                    route = "${AppTab.DECISIONS.routePrefix}item/{itemID}",
                     arguments = listOf(navArgument("itemID") { type = NavType.StringType }),
                 ) { entry ->
                     val itemID = entry.arguments?.getString("itemID") ?: return@composable
@@ -644,28 +720,62 @@ private fun SignedInApp(
         }
     }
 
-    if (showNewChat) {
+    val target = newChatTarget
+    if (target != null) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(onDismissRequest = { showNewChat = false }, sheetState = sheetState) {
+        ModalBottomSheet(onDismissRequest = { newChatTarget = null }, sheetState = sheetState) {
             NewChatSheet(
                 api = deps.agentRPCService(session),
                 capacityCache = KeyValueBoxCapacityCache(session.userID, deps.preferences),
                 prepareConversation = { id -> deps.prepareConversation(session, id) },
                 onCreated = { convoID ->
-                    showNewChat = false
+                    newChatTarget = null
+                    // "New coordinator chat…" stores the new id first, so
+                    // openChat lands it on the Coordinator tab.
+                    if (target == NewChatTarget.COORDINATOR) coordinatorSetting.set(convoID)
                     shell.openChat(convoID)
                 },
-                onCancel = { showNewChat = false },
+                onCancel = { newChatTarget = null },
+            )
+        }
+    }
+
+    if (showCoordinatorChooser) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val isLoading by chatListVM.isLoading.collectAsStateWithLifecycle()
+        ModalBottomSheet(onDismissRequest = { showCoordinatorChooser = false }, sheetState = sheetState) {
+            CoordinatorChooserSheet(
+                chats = allChats,
+                isLoading = isLoading,
+                onPick = { id ->
+                    showCoordinatorChooser = false
+                    coordinatorSetting.set(id)
+                    shell.openChat(id)
+                },
+                onNewChat = {
+                    showCoordinatorChooser = false
+                    newChatTarget = NewChatTarget.COORDINATOR
+                },
+                onCancel = { showCoordinatorChooser = false },
             )
         }
     }
 }
 
-/// The bottom bar: Conversations and Decisions (a Coordinator tab lands in
-/// front of them next, Missions later). The Decisions badge is the
-/// app-wide awaiting-you count, hidden at zero.
+/// Who asked for the New Chat sheet: the list (an ordinary chat) or the
+/// coordinator chooser (the new chat becomes the coordinator).
+private enum class NewChatTarget { CONVERSATIONS, COORDINATOR }
+
+/// The bottom bar: Coordinator, Conversations and Decisions (Missions
+/// later). The Decisions badge is the app-wide awaiting-you count, hidden
+/// at zero; the Coordinator badge is the chat-list unread rule as a dot.
 @Composable
-private fun AppTabBar(selected: AppTab, awaitingYouCount: Int, onSelect: (AppTab) -> Unit) {
+private fun AppTabBar(
+    selected: AppTab,
+    awaitingYouCount: Int,
+    coordinatorHasUnread: Boolean,
+    onSelect: (AppTab) -> Unit,
+) {
     NavigationBar {
         AppTab.entries.forEach { tab ->
             NavigationBarItem(
@@ -674,15 +784,18 @@ private fun AppTabBar(selected: AppTab, awaitingYouCount: Int, onSelect: (AppTab
                 label = { Text(tab.label) },
                 icon = {
                     val icon = when (tab) {
+                        AppTab.COORDINATOR -> Icons.Filled.SupervisorAccount
                         AppTab.CONVERSATIONS -> Icons.Filled.Forum
                         AppTab.DECISIONS -> Icons.Filled.CheckCircle
                     }
-                    if (tab == AppTab.DECISIONS && awaitingYouCount > 0) {
-                        BadgedBox(badge = { Badge { Text(needsYouBadgeText(awaitingYouCount)) } }) {
-                            Icon(icon, contentDescription = null)
-                        }
-                    } else {
-                        Icon(icon, contentDescription = null)
+                    when {
+                        tab == AppTab.DECISIONS && awaitingYouCount > 0 ->
+                            BadgedBox(badge = { Badge { Text(needsYouBadgeText(awaitingYouCount)) } }) {
+                                Icon(icon, contentDescription = null)
+                            }
+                        tab == AppTab.COORDINATOR && coordinatorHasUnread ->
+                            BadgedBox(badge = { Badge() }) { Icon(icon, contentDescription = null) }
+                        else -> Icon(icon, contentDescription = null)
                     }
                 },
             )
@@ -733,6 +846,8 @@ private fun ChatRoute(
     onOpenConversation: (String) -> Unit,
     /// Opens the conversation's tasks page (the tracker button in the top bar).
     onOpenItems: () -> Unit,
+    /// `false` at the Coordinator tab's root, where the chat IS the tab.
+    showsBackButton: Boolean = true,
     /// Which agent box runs this session, or null when the user has fewer
     /// than two boxes. Threaded from the list's ChatSummary (same source as
     /// the row chip) so header and row can never disagree.
@@ -798,6 +913,7 @@ private fun ChatRoute(
             onOpenChild = onOpenChild,
             onOpenConversation = onOpenConversation,
             onOpenItems = onOpenItems,
+            showsBackButton = showsBackButton,
             itemsSupported = itemsSupported,
             needsYouCount = needsYouCount,
             // Deferred: built when the browser sheet opens, on the sheet's own
