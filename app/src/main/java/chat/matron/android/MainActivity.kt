@@ -314,6 +314,12 @@ private class NavControllerShellHost(private val nav: NavHostController) : AppSh
         nav.navigate("${tab.routePrefix}chat/$roomID")
     }
 
+    override fun replaceTopChat(tab: AppTab, current: String, sibling: String) {
+        nav.navigate("${tab.routePrefix}chat/$sibling") {
+            popUpTo("${tab.routePrefix}chat/$current") { inclusive = true }
+        }
+    }
+
     override fun pushDecision(itemID: String) {
         nav.navigate("${AppTab.DECISIONS.routePrefix}item/$itemID")
     }
@@ -511,11 +517,8 @@ private fun SignedInApp(
                 roomBoxShorts = currentSummary(groups, convoID)?.roomBoxShorts ?: emptyList(),
                 onBack = { nav.popBackStack() },
                 onOpenChild = { shell.pushChat(it) },
-                onSwitchTo = { sibling ->
-                    nav.navigate("${prefix}chat/$sibling") {
-                        popUpTo("${prefix}chat/$convoID") { inclusive = true }
-                    }
-                },
+                // Through the shell so the mirror sees a replace, not a push.
+                onSwitchTo = { sibling -> shell.switchSubChat(convoID, sibling) },
                 onOpenConversation = onOpenConversation,
                 onOpenItems = { nav.navigate("${prefix}items/$convoID") },
             )
@@ -600,7 +603,9 @@ private fun SignedInApp(
                                 onBack = {},
                                 showsBackButton = false,
                                 onOpenChild = { shell.pushChat(it) },
-                                onSwitchTo = { sibling -> shell.pushChat(sibling) },
+                                // The root cannot be replaced: the sibling
+                                // is pushed once, later switches replace it.
+                                onSwitchTo = { sibling -> shell.switchSubChat(convoID, sibling) },
                                 onOpenConversation = onOpenConversation,
                                 onOpenItems = { nav.navigate("${AppTab.COORDINATOR.routePrefix}items/$convoID") },
                             )
@@ -893,6 +898,10 @@ private fun ChatRoute(
             childID = convoID,
             fallbackTitle = "Subagent",
             onBack = onBack,
+            // A coordinator that is itself a sub-chat (or learns its parent
+            // later) is still the tab's root: no back control there either
+            // (Apple hides it on the whole ChatDestinationView).
+            showsBackButton = showsBackButton,
             onSwitchTo = onSwitchTo,
             onOpenConversation = onOpenConversation,
         )

@@ -1,5 +1,6 @@
 package chat.matron.android
 
+import chat.matron.android.viewmodels.SubChatStripViewModel
 import kotlin.math.abs
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -44,6 +45,9 @@ class AppShellNavigation(var host: Host? = null) {
         fun replaceChats(roomID: String)
         /// Push [roomID] on [tab]'s stack (Conversations or Coordinator).
         fun pushChat(tab: AppTab, roomID: String)
+        /// Replace the chat on top of [tab]'s stack ([current]) with
+        /// [sibling] — the sub-chat switcher's pop-then-push.
+        fun replaceTopChat(tab: AppTab, current: String, sibling: String)
         /// Push item [itemID]'s detail on the Decisions stack.
         fun pushDecision(itemID: String)
         /// Pop [tab]'s stack back to its root.
@@ -192,6 +196,33 @@ class AppShellNavigation(var host: Host? = null) {
         if (path(current).lastOrNull() == roomID) return
         setPath(current, path(current) + roomID)
         navigateExpecting(current, roomID) { host?.pushChat(current, roomID) }
+    }
+
+    /// The sub-chat switcher (mini-header menu, subtask card): move the
+    /// viewer from [childID] to its sibling [siblingID] WITHOUT growing the
+    /// stack — `SubChatStripViewModel.pathReplacingCurrentChild`'s rule on
+    /// the selected tab. When the child is the stack's top it is replaced
+    /// in place; when it is not on the stack at all — the coordinator chat
+    /// at its tab's root, which cannot be replaced — the sibling is pushed
+    /// once, so back returns to the coordinator and the pushed sibling's
+    /// own switches replace from there (Bugbot, #76; Apple's root switch
+    /// is a no-op — a dead menu — so this is the Android deviation).
+    /// Switching to the coordinator itself lands on its root.
+    fun switchSubChat(childID: String, siblingID: String) {
+        if (siblingID == childID) return
+        if (siblingID == coordinatorConvoID) {
+            landOnCoordinatorRoot()
+            return
+        }
+        val tab = _tab.value
+        val current = path(tab)
+        if (current.lastOrNull() != childID) {
+            pushChat(siblingID)
+            return
+        }
+        val replaced = SubChatStripViewModel.pathReplacingCurrentChild(current, childID, siblingID) ?: return
+        setPath(tab, replaced)
+        navigateExpecting(tab, siblingID) { host?.replaceTopChat(tab, childID, siblingID) }
     }
 
     /// Push an item's detail on the Decisions stack. Never changes the tab.
