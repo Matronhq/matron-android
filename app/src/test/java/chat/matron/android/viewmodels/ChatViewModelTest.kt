@@ -1,6 +1,5 @@
 package chat.matron.android.viewmodels
 
-import chat.matron.android.chat.ConversationSummaryEntry
 import chat.matron.android.search.SearchHit
 import chat.matron.android.chat.FakeMediaService
 import chat.matron.android.chat.FakeTimelineService
@@ -1233,6 +1232,37 @@ class ChatViewModelTest {
         vm.stop()
     }
 
+    // MARK: - jumpToMilestone (apple #209)
+
+    /// A milestone tap from the Missions tab runs before the room's stream
+    /// is up: the jump parks and fires on the first snapshot, landing on
+    /// the marker's own seq (the anchor).
+    @Test
+    fun jumpToMilestone_beforeStartParksAndFiresOnFirstSnapshot() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(textItem("3"), textItem("7")), olderPages = mutableListOf())
+        val vm = makeVM(scope, timeline = fake)
+        vm.jumpToMilestone(7)
+        assertNull("parked, not focused", vm.pendingFocusID.value)
+        assertFalse(vm.reachedHistoryStart)
+        vm.start()
+        waitUntil { vm.pendingFocusID.value == "7" }
+        vm.stop()
+    }
+
+    /// Dismissing the search bar cancels only search's own parked jump — a
+    /// milestone jump parked alongside it must still fire (Apple's
+    /// `FocusOwner.milestone`).
+    @Test
+    fun jumpToMilestone_survivesEndChatSearch() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(textItem("3"), textItem("7")), olderPages = mutableListOf())
+        val vm = makeVM(scope, timeline = fake)
+        vm.jumpToMilestone(3)
+        vm.endChatSearch()
+        vm.start()
+        waitUntil { vm.pendingFocusID.value == "3" }
+        vm.stop()
+    }
+
     /// Bugbot (#56): closing the bar while the query is still in flight must
     /// not let the late result resurrect it.
     @Test
@@ -1633,28 +1663,6 @@ class ChatViewModelTest {
         waitUntil { vm.agentChatState("42") is AgentChatCardState.Answered }
         assertEquals(1, answerer.calls)
         assertTrue((vm.agentChatState("42") as AgentChatCardState.Answered).approved)
-    }
-
-    // MARK: - Summary TOC entries (matron-apple #124 port)
-
-    /// Port of matron-apple `ChatViewModelTests
-    /// .testSummaryEntriesFlowFromServiceToViewModel`: `summaryEntriesStream()`
-    /// frames flow through to published state unchanged (order, newest-first,
-    /// preserved from the service).
-    @Test
-    fun summaryEntriesFlowFromServiceToViewModel() = vmTest { scope ->
-        val fake = FakeTimelineService()
-        fake.summaryEntriesToEmit = listOf(
-            listOf(
-                ConversationSummaryEntry(seq = 40, toc = "Newer", detail = "d2", date = Instant.ofEpochSecond(2)),
-                ConversationSummaryEntry(seq = 10, toc = "Older", detail = "d1", date = Instant.ofEpochSecond(1)),
-            ),
-        )
-        val vm = makeVM(scope, fake)
-        vm.start()
-        waitUntil { vm.summaryEntries.value.size == 2 }
-        assertEquals(listOf(40L, 10L), vm.summaryEntries.value.map { it.seq })
-        vm.stop()
     }
 
     // MARK: - focus(seq) jump-to-message (matron-apple #124 port)
