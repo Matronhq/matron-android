@@ -114,12 +114,12 @@ class AppShellNavigationTest {
     // bar order; deeper in a stack the chat / item detail own horizontal
     // drags, so a non-empty path ignores it.
     /// Bar order since apple #209: Coordinator · Missions · Decisions ·
-    /// Conversations, with Missions present only once support is known.
+    /// Conversations, with Missions present until a 404 proves it
+    /// unsupported (the default, like iOS, is shown).
     @Test
     fun rootSwipeLeftGoesToTheNextTabAndRightComesBack() {
         val host = RecordingHost()
         val nav = AppShellNavigation(host)
-        nav.missionsSupported = true
         assertFalse("nothing to the right of the last tab", nav.swipeRoot(dx = -120f, dy = 10f))
         assertEquals(AppTab.CONVERSATIONS, nav.tab.value)
         assertTrue(nav.swipeRoot(dx = 120f, dy = 10f))
@@ -398,7 +398,6 @@ class AppShellNavigationTest {
     fun pushedMissionIsMirroredOnce_andARepeatTapIsANoOp() {
         val host = SimulatedControllerHost()
         val nav = AppShellNavigation(host).also { host.nav = it }
-        nav.missionsSupported = true
         nav.noteDestination(AppTab.CONVERSATIONS, "root", null)
         nav.openChat("!r:s")
         nav.pushMission("ms_1")

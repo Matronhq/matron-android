@@ -414,11 +414,11 @@ private fun SignedInApp(
         missionsVM.start()
         onDispose { missionsVM.stop() }
     }
-    // The Missions tab is in the bar only once `GET /missions` has
-    // succeeded; the clamp off a selected Missions tab on the false edge
-    // lives on `AppShellNavigation.missionsSupported` itself (apple #216).
+    // The Missions tab shows until `GET /missions` 404s (unknown reads as
+    // shown, as on iOS); the clamp off a selected Missions tab on the false
+    // edge lives on `AppShellNavigation.missionsSupported` itself (apple #216).
     val missionsSupported by missionsVM.isSupported.collectAsStateWithLifecycle()
-    LaunchedEffect(shell, missionsSupported) { shell.missionsSupported = missionsSupported == true }
+    LaunchedEffect(shell, missionsSupported) { shell.missionsSupported = AppShellNavigation.missionsTabShown(missionsSupported) }
     // The nav rules route the coordinator conversation to its own tab
     // (Bugbot, apple #197): mirror the setting into the shell.
     LaunchedEffect(shell, coordinatorConvoID) { shell.coordinatorConvoID = coordinatorConvoID }
@@ -638,7 +638,7 @@ private fun SignedInApp(
                     selected = selectedTab,
                     awaitingYouCount = awaitingYouCount,
                     coordinatorHasUnread = coordinatorHasUnread,
-                    missionsSupported = missionsSupported == true,
+                    missionsSupported = AppShellNavigation.missionsTabShown(missionsSupported),
                     missionsNeedsYou = missionsNeedsYou,
                     onSelect = { shell.selectTab(it) },
                 )
@@ -788,9 +788,9 @@ private fun SignedInApp(
             // The Missions tab (apple #209): its own graph, rooted at the
             // list; a mission page and the items opened from it push WITHIN
             // this tab, while conversations hand off to Conversations the
-            // way Decisions does. In the graph even while hidden from the
-            // bar — a title tap on an old journal never reaches it, and the
-            // shell never selects it while unsupported.
+            // way Decisions does. Stays in the graph once an old journal
+            // hides it from the bar — the shell never selects it while
+            // unsupported.
             navigation(route = AppTab.MISSIONS.route, startDestination = AppTab.MISSIONS.rootRoute) {
                 composable(AppTab.MISSIONS.rootRoute) {
                     MissionsScreen(
@@ -904,7 +904,7 @@ private fun SignedInApp(
 /// coordinator chooser (the new chat becomes the coordinator).
 private enum class NewChatTarget { CONVERSATIONS, COORDINATOR }
 
-/// The bottom bar: Coordinator, Missions (only once the journal is known
+/// The bottom bar: Coordinator, Missions (until the journal is known NOT
 /// to support it), Decisions and Conversations. The Decisions badge is the
 /// app-wide awaiting-you count and the Missions badge the needs-you total
 /// across open missions, both hidden at zero; the Coordinator badge is the

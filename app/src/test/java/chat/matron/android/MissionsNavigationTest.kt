@@ -135,15 +135,25 @@ class MissionsNavigationTest {
         assertFalse(nav.isAtRoot)
     }
 
+    /// Apple's `AppShellView` rule (`isSupported != false`): the tab shows
+    /// while support is unknown and once confirmed; only a 404 hides it.
+    @Test
+    fun missionsTabShownUntilProvenUnsupported() {
+        assertTrue("unknown → shown", AppShellNavigation.missionsTabShown(null))
+        assertTrue("confirmed → shown", AppShellNavigation.missionsTabShown(true))
+        assertFalse("404'd → hidden", AppShellNavigation.missionsTabShown(false))
+        assertTrue("the rules start from the same optimistic default", AppShellNavigation().missionsSupported)
+        assertEquals(AppTab.entries, AppShellNavigation.tabs(AppShellNavigation.missionsTabShown(null)))
+    }
+
     /// On an old journal the Missions tab is absent from the bar: the swipe
     /// must walk the three-tab order, never select a tag with no matching
     /// tab, and flipping unsupported while parked on Missions must clamp
     /// back to Conversations rather than leave a selection the bar can't
-    /// render. Support starts unknown, which reads as "not in the bar".
+    /// render.
     @Test
     fun swipeSkipsMissionsAndUnsupportedClampsOffIt() {
         val (nav, host) = nav(supported = false)
-        assertFalse(AppShellNavigation().missionsSupported)
         nav.noteDestination(AppTab.COORDINATOR, "e0", null)
         assertTrue(nav.swipeRoot(dx = -120f, dy = 5f))
         assertEquals("Missions is skipped when unsupported", AppTab.DECISIONS, nav.tab.value)

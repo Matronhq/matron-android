@@ -81,16 +81,17 @@ class AppShellNavigation(var host: Host? = null) {
     /// item opened from a mission page.
     var missionsPath: List<String> = emptyList()
 
-    /// `true` once `GET /missions` has succeeded (set by the shell from
-    /// `MissionsListViewModel.isSupported`); `false` while support is
-    /// unknown or once the journal has 404'd. The Missions tab is in the
-    /// bar only while this is `true`, so nothing may select its tag
-    /// otherwise: the root swipe walks [tabs] rather than the unconditional
-    /// `AppTab.entries`, [openMission] no-ops, and a selected Missions tab is
-    /// walked back to Conversations the instant the flag flips false (apple
-    /// #209 / #216). The clamp lives here, in the setter, so it is testable
-    /// without a view.
-    var missionsSupported: Boolean = false
+    /// `false` once `GET /missions` has 404'd (set by the shell from
+    /// `MissionsListViewModel.isSupported` through [missionsTabShown]);
+    /// `true` while support is unknown or confirmed — the Missions tab is
+    /// shown until proven unsupported, exactly as iOS's `AppShellView`
+    /// (`isSupported != false`). Once `false` the tab is absent from the
+    /// bar, so nothing may select its tag: the root swipe walks [tabs]
+    /// rather than the unconditional `AppTab.entries`, [openMission]
+    /// no-ops, and a selected Missions tab is walked back to Conversations
+    /// the instant the flag flips false (apple #209 / #216). The clamp lives
+    /// here, in the setter, so it is testable without a view.
+    var missionsSupported: Boolean = true
         set(value) {
             if (field == value) return
             field = value
@@ -381,6 +382,11 @@ class AppShellNavigation(var host: Host? = null) {
 
         /// Apple's `MissionRoute.pathValue`.
         fun missionRoute(missionID: String): String = "mission/$missionID"
+
+        /// Apple's `missionsVM.isSupported != false`: the tri-state support
+        /// flag as the bar reads it — unknown (`null`) and confirmed (`true`)
+        /// both show the Missions tab; only a 404 (`false`) hides it.
+        fun missionsTabShown(isSupported: Boolean?): Boolean = isSupported != false
 
         /// The tabs actually in the bar for a given support state — the same
         /// set the shell's `NavigationBar` renders, in bar (and swipe) order.
