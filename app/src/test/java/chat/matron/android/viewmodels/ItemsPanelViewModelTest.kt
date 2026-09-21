@@ -41,6 +41,10 @@ internal class FakeItemsStore : ItemsStoreReading {
     val item = MutableSharedFlow<TrackerItem?>(replay = 1)
     val comments = MutableSharedFlow<List<TrackerComment>>(replay = 1)
     val outbox = MutableSharedFlow<List<ItemOutboxEntity>>(replay = 1)
+    /// The scope-independent flow `awaitingYou` reads — separate from
+    /// [items] so a test can drive the two independently.
+    val awaiting = MutableSharedFlow<List<TrackerItem>>(replay = 1)
+    var awaitingSubscriptions = 0
     var storedComments: List<TrackerComment> = emptyList()
     var itemsSubscriptions = 0
     var commentsSubscriptions = 0
@@ -61,6 +65,10 @@ internal class FakeItemsStore : ItemsStoreReading {
     override fun itemOutboxCreatesFlow(): Flow<List<ItemOutboxEntity>> {
         creates.resetReplayCache()
         return creates
+    }
+    override fun needsUserFlow(): Flow<List<TrackerItem>> {
+        awaitingSubscriptions += 1
+        return awaiting
     }
 }
 
@@ -296,6 +304,55 @@ class ItemsPanelViewModelTest {
         vm.create(ItemKind.TASK, "Do X", "")
         assertTrue(sync.created.isEmpty())
         assertNotNull(vm.error.value)
+    }
+
+    // MARK: - App shell: all-conversations mode (spec §1)
+
+    @Test
+    fun awaitingYouIsCrossConversationNewestFirstRegardlessOfScope() = runBlocking {
+        val store = FakeItemsStore(); val sync = FakeItemsSync()
+        val vm = ItemsPanelViewModel("c1", store, FakeItemsApi(), sync, this)
+        vm.start()
+        waitUntil { store.awaitingSubscriptions == 1 }
+        assertEquals("the panel's own scope is untouched by the awaiting flow", ItemsScope.Convo("c1"), vm.itemsScope.value)
+        val mine = t("q", 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 1.0) // updatedAt = 1
+        val withAgent = t("a", 2, rank = 2.0) // awaiting agent → excluded
+        val foreign = TrackerItem(
+            id = "f", num = 9, kind = ItemKind.DECISION, awaiting = ItemAwaiting.USER, rank = 1.0, title = "F",
+            originConvoID = "c2", updatedAt = Instant.ofEpochSecond(9),
+        )
+        store.awaiting.emit(listOf(mine, withAgent, foreign))
+        waitUntil { vm.awaitingYouCount.value == 2 }
+        assertEquals("needsUser only, newest updatedAt first, every conversation", listOf("f", "q"), vm.awaitingYou.value.map { it.id })
+        assertEquals("the per-conversation badge only follows the scoped flow", 0, vm.needsYouCount.value)
+        vm.stop()
+    }
+
+    @Test
+    fun awaitingYouCountTracksStoreEmits() = runBlocking {
+        val store = FakeItemsStore(); val sync = FakeItemsSync()
+        val vm = ItemsPanelViewModel(null, store, FakeItemsApi(), sync, this)
+        vm.start()
+        waitUntil { store.awaitingSubscriptions == 1 }
+        store.awaiting.emit(listOf(t("q", 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 1.0)))
+        waitUntil { vm.awaitingYouCount.value == 1 }
+        store.awaiting.emit(emptyList())
+        waitUntil { vm.awaitingYouCount.value == 0 }
+        vm.stop()
+        store.awaiting.emit(listOf(t("q", 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 1.0)))
+        waitUntil(200) { vm.awaitingYouCount.value == 1 }
+        assertEquals("stop() cancels the awaiting subscription too", 0, vm.awaitingYouCount.value)
+    }
+
+    @Test
+    fun awaitingYouRuleIsPure() {
+        val items = listOf(
+            t("q", 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 1.0),
+            t("a", 2, rank = 2.0),
+            t("d", 3, kind = ItemKind.DECISION, awaiting = ItemAwaiting.USER, rank = 3.0, convo = "c2"),
+            t("x", 4, awaiting = ItemAwaiting.USER, state = ItemState.CLOSED, rank = 0.0, closedMs = 40),
+        )
+        assertEquals("open + awaiting user, newest first; a closed item never needs you", listOf("d", "q"), ItemsPanelViewModel.awaitingYou(items).map { it.id })
     }
 
     @Test

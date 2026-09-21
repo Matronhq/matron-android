@@ -74,6 +74,17 @@ class ItemsPanelViewModel(
     private val _needsYouCount = MutableStateFlow(0)
     val needsYouCount: StateFlow<Int> = _needsYouCount.asStateFlow()
 
+    /// Every open item awaiting the user across ALL conversations, newest
+    /// `updatedAt` first — independent of [itemsScope], fed by its own
+    /// [ItemsStoreReading.needsUserFlow] subscription. Backs the Decisions
+    /// list and the tab badge (spec §1, §2).
+    private val _awaitingYou = MutableStateFlow<List<TrackerItem>>(emptyList())
+    val awaitingYou: StateFlow<List<TrackerItem>> = _awaitingYou.asStateFlow()
+    /// `awaitingYou.size`, kept in lockstep (not a `stateIn` derivation: that
+    /// would pin a collector to [scope] for the VM's lifetime).
+    private val _awaitingYouCount = MutableStateFlow(0)
+    val awaitingYouCount: StateFlow<Int> = _awaitingYouCount.asStateFlow()
+
     private val _isSupported = MutableStateFlow(true)
     val isSupported: StateFlow<Boolean> = _isSupported.asStateFlow()
 
@@ -90,6 +101,7 @@ class ItemsPanelViewModel(
     val error: StateFlow<String?> = _error.asStateFlow()
 
     private var itemsJob: Job? = null
+    private var awaitingJob: Job? = null
     private var pendingCreatesJob: Job? = null
     private var supportedJob: Job? = null
     private var refreshJob: Job? = null
@@ -108,6 +120,13 @@ class ItemsPanelViewModel(
         observationGeneration += 1
         stop()
         resubscribe()
+        awaitingJob = scope.launch {
+            store.needsUserFlow().collect { items ->
+                val awaiting = awaitingYou(items)
+                _awaitingYou.value = awaiting
+                _awaitingYouCount.value = awaiting.size
+            }
+        }
         supportedJob = scope.launch {
             sync.isSupported.collect { _isSupported.value = it }
         }
@@ -120,6 +139,7 @@ class ItemsPanelViewModel(
     }
 
     fun stop() {
+        awaitingJob?.cancel(); awaitingJob = null
         itemsJob?.cancel(); itemsJob = null
         pendingCreatesJob?.cancel(); pendingCreatesJob = null
         supportedJob?.cancel(); supportedJob = null
@@ -226,6 +246,11 @@ class ItemsPanelViewModel(
     }
 
     companion object {
+        /// The Decisions rule (spec §1): `needsUser` only, every conversation,
+        /// newest `updatedAt` first.
+        fun awaitingYou(items: List<TrackerItem>): List<TrackerItem> =
+            items.filter { it.needsUser }.sortedByDescending { it.updatedAt }
+
         /// Sections rule (spec *Panel content*): `needsYou` = `needsUser` (any
         /// kind) sorted `updatedAt` desc — an item can appear here AND in
         /// `tasks`. `tasks` = kind task, open, sorted rank/num. `decisions` =

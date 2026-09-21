@@ -21,4 +21,9 @@ interface ItemsStoreReading {
     fun itemOutboxFlow(itemID: String): Flow<List<ItemOutboxEntity>>
     /// Every queued "create" outbox row, feeding `ItemsPanelViewModel.pendingCreates`.
     fun itemOutboxCreatesFlow(): Flow<List<ItemOutboxEntity>>
+    /// Every conversation's items regardless of the panel's scope — the
+    /// source of `ItemsPanelViewModel.awaitingYou` (app shell, spec §1).
+    /// Defaulted to `itemsFlow(All)` so `JournalStore` needs no new query;
+    /// fakes override it to drive it separately.
+    fun needsUserFlow(): Flow<List<TrackerItem>> = itemsFlow(ItemsScope.All)
 }

@@ -88,13 +88,7 @@ class ChatVMCache(
             itemsEntries[roomID] = cached
             return cached
         }
-        val vm = ItemsPanelViewModel(
-            convoID = roomID,
-            store = deps.journalStore(session),
-            api = deps.itemsApi(session),
-            sync = deps.itemsSync(session),
-            scope = scope,
-        )
+        val vm = deps.makeItemsPanelViewModel(session, convoID = roomID, scope = scope)
         itemsEntries[roomID] = vm
         if (itemsEntries.size > limit) {
             val eldest = itemsEntries.keys.first()

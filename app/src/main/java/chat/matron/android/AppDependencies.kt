@@ -43,6 +43,7 @@ import chat.matron.android.viewmodels.DeviceLinking
 import chat.matron.android.viewmodels.AgentChatProviding
 import chat.matron.android.viewmodels.JournalAgentChatService
 import chat.matron.android.viewmodels.DevicesProviding
+import chat.matron.android.viewmodels.ItemsPanelViewModel
 import chat.matron.android.viewmodels.JournalAgentRPCService
 import chat.matron.android.viewmodels.JournalDeviceLinkService
 import chat.matron.android.viewmodels.JournalDevicesService
@@ -366,6 +367,26 @@ class AppDependencies(
 
     /** The tracker's network surface — the session's API client. */
     fun itemsApi(session: UserSession): ItemsProviding = core(session).api
+
+    /**
+     * Per-chat / cross-chat items panel (spec: Apps → Panel content).
+     * `convoID = null` is the app-wide instance — see [makeDecisionsViewModel].
+     * [scope] is the host's lifecycle scope (the Swift original's implicit
+     * `@MainActor` tasks).
+     */
+    fun makeItemsPanelViewModel(session: UserSession, convoID: String?, scope: CoroutineScope): ItemsPanelViewModel {
+        val c = core(session)
+        return ItemsPanelViewModel(convoID = convoID, store = c.store, api = c.api, sync = c.itemsSync, scope = scope)
+    }
+
+    /**
+     * The one Decisions instance per signed-in session (app shell, spec §1):
+     * no home conversation, starts in `All`, feeds the Decisions list and the
+     * tab badge. Created and started by the shell, stopped when the shell
+     * leaves the composition on sign-out.
+     */
+    fun makeDecisionsViewModel(session: UserSession, scope: CoroutineScope): ItemsPanelViewModel =
+        makeItemsPanelViewModel(session, convoID = null, scope = scope)
 
     fun pushService(session: UserSession): PushService =
         JournalPushService(api = core(session).api, environment = pushEnvironment)
