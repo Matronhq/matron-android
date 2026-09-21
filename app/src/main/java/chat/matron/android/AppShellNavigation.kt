@@ -12,16 +12,22 @@ import kotlinx.coroutines.flow.asStateFlow
 /// bar shows); [routePrefix] prefixes the chat / tasks / item routes a tab
 /// hosts on its own stack (the Coordinator tab keeps its own copies so a
 /// sub-chat opened from the coordinator pushes there, not in Conversations).
+///
+/// Order (apple #209): Coordinator · Missions · Decisions · Conversations.
+/// The Missions tab is in the bar only while the journal is known to
+/// support `/missions` — see [AppShellNavigation.missionsSupported].
 enum class AppTab(val route: String, val rootRoute: String, val label: String, val routePrefix: String) {
     COORDINATOR("coordinator", "coordinator/root", "Coordinator", "coordinator/"),
-    CONVERSATIONS("conversations", "chats", "Conversations", ""),
+    MISSIONS("missions", "missions/list", "Missions", "missions/"),
     DECISIONS("decisions", "decisions/list", "Decisions", "decisions/"),
+    CONVERSATIONS("conversations", "chats", "Conversations", ""),
 }
 
 /// The signed-in shell's navigation rules, ported from matron-apple's
 /// `AppShellNavigation`. Apple's object IS the `NavigationStack` paths; on
 /// Android the `NavController` owns the back stacks, so this class keeps a
-/// mirror of them ([chatPath] / [decisionsPath] / [coordinatorPath], fed by
+/// mirror of them ([chatPath] / [decisionsPath] / [coordinatorPath] /
+/// [missionsPath], fed by
 /// [noteDestination] from the host's destination-changed listener) and
 /// expresses every cross-tab rule as plain, testable state changes plus
 /// [Host] commands the Compose shell executes on the controller. Tests
@@ -30,7 +36,8 @@ enum class AppTab(val route: String, val rootRoute: String, val label: String, v
 ///
 /// Path values: a bare room id for a chat (Apple's `[String]` path, where
 /// `ChatSummary.ID == String`), `item/<id>` for an item detail (Apple's
-/// `ItemRoute.pathValue`), and the unprefixed route for anything else
+/// `ItemRoute.pathValue`), `mission/<id>` for a mission page, and the
+/// unprefixed route for anything else
 /// pushed on a stack (`items/<convo>`, `search`, `settings`, …).
 class AppShellNavigation(var host: Host? = null) {
 
@@ -46,6 +53,13 @@ class AppShellNavigation(var host: Host? = null) {
         fun pushChat(tab: AppTab, roomID: String)
         /// Push item [itemID]'s detail on the Decisions stack.
         fun pushDecision(itemID: String)
+        /// Push mission [missionID]'s page on [tab]'s stack — the Missions
+        /// tab, or whichever chat tab a title tap / milestone card sat on.
+        fun pushMission(tab: AppTab, missionID: String)
+        /// REPLACE the Missions stack with [missionID]'s page over the list.
+        fun replaceMissions(missionID: String)
+        /// Push item [itemID]'s detail on the Missions stack.
+        fun pushMissionItem(itemID: String)
         /// Pop [tab]'s stack back to its root.
         fun popToRoot(tab: AppTab)
         /// Pop the top [count] entries off the Conversations stack (a
@@ -63,6 +77,25 @@ class AppShellNavigation(var host: Host? = null) {
     /// Coordinator tab stack: sub-chats and items opened from the
     /// coordinator push here, so back returns to it.
     var coordinatorPath: List<String> = emptyList()
+    /// Missions tab stack: `mission/<id>` entries, plus `item/<id>` for an
+    /// item opened from a mission page.
+    var missionsPath: List<String> = emptyList()
+
+    /// `true` once `GET /missions` has succeeded (set by the shell from
+    /// `MissionsListViewModel.isSupported`); `false` while support is
+    /// unknown or once the journal has 404'd. The Missions tab is in the
+    /// bar only while this is `true`, so nothing may select its tag
+    /// otherwise: the root swipe walks [tabs] rather than the unconditional
+    /// `AppTab.entries`, [openMission] no-ops, and a selected Missions tab is
+    /// walked back to Conversations the instant the flag flips false (apple
+    /// #209 / #216). The clamp lives here, in the setter, so it is testable
+    /// without a view.
+    var missionsSupported: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            if (!value && _tab.value == AppTab.MISSIONS) selectTabInternal(AppTab.CONVERSATIONS)
+        }
 
     /// The designated coordinator conversation, mirrored from
     /// `CoordinatorSetting` by the shell so the rules below can route to
@@ -124,7 +157,53 @@ class AppShellNavigation(var host: Host? = null) {
     /// "Open conversation" from a Decisions row or its detail: switch to
     /// Conversations first, then push, in that order so the push lands in
     /// the visible stack (spec §3). The Decisions stack is left where it was.
-    fun openConversationFromDecisions(convoID: String) {
+    fun openConversationFromDecisions(convoID: String) = handOffToConversations(convoID)
+
+    /// "Open the conversation" from a Missions row, a milestone or a
+    /// mission page's conversation list: the same hand-off, so the two
+    /// entry points cannot drift on the coordinator special case.
+    fun openConversationFromMissions(convoID: String) = handOffToConversations(convoID)
+
+    /// Open a mission from anywhere: select the tab and REPLACE its stack,
+    /// so the page is never stacked on a stale copy of itself. No-op on an
+    /// old journal that has no Missions tab to select.
+    fun openMission(missionID: String) {
+        if (!missionsSupported) return
+        selectTabInternal(AppTab.MISSIONS)
+        val value = missionRoute(missionID)
+        if (missionsPath != listOf(value)) {
+            missionsPath = listOf(value)
+            navigateExpecting(AppTab.MISSIONS, value) { host?.replaceMissions(missionID) }
+        }
+    }
+
+    /// Push a mission page on the SELECTED tab's stack — a Missions row, a
+    /// chat's title tap, a milestone card (apple #209, `ChatView.pushMission`).
+    /// Idempotent for the mission already on top: a double title tap or a
+    /// second card tap for the same mission must not stack two identical
+    /// pages. From Decisions (which hosts no mission page) it opens the
+    /// mission on the Missions tab.
+    fun pushMission(missionID: String) {
+        val current = _tab.value
+        if (current == AppTab.DECISIONS) {
+            openMission(missionID)
+            return
+        }
+        val value = missionRoute(missionID)
+        if (path(current).lastOrNull() == value) return
+        setPath(current, path(current) + value)
+        navigateExpecting(current, value) { host?.pushMission(current, missionID) }
+    }
+
+    /// Push an item's detail on the Missions stack (a mission page's open
+    /// item). Never changes the tab.
+    fun pushMissionItem(itemID: String) {
+        val value = itemRoute(itemID)
+        missionsPath = missionsPath + value
+        navigateExpecting(AppTab.MISSIONS, value) { host?.pushMissionItem(itemID) }
+    }
+
+    private fun handOffToConversations(convoID: String) {
         if (convoID == coordinatorConvoID) {
             landOnCoordinatorRoot()
             return
@@ -215,10 +294,12 @@ class AppShellNavigation(var host: Host? = null) {
     /// Returns whether the tab changed.
     fun swipeRoot(dx: Float, dy: Float): Boolean {
         if (!isAtRoot || abs(dx) <= SWIPE_THRESHOLD_DP || abs(dx) <= abs(dy)) return false
-        val index = AppTab.entries.indexOf(_tab.value)
+        val tabs = tabs(missionsSupported)
+        val index = tabs.indexOf(_tab.value)
+        if (index < 0) return false
         val next = if (dx < 0) index + 1 else index - 1
-        if (next !in AppTab.entries.indices) return false
-        selectTabInternal(AppTab.entries[next])
+        if (next !in tabs.indices) return false
+        selectTabInternal(tabs[next])
         return true
     }
 
@@ -277,6 +358,7 @@ class AppShellNavigation(var host: Host? = null) {
 
     private fun path(tab: AppTab): List<String> = when (tab) {
         AppTab.COORDINATOR -> coordinatorPath
+        AppTab.MISSIONS -> missionsPath
         AppTab.CONVERSATIONS -> chatPath
         AppTab.DECISIONS -> decisionsPath
     }
@@ -284,6 +366,7 @@ class AppShellNavigation(var host: Host? = null) {
     private fun setPath(tab: AppTab, value: List<String>) {
         when (tab) {
             AppTab.COORDINATOR -> coordinatorPath = value
+            AppTab.MISSIONS -> missionsPath = value
             AppTab.CONVERSATIONS -> chatPath = value
             AppTab.DECISIONS -> decisionsPath = value
         }
@@ -295,6 +378,14 @@ class AppShellNavigation(var host: Host? = null) {
 
         /// Apple's `ItemRoute.pathValue`.
         fun itemRoute(itemID: String): String = "item/$itemID"
+
+        /// Apple's `MissionRoute.pathValue`.
+        fun missionRoute(missionID: String): String = "mission/$missionID"
+
+        /// The tabs actually in the bar for a given support state — the same
+        /// set the shell's `NavigationBar` renders, in bar (and swipe) order.
+        fun tabs(missionsSupported: Boolean): List<AppTab> =
+            if (missionsSupported) AppTab.entries else AppTab.entries.filter { it != AppTab.MISSIONS }
 
         /// The path value a `NavController` destination mirrors to
         /// ([noteDestination]), from its route pattern and argument lookup:
@@ -308,6 +399,7 @@ class AppShellNavigation(var host: Host? = null) {
             return when (bare) {
                 "chat/{convoID}" -> argument("convoID")
                 "item/{itemID}" -> argument("itemID")?.let(::itemRoute)
+                "mission/{missionID}" -> argument("missionID")?.let(::missionRoute)
                 else -> Regex("\\{([^}]+)\\}").replace(bare) { m -> argument(m.groupValues[1]) ?: m.value }
             }
         }
