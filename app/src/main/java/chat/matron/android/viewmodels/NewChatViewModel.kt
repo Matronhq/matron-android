@@ -49,6 +49,20 @@ class JournalAgentRPCService(
 /// [value] (apple #169).
 data class ModelOption(val value: String, val label: String)
 
+/// One coding agent a bridge offers on its `recent_folders` reply
+/// (`agent_options`): [value] is what the `start` RPC's `agent` param takes,
+/// [label] is what the switch shows. Same shape and rules as [ModelOption];
+/// a separate type because the two picks mean different things to `start`
+/// (a Codex session takes no Claude model) and must not be mixed up
+/// (apple #179).
+data class AgentOption(val value: String, val label: String) {
+    companion object {
+        /// The two agents a bridge can name today, as it spells them.
+        const val CLAUDE = "claude"
+        const val CODEX = "codex"
+    }
+}
+
 /// One entry of a bridge's `recent_folders` answer. [lastUsed] (epoch ms) is
 /// `null` for "available but never used here" — sorts last, reads "never used".
 data class RecentFolder(val path: String, val lastUsed: Long?)
@@ -104,10 +118,29 @@ class NewChatViewModel(
     private val _modelOptions = MutableStateFlow<List<ModelOption>>(emptyList())
     val modelOptions: StateFlow<List<ModelOption>> = _modelOptions.asStateFlow()
 
+    /// What the picker's null "Default" row will actually run on, when the
+    /// box says (`default_model` on its `recent_folders` reply — the
+    /// bridge's `MATRON_DEFAULT_MODEL`). Display only: the row still omits
+    /// the `model` key, because the bridge applies its default itself and
+    /// naming it here would turn "no opinion" into an explicit pick. The
+    /// offered option's label when the value is listed, the raw alias
+    /// otherwise; null for a bridge that doesn't say (apple #177).
+    private val _defaultModelLabel = MutableStateFlow<String?>(null)
+    val defaultModelLabel: StateFlow<String?> = _defaultModelLabel.asStateFlow()
+
+    /// The null row's title in the picker: "Default (Fable)" on a box that
+    /// declares its default, plain "Default" otherwise. Lives here rather
+    /// than in the sheet so the platforms can't drift.
+    val defaultRowTitle: String get() = defaultRowTitle(_defaultModelLabel.value)
+
     /// Model offers learned by the fan-out, keyed by device — same lifetime
     /// as [folderCache], since both come out of the one `recent_folders`
     /// reply and both are wrong the moment that reply is re-asked for.
     private val modelOptionsCache = mutableMapOf<Long, List<ModelOption>>()
+
+    /// The `default_model` learned alongside [modelOptionsCache], same
+    /// lifetime; absent for a box that doesn't send one.
+    private val defaultModelCache = mutableMapOf<Long, String>()
 
     /// The picker's choice: null is the bridge's default.
     fun selectModel(value: String?) {
@@ -120,10 +153,78 @@ class NewChatViewModel(
     /// would send an alias the bridge answers `bad_model` to. A box that
     /// offers nothing (older bridge) hides the picker, which is the same
     /// situation: back to the bridge's default.
-    private fun adoptModelOptions(options: List<ModelOption>) {
+    private fun adoptModelOptions(options: List<ModelOption>, defaultModel: String?) {
         _modelOptions.value = options
+        _defaultModelLabel.value = defaultModel?.let { value ->
+            options.firstOrNull { it.value == value }?.label ?: value
+        }
         val picked = _selectedModel.value
         if (picked != null && options.none { it.value == picked }) _selectedModel.value = null
+    }
+
+    // MARK: agent switch (apple #179)
+
+    /// Which coding agents the box on the folder step can start, in bridge
+    /// order. Empty for a bridge that doesn't send `agent_options` (older
+    /// than the switch), which hides the switch AND keeps `agent` off the
+    /// `start` params — that bridge never offered, so it isn't told.
+    private val _agentOptions = MutableStateFlow<List<AgentOption>>(emptyList())
+    val agentOptions: StateFlow<List<AgentOption>> = _agentOptions.asStateFlow()
+
+    /// The box's `default_agent`: what a start with no `agent` would run.
+    private var defaultAgent: String? = null
+
+    /// The user's own pick, kept only while the current box offers it.
+    private var pickedAgent: String? = null
+
+    /// The agent `start` names: the user's pick when this box offers it,
+    /// else the box's default, else the first offer. Reads as Claude on a
+    /// bridge that offers nothing, which is what such a bridge runs.
+    private val _selectedAgent = MutableStateFlow(AgentOption.CLAUDE)
+    val selectedAgent: StateFlow<String> = _selectedAgent.asStateFlow()
+
+    /// One choice is no choice: the switch shows only when there is a second
+    /// agent to switch to.
+    val agentSwitchVisible: Boolean get() = _agentOptions.value.size > 1
+
+    /// The model picker is Claude-only — Claude aliases mean nothing to a
+    /// Codex session, and the bridge answers `bad_model` to one. Hidden
+    /// (and the pick parked, not dropped) while Codex is selected.
+    val modelPickerVisible: Boolean
+        get() = modelPickerVisible(_modelOptions.value, _selectedAgent.value)
+
+    /// The `agent_options` / `default_agent` learned alongside
+    /// [modelOptionsCache], same lifetime.
+    private val agentOptionsCache = mutableMapOf<Long, List<AgentOption>>()
+    private val defaultAgentCache = mutableMapOf<Long, String>()
+
+    /// The switch's choice. Parked (not dropped) while a later box doesn't
+    /// offer it — see [adoptAgentOptions].
+    fun selectAgent(value: String) {
+        pickedAgent = value
+        refreshSelectedAgent()
+    }
+
+    /// Points the switch at one box's offer. A pick this box doesn't list is
+    /// dropped (a `bad_agent` waiting to happen, same as a carried-over
+    /// model), and [selectedAgent] falls back to the box's own default.
+    private fun adoptAgentOptions(options: List<AgentOption>, defaultAgent: String?) {
+        _agentOptions.value = options
+        this.defaultAgent = defaultAgent
+        val picked = pickedAgent
+        if (picked != null && options.none { it.value == picked }) pickedAgent = null
+        refreshSelectedAgent()
+    }
+
+    private fun refreshSelectedAgent() {
+        val options = _agentOptions.value
+        val picked = pickedAgent
+        val boxDefault = defaultAgent
+        _selectedAgent.value = when {
+            picked != null && options.any { it.value == picked } -> picked
+            boxDefault != null && options.any { it.value == boxDefault } -> boxDefault
+            else -> options.firstOrNull()?.value ?: AgentOption.CLAUDE
+        }
     }
 
     // MARK: wake-on-pick (apple #168)
@@ -216,6 +317,9 @@ class NewChatViewModel(
                 // would launder disk data into an uncaptioned, live-looking
                 // row).
                 modelOptionsCache.clear()
+                defaultModelCache.clear()
+                agentOptionsCache.clear()
+                defaultAgentCache.clear()
                 val refreshing = connectedIDs.toSet()
                 _capacities.value = _capacities.value.filterKeys { it in refreshing && capacityCapturedAt[it] == null }
                 capacityCapturedAt.clear()
@@ -244,7 +348,8 @@ class NewChatViewModel(
         _foldersError.value = null
         // Model offers are per-box, so the step opens on what this box is
         // known to offer — nothing, until its own reply lands.
-        adoptModelOptions(modelOptionsCache[agent.id] ?: emptyList())
+        adoptModelOptions(modelOptionsCache[agent.id] ?: emptyList(), defaultModelCache[agent.id])
+        adoptAgentOptions(agentOptionsCache[agent.id] ?: emptyList(), defaultAgentCache[agent.id])
         if (!agent.connected) {
             // The first ask has already booted the box server-side; keep
             // asking until the bridge connects.
@@ -267,7 +372,8 @@ class NewChatViewModel(
             when (reply) {
                 is RPCReply.Ok -> {
                     _folders.value = parseFolders(reply.result)
-                    adoptModelOptions(parseModelOptions(reply.result))
+                    adoptModelOptions(parseModelOptions(reply.result), parseDefaultModel(reply.result))
+                    adoptAgentOptions(parseAgentOptions(reply.result), parseDefaultAgent(reply.result))
                 }
                 // The roster's `connected` is a snapshot; a box idle-stopped
                 // since then answers agent_unreachable — which has already
@@ -338,7 +444,8 @@ class NewChatViewModel(
                     when (reply) {
                         is RPCReply.Ok -> {
                             _folders.value = parseFolders(reply.result)
-                            adoptModelOptions(parseModelOptions(reply.result))
+                            adoptModelOptions(parseModelOptions(reply.result), parseDefaultModel(reply.result))
+                            adoptAgentOptions(parseAgentOptions(reply.result), parseDefaultAgent(reply.result))
                             return
                         }
                         is RPCReply.Failure -> if (reply.code != AGENT_UNREACHABLE) {
@@ -405,10 +512,19 @@ class NewChatViewModel(
             val params = buildJsonObject {
                 if (trimmed.isNotEmpty()) put("workdir", trimmed)
                 if (browserEnabled) put("browser", true)
+                // Named whenever the bridge offered agents (so it accepts the
+                // key), even with one offer or the default picked: saying
+                // what was shown beats trusting the box default not to have
+                // moved since the reply. An older bridge that offered nothing
+                // isn't sent a key it doesn't know.
+                val agentPick = _selectedAgent.value
+                if (_agentOptions.value.isNotEmpty()) put("agent", agentPick)
                 // null is the bridge's own default model, and the bridge
                 // distinguishes "no opinion" from any alias it knows — so
-                // omit the key entirely.
-                _selectedModel.value?.let { put("model", it) }
+                // omit the key entirely. A Codex session takes no Claude
+                // alias at all: the pick stays parked for a flip back, but
+                // the bridge would answer `bad_model` to it.
+                if (agentPick == AgentOption.CLAUDE) _selectedModel.value?.let { put("model", it) }
             }
             try {
                 var reply = api.agentRequest(agent.id, "start", params.toString())
@@ -478,6 +594,13 @@ class NewChatViewModel(
                 val folders = parseFolders(reply.result)
                 folderCache[agentID] = folders
                 modelOptionsCache[agentID] = parseModelOptions(reply.result)
+                agentOptionsCache[agentID] = parseAgentOptions(reply.result)
+                // Absent on the wire means absent in the cache: a box that
+                // stopped declaring a default must not keep its old one.
+                val boxDefaultModel = parseDefaultModel(reply.result)
+                if (boxDefaultModel != null) defaultModelCache[agentID] = boxDefaultModel else defaultModelCache.remove(agentID)
+                val boxDefaultAgent = parseDefaultAgent(reply.result)
+                if (boxDefaultAgent != null) defaultAgentCache[agentID] = boxDefaultAgent else defaultAgentCache.remove(agentID)
                 // The folder step may already be showing this box with its own
                 // live fetch failed (it raced ahead of this reply): swap the
                 // fan-out's answer in rather than leaving a stale error over a
@@ -559,6 +682,45 @@ class NewChatViewModel(
             }
         }
 
+        /// Reads `default_model` out of a `recent_folders` reply: the alias
+        /// (or full model name) a start with no `model` will run on. Like
+        /// `model_options` it is optional — an older bridge, or one with no
+        /// `MATRON_DEFAULT_MODEL`, omits it, and the row reads plain "Default".
+        fun parseDefaultModel(result: JsonElement): String? =
+            (result as? JsonObject)?.stringOrNull("default_model")?.takeIf { it.isNotEmpty() }
+
+        /// "Default (Fable)" for a box that declares its default, plain
+        /// "Default" otherwise.
+        fun defaultRowTitle(defaultModelLabel: String?): String =
+            defaultModelLabel?.let { "Default ($it)" } ?: "Default"
+
+        /// Reads `agent_options` out of a `recent_folders` reply: the coding
+        /// agents a `start` there may name. Optional like every block a
+        /// bridge attaches — absent on a bridge older than the switch. Bridge
+        /// order is kept; the same identity and label rules as
+        /// [parseModelOptions] (no `default` row to drop here, though).
+        fun parseAgentOptions(result: JsonElement): List<AgentOption> {
+            val obj = result as? JsonObject ?: return emptyList()
+            val raw = obj.arrayOrNull("agent_options") ?: return emptyList()
+            val seen = mutableSetOf<String>()
+            return raw.objects().mapNotNull { entry ->
+                val value = entry.stringOrNull("value")?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                if (!seen.add(value)) return@mapNotNull null
+                AgentOption(value, entry.stringOrNull("label")?.takeIf { it.isNotEmpty() } ?: value)
+            }
+        }
+
+        /// Reads `default_agent`: what a start with no `agent` would run as,
+        /// so the switch opens on it. Optional; null falls back to the first
+        /// offer.
+        fun parseDefaultAgent(result: JsonElement): String? =
+            (result as? JsonObject)?.stringOrNull("default_agent")?.takeIf { it.isNotEmpty() }
+
+        /// Whether the (Claude-only) model picker has anything to show for
+        /// this offer and agent pick.
+        fun modelPickerVisible(options: List<ModelOption>, selectedAgent: String): Boolean =
+            options.isNotEmpty() && selectedAgent == AgentOption.CLAUDE
+
         fun parseFolders(result: JsonElement): List<RecentFolder> {
             val obj = result as? JsonObject ?: return emptyList()
             val raw = obj.arrayOrNull("folders") ?: return emptyList()
@@ -583,6 +745,9 @@ class NewChatViewModel(
             // The offer came from this box's own reply, so this means it has
             // changed its mind since — the default always works.
             "bad_model" -> "That box doesn't offer that model — pick another."
+            // Same story: the switch only ever shows what this box's own
+            // reply offered, so the box has changed since (Codex uninstalled).
+            "bad_agent" -> "That box can't start that agent — pick another."
             else -> "Couldn't start — ${detail ?: code}."
         }
     }

@@ -21,6 +21,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -42,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.UsageMetersFormat
 import chat.matron.android.journal.DeviceDTO
+import chat.matron.android.viewmodels.AgentOption
 import chat.matron.android.viewmodels.AgentRPCProviding
 import chat.matron.android.viewmodels.AgentCapacityFreshness
 import chat.matron.android.viewmodels.BoxCapacity
@@ -81,6 +85,9 @@ fun NewChatSheet(
     val wakeGaveUp by viewModel.wakeGaveUp.collectAsStateWithLifecycle()
     val modelOptions by viewModel.modelOptions.collectAsStateWithLifecycle()
     val selectedModel by viewModel.selectedModel.collectAsStateWithLifecycle()
+    val defaultModelLabel by viewModel.defaultModelLabel.collectAsStateWithLifecycle()
+    val agentOptions by viewModel.agentOptions.collectAsStateWithLifecycle()
+    val selectedAgent by viewModel.selectedAgent.collectAsStateWithLifecycle()
 
     var navigated by remember { mutableStateOf(false) }
 
@@ -167,12 +174,23 @@ fun NewChatSheet(
 
                 HorizontalDivider()
                 Text("Other folder", style = MaterialTheme.typography.labelMedium)
+                // Which coding agent the session runs as; only shown when the
+                // box offers a second one to switch to (apple #179).
+                if (agentOptions.size > 1) {
+                    AgentSwitchRow(
+                        options = agentOptions,
+                        selected = selectedAgent,
+                        onSelect = { viewModel.selectAgent(it) },
+                    )
+                }
                 // Hidden for a bridge that doesn't say what it can run — an
-                // empty menu would only ever offer "Default" (apple #169).
-                if (modelOptions.isNotEmpty()) {
+                // empty menu would only ever offer "Default" (apple #169) —
+                // and while Codex is the agent, which takes no Claude model.
+                if (NewChatViewModel.modelPickerVisible(modelOptions, selectedAgent)) {
                     ModelPickerRow(
                         options = modelOptions,
                         selected = selectedModel,
+                        defaultTitle = NewChatViewModel.defaultRowTitle(defaultModelLabel),
                         onSelect = { viewModel.selectModel(it) },
                     )
                 }
@@ -187,12 +205,37 @@ fun NewChatSheet(
     }
 }
 
+/// Claude / Codex as a segmented row: both choices visible at once, the
+/// picked one filled. [options] is the box's own offer in bridge order.
+@Composable
+private fun AgentSwitchRow(
+    options: List<AgentOption>,
+    selected: String,
+    onSelect: (String) -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Agent", modifier = Modifier.weight(1f))
+        SingleChoiceSegmentedButtonRow {
+            options.forEachIndexed { index, option ->
+                SegmentedButton(
+                    selected = option.value == selected,
+                    onClick = { onSelect(option.value) },
+                    shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                ) { Text(option.label) }
+            }
+        }
+    }
+}
+
 /// "Model: Opus ▾" — a menu of the box's offered aliases plus the bridge's
 /// own Default (null, which omits the `model` key from `start`).
+/// [defaultTitle] names that row: "Default (Fable)" when the box declared
+/// what it runs on, plain "Default" otherwise (apple #177).
 @Composable
 private fun ModelPickerRow(
     options: List<ModelOption>,
     selected: String?,
+    defaultTitle: String,
     onSelect: (String?) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
@@ -200,10 +243,10 @@ private fun ModelPickerRow(
         Text("Model", modifier = Modifier.weight(1f))
         Box {
             TextButton(onClick = { open = true }) {
-                Text(options.firstOrNull { it.value == selected }?.label ?: "Default")
+                Text(options.firstOrNull { it.value == selected }?.label ?: defaultTitle)
             }
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                DropdownMenuItem(text = { Text("Default") }, onClick = { open = false; onSelect(null) })
+                DropdownMenuItem(text = { Text(defaultTitle) }, onClick = { open = false; onSelect(null) })
                 options.forEach { option ->
                     DropdownMenuItem(text = { Text(option.label) }, onClick = { open = false; onSelect(option.value) })
                 }
