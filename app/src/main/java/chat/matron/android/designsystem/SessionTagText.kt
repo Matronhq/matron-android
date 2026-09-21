@@ -83,6 +83,23 @@ object SessionTagText {
         }
     }
 
+    /// The plain-text mirror of the visual tag for a TalkBack label: box
+    /// NAMES joined with commas (the room form when ≥2 names, the single
+    /// box otherwise — the same gate as [room], so the reader never hears
+    /// a "room" the eye doesn't see), then the session short. Speaks names
+    /// rather than the letters and `↔` glyphs meant to be read, not heard
+    /// (apple #216). `null` when there is nothing to show, like [room]/[run].
+    fun plainLabel(boxName: String?, sessionShort: String?, roomBoxNames: List<String> = emptyList()): String? {
+        val names = if (roomBoxNames.size >= 2) roomBoxNames else listOfNotNull(boxName)
+        val joined = names.takeIf { it.isNotEmpty() }?.joinToString(", ")
+        return when {
+            joined == null && sessionShort == null -> null
+            sessionShort == null -> joined
+            joined == null -> sessionShort
+            else -> "$joined, $sessionShort"
+        }
+    }
+
     /// The full title line: room tag first, single-box tag second, bare
     /// title last — one composition shared by every place a tagged title
     /// renders (list rows, chat headers, search results), so the fallback
