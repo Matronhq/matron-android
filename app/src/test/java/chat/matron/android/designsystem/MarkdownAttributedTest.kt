@@ -99,6 +99,47 @@ class MarkdownAttributedTest {
         assertEquals(colors.link, text.styleAt("room").color)
     }
 
+    // MARK: - Body size follows the caller (apple #218; Bugbot on #74)
+
+    /// Span sizes win over the paragraph style in Compose, so the size a
+    /// surface renders at has to be baked into the spans themselves: with a
+    /// caller base every body/bold/inline-code/header span scales from it and
+    /// no span is left at the chat's 15sp; code blocks stay flat.
+    @Test
+    fun bodySpansAreBakedAtTheCallerBaseSize() {
+        val doc = MarkdownAttributed.parse("Hello **there** and `code`\n\n# Big\n\n- item\n\n> quote\n\n```\nblock\n```", colors, bodySize = 19f)
+        val texts = doc.blocks.map { it.text }
+        assertEquals(19.sp, texts[0].styleAt("Hello").fontSize)
+        assertEquals(19.sp, texts[0].styleAt("there").fontSize)
+        assertEquals((19f * 0.92f).sp, texts[0].styleAt("code").fontSize)
+        assertEquals((19f * 1.3f).sp, texts[1].styleAt("Big").fontSize)
+        assertEquals(19.sp, texts[2].styleAt("item").fontSize)
+        assertEquals(19.sp, texts[3].styleAt("quote").fontSize)
+        assertEquals("code blocks stay flat", MarkdownAttributed.codeBlockFontSize.sp, texts[4].styleAt("block").fontSize)
+        val chatSized = doc.blocks.flatMap { b -> b.text.spanStyles.filter { it.item.fontSize == MarkdownAttributed.baseFontSize.sp } }
+        assertTrue("no span may stay at the chat size: $chatSized", chatSized.isEmpty())
+    }
+
+    @Test
+    fun defaultBodySizeIsStillTheChatScale() {
+        val text = parse("Hello **there**").blocks.first().text
+        assertEquals(MarkdownAttributed.baseFontSize.sp, text.styleAt("Hello").fontSize)
+        assertEquals(MarkdownAttributed.baseFontSize.sp, text.styleAt("there").fontSize)
+    }
+
+    /// The item thread's reading scale, end to end through the parser: the
+    /// style `ItemDetailView` hands `MarkdownText` produces spans at the item
+    /// size, larger than the chat's — the assertion that would have caught
+    /// the paragraph-level no-op.
+    @Test
+    fun itemBodySpansRenderLargerThanTheChatBody() {
+        val item = itemBodyStyle(androidx.compose.material3.Typography().bodyLarge)
+        val doc = MarkdownAttributed.parse("Which auth?", colors, bodySize = item.fontSize.value)
+        val size = doc.blocks.first().text.styleAt("Which").fontSize
+        assertEquals(item.fontSize, size)
+        assertTrue("item $size vs chat ${MarkdownAttributed.baseFontSize.sp}", size.value > MarkdownAttributed.baseFontSize)
+    }
+
     // MARK: - Headers
 
     @Test
