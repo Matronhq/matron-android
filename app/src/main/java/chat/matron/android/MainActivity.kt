@@ -379,6 +379,7 @@ private fun SignedInApp(
                 },
                 onOpenConversation = onOpenConversation,
                 onOpenItems = { nav.navigate("items/$convoID") },
+                onOpenItem = { nav.navigate("item/$it") },
             )
         }
 
@@ -526,6 +527,9 @@ private fun ChatRoute(
     onOpenConversation: (String) -> Unit,
     /// Opens the conversation's tasks page (the tracker button in the top bar).
     onOpenItems: () -> Unit,
+    /// Opens one item's thread from an inline marker card in the timeline
+    /// (apple #186) — the same `item/{itemID}` route the tasks page pushes.
+    onOpenItem: (String) -> Unit,
     /// Which agent box runs this session, or null when the user has fewer
     /// than two boxes. Threaded from the list's ChatSummary (same source as
     /// the row chip) so header and row can never disagree.
@@ -593,6 +597,7 @@ private fun ChatRoute(
             onOpenItems = onOpenItems,
             itemsSupported = itemsSupported,
             needsYouCount = needsYouCount,
+            onOpenItem = onOpenItem,
             // Deferred: built when the browser sheet opens, on the sheet's own
             // scope, over the same store the sync engine writes (apple #142).
             mediaBrowser = { scope ->

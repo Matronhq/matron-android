@@ -4,6 +4,7 @@ import chat.matron.android.events.AgentChatRequest
 import chat.matron.android.events.AgentSpawnRequest
 import chat.matron.android.events.AskUserEvent
 import chat.matron.android.events.DiffEvent
+import chat.matron.android.events.ItemMarkerEvent
 import chat.matron.android.events.LiveOutputEvent
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.events.ToolCallEvent
@@ -71,11 +72,21 @@ object JournalTimelineMapper {
                 TimelineItem.Kind.Text(event.body() ?: "", null)
             }
 
-            // Tracker markers invalidate the local item cache (ItemsSync) and
-            // render nothing until the inline-cards port (apple #186) — before
-            // this they fell into the unknown branch below as
-            // "[unsupported event: item]" noise.
-            JournalEventType.ITEM -> return null
+            JournalEventType.ITEM -> {
+                // Tracker marker event (spec 2026-09-08). `ItemsSync` is the
+                // side-channel consumer (it triggers a refetch of the item) —
+                // this is only about what the timeline SHOWS. A malformed
+                // payload, `reordered` and `updated` never reach the timeline:
+                // the latter two exist purely to invalidate the local cache
+                // (see `ItemMarkerEvent`'s doc comment) and carry nothing
+                // worth rendering inline (apple #186; before it the whole
+                // type was skipped).
+                val marker = ItemMarkerEvent.parse(payload) ?: return null
+                if (marker.action == ItemMarkerEvent.Action.REORDERED ||
+                    marker.action == ItemMarkerEvent.Action.UPDATED
+                ) return null
+                TimelineItem.Kind.ItemMarker(event.seq.toString(), marker)
+            }
 
             JournalEventType.TOOL_OUTPUT -> {
                 // A tool_output carrying a viewer_url is a live command-output
