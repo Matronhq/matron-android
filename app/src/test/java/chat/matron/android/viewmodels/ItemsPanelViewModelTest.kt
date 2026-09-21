@@ -376,6 +376,24 @@ class ItemsPanelViewModelTest {
         vm.stop()
     }
 
+    /// Bugbot (#75): after a failed pull, a successful retry must take the
+    /// error row down again — the list just updated.
+    @Test
+    fun refreshClearsAStaleErrorOnceARetrySucceeds() = runBlocking {
+        val sync = FakeItemsSync().apply { refreshOutcome = ItemsRefreshOutcome.Failed("offline") }
+        val vm = ItemsPanelViewModel(null, FakeItemsStore(), FakeItemsApi(), sync, this)
+        vm.refresh()
+        assertEquals("offline", vm.error.value)
+        sync.refreshOutcome = ItemsRefreshOutcome.Succeeded
+        vm.refresh()
+        assertNull("a successful retry clears the stale row", vm.error.value)
+        sync.refreshOutcome = ItemsRefreshOutcome.Failed("offline")
+        vm.refresh()
+        sync.refreshOutcome = ItemsRefreshOutcome.Unsupported
+        vm.refresh()
+        assertNull("so does an unsupported outcome (isSupported carries it)", vm.error.value)
+    }
+
     @Test
     fun refreshTogglesIsRefreshing() = runBlocking {
         val vm = ItemsPanelViewModel("c1", FakeItemsStore(), FakeItemsApi(), FakeItemsSync(), this)

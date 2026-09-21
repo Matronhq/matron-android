@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /// [openConversationCallback] is the non-Compose seam behind the agent-spawn
@@ -69,5 +70,23 @@ class MainActivityTest {
         advanceUntilIdle()
 
         assertEquals(listOf("room-1", "room-2"), navigated)
+    }
+
+    // MARK: - Item detail push guard (Bugbot on #78)
+
+    /// A double tap on an inline item card, or a link to the item already
+    /// on screen, must not push a second identical detail.
+    @Test
+    fun itemAlreadyOnTopIsANoOp() {
+        assertTrue(itemIsAlreadyOnTop("item/{itemID}", "it_1", "", "it_1"))
+        assertTrue(itemIsAlreadyOnTop("decisions/item/{itemID}", "it_1", "decisions/", "it_1"))
+    }
+
+    @Test
+    fun anyOtherTopDestinationStillPushes() {
+        assertFalse("a different item", itemIsAlreadyOnTop("item/{itemID}", "it_2", "", "it_1"))
+        assertFalse("the chat under the card", itemIsAlreadyOnTop("chat/{convoID}", null, "", "it_1"))
+        assertFalse("the same item on another tab's stack", itemIsAlreadyOnTop("decisions/item/{itemID}", "it_1", "", "it_1"))
+        assertFalse("no destination yet", itemIsAlreadyOnTop(null, null, "", "it_1"))
     }
 }

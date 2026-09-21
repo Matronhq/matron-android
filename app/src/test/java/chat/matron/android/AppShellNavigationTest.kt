@@ -16,6 +16,7 @@ class AppShellNavigationTest {
         override fun switchTab(tab: AppTab) { commands += "switch:${tab.name}" }
         override fun replaceChats(roomID: String) { commands += "replace:$roomID" }
         override fun pushChat(tab: AppTab, roomID: String) { commands += "pushChat:${tab.name}:$roomID" }
+        override fun replaceTopChat(tab: AppTab, current: String, sibling: String) { commands += "replaceTop:${tab.name}:$current>$sibling" }
         override fun pushDecision(itemID: String) { commands += "pushDecision:$itemID" }
         override fun pushMission(tab: AppTab, missionID: String) { commands += "pushMission:${tab.name}:$missionID" }
         override fun replaceMissions(missionID: String) { commands += "replaceMissions:$missionID" }
@@ -297,6 +298,11 @@ class AppShellNavigationTest {
             push(AppTab.CONVERSATIONS, roomID)
         }
         override fun pushChat(tab: AppTab, roomID: String) { commands += "pushChat:${tab.name}:$roomID"; push(tab, roomID) }
+        override fun replaceTopChat(tab: AppTab, current: String, sibling: String) {
+            commands += "replaceTop:${tab.name}:$current>$sibling"
+            val s = stacks.getValue(tab); if (s.last().second == current) s.removeAt(s.size - 1)
+            push(tab, sibling)
+        }
         override fun pushDecision(itemID: String) { commands += "pushDecision:$itemID"; push(AppTab.DECISIONS, "item/$itemID") }
         override fun pushMission(tab: AppTab, missionID: String) { commands += "pushMission:${tab.name}:$missionID"; push(tab, "mission/$missionID") }
         override fun replaceMissions(missionID: String) {
@@ -352,6 +358,41 @@ class AppShellNavigationTest {
         nav.selectTab(AppTab.CONVERSATIONS)
         nav.noteDestination(AppTab.CONVERSATIONS, "root-CONVERSATIONS", null)
         assertTrue(nav.isAtRoot)
+    }
+
+    /// Bugbot (#76): the sub-chat switcher must not grow the stack. A pushed
+    /// child is replaced in place (and the mirror sees a replace, not a
+    /// push); the coordinator root cannot be replaced, so its sibling is
+    /// pushed once and switches from there replace.
+    @Test
+    fun switchSubChatReplacesInPlaceOrPushesOnceFromTheCoordinatorRoot() {
+        val host = SimulatedControllerHost()
+        val nav = AppShellNavigation(host).also { host.nav = it }
+        nav.noteDestination(AppTab.CONVERSATIONS, "root-CONVERSATIONS", null)
+        nav.pushChat("!parent:s")
+        nav.pushChat("!a:s")
+        nav.switchSubChat("!a:s", "!b:s")
+        assertEquals("replaced in place, mirrored once", listOf("!parent:s", "!b:s"), nav.chatPath)
+        assertEquals(listOf(null, "!parent:s", "!b:s"), host.stack(AppTab.CONVERSATIONS))
+        assertEquals("replaceTop:CONVERSATIONS:!a:s>!b:s", host.commands.last())
+        host.commands.clear()
+        nav.switchSubChat("!b:s", "!b:s")
+        assertTrue("switching to the current child is a no-op", host.commands.isEmpty())
+        // The coordinator is itself a sub-chat: its tab's root (a chooser
+        // pick assigns AND lands there; a Settings assignment alone does
+        // not navigate).
+        nav.chooseCoordinator("!coord:s") { }
+        assertEquals(AppTab.COORDINATOR, nav.tab.value)
+        nav.switchSubChat("!coord:s", "!sibA:s")
+        assertEquals("pushed once from the root", listOf("!sibA:s"), nav.coordinatorPath)
+        assertEquals(listOf(null, "!sibA:s"), host.stack(AppTab.COORDINATOR))
+        nav.switchSubChat("!sibA:s", "!sibB:s")
+        assertEquals("further switches replace — the stack never grows", listOf("!sibB:s"), nav.coordinatorPath)
+        assertEquals(listOf(null, "!sibB:s"), host.stack(AppTab.COORDINATOR))
+        nav.switchSubChat("!sibB:s", "!coord:s")
+        assertEquals("switching back to the coordinator lands on its root", emptyList<String>(), nav.coordinatorPath)
+        assertEquals(listOf<String?>(null), host.stack(AppTab.COORDINATOR))
+        assertEquals("the Conversations stack was never touched", listOf("!parent:s", "!b:s"), nav.chatPath)
     }
 
     /// Bugbot (#76): a chooser pick must mirror the new coordinator into
