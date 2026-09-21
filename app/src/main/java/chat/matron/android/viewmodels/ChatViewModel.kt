@@ -1,7 +1,6 @@
 package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.MediaFetchOutcome
-import chat.matron.android.chat.ConversationSummaryEntry
 import chat.matron.android.chat.JournalTimelineMapper
 import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineItem
@@ -153,6 +152,29 @@ class ChatViewModel(
         }
     }
 
+    // MARK: - Jump to a milestone (apple #209)
+
+    /// A milestone jump parked until the stream is live — its OWN slot, not
+    /// search's: `endChatSearch` clears only search's parked jump, so
+    /// dismissing the search bar cannot kill a milestone jump in flight
+    /// (Apple's `FocusOwner.milestone`).
+    private var pendingMilestoneFocusSeq: Long? = null
+
+    /// Scrolls the transcript to a milestone's anchor — the `seq` of its own
+    /// `milestone` marker event (spec 2026-09-10). Rides the same
+    /// park-until-live jump as in-conversation search, so a tap made from
+    /// the Missions tab BEFORE this room's stream is up lands once the first
+    /// snapshot arrives. A seq that no longer exists lands on the nearest
+    /// earlier row ([focus]'s existing fallback).
+    suspend fun jumpToMilestone(seq: Long) {
+        if (_hasReceivedFirstSnapshot.value && observationTask?.isActive == true) {
+            pendingMilestoneFocusSeq = null
+            focus(seq)
+        } else {
+            pendingMilestoneFocusSeq = seq
+        }
+    }
+
     /// ∧ steps OLDER (higher index — matches are newest-first), ∨ steps back
     /// toward the newest; clamped at both ends without re-focusing.
     suspend fun stepChatSearch(older: Boolean) {
@@ -193,12 +215,6 @@ class ChatViewModel(
 
     private val _sessionStatus = MutableStateFlow<SessionStatus?>(null)
     val sessionStatus: StateFlow<SessionStatus?> = _sessionStatus.asStateFlow()
-
-    /// TOC summary entries for this conversation, newest-first — mirrors
-    /// `TimelineService.summaryEntriesStream()`. Empty until the journal
-    /// replays the room's summary rows (or forever, on backends without one).
-    private val _summaryEntries = MutableStateFlow<List<ConversationSummaryEntry>>(emptyList())
-    val summaryEntries: StateFlow<List<ConversationSummaryEntry>> = _summaryEntries.asStateFlow()
 
     private val _rows = MutableStateFlow<List<TimelineRow>>(emptyList())
     val rows: StateFlow<List<TimelineRow>> = _rows.asStateFlow()
@@ -315,7 +331,6 @@ class ChatViewModel(
     private var observationTask: Job? = null
     private var statusTask: Job? = null
     private var sessionStateTask: Job? = null
-    private var summaryEntriesTask: Job? = null
     private var connectionTask: Job? = null
     private var emptyDebounceTask: Job? = null
     private var resumeTask: Job? = null
@@ -838,7 +853,7 @@ class ChatViewModel(
         }
     }
 
-    // MARK: - Summaries TOC jump-to-message
+    // MARK: - Jump-to-message (a milestone tap, a search hit)
 
     /// Pending scroll anchor for a TOC jump. The timeline observes this exactly
     /// like the Apple views observe `pendingFocusID`: disengage tail-follow,
@@ -866,7 +881,7 @@ class ChatViewModel(
     private var focusTask: Job? = null
 
     /// Navigates the transcript to the message nearest (at or before) [seq] —
-    /// the summaries TOC sheet's jump-to-message action. Pages history
+    /// the jump-to-message action behind milestone taps and search hits. Pages history
     /// backward until the target region is loaded locally, giving up when
     /// [reachedHistoryStart] latches; at that point it lands on the oldest row
     /// actually available rather than doing nothing. Port of the Apple
@@ -1006,6 +1021,10 @@ class ChatViewModel(
                         pendingChatSearchFocusSeq = null
                         scope.launch { focus(seq) }
                     }
+                    pendingMilestoneFocusSeq?.let { seq ->
+                        pendingMilestoneFocusSeq = null
+                        scope.launch { focus(seq) }
+                    }
                     updateSettledEmpty(snapshot.isEmpty())
                     // Content → empty is the signature of a mirror wipe under an
                     // open view; refetch the newest page (nothing else does).
@@ -1044,13 +1063,6 @@ class ChatViewModel(
             }
         }
 
-        summaryEntriesTask?.cancel()
-        summaryEntriesTask = scope.launch {
-            timeline.summaryEntriesStream().collect { entries ->
-                _summaryEntries.value = entries
-            }
-        }
-
         // A prior failed image fetch only means "unreachable then" — once the
         // sync connection comes back up, give it another chance rather than
         // negative-caching it for the rest of the VM's (session-long) lifetime.
@@ -1082,8 +1094,6 @@ class ChatViewModel(
         statusTask = null
         sessionStateTask?.cancel()
         sessionStateTask = null
-        summaryEntriesTask?.cancel()
-        summaryEntriesTask = null
         connectionTask?.cancel()
         connectionTask = null
         emptyDebounceTask?.cancel()

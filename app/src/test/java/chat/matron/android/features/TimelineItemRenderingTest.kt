@@ -2,6 +2,8 @@ package chat.matron.android.features
 
 import chat.matron.android.chat.TimelineItem
 import chat.matron.android.events.ItemMarkerEvent
+import chat.matron.android.events.MilestoneMarkerEvent
+import chat.matron.android.events.MissionMarkerEvent
 import chat.matron.android.features.chat.attachmentIsExpired
 import chat.matron.android.features.chat.attachmentIsLoading
 import chat.matron.android.features.chat.timelineAvatarSender
@@ -9,6 +11,7 @@ import chat.matron.android.features.chat.timelineDisplayName
 import chat.matron.android.features.chat.timelineItemShouldRender
 import chat.matron.android.models.ItemAuthor
 import chat.matron.android.models.ItemKind
+import chat.matron.android.models.MilestoneKind
 import chat.matron.android.models.TimelineSendState
 import java.time.Instant
 import org.junit.Assert.assertEquals
@@ -155,5 +158,15 @@ class TimelineItemRenderingTest {
     /// circle and jumps to the real one once the durable row lands.
     @Test fun avatarSender_ephemeralStreamingPlaceholder_isNull_evenInMultiSenderRoom() {
         assertNull(timelineAvatarSender(textItem("eph:1", "agent", isOwn = false), hasMultipleSenders = true))
+    }
+
+    /// Both mission marker kinds render (apple #209): the milestone card is
+    /// the jump target's own row and the mission notice is the inline
+    /// lifecycle line — neither is bookkeeping.
+    @Test fun shouldRender_returnsTrue_forMissionMarkers() {
+        val milestone = MilestoneMarkerEvent("ml_1", 63, MilestoneKind.USER_INPUT, "Dan asked", missionID = "ms_1", missionNum = 61)
+        assertTrue(timelineItemShouldRender(item(TimelineItem.Kind.MilestoneMarker("k", milestone))))
+        val mission = MissionMarkerEvent("ms_1", 61, "M", MissionMarkerEvent.Action.CREATED)
+        assertTrue(timelineItemShouldRender(item(TimelineItem.Kind.MissionMarker("k", mission))))
     }
 }
