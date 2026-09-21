@@ -55,4 +55,23 @@ class DiffEventTest {
         val evt = DiffEvent.parse(payload("""{"diff":"x","viewer_url":42}"""))
         assertNull(evt.viewerURL)
     }
+
+    /// Local retention (apple #212, spec §3.4) strips `diff` and `snippet`
+    /// and sets `expired: true`, keeping every other key so the card can
+    /// still name the file. The parse must surface that as a flag, not as an
+    /// empty diff indistinguishable from a header-only payload.
+    @Test
+    fun parseCarriesTheExpiredFlagAndKeepsTheMetadata() {
+        val evt = DiffEvent.parse(payload("""{"file_path":"/w/Sources/A.swift","display_path":"Sources/A.swift","tool":"Edit","added":2,"removed":1,"new_file":false,"expired":true}"""))
+        assertTrue(evt.expired)
+        assertEquals("", evt.diff)
+        assertEquals("A.swift", evt.filename)
+        assertEquals(2, evt.added)
+        assertEquals(1, evt.removed)
+    }
+
+    @Test
+    fun parseDefaultsExpiredToFalse() {
+        assertFalse(DiffEvent.parse(payload("""{"diff":"+ a"}""")).expired)
+    }
 }

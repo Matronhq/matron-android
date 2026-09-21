@@ -622,4 +622,18 @@ class JournalTimelineMapperTest {
         assertEquals(TimelineItem.Kind.Unknown("spawn_outcome"), item.kind)
     }
 
+
+    // MARK: Expired diff (apple #212)
+
+    /// Local retention strips `diff`/`snippet` from a `diff` payload and sets
+    /// `expired: true`, keeping the other keys so the row can still name the
+    /// file. The mapper must carry that flag through to the `DiffEvent`.
+    @Test fun expiredDiffMapsToAFlaggedDiffItem() {
+        val item = map(ev(7, "diff", payload = buildJsonObject {
+            put("file_path", "/w/Sources/A.swift"); put("added", 2); put("removed", 1); put("expired", true)
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.Diff
+        assertTrue(kind.event.expired)
+        assertEquals("the row must still be able to name the file", "A.swift", kind.event.filename)
+    }
 }
