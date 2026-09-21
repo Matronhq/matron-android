@@ -13,7 +13,9 @@ import androidx.compose.ui.text.TextStyle
 fun SelectableMessageText(
     raw: String,
     modifier: Modifier = Modifier,
-    textStyle: TextStyle = androidx.compose.material3.LocalTextStyle.current,
+    /// `null` renders at the chat scale; an explicit style wins (see
+    /// [markdownBodyStyle]).
+    textStyle: TextStyle? = null,
     onLinkClick: ((String) -> Unit)? = null,
 ) {
     SelectionContainer(modifier) {
