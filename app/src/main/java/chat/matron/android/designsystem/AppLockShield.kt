@@ -15,6 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -42,6 +43,14 @@ import androidx.compose.ui.unit.dp
 /// recomposition: the credential fallback runs in a separate activity, and
 /// re-prompting on every return would loop the user in a prompt they cannot
 /// dismiss. The button covers retries.
+/// Whether the app lock is engaged right now. Because the shield replaces the
+/// composition, anything with a teardown that must behave differently when the
+/// lock (rather than the user) took it down reads this in its dispose path —
+/// the voice recorder keeps a live note across the lock, for one. Read
+/// lazily (a lambda, not a value) so a dispose handler sees the state at
+/// teardown time.
+val LocalAppLockActive = staticCompositionLocalOf<() -> Boolean> { { false } }
+
 @Composable
 fun AppLockShield(
     isAuthenticating: Boolean,
