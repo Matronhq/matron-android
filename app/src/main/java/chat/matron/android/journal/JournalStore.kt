@@ -13,10 +13,7 @@ import kotlin.math.max
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 
 /// Thrown by the [JournalStore.failApplyForTesting] injection hook to simulate
 /// a disk-full / SQLite I/O error without a real failing backend.
@@ -125,10 +122,11 @@ class JournalStore(
     /// Applies one journal frame inside a single transaction. Returns `false`
     /// (a no-op) when `seq <= cursor` (a duplicate/replayed frame); otherwise
     /// inserts the event, updates the conversation summary, advances the cursor,
-    /// and returns `true`.
-    suspend fun applyJournal(event: JournalEvent): Boolean {
+    /// and returns `true`. `now` (epoch ms) is the clock the insert-time
+    /// tombstone rules run against — injectable for tests only.
+    suspend fun applyJournal(event: JournalEvent, now: Long = System.currentTimeMillis()): Boolean {
         if (failApplyForTesting?.invoke(event.seq) == true) throw JournalStoreWriteException()
-        return db.withTransaction { applyOneInTransaction(event) }
+        return db.withTransaction { applyOneInTransaction(event, now) }
     }
 
     /// Applies a reconnect-replay batch inside ONE transaction (port of
@@ -139,22 +137,29 @@ class JournalStore(
     /// so the caller can index exactly those for search. A write failure
     /// mid-batch rolls the WHOLE batch back, leaving the cursor untouched —
     /// the same reconnect-from-cursor recovery shape as the per-frame path.
-    suspend fun applyJournalBatch(events: List<JournalEvent>): List<JournalEvent> {
+    suspend fun applyJournalBatch(
+        events: List<JournalEvent>,
+        now: Long = System.currentTimeMillis(),
+    ): List<JournalEvent> {
         if (events.isEmpty()) return emptyList()
         return db.withTransaction {
             events.filter { event ->
                 if (failApplyForTesting?.invoke(event.seq) == true) throw JournalStoreWriteException()
-                applyOneInTransaction(event)
+                applyOneInTransaction(event, now)
             }
         }
     }
 
     /// Per-event apply body shared by [applyJournal] and [applyJournalBatch].
     /// MUST be called inside an open transaction.
-    private suspend fun applyOneInTransaction(event: JournalEvent): Boolean {
+    private suspend fun applyOneInTransaction(event: JournalEvent, now: Long): Boolean {
         val current = metaDao.value(CURSOR_KEY)?.toLongOrNull() ?: 0
         if (event.seq <= current) return false
-        eventDao.insertReplace(EventEntity.from(event))
+        // Stored tombstoned when it is already past a cutoff — see
+        // [tombstonedForStorage]. The derived columns below read `stored`
+        // so they describe what is on disk.
+        val stored = tombstonedForStorage(event, now)
+        eventDao.insertReplace(EventEntity.from(stored))
         SummaryEntryEntity.from(event)?.let { summaryEntryDao.insertIgnore(it) }
 
         var convo = conversationDao.byId(event.convoID) ?: ConversationEntity(
@@ -172,7 +177,7 @@ class JournalStore(
             convo = convo.copy(lastActivityTS = event.ts.toEpochMilli())
         }
 
-        val payload = event.payload
+        val payload = stored.payload
         when {
             event.type == JournalEventType.CONVO_META -> {
                 payload.stringOrNull("title")?.takeIf { it.isNotEmpty() }?.let {
@@ -214,7 +219,23 @@ class JournalStore(
                 )
             }
             event.type in JournalEventType.MESSAGE_TYPES -> {
-                convo = convo.copy(snippet = snippet(event))
+                // `snippet` is computed from the ORIGINAL wire payload, never
+                // the stored (possibly tombstoned) one: a message that expires
+                // later keeps its `conversation.snippet` exactly as written —
+                // the purge no longer rewrites it — and relies on
+                // [applyReadTimeSnippetTTL] to hide it at read time for the
+                // one type that TTL covers (`tool_output`). A message that
+                // arrives ALREADY past its cutoff must behave identically
+                // (in-place-expiry parity), not freeze the `[diff]`
+                // placeholder [snippet]'s default case produces for a type it
+                // has no case for. The two columns DO come from the stored
+                // payload — they describe what's actually on disk, which is
+                // what the read-time TTL substitutes in.
+                convo = convo.copy(
+                    snippet = snippet(event),
+                    lastMessageType = event.type,
+                    expiredSnippet = expiredSnippet(event.type, payload),
+                )
                 if (event.sender != ownSender && event.seq > convo.readUpToSeq) {
                     convo = convo.copy(unreadCount = convo.unreadCount + 1)
                 }
@@ -237,10 +258,12 @@ class JournalStore(
 
     // MARK: History
 
-    suspend fun insertHistory(events: List<JournalEvent>) {
+    /// `now` (epoch ms) is the clock the insert-time tombstone rules run
+    /// against — injectable for tests only.
+    suspend fun insertHistory(events: List<JournalEvent>, now: Long = System.currentTimeMillis()) {
         db.withTransaction {
             for (e in events) {
-                eventDao.insertIgnore(EventEntity.from(e))
+                eventDao.insertIgnore(EventEntity.from(tombstonedForStorage(e, now)))
                 SummaryEntryEntity.from(e)?.let { summaryEntryDao.insertIgnore(it) }
             }
             // A post-snapshot refill can contain the frames that confirm
@@ -257,13 +280,21 @@ class JournalStore(
             // Paginated rows can include unread messages (e.g. the refill after
             // a snapshot_required wipe). Live applyJournal counts unread
             // incrementally; recount here so the list doesn't under-report.
+            //
+            // Backfilled rows can also become a conversation's newest
+            // message-type event without moving `last_seq`, so the two TTL
+            // columns are recomputed in the same pass — one indexed lookup
+            // per touched conversation, exactly like the recount.
             for (convoID in events.map { it.convoID }.toSet()) {
                 val convo = conversationDao.byId(convoID) ?: continue
+                val columns = newestMessageColumns(convoID)
                 conversationDao.upsert(
                     convo.copy(
                         unreadCount = eventDao.countUnread(
                             convoID, convo.readUpToSeq, JournalEventType.MESSAGE_TYPES, ownSender,
                         ),
+                        lastMessageType = columns.first,
+                        expiredSnippet = columns.second,
                     )
                 )
             }
@@ -531,6 +562,9 @@ class JournalStore(
         // re-evaluated against current wall time. Re-fires on conversation-table
         // changes (which every meaningful event write also triggers via the
         // summary upsert).
+        // The query reads ONLY the `conversation` table: the TTL is pure
+        // column logic (see applyReadTimeSnippetTTL), so Room's invalidation
+        // tracker re-fires the list for conversation-row writes alone.
         conversationDao.visibleTopLevelFlow().map { list -> list.map { applyReadTimeSnippetTTL(it, now()) } }
 
     fun childrenFlow(parentConvoID: String): Flow<List<ConversationEntity>> =
@@ -573,58 +607,62 @@ class JournalStore(
 
     /// Rewrites every `tool_output` event payload with `live_log: true` older
     /// than 24h to the server's tombstone shape — snippet removed,
-    /// `expired: true`, `blob_ref: null` — and, when the purged event is still
-    /// the newest message-type event in its conversation, rewrites the
-    /// conversation-list preview to `$ <command>`. Idempotent. `now` (epoch ms)
-    /// is injectable for tests.
-    ///
-    /// Boot-time invocation is the composition root's responsibility (a Kotlin
-    /// constructor can't suspend, unlike the Apple original's `init`).
+    /// `expired: true`, `blob_ref: null`. Idempotent. `now` (epoch ms) is
+    /// injectable for tests. No longer rewrites `conversation.snippet`: the
+    /// read path derives the `$ <command>` preview from the columns.
     suspend fun purgeExpiredToolOutputSnippets(now: Long = System.currentTimeMillis()) {
         val cutoff = now - TTL_MS
         db.withTransaction {
             val rows = eventDao.ofTypeAtOrBefore(JournalEventType.TOOL_OUTPUT, cutoff)
             for (row in rows) {
                 val payload = parseJsonObjectOrNull(row.payload) ?: continue
-                if (payload.boolOrNull("live_log") != true) continue
-                if (payload.boolOrNull("expired") == true) continue
-                val tombstone = buildJsonObject {
-                    for ((k, v) in payload) {
-                        if (k != "snippet" && k != "expired" && k != "blob_ref") put(k, v)
-                    }
-                    put("expired", true)
-                    put("blob_ref", JsonNull)
-                }
+                val tombstone = EventTombstone.apply(payload, row.type, row.ts, now) ?: continue
                 eventDao.updatePayload(row.seq, tombstone.toString())
-
-                val command = payload.stringOrNull("command")
-                if (command.isNullOrEmpty()) continue
-                val convo = conversationDao.byId(row.convoID) ?: continue
-                val newestMessageSeq = eventDao.newestMessageSeq(row.convoID, JournalEventType.MESSAGE_TYPES)
-                if (newestMessageSeq == row.seq) {
-                    conversationDao.upsert(convo.copy(snippet = "$ $command".take(120)))
-                }
             }
         }
     }
 
-    /// Read-time mirror of the tombstone rewrite, applied WITHOUT a write. An
-    /// app left running past the 24h TTL must stop surfacing an expired
-    /// `live_log` snippet in the list the next time it's read, even though the
-    /// boot-time sweep only runs at startup. Only touches the in-memory record.
-    private suspend fun applyReadTimeSnippetTTL(record: ConversationEntity, now: Long): ConversationEntity {
+    /// The form of [event] that actually goes to disk: a `tool_output` or
+    /// `diff` that is ALREADY past one of [EventTombstone]'s cutoffs when it
+    /// arrives is stored tombstoned, never in full.
+    ///
+    /// This is what makes the sweeps' watermarks complete. A sweep skips
+    /// everything at or below its watermark, so a row older than that can
+    /// only be correct if the two insert paths applied the identical rule on
+    /// the way in — which is why both of them, and both sweeps, call
+    /// [EventTombstone.apply] and nothing else.
+    private fun tombstonedForStorage(event: JournalEvent, now: Long): JournalEvent {
+        val rewritten = EventTombstone.apply(event.payload, event.type, event.ts.toEpochMilli(), now) ?: return event
+        return event.copy(payload = rewritten)
+    }
+
+    /// The newest message-type event's derived facts for [convoID] as
+    /// `(lastMessageType, expiredSnippet)`, or `(null, null)` when the
+    /// conversation has no message-type event. One indexed lookup on
+    /// `convo_id`; called only from write paths, never from a read.
+    private suspend fun newestMessageColumns(convoID: String): Pair<String?, String?> {
+        val row = eventDao.newestMessageEvent(convoID, JournalEventType.MESSAGE_TYPES) ?: return null to null
+        return row.type to expiredSnippet(row.type, parseJsonObjectOrNull(row.payload))
+    }
+
+    /// Read-time mirror of the tool-output tombstone, applied WITHOUT a
+    /// write and WITHOUT reading `event`.
+    ///
+    /// An app left running past the 24 h tool-output TTL (docs/protocol.md
+    /// Retention) must stop surfacing an expired `live_log` snippet in the
+    /// conversation list the next time it is read, exactly as
+    /// `JournalTimelineMapper` already hides it in the open thread. Before
+    /// v7 that answer came from a `MAX(seq)` sub-query plus an event fetch
+    /// per stale conversation — two `event` reads per stale row on every
+    /// list read. Both facts now live on the conversation row, maintained on
+    /// write ([applyJournal], [insertHistory], and the sweeps), so the list
+    /// read is one `conversation` query regardless of how stale it is.
+    private fun applyReadTimeSnippetTTL(record: ConversationEntity, now: Long): ConversationEntity {
+        if (record.lastMessageType != JournalEventType.TOOL_OUTPUT) return record
+        val expiredSnippet = record.expiredSnippet ?: return record
         val activityTS = record.lastActivityTS ?: return record
-        val cutoff = now - TTL_MS
-        if (activityTS > cutoff) return record
-        val seq = eventDao.newestMessageSeq(record.id, JournalEventType.MESSAGE_TYPES) ?: return record
-        val event = eventDao.byId(seq) ?: return record
-        if (event.type != JournalEventType.TOOL_OUTPUT) return record
-        val payload = parseJsonObjectOrNull(event.payload) ?: return record
-        if (payload.boolOrNull("live_log") != true) return record
-        if (payload.boolOrNull("expired") == true) return record
-        val command = payload.stringOrNull("command")
-        if (command.isNullOrEmpty()) return record
-        return record.copy(snippet = "$ $command".take(120))
+        if (activityTS > now - TTL_MS) return record
+        return record.copy(snippet = expiredSnippet)
     }
 
     /// Mirrors the server's snippetOf (matron-journal src/journal.js).

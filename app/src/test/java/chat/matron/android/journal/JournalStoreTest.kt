@@ -402,10 +402,14 @@ class JournalStoreTest {
     private suspend fun storedPayload(store: JournalStore, seq: Long): JsonObject =
         store.events("c1").first { it.seq == seq }.payload
 
+    // The event helper stamps ts = seq seconds after epoch, so seq 1 is
+    // ancient relative to any injected `now` past 1970-01-02. Every insert
+    // below pins `now` inside the TTL too, or the insert-time tombstone would
+    // do the sweep's job and the sweep tests would prove nothing.
     @Test
     fun purgeRewritesStaleLiveLogToTombstone() = runBlocking {
         val store = makeStore()
-        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload()))
+        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload()), now = nowSeconds(1.0))
         store.purgeExpiredToolOutputSnippets(now = nowSeconds(1.0 + 25 * 3600))
 
         val payload = storedPayload(store, 1)
@@ -420,8 +424,8 @@ class JournalStoreTest {
     @Test
     fun purgeLeavesYoungAndNonLiveLogRows() = runBlocking {
         val store = makeStore()
-        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload(liveLog = false)))
-        store.applyJournal(ev(2, type = "tool_output", payload = toolOutputPayload()))
+        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload(liveLog = false)), now = nowSeconds(2.0))
+        store.applyJournal(ev(2, type = "tool_output", payload = toolOutputPayload()), now = nowSeconds(2.0))
         store.purgeExpiredToolOutputSnippets(now = nowSeconds(2.0 + 23 * 3600))
         assertNotNull(storedPayload(store, 2).stringOrNull("snippet"))
 
@@ -430,20 +434,22 @@ class JournalStoreTest {
         assertNull(storedPayload(store, 2).stringOrNull("snippet"))
     }
 
+    /// The purge no longer rewrites `conversation.snippet`; after the sweep
+    /// the `$ command` preview comes from the read-time column logic.
     @Test
     fun purgeRewritesConvoPreviewWhenPurgedEventIsNewest() = runBlocking {
         val store = makeStore()
-        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload()))
+        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload()), now = nowSeconds(1.0))
         assertEquals("output text", store.conversations(now = nowSeconds(1.0)).first().snippet)
         store.purgeExpiredToolOutputSnippets(now = nowSeconds(1.0 + 25 * 3600))
-        assertEquals("$ make test", store.conversations().first().snippet)
+        assertEquals("$ make test", store.conversations(now = nowSeconds(1.0 + 25 * 3600)).first().snippet)
     }
 
     @Test
     fun purgeKeepsConvoPreviewWhenNewerMessageExists() = runBlocking {
         val store = makeStore()
-        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload()))
-        store.applyJournal(ev(2, payload = body("later text")))
+        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload()), now = nowSeconds(2.0))
+        store.applyJournal(ev(2, payload = body("later text")), now = nowSeconds(2.0))
         store.purgeExpiredToolOutputSnippets(now = nowSeconds(2.0 + 48 * 3600))
         assertEquals("later text", store.conversations().first().snippet)
     }
@@ -451,7 +457,7 @@ class JournalStoreTest {
     @Test
     fun purgeIsIdempotent() = runBlocking {
         val store = makeStore()
-        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload()))
+        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload()), now = nowSeconds(1.0))
         val now = nowSeconds(1.0 + 25 * 3600)
         store.purgeExpiredToolOutputSnippets(now = now)
         val first = storedPayload(store, 1)
@@ -464,7 +470,7 @@ class JournalStoreTest {
     @Test
     fun conversationsAppliesTTLAtReadTimeWithoutPurge() = runBlocking {
         val store = makeStore()
-        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload()))
+        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload()), now = nowSeconds(1.0))
         assertEquals("output text", store.conversations(now = nowSeconds(1.0 + 0.001)).first().snippet)
 
         val stale = store.conversations(now = nowSeconds(1.0 + 25 * 3600))
@@ -476,7 +482,7 @@ class JournalStoreTest {
     @Test
     fun conversationsReadTimeTTLLeavesNonLiveLogSnippetsAlone() = runBlocking {
         val store = makeStore()
-        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload(liveLog = false)))
+        store.applyJournal(ev(1, type = "tool_output", payload = toolOutputPayload(liveLog = false)), now = nowSeconds(1.0))
         val stale = store.conversations(now = nowSeconds(1.0 + 48 * 3600))
         assertEquals("output text", stale.first().snippet)
     }

@@ -136,8 +136,14 @@ interface EventDao {
     @Query("SELECT MAX(seq) FROM event WHERE convo_id = :convoID")
     suspend fun maxSeq(convoID: String): Long?
 
-    @Query("SELECT MAX(seq) FROM event WHERE convo_id = :convoID AND type IN (:messageTypes)")
-    suspend fun newestMessageSeq(convoID: String, messageTypes: Collection<String>): Long?
+    /// The newest message-type row of one conversation — what decides
+    /// `conversation.last_message_type` / `expired_snippet` on the write
+    /// paths (`insertHistory`, the sweeps). One indexed lookup on `convo_id`.
+    @Query(
+        "SELECT * FROM event WHERE convo_id = :convoID AND type IN (:messageTypes) " +
+            "ORDER BY seq DESC LIMIT 1"
+    )
+    suspend fun newestMessageEvent(convoID: String, messageTypes: Collection<String>): EventEntity?
 
     @Query(
         "SELECT COUNT(*) FROM event WHERE convo_id = :convoID AND seq > :afterSeq " +
