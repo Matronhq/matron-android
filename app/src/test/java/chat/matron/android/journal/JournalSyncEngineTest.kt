@@ -467,6 +467,105 @@ class JournalSyncEngineTest {
         engine.endSync()
     }
 
+    /// A parked verdict must not outlive its socket. A room whose first frame
+    /// (session_status) landed just before a drop was left parked; after the
+    /// reconnect its next live message settled it as "open" and MainActivity
+    /// navigated into the room (Bugbot, PR #67). The parked set is cleared on
+    /// connect: the convo already has its store row, so post-reconnect it is
+    /// simply a known convo whose frames never auto-open — like a convo born
+    /// in a reconnect backlog. A genuinely new convo after it still emits.
+    @Test
+    fun parkedAutoOpenDoesNotSurviveReconnect() = runBlocking {
+        val first = FakeWebSocketConnection()
+        first.serve(helloOK(1))
+        first.serve(journalLine(1))
+        val second = FakeWebSocketConnection()
+        second.serve(helloOK(2)) // nothing to replay: cursor already at 2
+        val store = seededStore()
+        val connector = FakeConnector(listOf(first, second))
+        val engine = makeEngine(store, connector)
+        engine.beginSync()
+        engine.waitUntilReady()
+
+        val probe = FlowProbe(this, engine.newConversations())
+        delay(50)
+        first.serve(journalLine(2, convo = "room", type = "session_status")) // parked, title unknown
+        waitUntil { store.cursor() >= 2 }
+        first.closeFromServer()
+        waitUntil { connector.connectCount == 2 }
+        engine.waitUntilReady()
+
+        second.serve(journalLine(3, convo = "room")) // live message on the parked convo → must NOT emit
+        second.serve(metaLine(4, convo = "cLive")) // normal new convo → emit
+        assertEquals("a verdict parked on the dead socket must not open the convo after reconnect", "cLive", probe.next())
+        probe.cancel()
+        engine.endSync()
+    }
+
+    /// Same drop, but the room's titled meta arrives in the reconnect REPLAY
+    /// (batched through flushReplay, which never publishes). The parked id
+    /// must be settled by the replay, not left for the next live frame.
+    @Test
+    fun parkedAutoOpenSettledByReconnectReplayNotByNextLiveMessage() = runBlocking {
+        val first = FakeWebSocketConnection()
+        first.serve(helloOK(1))
+        first.serve(journalLine(1))
+        val second = FakeWebSocketConnection()
+        second.serve(helloOK(4))
+        second.serve(journalLine(3, convo = "room", type = "read_marker")) // replayed
+        second.serve(metaLine(4, convo = "room", title = "↔️ [ab] mac ↔ dev-z")) // replayed: the title
+        val store = seededStore()
+        val connector = FakeConnector(listOf(first, second))
+        val engine = makeEngine(store, connector)
+        engine.beginSync()
+        engine.waitUntilReady()
+
+        val probe = FlowProbe(this, engine.newConversations())
+        delay(50)
+        first.serve(journalLine(2, convo = "room", type = "session_status")) // parked
+        waitUntil { store.cursor() >= 2 }
+        first.closeFromServer()
+        waitUntil { connector.connectCount == 2 }
+        engine.waitUntilReady()
+        waitUntil { store.cursor() >= 4 }
+
+        second.serve(journalLine(5, convo = "room")) // live message → must NOT emit
+        second.serve(metaLine(6, convo = "cLive")) // normal new convo → emit
+        assertEquals("a room whose title replayed after a drop must not open on its next live message", "cLive", probe.next())
+        probe.cancel()
+        engine.endSync()
+    }
+
+    /// endSync drops parked verdicts with the connection: a convo parked
+    /// before a stop must not auto-open from its next live message after a
+    /// later start.
+    @Test
+    fun endSyncClearsParkedAutoOpen() = runBlocking {
+        val first = FakeWebSocketConnection()
+        first.serve(helloOK(1))
+        first.serve(journalLine(1))
+        val second = FakeWebSocketConnection()
+        second.serve(helloOK(2))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(first, second)))
+        engine.beginSync()
+        engine.waitUntilReady()
+
+        val probe = FlowProbe(this, engine.newConversations())
+        delay(50)
+        first.serve(journalLine(2, convo = "room", type = "session_status")) // parked
+        waitUntil { store.cursor() >= 2 }
+        engine.endSync()
+
+        engine.beginSync()
+        engine.waitUntilReady()
+        second.serve(journalLine(3, convo = "room")) // live message → must NOT emit
+        second.serve(metaLine(4, convo = "cLive")) // normal new convo → emit
+        assertEquals("endSync must drop a parked verdict", "cLive", probe.next())
+        probe.cancel()
+        engine.endSync()
+    }
+
     // MARK: Reconnect seams
 
     @Test

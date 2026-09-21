@@ -142,8 +142,14 @@ class JournalSyncEngine(
     private val newConvoListeners = mutableMapOf<UUID, (String) -> Unit>()
     /// Live-born top-level convos whose auto-open verdict is still waiting
     /// on their title: the first frame was neither the `convo_meta` that
-    /// carries it nor a message (see [considerAutoOpen]). Touched only from
-    /// the receive loop, which handles frames one at a time.
+    /// carries it nor a message (see [considerAutoOpen]). Guarded by `lock`.
+    /// Scoped to ONE live connection: cleared on connect, on [endSync] and on
+    /// a `snapshot_required` wipe. A convo parked when the socket drops
+    /// already has its store row, so after the reconnect it is "not new" and
+    /// — with the set cleared — its next live message cannot publish it; it
+    /// simply does not auto-open, like any convo born in a reconnect backlog
+    /// (Bugbot, PR #67: a room parked across a drop was opened by its next
+    /// live message).
     private val pendingAutoOpen = mutableSetOf<String>()
 
     // MARK: Offline outbox state (guarded by `lock`)
@@ -229,6 +235,7 @@ class JournalSyncEngine(
             // only as fresh as the live stream, and a future beginSync()'s
             // `viewing` replay repopulates it.
             lastSessionStatus.clear()
+            pendingAutoOpen.clear()
             waiters = readyWaiters.toList(); readyWaiters.clear()
             rpc = rpcPending.values.toList(); rpcPending.clear()
         }
@@ -655,15 +662,17 @@ class JournalSyncEngine(
     private fun considerAutoOpen(event: JournalEvent, firstFrame: Boolean) {
         val title = if (event.type == JournalEventType.CONVO_META) event.payload.stringOrNull("title") else null
         if (title != null) {
-            pendingAutoOpen.remove(event.convoID)
+            synchronized(lock) { pendingAutoOpen.remove(event.convoID) }
             if (!JournalEventType.isAgentRoomTitle(title)) publishNewConversation(event.convoID)
         } else if (event.type in JournalEventType.MESSAGE_TYPES) {
-            pendingAutoOpen.remove(event.convoID)
+            synchronized(lock) { pendingAutoOpen.remove(event.convoID) }
             publishNewConversation(event.convoID)
         } else if (firstFrame) {
-            pendingAutoOpen.add(event.convoID)
+            synchronized(lock) { pendingAutoOpen.add(event.convoID) }
         }
     }
+
+    private fun isPendingAutoOpen(convoID: String): Boolean = synchronized(lock) { convoID in pendingAutoOpen }
 
     // MARK: RPC correlator
 
@@ -760,6 +769,9 @@ class JournalSyncEngine(
                     sentOnThisConnection.clear()
                     sendOrderThisConnection.clear()
                     mediaSendsThisConnection.clear()
+                    // Parked auto-open verdicts belong to the dead socket; see
+                    // [pendingAutoOpen].
+                    pendingAutoOpen.clear()
                 }
                 scope.launch { flushOutbox() }
                 // Behind the head: the backlog replay is about to stream in.
@@ -892,6 +904,12 @@ class JournalSyncEngine(
             }
         }
         val applied = store.applyJournalBatch(buffer.toList())
+        // A replayed frame settles a parked verdict as "not opened": the
+        // replay path never publishes (see above), and leaving the id parked
+        // would let the convo's next LIVE frame open it. The connect-time
+        // clear already empties the set before any replay on this socket;
+        // this keeps the invariant local to the batch path too.
+        synchronized(lock) { buffer.forEach { pendingAutoOpen.remove(it.convoID) } }
         buffer.clear()
         applied.forEach { indexForSearch(it) }
         var count = appliedSinceAck + applied.size
@@ -957,7 +975,7 @@ class JournalSyncEngine(
                         runCatching { store.parentConvoID(event.convoID) }.getOrNull() == null
                     ) {
                         considerAutoOpen(event, firstFrame = true)
-                    } else if (!isNewConvo && event.convoID in pendingAutoOpen) {
+                    } else if (!isNewConvo && isPendingAutoOpen(event.convoID)) {
                         considerAutoOpen(event, firstFrame = false)
                     }
                 }
@@ -990,6 +1008,10 @@ class JournalSyncEngine(
                     refreshJob?.cancel()
                     storeEpoch += 1
                     lastSessionStatus.clear()
+                    // The rows those verdicts waited on are about to go; a
+                    // re-fetched convo arrives via the cold snapshot, not as a
+                    // live birth.
+                    pendingAutoOpen.clear()
                 }
                 runCatching { store.wipe() }
                     .onFailure { MatronDebug.breadcrumb("snapshot_required: store.wipe failed: $it") }
