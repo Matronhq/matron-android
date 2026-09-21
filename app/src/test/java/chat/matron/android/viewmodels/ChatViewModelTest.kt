@@ -27,6 +27,7 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -1307,6 +1308,215 @@ class ChatViewModelTest {
         vm.stop()
     }
 
+    // MARK: - Jump to my last message (apple #202, item #60)
+
+    private fun row(seq: Int, own: Boolean) =
+        textItem(seq.toString(), body = "m$seq", isOwn = own, timestamp = Instant.ofEpochSecond(seq.toLong()))
+
+    /// The mirror knows the user's last message sits below the loaded window;
+    /// the jump pages backward until it is loaded, exactly like a deep search
+    /// hit.
+    @Test
+    fun jumpToLastOwnMessage_usesServiceSeqAndPaginates() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(
+            loaded = listOf(row(5, own = false), row(6, own = false)),
+            olderPages = mutableListOf(listOf(row(3, own = true), row(4, own = false))),
+        )
+        fake.newestOwnSeq = 3
+        val vm = searchVM(scope, fake, null)
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+
+        assertTrue(vm.jumpToLastOwnMessage())
+        waitUntil { vm.pendingFocusID.value != null }
+        assertEquals("3", vm.pendingFocusID.value)
+        assertEquals("pages until the target row is loaded", 1, fake.paginateCalls)
+        vm.stop()
+    }
+
+    /// No mirror answer (a store that hasn't synced the row yet): the newest
+    /// own row already loaded is the target. A local echo (non-numeric id) is
+    /// not a landable row and is skipped.
+    @Test
+    fun jumpToLastOwnMessage_fallsBackToNewestLoadedOwnRow() = vmTest { scope ->
+        val echo = textItem("echo:abc", body = "sending", isOwn = true)
+        val fake = PagingFakeTimelineService(
+            loaded = listOf(row(1, own = true), row(2, own = false), row(3, own = true), row(4, own = false), echo),
+            olderPages = mutableListOf(),
+        )
+        val vm = searchVM(scope, fake, null)
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+
+        assertTrue(vm.jumpToLastOwnMessage())
+        assertEquals("3", vm.pendingFocusID.value)
+        assertEquals(0, fake.paginateCalls)
+        vm.stop()
+    }
+
+    /// The user never wrote here (a coordinator-spawned session, say):
+    /// nothing to land on, nothing scrolls.
+    @Test
+    fun jumpToLastOwnMessage_withNoOwnMessageIsNoop() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(row(1, own = false), row(2, own = false)), olderPages = mutableListOf())
+        val vm = searchVM(scope, fake, null)
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+
+        assertFalse(vm.jumpToLastOwnMessage())
+        assertNull(vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// Tapped before the stream is live (cold VM), the jump parks and fires
+    /// off the first snapshot — the same gate in-conversation search uses, for
+    /// the same reason: sampling paginate growth against a dead stream falsely
+    /// latches `reachedHistoryStart`.
+    @Test
+    fun jumpToLastOwnMessage_beforeStartParksUntilLive() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(row(3, own = true), row(4, own = false)), olderPages = mutableListOf())
+        fake.newestOwnSeq = 3
+        val vm = searchVM(scope, fake, null)
+
+        assertTrue("a target exists, the jump is merely parked", vm.jumpToLastOwnMessage())
+        assertNull("no jump before the stream is live", vm.pendingFocusID.value)
+        assertFalse(vm.reachedHistoryStart)
+
+        vm.start()
+        waitUntil { vm.pendingFocusID.value == "3" }
+        assertEquals("3", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// Dismissing the search bar aborts search's jump only. A last-message
+    /// jump paginating while the bar happens to be up lands regardless
+    /// (Bugbot, apple #202).
+    @Test
+    fun jumpToLastOwnMessage_survivesSearchDismiss() = vmTest { scope ->
+        val fake = BlockingPagingFakeTimelineService(
+            loaded = listOf(row(50, own = false)),
+            olderPages = mutableListOf(listOf(row(3, own = true))),
+        )
+        fake.newestOwnSeq = 3
+        val vm = searchVM(scope, fake, FakeSearchService(listOf(searchHit("50", 50))))
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+        vm.beginChatSearch("m50")   // loaded hit: lands without paginating
+        assertEquals("50", vm.pendingFocusID.value)
+        vm.clearPendingFocus()
+
+        val jump = async { vm.jumpToLastOwnMessage() }
+        waitUntil { fake.paginateStarted }
+        assertTrue(fake.paginateStarted)
+
+        vm.endChatSearch()
+        fake.release()
+        assertTrue(jump.await())
+        assertNull(vm.chatSearch.value)
+        assertEquals("the bar's dismissal must not kill the jump", "3", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// Search started AFTER a parked last-message jump owns the park from then
+    /// on: its dismissal clears what it armed, not more.
+    @Test
+    fun jumpToLastOwnMessage_thenSearchDismissLeavesNothingArmed() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(row(3, own = true)), olderPages = mutableListOf())
+        fake.newestOwnSeq = 3
+        val vm = searchVM(scope, fake, FakeSearchService(listOf(searchHit("3", 3))))
+        vm.jumpToLastOwnMessage()      // cold: parks
+        vm.beginChatSearch("m3")       // cold: re-parks under search
+        vm.endChatSearch()
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+        delay(100)
+        assertNull("nothing should fire — search cleared its own park", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// The view leaves (`stop()`) while the mirror is still answering: the
+    /// late answer must not park a jump that fires on the room's next open
+    /// (CodeRabbit, apple #202).
+    @Test
+    fun jumpToLastOwnMessage_lookupLandingAfterStopIsDropped() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(row(3, own = true), row(4, own = false)), olderPages = mutableListOf())
+        fake.newestOwnSeq = 3
+        fake.ownSeqLookupGate = CompletableDeferred()
+        val vm = searchVM(scope, fake, null)
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+
+        val jump = async { vm.jumpToLastOwnMessage() }
+        waitUntil { fake.ownSeqLookupStarted }
+        vm.stop()
+        fake.ownSeqLookupGate!!.complete(Unit)
+        assertFalse("a jump whose view is gone reports nothing to do", jump.await())
+
+        vm.start()
+        delay(100)
+        assertNull("no stale target on the restart", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// A cold park that never got its snapshot is dropped by `stop()`, so a
+    /// room re-opened days later doesn't jump on its own.
+    @Test
+    fun jumpToLastOwnMessage_stopDropsAColdPark() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(row(3, own = true)), olderPages = mutableListOf())
+        fake.newestOwnSeq = 3
+        val vm = searchVM(scope, fake, null)
+        vm.jumpToLastOwnMessage()
+        vm.stop()
+        vm.start()
+        delay(100)
+        assertNull(vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// A search that finds nothing (common right after opening a room from
+    /// grouped search) must not kill a last-message jump that is still
+    /// paginating (Bugbot, apple #202, round two).
+    @Test
+    fun jumpToLastOwnMessage_survivesNoHitSearch() = vmTest { scope ->
+        val fake = BlockingPagingFakeTimelineService(
+            loaded = listOf(row(50, own = false)),
+            olderPages = mutableListOf(listOf(row(3, own = true))),
+        )
+        fake.newestOwnSeq = 3
+        val vm = searchVM(scope, fake, FakeSearchService(emptyList()))
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+
+        val jump = async { vm.jumpToLastOwnMessage() }
+        waitUntil { fake.paginateStarted }
+        assertTrue(fake.paginateStarted)
+
+        vm.beginChatSearch("nothing")
+        assertEquals("the bar reports no matches", emptyList<Long>(), vm.chatSearch.value?.matchSeqs)
+        fake.release()
+        assertTrue(jump.await())
+        assertEquals("a no-hit query must not cancel the jump", "3", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// Same for a COLD park: a no-hit query typed before the stream is live
+    /// leaves the parked last-message jump armed, and it fires on the first
+    /// snapshot.
+    @Test
+    fun jumpToLastOwnMessage_coldParkSurvivesNoHitSearch() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(row(3, own = true)), olderPages = mutableListOf())
+        fake.newestOwnSeq = 3
+        val vm = searchVM(scope, fake, FakeSearchService(emptyList()))
+        vm.jumpToLastOwnMessage()
+        vm.beginChatSearch("nothing")
+        assertNull(vm.pendingFocusID.value)
+
+        vm.start()
+        waitUntil { vm.pendingFocusID.value == "3" }
+        assertEquals("3", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
     // MARK: - render window cap + slide (apple #166)
 
     private fun messageIDs(vm: ChatViewModel) = vm.windowedRows.value.mapNotNull { (it as? TimelineRow.Message)?.item?.id }
@@ -2246,11 +2456,31 @@ private class PagingFakeTimelineService(
 
     override fun items(): kotlinx.coroutines.flow.Flow<List<TimelineItem>> = snapshots
 
+    var paginateCalls = 0
+        private set
+
     override suspend fun paginateBackward(requestSize: Int): Boolean {
+        paginateCalls += 1
         if (olderPages.isEmpty()) return false
         current = olderPages.removeAt(0) + current
         snapshots.tryEmit(current)
         return true
+    }
+
+    /// What [newestOwnMessageSeq] answers — the journal mirror's view of the
+    /// user's last message, which may sit below every loaded page.
+    var newestOwnSeq: Long? = null
+    /// When set, [newestOwnMessageSeq] parks on this gate until the test
+    /// completes it — lets a test tear the VM down WHILE the mirror is still
+    /// answering.
+    var ownSeqLookupGate: CompletableDeferred<Unit>? = null
+    @Volatile var ownSeqLookupStarted = false
+        private set
+
+    override suspend fun newestOwnMessageSeq(): Long? {
+        ownSeqLookupStarted = true
+        ownSeqLookupGate?.await()
+        return newestOwnSeq
     }
 
     override suspend fun sendText(body: String, inReplyTo: String?) {}
@@ -2287,6 +2517,9 @@ private class BlockingPagingFakeTimelineService(
     }
 
     fun release() { gate.complete(Unit) }
+
+    var newestOwnSeq: Long? = null
+    override suspend fun newestOwnMessageSeq(): Long? = newestOwnSeq
 
     override suspend fun sendText(body: String, inReplyTo: String?) {}
     override suspend fun sendButtonResponse(selectedValues: List<String>, inReplyTo: String) {}

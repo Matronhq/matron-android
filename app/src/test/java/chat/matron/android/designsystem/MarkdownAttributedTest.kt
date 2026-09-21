@@ -388,6 +388,60 @@ class MarkdownAttributedTest {
         assertEquals("https://example.com", cell.getStringAnnotations("URL", idx, idx + 1).firstOrNull()?.item)
     }
 
+    // MARK: - Reference-definition-shaped bodies (apple #183)
+
+    /// The bridge mirrors a voice note as `[Voice note transcription]: Hello.`
+    /// (matron-bridge `lib/journal-media.js`). To a CommonMark parser that
+    /// line is a link reference definition and renders as NOTHING — the Apple
+    /// apps escaped the bracket before parsing (apple #183). This converter
+    /// is not CommonMark: it has no reference-definition concept, and its
+    /// inline pass only reads `[label](url)`, so the line already survives
+    /// as text. Pinned here so a future parser swap cannot bring the empty
+    /// bubble to Android. (No escape is ported: this parser has no
+    /// backslash-escape handling either, so `\[` would render literally.)
+    @Test
+    fun referenceDefinitionShapedBody_rendersAsText() {
+        val doc = parse("[Voice note transcription]: Hello.")
+        assertEquals(1, doc.blocks.size)
+        assertEquals(MarkdownBlockKind.Paragraph, doc.blocks.first().kind)
+        assertEquals("[Voice note transcription]: Hello.", doc.plainText)
+    }
+
+    /// Mirrors Apple's `test_onlyDefinitionLinesChange_inAMultilineBody`: the
+    /// definition-shaped lines stay visible, and a real inline link on a
+    /// neighbouring line still parses as a link.
+    @Test
+    fun referenceDefinitionShapedLines_inMultilineBody_allStayVisible() {
+        val doc = parse("First line\n[TODO]: fix the build\n  [x]: y\nA [real link](https://a.b) stays")
+        val text = doc.plainText
+        assertTrue(text, text.contains("[TODO]: fix the build"))
+        assertTrue(text, text.contains("[x]: y"))
+        assertTrue(text, text.contains("real link"))
+        val annotations = doc.blocks.first().text.getStringAnnotations("URL", 0, text.length)
+        assertEquals(listOf("https://a.b"), annotations.map { it.item })
+    }
+
+    /// Mirrors Apple's `test_fencedCodeIsLeftAlone`: a definition-shaped line
+    /// inside a fence is code content, verbatim; the same line outside the
+    /// fence is a paragraph.
+    @Test
+    fun referenceDefinitionShapedLine_insideFence_staysCodeContent() {
+        val doc = parse("```\n[ref]: http://x\n```\n[ref]: http://x")
+        assertEquals(listOf(MarkdownBlockKind.CodeBlock, MarkdownBlockKind.Paragraph), doc.blocks.map { it.kind })
+        assertEquals("[ref]: http://x", doc.blocks[0].text.text)
+        assertEquals("[ref]: http://x", doc.blocks[1].text.text)
+    }
+
+    /// Mirrors Apple's `test_ordinaryBodiesPassThroughUntouched`.
+    @Test
+    fun ordinaryBracketedBodies_passThroughUntouched() {
+        for (body in listOf("plain", "[x] not a definition", "a: b", "[]: empty label", "- [x] done")) {
+            val doc = parse(body)
+            assertTrue(body, doc.plainText.contains(body.removePrefix("- ")))
+        }
+        assertEquals("link", parse("[link](u)").plainText)
+    }
+
     // MARK: - Cache
 
     @Test
