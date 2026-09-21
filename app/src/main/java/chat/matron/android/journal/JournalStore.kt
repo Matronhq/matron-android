@@ -229,7 +229,9 @@ class JournalStore(
         // follow-up write means the confirming row and its outbox delete
         // commit or fail together, so a relaunch can never show a durable
         // duplicate echo beside the delivered message.
-        if (event.sender == ownSender && event.type == JournalEventType.TEXT) {
+        // An item marker's `fallback_for` text twin is journal-authored under
+        // the writer's sender, never a queued send — it must not confirm one.
+        if (event.sender == ownSender && event.type == JournalEventType.TEXT && !event.isItemFallbackText()) {
             event.body()?.let { deleteFirstMatchingInTransaction(event.convoID, it) }
         }
         return true
@@ -251,7 +253,7 @@ class JournalStore(
             // same confirmation-delete here, timestamp-guarded so genuinely
             // old history can't eat a fresh queued send.
             for (e in events) {
-                if (e.sender != ownSender || e.type != JournalEventType.TEXT) continue
+                if (e.sender != ownSender || e.type != JournalEventType.TEXT || e.isItemFallbackText()) continue
                 e.body()?.let { deleteFirstMatchingInTransaction(e.convoID, it, journaledAtMs = e.ts.toEpochMilli()) }
             }
             // Paginated rows can include unread messages (e.g. the refill after

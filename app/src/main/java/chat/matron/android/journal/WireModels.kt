@@ -37,6 +37,17 @@ object JournalEventType {
     /// -authored, appended into the parent's own conversation (see
     /// `chat.matron.android.events.SpawnOutcome`).
     const val SPAWN_OUTCOME = "spawn_outcome"
+    /// Tracker marker, written by the journal itself on every mutating
+    /// `/items` route (protocol.md "Items"). An invalidation signal for the
+    /// local item cache, never a message: not in [MESSAGE_TYPES], and the
+    /// timeline renders nothing for it until the inline cards port.
+    const val ITEM = "item"
+
+    /// Payload key on the plain `text` twin the journal appends after a
+    /// card-worthy `item` marker so pre-tracker clients still see the turn
+    /// (spec "Old-client fallback"). A client that renders `item` markers
+    /// hides these — one guard, kept until the journal stops emitting them.
+    const val FALLBACK_FOR_KEY = "fallback_for"
 
     /// Infix in a subagent child's convo id: `<parent>:sub:<agentId>`.
     const val CHILD_CONVO_INFIX = ":sub:"
@@ -87,6 +98,12 @@ data class JournalEvent(
 /// Payload-key accessors. The wire key names ("body"/"snippet"/"diff") live
 /// here so every reader agrees on them and precedence lives in one place.
 fun JournalEvent.body(): String? = payload.stringOrNull("body")
+
+/// True for the journal's old-client twin of an `item` marker (a `text`
+/// event flagged `fallback_for`). Hidden from the timeline and skipped by
+/// outbox delivery confirmation — the marker already carries the turn.
+fun JournalEvent.isItemFallbackText(): Boolean =
+    type == JournalEventType.TEXT && payload.stringOrNull(JournalEventType.FALLBACK_FOR_KEY) != null
 fun JournalEvent.snippet(): String? = payload.stringOrNull("snippet")
 fun JournalEvent.diff(): String? = payload.stringOrNull("diff")
 
