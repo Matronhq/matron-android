@@ -166,6 +166,7 @@ class NewChatViewModelTest {
             RPCReply.Failure("not_ready", null) to "The agent didn't answer — is the box awake?",
             RPCReply.Failure("bad_workdir", "/nope") to "That folder doesn't exist on the box.",
             RPCReply.Failure("bad_model", "opus") to "That box doesn't offer that model — pick another.",
+            RPCReply.Failure("bad_agent", "codex") to "That box can't start that agent — pick another.",
             RPCReply.Failure("spawn_failed", "boom") to "Couldn't start — boom.",
             RPCReply.Failure("unsupported_mode", null) to "Couldn't start — unsupported_mode.",
         )
@@ -462,5 +463,298 @@ class NewChatViewModelTest {
         vm.selectModel("opus")
         vm.select(agents[1])
         assertNull("box b can't run opus — carrying the pick over would earn a bad_model", vm.selectedModel.value)
+    }
+
+    // MARK: Default model (apple #177)
+
+    @Test
+    fun defaultModel_titlesTheDefaultRowAndStillOmitsTheKey() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
+        fake.replies["recent_folders"] = foldersReply(
+            """{"folders":[],"default_model":"fable","model_options":[{"value":"opus","label":"Opus"},{"value":"fable","label":"Fable"}]}""",
+        )
+        fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
+        val vm = vmWith(fake)
+        vm.load()
+        assertEquals("the offered option's label, not the raw alias", "Fable", vm.defaultModelLabel.value)
+        assertEquals("Default (Fable)", vm.defaultRowTitle)
+        assertNull("naming the default is not picking it", vm.selectedModel.value)
+        vm.start("~/dev/app")
+        assertFalse("the bridge applies its own default — the key stays omitted", fake.requests.last().params.containsKey("model"))
+    }
+
+    @Test
+    fun defaultModel_absentOrEmptyReadsPlainDefault() = runBlocking {
+        val replies = listOf(
+            """{"folders":[],"model_options":[{"value":"opus","label":"Opus"}]}""",
+            """{"folders":[],"default_model":"","model_options":[{"value":"opus","label":"Opus"}]}""",
+        )
+        for (reply in replies) {
+            val fake = FakeAgentRPCProvider()
+            fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
+            fake.replies["recent_folders"] = foldersReply(reply)
+            val vm = vmWith(fake)
+            vm.load()
+            assertNull(vm.defaultModelLabel.value)
+            assertEquals("an older bridge, or one with no box default", "Default", vm.defaultRowTitle)
+        }
+    }
+
+    @Test
+    fun defaultModel_unlistedValueShowsTheRawName() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
+        fake.replies["recent_folders"] = foldersReply(
+            """{"folders":[],"default_model":"claude-opus-5","model_options":[{"value":"opus","label":"Opus"}]}""",
+        )
+        val vm = vmWith(fake)
+        vm.load()
+        assertEquals("a full model name is not in the alias offer — show it as sent", "Default (claude-opus-5)", vm.defaultRowTitle)
+    }
+
+    /// Same prefetch contract as `model_options`: the folder step renders
+    /// the box's default off the roster fan-out, and switching boxes swaps
+    /// it for the new box's (or drops it for a box that doesn't say).
+    @Test
+    fun defaultModel_followsTheBoxAcrossTheRosterPrefetch() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
+        fake.devicesResult = Result.success(agents)
+        fake.repliesByDevice[1] = foldersReply("""{"folders":[],"default_model":"fable","model_options":[{"value":"fable","label":"Fable"}]}""")
+        fake.repliesByDevice[2] = foldersReply("""{"folders":[],"model_options":[{"value":"sonnet","label":"Sonnet"}]}""")
+        val vm = vmWith(fake)
+        vm.load()
+        val before = fake.requests.count { it.method == "recent_folders" }
+
+        vm.select(agents[0])
+        assertEquals("Default (Fable)", vm.defaultRowTitle)
+        assertEquals("served from the prefetch, not re-asked", before, fake.requests.count { it.method == "recent_folders" })
+        vm.select(agents[1])
+        assertEquals("box b never said — no stale label carried over", "Default", vm.defaultRowTitle)
+    }
+
+    // MARK: Agent switch (apple #179)
+
+    @Test
+    fun agentOptions_parsedFromRecentFolders_openOnTheBoxDefault() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
+        fake.replies["recent_folders"] = foldersReply(
+            """{"folders":[],"default_agent":"codex","agent_options":[
+              {"value":"claude","label":"Claude Code"},
+              {"value":"codex","label":"Codex"},
+              {"value":"codex","label":"Codex again"},
+              {"value":""},
+              {"label":"nameless"}
+            ]}""",
+        )
+        val vm = vmWith(fake)
+        vm.load()
+        assertEquals(
+            "bridge order kept; repeats and entries with nothing to send are dropped",
+            listOf(AgentOption("claude", "Claude Code"), AgentOption("codex", "Codex")),
+            vm.agentOptions.value,
+        )
+        assertEquals("the switch opens on what a no-pick start would run", "codex", vm.selectedAgent.value)
+        assertTrue(vm.agentSwitchVisible)
+    }
+
+    @Test
+    fun agentOptions_absentKey_hidesTheSwitch_andStartOmitsAgent() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
+        fake.replies["recent_folders"] = foldersReply("""{"folders":[]}""")
+        fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
+        val vm = vmWith(fake)
+        vm.load()
+        assertTrue(vm.agentOptions.value.isEmpty())
+        assertFalse("an older bridge offers nothing — no switch", vm.agentSwitchVisible)
+        vm.start("~/dev/app")
+        assertFalse("a bridge that never offered agents must not be sent one", fake.requests.last().params.containsKey("agent"))
+    }
+
+    @Test
+    fun singleAgentOffer_hidesTheSwitch_butStartStillNamesIt() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
+        fake.replies["recent_folders"] = foldersReply(
+            """{"folders":[],"default_agent":"claude","agent_options":[{"value":"claude","label":"Claude Code"}]}""",
+        )
+        fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
+        val vm = vmWith(fake)
+        vm.load()
+        assertFalse("one choice is no choice", vm.agentSwitchVisible)
+        vm.start("~/dev/app")
+        assertEquals(
+            "a bridge that offers agents accepts the key — say what was shown",
+            "claude",
+            fake.requests.last().params["agent"]?.jsonPrimitive?.content,
+        )
+    }
+
+    @Test
+    fun start_sendsThePickedAgent() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
+        fake.replies["recent_folders"] = foldersReply(
+            """{"folders":[],"default_agent":"claude","agent_options":[{"value":"claude","label":"Claude Code"},{"value":"codex","label":"Codex"}]}""",
+        )
+        fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
+        val vm = vmWith(fake)
+        vm.load()
+        vm.selectAgent("codex")
+        vm.start("~/dev/app")
+        assertEquals("codex", fake.requests.last().params["agent"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun codexPick_hidesTheModelPicker_andOmitsTheModel() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        fake.devicesResult = Result.success(listOf(agent(9, connected = true)))
+        fake.replies["recent_folders"] = foldersReply(
+            """{"folders":[],"default_agent":"claude",
+             "agent_options":[{"value":"claude","label":"Claude Code"},{"value":"codex","label":"Codex"}],
+             "model_options":[{"value":"opus","label":"Opus"}]}""",
+        )
+        fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
+        val vm = vmWith(fake)
+        vm.load()
+        vm.selectModel("opus")
+        assertTrue(vm.modelPickerVisible)
+
+        vm.selectAgent("codex")
+        assertFalse("Claude aliases mean nothing to a Codex session", vm.modelPickerVisible)
+        vm.start("~/dev/app")
+        assertFalse(
+            "the bridge answers bad_model to a model on a Codex start — never send one",
+            fake.requests.last().params.containsKey("model"),
+        )
+
+        vm.selectAgent("claude")
+        assertTrue(vm.modelPickerVisible)
+        assertEquals("the pick was parked, not thrown away", "opus", vm.selectedModel.value)
+    }
+
+    @Test
+    fun switchingBoxes_dropsAnAgentTheNewBoxDoesNotOffer() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
+        fake.devicesResult = Result.success(agents)
+        fake.repliesByDevice[1] = foldersReply(
+            """{"folders":[],"default_agent":"claude","agent_options":[{"value":"claude","label":"Claude Code"},{"value":"codex","label":"Codex"}]}""",
+        )
+        fake.repliesByDevice[2] = foldersReply(
+            """{"folders":[],"default_agent":"claude","agent_options":[{"value":"claude","label":"Claude Code"}]}""",
+        )
+        val vm = vmWith(fake)
+        vm.load()
+
+        vm.select(agents[0])
+        vm.selectAgent("codex")
+        vm.select(agents[1])
+        assertEquals("box b can't run Codex — carrying the pick over would earn a bad_agent", "claude", vm.selectedAgent.value)
+        assertFalse(vm.agentSwitchVisible)
+    }
+
+    /// Bugbot (#65): the fan-out repair of a folder step whose live fetch
+    /// failed (see `fanOutSuccess_repairsFolderStepAfterLiveFetchFailed`)
+    /// must adopt the whole reply, not just its folders — the step opened
+    /// on an empty offer, so the switch, the default label and the `agent`
+    /// key on `start` are all waiting on it.
+    @Test
+    fun fanOutRepair_adoptsAgentAndModelOfferToo() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
+        fake.devicesResult = Result.success(agents)
+        val gate = CompletableDeferred<Unit>()
+        fake.foldersGatesByDevice[1] = ArrayDeque(listOf(gate))
+        fake.foldersSequenceByDevice[1] = ArrayDeque(
+            listOf(
+                foldersReply(
+                    """{"folders":[{"path":"/w/app","last_used":100}],"default_model":"fable",
+                     "model_options":[{"value":"fable","label":"Fable"}],"default_agent":"claude",
+                     "agent_options":[{"value":"claude","label":"Claude Code"},{"value":"codex","label":"Codex"}]}""",
+                ), // fan-out, parked
+                RPCReply.Failure("internal", null), // select()'s live call
+            ),
+        )
+        fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
+        fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
+        val vm = vmWith(fake)
+        val loading = async { vm.load() }
+        while (fake.requests.count { it.method == "recent_folders" } < 2) yield()
+
+        vm.select(agents[0]) // cache still cold → live call → fails
+        assertNotNull(vm.foldersError.value)
+        assertFalse(vm.agentSwitchVisible)
+        assertEquals("Default", vm.defaultRowTitle)
+
+        gate.complete(Unit) // the fan-out reply lands after the failure
+        loading.await()
+        assertNull(vm.foldersError.value)
+        assertEquals(listOf("/w/app"), vm.folders.value.map { it.path })
+        assertTrue("the repair brought the offer with it", vm.agentSwitchVisible)
+        assertEquals("claude", vm.selectedAgent.value)
+        assertTrue(vm.modelPickerVisible)
+        assertEquals("Default (Fable)", vm.defaultRowTitle)
+        vm.start("/w/app")
+        assertEquals(
+            "the box offered agents, so start names one",
+            "claude",
+            fake.requests.last().params["agent"]?.jsonPrimitive?.content,
+        )
+    }
+
+    /// The other completion order (see
+    /// `selectFailure_fallsBackToFanOutFoldersThatLandedMeanwhile`): the
+    /// fan-out warmed the cache while the live call was out, and the live
+    /// call then failed. Falling back to the cached folders must take the
+    /// cached offer too — the step adopted an empty cache on entry.
+    @Test
+    fun selectFailure_fallsBackToFanOutOfferThatLandedMeanwhile() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
+        fake.devicesResult = Result.success(agents)
+        val fanOutGate = CompletableDeferred<Unit>()
+        val selectGate = CompletableDeferred<Unit>()
+        fake.foldersGatesByDevice[1] = ArrayDeque(listOf(fanOutGate, selectGate))
+        fake.foldersSequenceByDevice[1] = ArrayDeque(
+            listOf(
+                foldersReply(
+                    """{"folders":[],"default_model":"fable","model_options":[{"value":"fable","label":"Fable"}],
+                     "default_agent":"codex","agent_options":[{"value":"claude","label":"Claude Code"},{"value":"codex","label":"Codex"}]}""",
+                ), // fan-out
+                RPCReply.Failure("internal", null), // select()'s live call
+            ),
+        )
+        fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
+        fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
+        val vm = vmWith(fake)
+        val loading = async { vm.load() }
+        while (fake.requests.count { it.method == "recent_folders" } < 2) yield()
+
+        val selecting = async { vm.select(agents[0]) } // cache cold → live call, parked
+        while (fake.requests.count { it.method == "recent_folders" } < 3) yield()
+
+        fanOutGate.complete(Unit) // cache warms while the live call is still out
+        loading.await()
+        selectGate.complete(Unit) // …and then the live call fails
+        selecting.await()
+        assertNull(vm.foldersError.value)
+        assertTrue(vm.agentSwitchVisible)
+        assertEquals("opens on the box default the cached reply named", "codex", vm.selectedAgent.value)
+        assertEquals("Fable", vm.defaultModelLabel.value)
+        vm.start("/x")
+        assertEquals("codex", fake.requests.last().params["agent"]?.jsonPrimitive?.content)
+        assertFalse("a Codex start carries no Claude model", fake.requests.last().params.containsKey("model"))
+    }
+
+    @Test
+    fun startErrorCopy_badAgent() {
+        assertEquals(
+            "That box can't start that agent — pick another.",
+            NewChatViewModel.startErrorCopy("bad_agent", "codex"),
+        )
     }
 }
