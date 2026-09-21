@@ -14,6 +14,7 @@ import chat.matron.android.journal.arrayOrNull
 import chat.matron.android.journal.body
 import chat.matron.android.journal.boolOrNull
 import chat.matron.android.journal.intOrNull
+import chat.matron.android.journal.isItemFallbackText
 import chat.matron.android.journal.longOrNull
 import chat.matron.android.journal.stringOrNull
 import chat.matron.android.models.TimelineSendState
@@ -59,8 +60,22 @@ object JournalTimelineMapper {
             // "[unsupported event: summary]" noise.
             JournalEventType.SUMMARY -> return null
 
-            JournalEventType.TEXT ->
+            JournalEventType.TEXT -> {
+                // Old-client fallback (spec 2026-09-08, "Old-client
+                // fallback"): the journal mirrors a card-worthy item marker
+                // as a plain `text` event flagged `fallback_for: "item"` so
+                // pre-tracker clients still see the turn. This client knows
+                // the marker, so the twin is hidden — rendering both would
+                // show the same reply twice.
+                if (event.isItemFallbackText()) return null
                 TimelineItem.Kind.Text(event.body() ?: "", null)
+            }
+
+            // Tracker markers invalidate the local item cache (ItemsSync) and
+            // render nothing until the inline-cards port (apple #186) — before
+            // this they fell into the unknown branch below as
+            // "[unsupported event: item]" noise.
+            JournalEventType.ITEM -> return null
 
             JournalEventType.TOOL_OUTPUT -> {
                 // A tool_output carrying a viewer_url is a live command-output

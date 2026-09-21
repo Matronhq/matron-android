@@ -128,6 +128,40 @@ class JournalSyncEngineTest {
         engine.endSync()
     }
 
+    /// An applied `item` frame reaches `itemMarkers()` (the invalidation
+    /// feed `ItemsSync` refetches on), live and from a replay batch alike;
+    /// a malformed payload is dropped rather than handed on.
+    @Test
+    fun itemMarkerFanOut() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(1))
+        socket.serve(
+            """{"kind":"journal","seq":1,"convo_id":"c1","ts":1000,"sender":"agent:a","type":"item",""" +
+                """"payload":{"item_id":"it_r","num":1,"kind":"task","title":"Replayed","action":"created","by":"agent"}}""",
+        )
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        val probe = FlowProbe(this, engine.itemMarkers())
+        delay(50)
+        engine.beginSync()
+        engine.waitUntilReady()
+        val replayed = probe.next()
+        assertEquals("c1", replayed.first); assertEquals("it_r", replayed.second.itemID)
+        socket.serve(
+            """{"kind":"journal","seq":2,"convo_id":"c1","ts":2000,"sender":"user:dan","type":"item",""" +
+                """"payload":{"item_id":"it_1","num":2,"kind":"question","title":"Q","action":"commented","by":"user","awaiting":"agent"}}""",
+        )
+        socket.serve("""{"kind":"journal","seq":3,"convo_id":"c1","ts":3000,"sender":"user:dan","type":"item","payload":{"garbage":true}}""")
+        socket.serve(journalLine(4))
+        val live = probe.next()
+        assertEquals("it_1", live.second.itemID)
+        assertEquals(chat.matron.android.events.ItemMarkerEvent.Action.COMMENTED, live.second.action)
+        waitUntil { store.cursor() >= 4 }
+        assertEquals("the malformed marker was applied to the mirror but not published", 4L, store.cursor())
+        probe.cancel()
+        engine.endSync()
+    }
+
     @Test
     fun ephemeralFanOut() = runBlocking {
         val socket = FakeWebSocketConnection()

@@ -3,6 +3,7 @@ package chat.matron.android.journal
 import chat.matron.android.journal.db.OutboxEntity
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.SessionStatusUpdate
+import chat.matron.android.events.ItemMarkerEvent
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.sync.SyncService
 import java.time.Instant
@@ -140,6 +141,9 @@ class JournalSyncEngine(
     private val toolStreamListeners = mutableMapOf<UUID, Pair<String, (ToolStreamUpdate) -> Unit>>()
     private val sessionStatusListeners = mutableMapOf<UUID, Pair<String, (SessionStatusUpdate) -> Unit>>()
     private val newConvoListeners = mutableMapOf<UUID, (String) -> Unit>()
+    /// Tracker markers (`item` events) as they are applied — the invalidation
+    /// feed for `ItemsSync`. Keyed like the other listener maps.
+    private val itemMarkerListeners = mutableMapOf<UUID, (Pair<String, ItemMarkerEvent>) -> Unit>()
     /// Live-born top-level convos whose auto-open verdict is still waiting
     /// on their title: the first frame was neither the `convo_meta` that
     /// carries it nor a message (see [considerAutoOpen]). Guarded by `lock`.
@@ -567,6 +571,16 @@ class JournalSyncEngine(
         awaitClose { synchronized(lock) { sessionStatusListeners.remove(id) } }
     }
 
+    /// Tracker markers (`item` events) as they are applied, live AND from a
+    /// reconnect replay — `(convoID, marker)` pairs. `ItemsSync` refetches the
+    /// named item on each. Mirrors `newConversations()`'s shape; a payload
+    /// that fails to parse is dropped here rather than handed on half-built.
+    fun itemMarkers(): Flow<Pair<String, ItemMarkerEvent>> = callbackFlow {
+        val id = UUID.randomUUID()
+        synchronized(lock) { itemMarkerListeners[id] = { m -> trySend(m) } }
+        awaitClose { synchronized(lock) { itemMarkerListeners.remove(id) } }
+    }
+
     /// Emits the id of a conversation created live (first-ever frame while
     /// `.running`). A reconnect backlog does NOT replay through here.
     override fun newConversations(): Flow<String> = callbackFlow {
@@ -642,6 +656,12 @@ class JournalSyncEngine(
 
     private fun publishNewConversation(convoID: String) = synchronized(lock) {
         newConvoListeners.values.forEach { it(convoID) }
+    }
+
+    private fun publishItemMarker(event: JournalEvent) {
+        if (event.type != JournalEventType.ITEM) return
+        val marker = ItemMarkerEvent.parse(event.payload) ?: return
+        synchronized(lock) { itemMarkerListeners.values.forEach { it(event.convoID to marker) } }
     }
 
     /// Decides whether a live-born top-level conversation auto-opens, on
@@ -911,7 +931,7 @@ class JournalSyncEngine(
         // this keeps the invariant local to the batch path too.
         synchronized(lock) { buffer.forEach { pendingAutoOpen.remove(it.convoID) } }
         buffer.clear()
-        applied.forEach { indexForSearch(it) }
+        applied.forEach { indexForSearch(it); publishItemMarker(it) }
         var count = appliedSinceAck + applied.size
         if (count >= 50) {
             runCatching { connection.send(ClientOp.Ack(store.cursor())) }
@@ -948,6 +968,7 @@ class JournalSyncEngine(
                 // (duplicate, seq <= cursor) is a legitimate no-op.
                 if (store.applyJournal(event)) {
                     indexForSearch(event)
+                    publishItemMarker(event)
                     applied += 1
                     if (applied >= 50) {
                         runCatching { connection.send(ClientOp.Ack(store.cursor())) }

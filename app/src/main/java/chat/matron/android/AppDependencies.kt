@@ -15,6 +15,9 @@ import chat.matron.android.chat.JournalTimelineService
 import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineService
 import chat.matron.android.journal.AgentSpawnAnswering
+import chat.matron.android.journal.ItemsProviding
+import chat.matron.android.journal.ItemsSync
+import chat.matron.android.journal.ItemsSyncing
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.JournalSyncEngine
@@ -159,6 +162,12 @@ class AppDependencies(
         val db: MatronDatabase,
         val store: JournalStore,
         val engine: JournalSyncEngine,
+        /**
+         * Keeps the tracker cache fresh off the engine's item markers and
+         * connection state; started with the core, stopped (and awaited)
+         * before the sign-out wipe so no in-flight fetch writes into it.
+         */
+        val itemsSync: ItemsSync,
         /** Boot-time TTL sweep; teardown joins it before wiping the same DB. */
         var purgeJob: Job? = null,
         /**
@@ -230,8 +239,18 @@ class AppDependencies(
             ownSender = "user:${session.userID}",
             search = search,
         )
-        val core = JournalCore(api, db, store, engine)
+        val itemsSync = ItemsSync(
+            api = api,
+            store = store,
+            markers = { engine.itemMarkers() },
+            connectionStates = { engine.stateStream },
+        )
+        val core = JournalCore(api, db, store, engine, itemsSync)
         cores[session.userID] = core
+        // Subscribes to markers and connection state; the first `Running`
+        // runs the probe refresh (a 404 hides the tracker UI) and drains any
+        // outbox rows left from the previous run.
+        itemsSync.start()
         // Boot-time TTL sweep of expired tool-output snippets. Kotlin constructors
         // can't suspend, so the composition root drives it once the store exists —
         // documented on JournalStore.purgeExpiredToolOutputSnippets. Tracked on
@@ -341,6 +360,12 @@ class AppDependencies(
      * `journalStore(for:)`.
      */
     fun journalStore(session: UserSession): JournalStore = core(session).store
+
+    /** The tracker's sync for a session, for the panel and detail view models. */
+    fun itemsSync(session: UserSession): ItemsSyncing = core(session).itemsSync
+
+    /** The tracker's network surface — the session's API client. */
+    fun itemsApi(session: UserSession): ItemsProviding = core(session).api
 
     fun pushService(session: UserSession): PushService =
         JournalPushService(api = core(session).api, environment = pushEnvironment)
@@ -471,9 +496,18 @@ class AppDependencies(
                     pushResult.isFailure ->
                         MatronDebug.breadcrumb("signOut: unregisterPush failed: ${pushResult.exceptionOrNull()}")
                 }
+                // Stop the tracker sync BEFORE the engine: it awaits every
+                // in-flight refresh/refetch/drain, so nothing can resume after
+                // the wipe below and write the old account's items back.
+                runCatching { core.itemsSync.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: itemsSync.stop failed: $it") }
                 core.engine.endSync()
                 runCatching { core.store.wipe() }
                     .onFailure { MatronDebug.breadcrumb("signOut: store.wipe failed: $it") }
+                // wipe() keeps the item outbox for the same reason it keeps
+                // the text outbox; sign-out clears the whole tracker cache.
+                runCatching { core.store.wipeItems() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: store.wipeItems failed: $it") }
                 // wipe() deliberately preserves the offline outbox (a
                 // snapshot_required mirror wipe must not eat unsent messages);
                 // sign-out must clear it so the next account can't inherit —

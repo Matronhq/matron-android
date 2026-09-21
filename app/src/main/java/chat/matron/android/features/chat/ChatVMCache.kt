@@ -5,6 +5,8 @@ import chat.matron.android.models.BotCommandCatalog
 import chat.matron.android.models.UserSession
 import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.ComposerViewModel
+import chat.matron.android.viewmodels.ItemDetailViewModel
+import chat.matron.android.viewmodels.ItemsPanelViewModel
 import chat.matron.android.viewmodels.SubChatStripViewModel
 import kotlinx.coroutines.CoroutineScope
 
@@ -25,6 +27,7 @@ class ChatVMCache(
 ) {
     private val entries = LinkedHashMap<String, Pair<ChatViewModel, ComposerViewModel>>()
     private val stripEntries = mutableMapOf<String, SubChatStripViewModel>()
+    private val itemsEntries = LinkedHashMap<String, ItemsPanelViewModel>()
     private val limit = 8
 
     /** The (chat, composer) VM pair for [roomID], created and cached on first use. */
@@ -73,6 +76,41 @@ class ChatVMCache(
                 scope = scope,
             )
         }
+
+    /**
+     * The per-room items panel VM, shared by the chat screen (its top-bar
+     * needs-you badge) and the tasks page, so both read one observation of
+     * the same store slice. LRU-bounded like the chat VMs; an evicted VM is
+     * stopped to release its flows.
+     */
+    fun itemsPanelViewModel(roomID: String): ItemsPanelViewModel {
+        itemsEntries.remove(roomID)?.let { cached ->
+            itemsEntries[roomID] = cached
+            return cached
+        }
+        val vm = ItemsPanelViewModel(
+            convoID = roomID,
+            store = deps.journalStore(session),
+            api = deps.itemsApi(session),
+            sync = deps.itemsSync(session),
+            scope = scope,
+        )
+        itemsEntries[roomID] = vm
+        if (itemsEntries.size > limit) {
+            val eldest = itemsEntries.keys.first()
+            itemsEntries.remove(eldest)?.stop()
+        }
+        return vm
+    }
+
+    /** A fresh detail VM per item screen (not cached: one screen, one thread). */
+    fun itemDetailViewModel(itemID: String): ItemDetailViewModel = ItemDetailViewModel(
+        itemID = itemID,
+        store = deps.journalStore(session),
+        api = deps.itemsApi(session),
+        sync = deps.itemsSync(session),
+        scope = scope,
+    )
 
     /** The (read-only timeline VM, switcher strip VM) pair for a subagent child. */
     fun subChatViewModels(childID: String, parentConvoID: String): Pair<ChatViewModel, SubChatStripViewModel> =

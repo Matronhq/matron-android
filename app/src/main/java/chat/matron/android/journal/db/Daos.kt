@@ -69,7 +69,24 @@ interface ConversationDao {
 
     @Query("DELETE FROM conversation")
     suspend fun deleteAll()
+
+    /// Every conversation's title beside its box name (a LEFT JOIN against
+    /// `agent`), for the tracker's "All" scope origin labels.
+    @Query(
+        "SELECT conversation.id AS id, conversation.title AS title, agent.name AS agentName " +
+            "FROM conversation LEFT JOIN agent ON agent.id = conversation.agent_device_id"
+    )
+    suspend fun originLabelRows(): List<OriginLabelRow>
+
+    @Query(
+        "SELECT conversation.id AS id, conversation.title AS title, agent.name AS agentName " +
+            "FROM conversation LEFT JOIN agent ON agent.id = conversation.agent_device_id WHERE conversation.id = :id"
+    )
+    suspend fun originLabelRow(id: String): OriginLabelRow?
 }
+
+/// Projection of [ConversationDao.originLabelRows].
+data class OriginLabelRow(val id: String, val title: String, val agentName: String?)
 
 @Dao
 interface AgentDao {
@@ -264,6 +281,101 @@ interface MetaDao {
     @Query("SELECT value FROM meta WHERE key = :key")
     suspend fun value(key: String): String?
 
+    /// Drops every key starting with [prefix] (the tracker's per-scope
+    /// watermarks at `wipeItems`). `%`/`_` never occur in the prefixes used.
+    @Query("DELETE FROM meta WHERE key LIKE :prefix || '%'")
+    suspend fun deleteWithPrefix(prefix: String)
+
     @Query("DELETE FROM meta")
+    suspend fun deleteAll()
+}
+
+// MARK: Task & decision tracker
+
+@Dao
+interface ItemDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(items: List<ItemEntity>)
+
+    @Query("SELECT * FROM item WHERE id = :id")
+    suspend fun byId(id: String): ItemEntity?
+
+    @Query("SELECT * FROM item WHERE id = :id")
+    fun byIdFlow(id: String): Flow<ItemEntity?>
+
+    /// Lookup by the human-facing `#num`. Numbers are unique per journal, so
+    /// at most one row matches; the `id` ordering only makes a theoretical
+    /// duplicate resolve to the same row every time.
+    @Query("SELECT * FROM item WHERE num = :num ORDER BY id LIMIT 1")
+    suspend fun byNum(num: Int): ItemEntity?
+
+    @Query("SELECT * FROM item ORDER BY rank, num")
+    suspend fun all(): List<ItemEntity>
+
+    @Query("SELECT * FROM item ORDER BY rank, num")
+    fun allFlow(): Flow<List<ItemEntity>>
+
+    @Query("SELECT * FROM item WHERE origin_convo_id = :convoID ORDER BY rank, num")
+    suspend fun forConversation(convoID: String): List<ItemEntity>
+
+    @Query("SELECT * FROM item WHERE origin_convo_id = :convoID ORDER BY rank, num")
+    fun forConversationFlow(convoID: String): Flow<List<ItemEntity>>
+
+    @Query("SELECT MAX(updated_at) FROM item")
+    suspend fun maxUpdatedAt(): Long?
+
+    @Query("DELETE FROM item")
+    suspend fun deleteAll()
+}
+
+@Dao
+interface ItemCommentDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(comments: List<ItemCommentEntity>)
+
+    @Query("SELECT * FROM item_comment WHERE item_id = :itemID ORDER BY created_at, id")
+    suspend fun forItem(itemID: String): List<ItemCommentEntity>
+
+    @Query("SELECT * FROM item_comment WHERE item_id = :itemID ORDER BY created_at, id")
+    fun forItemFlow(itemID: String): Flow<List<ItemCommentEntity>>
+
+    @Query("SELECT COUNT(*) FROM item_comment")
+    suspend fun count(): Int
+
+    @Query("DELETE FROM item_comment WHERE item_id = :itemID")
+    suspend fun deleteForItem(itemID: String)
+
+    @Query("DELETE FROM item_comment")
+    suspend fun deleteAll()
+}
+
+@Dao
+interface ItemOutboxDao {
+    /// Idempotent on `local_id`, like the text outbox: a duplicate insert of
+    /// an already-queued local id (a retried UI action) is a silent no-op.
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIgnore(row: ItemOutboxEntity)
+
+    @Query("SELECT * FROM item_outbox ORDER BY created_at, local_id")
+    suspend fun pending(): List<ItemOutboxEntity>
+
+    @Query("SELECT * FROM item_outbox WHERE item_id = :itemID ORDER BY created_at, local_id")
+    suspend fun forItem(itemID: String): List<ItemOutboxEntity>
+
+    @Query("SELECT * FROM item_outbox WHERE item_id = :itemID ORDER BY created_at, local_id")
+    fun forItemFlow(itemID: String): Flow<List<ItemOutboxEntity>>
+
+    /// Every queued "create" row (an item that only exists locally, still
+    /// waiting on the drain) — feeds the panel's Pending section.
+    @Query("SELECT * FROM item_outbox WHERE op = 'create' ORDER BY created_at, local_id")
+    fun createsFlow(): Flow<List<ItemOutboxEntity>>
+
+    @Query("UPDATE item_outbox SET attempts = attempts + 1, last_error = :error WHERE local_id = :localID")
+    suspend fun markAttempt(localID: String, error: String?)
+
+    @Query("DELETE FROM item_outbox WHERE local_id = :localID")
+    suspend fun delete(localID: String)
+
+    @Query("DELETE FROM item_outbox")
     suspend fun deleteAll()
 }

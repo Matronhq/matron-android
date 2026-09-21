@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
@@ -53,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.chat.SessionTag
 import chat.matron.android.chat.TimelineItem
+import chat.matron.android.designsystem.NeedsYouBadge
 import chat.matron.android.designsystem.SessionTagText
 import chat.matron.android.journal.AgentChatDecision
 import chat.matron.android.designsystem.ActivityIndicatorRow
@@ -122,6 +124,14 @@ fun ChatScreen(
     /// for users who open the browser). `null` (previews/tests) hides the
     /// toolbar button. Port of apple #142's ChatView toolbar + sheet.
     mediaBrowser: ((CoroutineScope) -> MediaBrowserViewModel)? = null,
+    /// Opens this conversation's tasks page (the task & decision tracker,
+    /// apple #185 / #194). `null` (previews/tests) hides the top-bar button;
+    /// [itemsSupported] false (a journal predating the tracker 404'd on
+    /// `GET /items`) hides it too. [needsYouCount] is the button's badge —
+    /// open items in THIS chat awaiting the user.
+    onOpenItems: (() -> Unit)? = null,
+    itemsSupported: Boolean = true,
+    needsYouCount: Int = 0,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val chatSearch by chatVM.chatSearch.collectAsStateWithLifecycle()
@@ -250,6 +260,20 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    // The tracker button stays outside the ellipsis menu: its
+                    // needs-you badge is the whole point (the agent is
+                    // waiting on you), and a badge inside a menu is invisible.
+                    if (onOpenItems != null && itemsSupported) {
+                        Box {
+                            IconButton(onClick = onOpenItems) {
+                                Icon(Icons.Filled.Checklist, contentDescription = "Tasks")
+                            }
+                            NeedsYouBadge(
+                                count = needsYouCount,
+                                modifier = Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 2.dp),
+                            )
+                        }
+                    }
                     // One ellipsis menu instead of a row of icon buttons —
                     // trailing icons squeezed the title down to a few
                     // characters (apple #150). The sub-chats section that
