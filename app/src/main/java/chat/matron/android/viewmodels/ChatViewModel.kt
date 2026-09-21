@@ -113,11 +113,17 @@ class ChatViewModel(
     /// and the last-own-message jump; [focusOwner] says whose it is.
     private var pendingChatSearchFocusSeq: Long? = null
 
-    /// Which feature started the jump [focusOrPark] is running or has parked.
-    /// Dismissing the search bar must abort only search's own jump — a "jump
-    /// to my last message" in flight while the bar happens to be up would
-    /// otherwise die with it (Bugbot, apple #202).
-    private enum class FocusOwner { Search, LastOwnMessage }
+    /// Which feature started the jump that is currently RUNNING (or, for the
+    /// two owners that share [pendingChatSearchFocusSeq], parked). Dismissing
+    /// the search bar must abort only search's own jump — a "jump to my last
+    /// message" or a milestone jump in flight while the bar happens to be up
+    /// would otherwise die with it (Bugbot, apple #202 and #209).
+    ///
+    /// Nothing clears this when a jump finishes, so it names the last claimant
+    /// rather than a live claim: every path that takes over [focusTask] has to
+    /// claim it, or a stale `Search` left by an earlier query makes
+    /// [endChatSearch] cancel a jump that is not search's.
+    private enum class FocusOwner { Search, LastOwnMessage, Milestone }
     private var focusOwner: FocusOwner? = null
 
     /// Bumped by every [beginChatSearch] and [endChatSearch]; an in-flight
@@ -187,6 +193,23 @@ class ChatViewModel(
     /// (Apple's `FocusOwner.milestone`).
     private var pendingMilestoneFocusSeq: Long? = null
 
+    /// Takes over [focusTask] for a milestone jump, claiming [focusOwner] with
+    /// it. The claim is what stops an unrelated [endChatSearch] from cancelling
+    /// the jump mid-pagination: the bar survives `stop()` on Android (Apple's
+    /// `stop()` dismisses it), so after a title tap into a mission and back the
+    /// bar is still up over a room whose [focusOwner] may still read `Search`
+    /// from the query that raised it, and the user's dismissal would otherwise
+    /// abort the milestone jump they just asked for (Bugbot, #79).
+    ///
+    /// Claimed only where the jump actually RUNS. A milestone jump that *parks*
+    /// must not claim: its park lives in [pendingMilestoneFocusSeq], so taking
+    /// ownership would strand a search park in [pendingChatSearchFocusSeq] that
+    /// [endChatSearch] still has to clear.
+    private suspend fun focusAsMilestone(seq: Long) {
+        focusOwner = FocusOwner.Milestone
+        focus(seq)
+    }
+
     /// Scrolls the transcript to a milestone's anchor — the `seq` of its own
     /// `milestone` marker event (spec 2026-09-10). Rides the same
     /// park-until-live jump as in-conversation search, so a tap made from
@@ -196,7 +219,7 @@ class ChatViewModel(
     suspend fun jumpToMilestone(seq: Long) {
         if (_hasReceivedFirstSnapshot.value && observationTask?.isActive == true) {
             pendingMilestoneFocusSeq = null
-            focus(seq)
+            focusAsMilestone(seq)
         } else {
             pendingMilestoneFocusSeq = seq
         }
@@ -1098,7 +1121,9 @@ class ChatViewModel(
                     }
                     pendingMilestoneFocusSeq?.let { seq ->
                         pendingMilestoneFocusSeq = null
-                        scope.launch { focus(seq) }
+                        // Claims [focusOwner] as it supersedes any search jump
+                        // fired just above — same reason as the live path.
+                        scope.launch { focusAsMilestone(seq) }
                     }
                     updateSettledEmpty(snapshot.isEmpty())
                     // Content → empty is the signature of a mirror wipe under an

@@ -1264,6 +1264,62 @@ class ChatViewModelTest {
         vm.stop()
     }
 
+    /// Bugbot (#79): a milestone jump that runs LIVE must claim the focus
+    /// slot. The search bar outlives `stop()` on Android, so after a title
+    /// tap into a mission and back it is still up over a room whose
+    /// `focusOwner` reads `Search` from the query that raised it — and
+    /// dismissing that stale bar used to cancel the milestone jump
+    /// mid-pagination, dropping the scroll the user just asked for.
+    @Test
+    fun jumpToMilestone_liveJumpSurvivesSearchDismiss() = vmTest { scope ->
+        val fake = BlockingPagingFakeTimelineService(
+            loaded = listOf(textItem("50", body = "match", timestamp = Instant.ofEpochSecond(50))),
+            olderPages = mutableListOf(listOf(textItem("3", timestamp = Instant.ofEpochSecond(3)))),
+        )
+        val vm = searchVM(scope, fake, FakeSearchService(listOf(searchHit("50", 50))))
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+        // A loaded hit lands without paginating — but leaves search owning
+        // the focus slot, which is the whole point of the setup.
+        vm.beginChatSearch("match")
+        assertEquals("50", vm.pendingFocusID.value)
+        vm.clearPendingFocus()
+
+        val jump = launch { vm.jumpToMilestone(3) }
+        waitUntil { fake.paginateStarted }
+        assertTrue("the milestone jump is mid-pagination", fake.paginateStarted)
+
+        vm.endChatSearch()
+        fake.release()
+        jump.join()
+        assertNull(vm.chatSearch.value)
+        assertEquals("the bar's dismissal must not kill the jump", "3", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
+    /// The same claim on the parked route: a milestone park fires on the
+    /// first snapshot alongside a search park, supersedes it, and therefore
+    /// has to take the slot with it — otherwise the dismissal that follows
+    /// cancels the milestone jump the search park no longer owns.
+    @Test
+    fun jumpToMilestone_parkedJumpFiringOverASearchParkSurvivesSearchDismiss() = vmTest { scope ->
+        val fake = BlockingPagingFakeTimelineService(
+            loaded = listOf(textItem("50", body = "match", timestamp = Instant.ofEpochSecond(50))),
+            olderPages = mutableListOf(listOf(textItem("3", timestamp = Instant.ofEpochSecond(3)))),
+        )
+        val vm = searchVM(scope, fake, FakeSearchService(listOf(searchHit("50", 50))))
+        vm.jumpToMilestone(3)       // cold: parks on the milestone slot
+        vm.beginChatSearch("match") // cold: parks on search's slot, taking the owner
+        vm.start()
+        waitUntil { fake.paginateStarted }
+
+        vm.endChatSearch()
+        fake.release()
+        waitUntil { vm.pendingFocusID.value == "3" }
+        assertEquals("the bar's dismissal must not kill the jump", "3", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
     /// Bugbot (#56): closing the bar while the query is still in flight must
     /// not let the late result resurrect it.
     @Test
