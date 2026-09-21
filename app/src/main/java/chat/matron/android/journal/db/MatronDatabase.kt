@@ -1,6 +1,7 @@
 package chat.matron.android.journal.db
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -10,6 +11,8 @@ import chat.matron.android.journal.JournalEventType
 import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.parseJsonObjectOrNull
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /// Room database backing the journal mirror. Schema v1 already includes
 /// `parent_convo_id` (the Apple original added it in a v2 migration; a fresh
@@ -186,13 +189,47 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
-        /// Production, file-backed at the given path.
-        fun open(context: Context, file: File): MatronDatabase =
-            Room.databaseBuilder(context.applicationContext, MatronDatabase::class.java, file.absolutePath)
-                .addMigrations(
-                    MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
-                )
+        private val MIGRATIONS = listOf(
+            MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
+        )
+
+        /// Production, file-backed at the given path. [onOpened] fires from
+        /// Room's `onOpen` callback — i.e. on the FIRST ACTUAL open, which
+        /// Room defers to the first query, off the main thread — with the
+        /// total time the migration chain took on that open, or `null` when
+        /// none ran. The launch timeline turns that into its nested
+        /// `migration` interval (apple #212).
+        fun open(context: Context, file: File, onOpened: ((migrationMillis: Long?) -> Unit)? = null): MatronDatabase {
+            val timing = MigrationTiming()
+            return Room.databaseBuilder(context.applicationContext, MatronDatabase::class.java, file.absolutePath)
+                .addMigrations(*MIGRATIONS.map(timing::wrap).toTypedArray())
+                .addCallback(object : RoomDatabase.Callback() {
+                    override fun onOpen(db: SupportSQLiteDatabase) {
+                        onOpened?.invoke(timing.totalOrNull())
+                    }
+                })
                 .build()
+        }
+
+        /// Sums the wall time of every migration step Room actually runs on
+        /// an open. `SystemClock.elapsedRealtime` (not the wall clock) because
+        /// this is an elapsed-time measurement: an NTP step landing
+        /// mid-migration must not skew it.
+        private class MigrationTiming {
+            private val total = AtomicLong(0)
+            private val ran = AtomicBoolean(false)
+
+            fun wrap(migration: Migration): Migration = object : Migration(migration.startVersion, migration.endVersion) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    val began = SystemClock.elapsedRealtime()
+                    migration.migrate(db)
+                    total.addAndGet(SystemClock.elapsedRealtime() - began)
+                    ran.set(true)
+                }
+            }
+
+            fun totalOrNull(): Long? = if (ran.get()) total.get() else null
+        }
 
         /// Test/ephemeral, memory-backed. Cleared when the last connection closes.
         fun inMemory(context: Context): MatronDatabase =

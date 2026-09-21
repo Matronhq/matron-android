@@ -10,6 +10,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -428,6 +429,33 @@ class MatronDatabaseMigrationTest {
             assertEquals("$ make build", store.conversation("c5")?.expiredSnippet)
         } finally {
             database.close()
+            file.delete()
+        }
+    }
+
+    /// `open(onOpened:)` reports how long the migration chain took on the
+    /// open that ran it (the launch timeline's nested `migration` interval)
+    /// and `null` on a later open of the same, now up-to-date file.
+    @Test
+    fun openReportsMigrationDurationOnceAndNullOnReopen() = runBlocking {
+        val file = File.createTempFile("migration-test-timing", ".sqlite").also { it.delete() }
+        buildV6(file)
+        var reported: Long? = -1
+        val database = MatronDatabase.open(context, file) { reported = it }
+        try {
+            JournalStore(database, ownSender = "user:dan").cursor() // forces the lazy open
+            assertNotNull("the v6 → v7 step ran on this open, so a duration is reported", reported)
+            assertTrue("a duration, not the sentinel", (reported ?: -1) >= 0)
+        } finally {
+            database.close()
+        }
+        reported = -1
+        val reopened = MatronDatabase.open(context, file) { reported = it }
+        try {
+            JournalStore(reopened, ownSender = "user:dan").cursor()
+            assertNull("reopening an up-to-date store runs no migrations", reported)
+        } finally {
+            reopened.close()
             file.delete()
         }
     }

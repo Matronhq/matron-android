@@ -49,6 +49,7 @@ import chat.matron.android.designsystem.RelativeMinuteTimeView
 import chat.matron.android.designsystem.SessionTagText
 import chat.matron.android.designsystem.SyncBannerState
 import chat.matron.android.designsystem.UnreadBadge
+import chat.matron.android.models.LaunchTimeline
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.viewmodels.ChatListViewModel
 import kotlinx.coroutines.launch
@@ -77,6 +78,14 @@ fun ChatListScreen(
     val groups by viewModel.groups.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
+    // Launch timeline (apple #212): the first list paint. Apple marks the
+    // list's first `onAppear`; here the list body is not painted until the
+    // first snapshot lands (a spinner shows while `isLoading`), so the mark
+    // is taken when that first snapshot composes. First-wins inside the
+    // timeline, so re-appearing on back-navigation records nothing.
+    LaunchedEffect(isLoading) {
+        if (!isLoading) LaunchTimeline.shared.mark(LaunchTimeline.Mark.FIRST_LIST_PAINT)
+    }
 
     var overflowOpen by remember { mutableStateOf(false) }
 

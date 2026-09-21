@@ -21,6 +21,7 @@ import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.JournalSyncEngine
 import chat.matron.android.journal.OkHttpWebSocketConnector
 import chat.matron.android.journal.db.MatronDatabase
+import chat.matron.android.models.LaunchTimeline
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.UserSession
 import chat.matron.android.push.JournalPushService
@@ -90,7 +91,17 @@ class AppDependencies(
      * build the whole graph with an in-memory store + in-memory Room.
      */
     private val sessionStoreFactory: (Context) -> SessionStore = { EncryptedPrefsSessionStore.create(it) },
-    private val journalDatabaseFactory: (Context, File) -> MatronDatabase = { c, f -> MatronDatabase.open(c, f) },
+    private val journalDatabaseFactory: (Context, File) -> MatronDatabase = { c, f ->
+        // Room opens on first access, off the main thread; the launch
+        // timeline's store-open interval closes there, with the migration
+        // (if one ran) recorded nested inside it — the one launch that runs
+        // v7 pays its index build and backfill here, and that contrast is
+        // the headline number of apple #212.
+        MatronDatabase.open(c, f) { migrationMillis ->
+            LaunchTimeline.shared.endStoreOpen()
+            migrationMillis?.let { LaunchTimeline.shared.recordMigration(it) }
+        }
+    },
     private val searchDatabaseFactory: (Context, File) -> SearchDatabase = { c, f -> SearchDatabase.open(c, f) },
     /**
      * Background scope for startup sweeps and sign-out teardown. Injectable so
@@ -198,6 +209,7 @@ class AppDependencies(
 
         val prefs = context.getSharedPreferences("matron-kv", Context.MODE_PRIVATE)
         preferences = SharedPreferencesKeyValueStore(prefs)
+        LaunchTimeline.shared.attachStore(preferences)
         recentStartFolders = RecentStartFolders(preferences)
         boxLetterOverrides = BoxLetterOverrides(preferences)
 
@@ -226,6 +238,7 @@ class AppDependencies(
             token = session.accessToken,
         )
         val dbFile = File(journalDirectory, "${session.userID.sanitizedForFilename()}.sqlite")
+        LaunchTimeline.shared.beginStoreOpen()
         val db = journalDatabaseFactory(context, dbFile)
         val store = JournalStore(db = db, ownSender = "user:${session.userID}")
         val engine = JournalSyncEngine(
@@ -249,6 +262,12 @@ class AppDependencies(
         // older than an hour.
         engine.attachMaintenance(maintenance)
         engine.setCatchUpCompleteHandler {
+            // The engine must not call LaunchTimeline itself; this hook lets
+            // the app layer record the mark the first time the replay
+            // reaches the live cursor — and lets maintenance past its launch
+            // hold early, since catch-up reaching the cursor is the signal
+            // the launch path is over.
+            LaunchTimeline.shared.mark(LaunchTimeline.Mark.CATCH_UP_COMPLETE)
             appScope.launch { maintenance.runAfterCatchUp() }
         }
         maintenance.start()
