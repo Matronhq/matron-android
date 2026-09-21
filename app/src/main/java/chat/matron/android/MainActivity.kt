@@ -285,6 +285,24 @@ fun openConversationCallback(
     }
 }
 
+/// Whether item [itemID]'s detail is already the top destination of the tab
+/// whose routes start with [prefix] — in which case a push must no-op, the
+/// same rule the chat opens follow (`AppShellNavigation.pushChat`). An inline
+/// card's tap navigates at once, so a double tap would otherwise push two
+/// identical details and Back would land on the same item again (Bugbot on
+/// #78). Pure over the current entry's route pattern and its `itemID`
+/// argument so the rule is unit-testable without a NavController.
+fun itemIsAlreadyOnTop(currentRoute: String?, currentItemID: String?, prefix: String, itemID: String): Boolean =
+    currentRoute == "${prefix}item/{itemID}" && currentItemID == itemID
+
+/// Push item [itemID]'s detail on the tab whose routes start with [prefix],
+/// unless it is already on top (see [itemIsAlreadyOnTop]).
+private fun NavHostController.pushItem(prefix: String, itemID: String) {
+    val entry = currentBackStackEntry
+    if (itemIsAlreadyOnTop(entry?.destination?.route, entry?.arguments?.getString("itemID"), prefix, itemID)) return
+    navigate("${prefix}item/$itemID")
+}
+
 /// The tab-root routes: the only destinations where the bottom bar shows
 /// (spec §3 — hidden inside a pushed chat and inside item detail).
 private val tabRootRoutes: Set<String> = AppTab.entries.map { it.rootRoute }.toSet()
@@ -317,7 +335,7 @@ private class NavControllerShellHost(private val nav: NavHostController) : AppSh
     }
 
     override fun pushDecision(itemID: String) {
-        nav.navigate("${AppTab.DECISIONS.routePrefix}item/$itemID")
+        nav.pushItem(AppTab.DECISIONS.routePrefix, itemID)
     }
 
     /// A tab that is saved away (another tab showing) is not on the
@@ -520,7 +538,7 @@ private fun SignedInApp(
                 },
                 onOpenConversation = onOpenConversation,
                 onOpenItems = { nav.navigate("${prefix}items/$convoID") },
-                onOpenItem = { nav.navigate("${prefix}item/$it") },
+                onOpenItem = { nav.pushItem(prefix, it) },
             )
         }
 
@@ -536,7 +554,7 @@ private fun SignedInApp(
                 viewModel = itemsVM,
                 originLabels = { deps.journalStore(session).conversationOriginLabels() },
                 onBack = { nav.popBackStack() },
-                onSelect = { item -> nav.navigate("${prefix}item/${item.id}") },
+                onSelect = { item -> nav.pushItem(prefix, item.id) },
                 onOpenConversation = onOpenConversation,
             )
         }
@@ -556,7 +574,7 @@ private fun SignedInApp(
                 // `[#12](matron://item/12)` inside the body or a comment pushes
                 // that item over this one (apple #208).
                 resolveItemLink = { num -> deps.trackerItemLinkOutcome(num, session) },
-                onOpenItem = { nav.navigate("${prefix}item/$it") },
+                onOpenItem = { nav.pushItem(prefix, it) },
             )
         }
     }
@@ -610,7 +628,7 @@ private fun SignedInApp(
                                 onSwitchTo = { sibling -> shell.pushChat(sibling) },
                                 onOpenConversation = onOpenConversation,
                                 onOpenItems = { nav.navigate("${AppTab.COORDINATOR.routePrefix}items/$convoID") },
-                                onOpenItem = { nav.navigate("${AppTab.COORDINATOR.routePrefix}item/$it") },
+                                onOpenItem = { nav.pushItem(AppTab.COORDINATOR.routePrefix, it) },
                             )
                         }
                     }
@@ -739,7 +757,7 @@ private fun SignedInApp(
                         // A linked item pushes within the Decisions tab too, so
                         // Back returns to the decision the link was tapped in.
                         resolveItemLink = { num -> deps.trackerItemLinkOutcome(num, session) },
-                        onOpenItem = { nav.navigate("${AppTab.DECISIONS.routePrefix}item/$it") },
+                        onOpenItem = { nav.pushItem(AppTab.DECISIONS.routePrefix, it) },
                     )
                 }
             }
