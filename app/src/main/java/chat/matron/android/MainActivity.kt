@@ -386,8 +386,13 @@ private fun SignedInApp(
         onDispose { decisionsVM.stop() }
     }
     // The nav rules route the coordinator conversation to its own tab
-    // (Bugbot, apple #197): mirror the setting into the shell.
+    // (Bugbot, apple #197): mirror the PERSISTED setting into the shell
+    // (the restored value on sign-in). Changes made from the UI go through
+    // `shell.assignCoordinator` / `chooseCoordinator`, which mirror
+    // synchronously — this effect lands a frame later, too late for the
+    // openChat that follows a pick (Bugbot, #76).
     LaunchedEffect(shell, coordinatorConvoID) { shell.coordinatorConvoID = coordinatorConvoID }
+    val persistCoordinator: (String?) -> Unit = remember(coordinatorSetting) { { id -> coordinatorSetting.set(id) } }
 
     // Agent-spawn card / SpawnOutcomeRow "Open" deep link. remembered (keyed
     // on session.userID, matching vmCache/chatListVM above) because
@@ -661,7 +666,7 @@ private fun SignedInApp(
                         coordinator = CoordinatorSettingRowModel(
                             title = coordinatorTitle,
                             onChoose = { showCoordinatorChooser = true },
-                            onClear = { coordinatorSetting.set(null) },
+                            onClear = { shell.assignCoordinator(null, persistCoordinator) },
                         ),
                         onBack = { nav.popBackStack() },
                     )
@@ -730,10 +735,9 @@ private fun SignedInApp(
                 prepareConversation = { id -> deps.prepareConversation(session, id) },
                 onCreated = { convoID ->
                     newChatTarget = null
-                    // "New coordinator chat…" stores the new id first, so
-                    // openChat lands it on the Coordinator tab.
-                    if (target == NewChatTarget.COORDINATOR) coordinatorSetting.set(convoID)
-                    shell.openChat(convoID)
+                    // "New coordinator chat…" assigns the new id first (and
+                    // synchronously), so the open lands on the Coordinator tab.
+                    if (target == NewChatTarget.COORDINATOR) shell.chooseCoordinator(convoID, persistCoordinator) else shell.openChat(convoID)
                 },
                 onCancel = { newChatTarget = null },
             )
@@ -749,8 +753,7 @@ private fun SignedInApp(
                 isLoading = isLoading,
                 onPick = { id ->
                     showCoordinatorChooser = false
-                    coordinatorSetting.set(id)
-                    shell.openChat(id)
+                    shell.chooseCoordinator(id, persistCoordinator)
                 },
                 onNewChat = {
                     showCoordinatorChooser = false
