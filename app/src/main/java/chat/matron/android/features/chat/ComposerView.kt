@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -42,6 +43,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,6 +60,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.AttachmentTray
 import chat.matron.android.designsystem.UploadProgressBar
 import chat.matron.android.models.BotCommand
+import chat.matron.android.platform.AudioFocusInterruptions
+import chat.matron.android.platform.AudioInputDiagnostics
+import chat.matron.android.platform.VoiceRecordingService
 import chat.matron.android.viewmodels.ComposerDraftMemory
 import chat.matron.android.viewmodels.ComposerViewModel
 import chat.matron.android.viewmodels.MediaRecorderAudioRecording
@@ -65,7 +70,9 @@ import chat.matron.android.viewmodels.PaletteSuggestion
 import chat.matron.android.viewmodels.VoiceRecorder
 import java.io.File
 import java.util.UUID
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -145,9 +152,30 @@ fun ComposerView(viewModel: ComposerViewModel) {
                     }
                 }
             },
+            // Switching apps mid-note used to kill the capture: a microphone
+            // foreground service holds mic access for exactly the span of a
+            // recording (port of apple #180's `audio` background mode).
+            holdRecordingSession = { hold ->
+                if (hold) VoiceRecordingService.start(context) else VoiceRecordingService.stop(context)
+            },
+            // A backgrounded recording is far more likely to be interrupted (a
+            // call, the assistant, another app taking the mic): audio-focus
+            // changes pause and resume the recorder (port of apple #180).
+            observeInterruptions = AudioFocusInterruptions(context)::observe,
+            describeInputRoute = AudioInputDiagnostics(context)::describe,
         )
     }
     val recorderState by recorder.state.collectAsStateWithLifecycle()
+    // Peak-level breadcrumbs every few seconds while capture is live, so a
+    // note that comes back silent can be told from one that was never heard
+    // (port of apple #181). Keyed on the state so a pause stops the ticker.
+    LaunchedEffect(recorderState) {
+        if (recorderState !is VoiceRecorder.State.Recording) return@LaunchedEffect
+        while (true) {
+            delay(LEVEL_SAMPLE_INTERVAL)
+            recorder.sampleLevel()
+        }
+    }
 
     // Restore any per-room draft on first appearance; persist on disappear.
     DisposableEffect(viewModel.roomID) {
@@ -188,8 +216,9 @@ fun ComposerView(viewModel: ComposerViewModel) {
             UploadProgressBar(label = upload.label, fraction = upload.fraction)
         }
 
-        if (recorderState is VoiceRecorder.State.Recording) {
+        (recorderState as? VoiceRecorder.State.Recording)?.let { recording ->
             RecordingBar(
+                isPaused = recording.isPaused,
                 onCancel = { recorder.cancel() },
                 onSend = {
                     recorder.stop()?.let { note ->
@@ -197,7 +226,7 @@ fun ComposerView(viewModel: ComposerViewModel) {
                     }
                 },
             )
-        } else {
+        } ?: run {
             AttachmentTray(attachments = staged, onRemove = { id -> viewModel.removeAttachment(id) })
 
             Row(
@@ -287,8 +316,15 @@ private fun AttachMenu(onPickPhoto: () -> Unit, onPickFile: () -> Unit) {
     }
 }
 
+/// Interval between the recorder's peak-level diagnostics samples.
+private val LEVEL_SAMPLE_INTERVAL = 5.seconds
+
+/// The live-recording strip. While an interruption holds the capture
+/// ([isPaused]) it says so: the spinner and "Recording…" would claim to be
+/// capturing a call that the recorder is not hearing. Send still delivers
+/// what was captured up to the pause.
 @Composable
-private fun RecordingBar(onCancel: () -> Unit, onSend: () -> Unit) {
+private fun RecordingBar(isPaused: Boolean, onCancel: () -> Unit, onSend: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -296,8 +332,13 @@ private fun RecordingBar(onCancel: () -> Unit, onSend: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        CircularProgressIndicator(modifier = Modifier.padding(2.dp), strokeWidth = 2.dp)
-        Text("Recording…", modifier = Modifier.weight(1f))
+        if (isPaused) {
+            Icon(Icons.Default.Pause, contentDescription = "Recording paused", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(recordingBarLabel(isPaused = true), modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            CircularProgressIndicator(modifier = Modifier.padding(2.dp), strokeWidth = 2.dp)
+            Text(recordingBarLabel(isPaused = false), modifier = Modifier.weight(1f))
+        }
         TextButton(onClick = onCancel) { Text("Cancel") }
         IconButton(onClick = onSend) {
             Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send voice note", tint = MaterialTheme.colorScheme.primary)
@@ -325,6 +366,11 @@ private fun ComposerErrorBanner(message: String, onDismiss: () -> Unit) {
         }
     }
 }
+
+/// Copy for the recording strip: truthful about a capture an interruption
+/// has paused (a call, another app on the mic) versus one that is live.
+internal fun recordingBarLabel(isPaused: Boolean): String =
+    if (isPaused) "Recording paused" else "Recording…"
 
 /** User-facing copy for a [VoiceRecorder.RecorderError] thrown by [VoiceRecorder.start]. */
 private fun voiceRecorderErrorMessage(error: VoiceRecorder.RecorderError): String = when (error) {
