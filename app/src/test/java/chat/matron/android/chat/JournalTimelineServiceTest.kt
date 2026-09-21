@@ -858,7 +858,9 @@ class JournalTimelineServiceTest {
         // The transcript stream excludes the summary rows entirely.
         engine.beginSync(); engine.waitUntilReady()
         val (collector, task) = collectItems(service.items())
-        waitUntil { collector.last() != null }
+        // The first snapshot can be empty under load (the observation lands
+        // before the mirror read); wait for the populated one, not merely any.
+        waitUntil { collector.last()?.isNotEmpty() == true }
         assertEquals(listOf("1"), collector.last()!!.map { it.id })
         task.cancel(); engine.endSync()
     }
