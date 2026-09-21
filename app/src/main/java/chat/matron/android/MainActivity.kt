@@ -318,8 +318,17 @@ private class NavControllerShellHost(private val nav: NavHostController) : AppSh
         nav.navigate("${AppTab.DECISIONS.routePrefix}item/$itemID")
     }
 
+    /// A tab that is saved away (another tab showing) is not on the
+    /// controller's back stack, so `popBackStack` cannot reach it; dropping
+    /// its saved state instead makes the next `restoreState` start at the
+    /// graph's root — which is what Clear/Change from Settings need, or the
+    /// old sub-chat / item would come back with the tab (Bugbot, #76).
     override fun popToRoot(tab: AppTab) {
-        nav.popBackStack(tab.rootRoute, inclusive = false)
+        if (nav.currentDestination?.appTab() == tab) {
+            nav.popBackStack(tab.rootRoute, inclusive = false)
+        } else {
+            runCatching { nav.clearBackStack(tab.route) }
+        }
     }
 
     /// The Conversations stack may be saved away (another tab showing):
