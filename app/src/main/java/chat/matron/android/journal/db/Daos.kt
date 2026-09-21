@@ -450,6 +450,11 @@ interface MissionDao {
     @Query("DELETE FROM mission WHERE id IN (:ids)")
     suspend fun deleteByIds(ids: List<String>)
 
+    /// The ids among [ids] whose cached row is already closed — see
+    /// `JournalStore.upsertMissions`' "closed is terminal" guard.
+    @Query("SELECT id FROM mission WHERE id IN (:ids) AND state = 'closed'")
+    suspend fun closedAmong(ids: List<String>): List<String>
+
     /// Which mission a conversation belongs to, derived locally (the
     /// snapshot does not carry `conversations.mission_id`). Three lookups,
     /// in order: origin; `mission_conversation`, the authoritative
@@ -458,19 +463,23 @@ interface MissionDao {
     /// milestone posted in the conversation, which still matters as a
     /// fallback until the owning mission's own detail fetch has ever
     /// landed. One statement so Room's invalidation tracker re-fires it on
-    /// a write to any of the three tables.
+    /// a write to any of the three tables. The journal never lets a
+    /// conversation originate or join a second mission (its `mission_id` is
+    /// never cleared), but should the cache ever hold several, the OPEN one
+    /// wins, then the newest — a title tap must never land on a closed
+    /// mission while a live one exists (Bugbot, #79).
     @Query(
         "SELECT COALESCE(" +
-            "(SELECT id FROM mission WHERE origin_convo_id = :convoID ORDER BY id LIMIT 1), " +
-            "(SELECT mission_id FROM mission_conversation WHERE convo_id = :convoID ORDER BY mission_id LIMIT 1), " +
+            "(SELECT id FROM mission WHERE origin_convo_id = :convoID ORDER BY (state = 'open') DESC, created_at DESC, id LIMIT 1), " +
+            "(SELECT mc.mission_id FROM mission_conversation mc LEFT JOIN mission m ON m.id = mc.mission_id WHERE mc.convo_id = :convoID ORDER BY (m.state = 'open') DESC, m.created_at DESC, mc.mission_id LIMIT 1), " +
             "(SELECT mission_id FROM milestone WHERE convo_id = :convoID ORDER BY seq DESC LIMIT 1))"
     )
     suspend fun missionIDForConversation(convoID: String): String?
 
     @Query(
         "SELECT COALESCE(" +
-            "(SELECT id FROM mission WHERE origin_convo_id = :convoID ORDER BY id LIMIT 1), " +
-            "(SELECT mission_id FROM mission_conversation WHERE convo_id = :convoID ORDER BY mission_id LIMIT 1), " +
+            "(SELECT id FROM mission WHERE origin_convo_id = :convoID ORDER BY (state = 'open') DESC, created_at DESC, id LIMIT 1), " +
+            "(SELECT mc.mission_id FROM mission_conversation mc LEFT JOIN mission m ON m.id = mc.mission_id WHERE mc.convo_id = :convoID ORDER BY (m.state = 'open') DESC, m.created_at DESC, mc.mission_id LIMIT 1), " +
             "(SELECT mission_id FROM milestone WHERE convo_id = :convoID ORDER BY seq DESC LIMIT 1))"
     )
     fun missionIDForConversationFlow(convoID: String): Flow<String?>

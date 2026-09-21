@@ -446,4 +446,26 @@ class MissionsSyncTest {
         assertEquals("step", rig.store.mission("ms_1")?.lastMilestone?.title)
         rig.sync.stop()
     }
+
+    /// Bugbot (#79): a detail GET issued before a user close but answered
+    /// after it carries the still-open row. `writes` orders the commits but
+    /// cannot know the response is stale; the store's "closed is terminal"
+    /// guard drops it, so a successful close never flips back to open.
+    @Test
+    fun aStaleDetailResponseCannotReopenAClosedMission() = runBlocking {
+        val api = FakeMissions()
+        api.detail("ms_1", detail(mission("ms_1", 61)))
+        val rig = make(api)
+        rig.store.upsertMissions(listOf(mission("ms_1", 61)))
+        api.blockNextDetail = true
+        val detailTask = async(Dispatchers.Default) { rig.sync.refreshMission("ms_1") }
+        waitUntil { api.isDetailGated }
+        assertEquals(MissionState.CLOSED, rig.sync.closeMission("ms_1", "Done.").state)
+        assertEquals(MissionState.CLOSED, rig.store.mission("ms_1")?.state)
+        api.releaseDetailGate()
+        assertEquals(MissionsRefreshOutcome.Succeeded, detailTask.await())
+        assertEquals("the older, still-open detail row must not reopen the mission", MissionState.CLOSED, rig.store.mission("ms_1")?.state)
+        assertEquals("Done.", rig.store.mission("ms_1")?.closeSummary)
+        rig.sync.stop()
+    }
 }

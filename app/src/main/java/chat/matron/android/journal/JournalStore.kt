@@ -647,9 +647,23 @@ class JournalStore(
     // GET /missions and GET /missions/:id by `MissionsSync` — never from the
     // event log. Ported from matron-apple's `JournalStore+Missions.swift`.
 
+    /// Closed is terminal (protocol: no reopen route, `PATCH` / `join` /
+    /// `POST /milestones` all 409 on a closed mission), so an incoming OPEN
+    /// row never overwrites a cached CLOSED one: a detail `GET` issued
+    /// before a user close but answered after it would otherwise flip the
+    /// just-closed mission back to open until the next refresh (Bugbot,
+    /// #79 — a window Apple's actor has too). The cached row is kept as is;
+    /// the next list refresh carries the closed row with fresh counts.
     suspend fun upsertMissions(missions: List<Mission>) {
         if (missions.isEmpty()) return
-        missionDao.upsertAll(missions.map(MissionEntity::from))
+        db.withTransaction { upsertMissionsGuarded(missions) }
+    }
+
+    private suspend fun upsertMissionsGuarded(missions: List<Mission>) {
+        val reopening = missions.filter { it.state == MissionState.OPEN }.map { it.id }
+        val closed = if (reopening.isEmpty()) emptySet() else missionDao.closedAmong(reopening).toSet()
+        val rows = missions.filter { it.state == MissionState.CLOSED || it.id !in closed }
+        if (rows.isNotEmpty()) missionDao.upsertAll(rows.map(MissionEntity::from))
     }
 
     /// The full-list refresh's write (`MissionsSync.refreshOnce`) IS
@@ -675,7 +689,7 @@ class JournalStore(
     suspend fun replaceMissions(missions: List<Mission>, protectedIDs: Set<String> = emptySet()) {
         db.withTransaction {
             val fresh = missions.filter { it.id !in protectedIDs }
-            if (fresh.isNotEmpty()) missionDao.upsertAll(fresh.map(MissionEntity::from))
+            if (fresh.isNotEmpty()) upsertMissionsGuarded(fresh)
             val keep = missions.map { it.id }.toSet() + protectedIDs
             val stale = missionDao.idsNotIn(keep.toList())
             if (stale.isEmpty()) return@withTransaction

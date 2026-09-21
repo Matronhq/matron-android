@@ -289,4 +289,50 @@ class JournalStoreMissionsTest {
         store.replaceMissions(emptyList(), protectedIDs = setOf("ms_2"))
         assertEquals(listOf("ms_2"), store.missions(null).map { it.id })
     }
+
+    /// Closed is terminal: an OPEN row (a detail response that predates a
+    /// user close) never overwrites a cached CLOSED one, through either
+    /// write path; a CLOSED row always lands (Bugbot, #79).
+    @Test
+    fun upsertNeverReopensAClosedMission() = runBlocking {
+        val store = makeStore()
+        val closed = mission("ms_1", 61, state = MissionState.CLOSED, closedAt = 50).copy(closeSummary = "Done.")
+        store.upsertMissions(listOf(closed))
+        store.upsertMissions(listOf(mission("ms_1", 61, needsYou = 9)))
+        assertEquals("a stale open row is dropped", MissionState.CLOSED, store.mission("ms_1")?.state)
+        assertEquals("Done.", store.mission("ms_1")?.closeSummary)
+        store.replaceMissions(listOf(mission("ms_1", 61), mission("ms_2", 62)))
+        assertEquals("the list path is guarded too", MissionState.CLOSED, store.mission("ms_1")?.state)
+        assertEquals(listOf("ms_1", "ms_2"), store.missions(null).map { it.id }.sorted())
+        // A closed row over an open one always lands; a closed row over a
+        // closed one refreshes its fields.
+        store.upsertMissions(listOf(mission("ms_2", 62, state = MissionState.CLOSED, closedAt = 60)))
+        assertEquals(MissionState.CLOSED, store.mission("ms_2")?.state)
+        store.upsertMissions(listOf(closed.copy(closeSummary = "Done, really.")))
+        assertEquals("Done, really.", store.mission("ms_1")?.closeSummary)
+    }
+
+    /// Should the cache ever hold several missions for one origin (the
+    /// journal itself never allows it), a title tap opens the OPEN one,
+    /// then the newest — never a closed earlier mission while a live one
+    /// exists — whichever way the ids happen to sort (Bugbot, #79).
+    @Test
+    fun missionIDForConversationPrefersTheOpenThenNewestMission() = runBlocking {
+        val store = makeStore()
+        store.upsertMissions(
+            listOf(
+                mission("ms_a", 61, state = MissionState.CLOSED, convo = "c1", closedAt = 40).copy(createdAt = Instant.ofEpochSecond(1)),
+                mission("ms_b", 62, convo = "c1").copy(createdAt = Instant.ofEpochSecond(2)),
+                mission("ms_c", 63, state = MissionState.CLOSED, convo = "c1", closedAt = 90).copy(createdAt = Instant.ofEpochSecond(3)),
+            ),
+        )
+        assertEquals("the open mission wins regardless of id order", "ms_b", store.missionID("c1"))
+        store.upsertMissions(listOf(mission("ms_b", 62, state = MissionState.CLOSED, convo = "c1", closedAt = 95)))
+        assertEquals("all closed: the newest created", "ms_c", store.missionID("c1"))
+        // Membership rows follow the same rule.
+        store.replaceMissionConversations("ms_a", listOf(MissionConversation("c9", "J", null, "idle")))
+        store.replaceMissionConversations("ms_b", listOf(MissionConversation("c9", "J", null, "idle")))
+        store.upsertMissions(listOf(mission("ms_a", 61, convo = "c1").copy(createdAt = Instant.ofEpochSecond(1))))
+        assertEquals("joined: the open mission wins", "ms_a", store.missionID("c9"))
+    }
 }
