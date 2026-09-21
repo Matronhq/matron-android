@@ -27,3 +27,13 @@ interface ItemsStoreReading {
     /// fakes override it to drive it separately.
     fun needsUserFlow(): Flow<List<TrackerItem>> = itemsFlow(ItemsScope.All)
 }
+
+/// Reads one tracker item by its human-facing NUMBER (`#65`) — the single
+/// store call a tapped `[#65](matron://item/65)` link needs. `JournalStore`
+/// implements it; tests fake it. Deliberately NOT folded into
+/// [ItemsStoreReading]: the resolver wants nothing else from the store, and
+/// every panel/detail fake would otherwise have to grow a method it never
+/// uses.
+interface TrackerItemNumberReading {
+    suspend fun item(num: Int): TrackerItem?
+}

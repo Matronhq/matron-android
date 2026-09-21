@@ -56,6 +56,8 @@ import androidx.navigation.navArgument
 import chat.matron.android.designsystem.AppLockShield
 import chat.matron.android.designsystem.MatronAppearance
 import chat.matron.android.designsystem.MatronTheme
+import chat.matron.android.designsystem.TrackerItemLinkHost
+import chat.matron.android.designsystem.TrackerItemLinkOutcome
 import chat.matron.android.designsystem.SyncBannerState
 import chat.matron.android.designsystem.needsYouBadgeText
 import chat.matron.android.designsystem.syncBannerStateFrom
@@ -504,6 +506,7 @@ private fun SignedInApp(
                 },
                 onOpenConversation = onOpenConversation,
                 onOpenItems = { nav.navigate("${prefix}items/$convoID") },
+                onOpenItem = { nav.navigate("${prefix}item/$it") },
             )
         }
 
@@ -536,6 +539,10 @@ private fun SignedInApp(
                 deps = deps, session = session, vmCache = vmCache, itemID = itemID,
                 onBack = { nav.popBackStack() },
                 onOpenConversation = onOpenConversation,
+                // `[#12](matron://item/12)` inside the body or a comment pushes
+                // that item over this one (apple #208).
+                resolveItemLink = { num -> deps.trackerItemLinkOutcome(num, session) },
+                onOpenItem = { nav.navigate("${prefix}item/$it") },
             )
         }
     }
@@ -589,6 +596,7 @@ private fun SignedInApp(
                                 onSwitchTo = { sibling -> shell.pushChat(sibling) },
                                 onOpenConversation = onOpenConversation,
                                 onOpenItems = { nav.navigate("${AppTab.COORDINATOR.routePrefix}items/$convoID") },
+                                onOpenItem = { nav.navigate("${AppTab.COORDINATOR.routePrefix}item/$it") },
                             )
                         }
                     }
@@ -714,6 +722,10 @@ private fun SignedInApp(
                         deps = deps, session = session, vmCache = vmCache, itemID = itemID,
                         onBack = { nav.popBackStack() },
                         onOpenConversation = onOpenConversationFromDecisions,
+                        // A linked item pushes within the Decisions tab too, so
+                        // Back returns to the decision the link was tapped in.
+                        resolveItemLink = { num -> deps.trackerItemLinkOutcome(num, session) },
+                        onOpenItem = { nav.navigate("${AppTab.DECISIONS.routePrefix}item/$it") },
                     )
                 }
             }
@@ -814,6 +826,12 @@ private fun ItemDetailRoute(
     itemID: String,
     onBack: () -> Unit,
     onOpenConversation: (String) -> Unit,
+    /// `[#12](matron://item/12)` inside the body or a comment (apple #208):
+    /// resolved through the session's store + sync …
+    resolveItemLink: suspend (Int) -> TrackerItemLinkOutcome,
+    /// … and pushed over this item WITHIN the hosting tab, so Back returns
+    /// to the item the link was tapped in.
+    onOpenItem: (String) -> Unit,
 ) {
     val detailVM = remember(itemID) { vmCache.itemDetailViewModel(itemID) }
     val readMemory = remember(session.userID) { ItemReadMemory(deps.preferences) }
@@ -825,6 +843,8 @@ private fun ItemDetailRoute(
         readMemory = readMemory,
         onBack = onBack,
         onOpenConversation = onOpenConversation,
+        resolveItemLink = resolveItemLink,
+        onOpenItem = onOpenItem,
     )
 }
 
@@ -846,6 +866,10 @@ private fun ChatRoute(
     onOpenConversation: (String) -> Unit,
     /// Opens the conversation's tasks page (the tracker button in the top bar).
     onOpenItems: () -> Unit,
+    /// Opens one item's thread from an inline marker card in the timeline
+    /// (apple #186) — the same `item/{itemID}` route the tasks page pushes,
+    /// under the hosting tab's prefix.
+    onOpenItem: (String) -> Unit,
     /// `false` at the Coordinator tab's root, where the chat IS the tab.
     showsBackButton: Boolean = true,
     /// Which agent box runs this session, or null when the user has fewer
@@ -899,35 +923,44 @@ private fun ChatRoute(
         }
         val needsYouCount by itemsVM.needsYouCount.collectAsStateWithLifecycle()
         val itemsSupported by itemsVM.isSupported.collectAsStateWithLifecycle()
-        ChatScreen(
-            chatVM = chatVM,
-            composerVM = composerVM,
-            stripVM = stripVM,
-            chatTitle = title,
-            boxName = boxName,
-            sessionShort = sessionShort,
-            boxShort = boxShort,
-            roomBoxNames = roomBoxNames,
-            roomBoxShorts = roomBoxShorts,
-            onBack = onBack,
-            onOpenChild = onOpenChild,
-            onOpenConversation = onOpenConversation,
-            onOpenItems = onOpenItems,
-            showsBackButton = showsBackButton,
-            itemsSupported = itemsSupported,
-            needsYouCount = needsYouCount,
-            // Deferred: built when the browser sheet opens, on the sheet's own
-            // scope, over the same store the sync engine writes (apple #142).
-            mediaBrowser = { scope ->
-                MediaBrowserViewModel(
-                    store = deps.journalStore(session),
-                    convoID = convoID,
-                    serverURL = session.homeserverURL.toHttpUrl(),
-                    media = deps.mediaService(session),
-                    scope = scope,
-                )
-            },
-        )
+        // `[#65](matron://item/65)` links in any message body (apple #208):
+        // resolved through the session's store + sync, opened where an
+        // inline item card opens it; a miss stays put and explains itself.
+        TrackerItemLinkHost(
+            resolve = { num -> deps.trackerItemLinkOutcome(num, session) },
+            open = onOpenItem,
+        ) {
+            ChatScreen(
+                chatVM = chatVM,
+                composerVM = composerVM,
+                stripVM = stripVM,
+                chatTitle = title,
+                boxName = boxName,
+                sessionShort = sessionShort,
+                boxShort = boxShort,
+                roomBoxNames = roomBoxNames,
+                roomBoxShorts = roomBoxShorts,
+                onBack = onBack,
+                onOpenChild = onOpenChild,
+                onOpenConversation = onOpenConversation,
+                onOpenItems = onOpenItems,
+                showsBackButton = showsBackButton,
+                itemsSupported = itemsSupported,
+                needsYouCount = needsYouCount,
+                onOpenItem = onOpenItem,
+                // Deferred: built when the browser sheet opens, on the sheet's own
+                // scope, over the same store the sync engine writes (apple #142).
+                mediaBrowser = { scope ->
+                    MediaBrowserViewModel(
+                        store = deps.journalStore(session),
+                        convoID = convoID,
+                        serverURL = session.homeserverURL.toHttpUrl(),
+                        media = deps.mediaService(session),
+                        scope = scope,
+                    )
+                },
+            )
+        }
     }
 }
 
