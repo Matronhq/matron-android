@@ -229,19 +229,22 @@ fun ItemDetailView(
         }
     }
     val scrollable by remember(listState) { derivedStateOf { listState.canScrollForward || listState.canScrollBackward } }
-    // Rows before the comments: header, optional meta, optional body card,
-    // divider — the index math for the bottom anchor.
-    val lastIndex by remember(model) { derivedStateOf { listState.layoutInfo.totalItemsCount - 1 } }
+    // The bottom anchor's index, from the model rather than the layout (which
+    // reports 0 rows before the first measure): header, optional meta,
+    // optional body card, divider, comments, pending rows, anchor.
+    val hasMeta = item.labels.isNotEmpty() || item.links.isNotEmpty()
+    val hasBody = item.body.isNotEmpty() || item.attachments.isNotEmpty()
+    val lastIndex = 1 + (if (hasMeta) 1 else 0) + (if (hasBody) 1 else 0) + 1 + rowCount
 
     LaunchedEffect(item.id) {
         placed = true
-        if (startsAtBottom && lastIndex >= 0) listState.scrollToItem(lastIndex)
+        if (startsAtBottom) listState.scrollToItem(lastIndex)
     }
     var previousCount by remember(item.id) { mutableStateOf(rowCount) }
     LaunchedEffect(rowCount) {
         val old = previousCount
         previousCount = rowCount
-        if (itemThreadShouldFollowTail(model.loadedCommentCount, startsAtBottom, placed, atBottom, old, rowCount) && lastIndex >= 0) {
+        if (itemThreadShouldFollowTail(model.loadedCommentCount, startsAtBottom, placed, atBottom, old, rowCount)) {
             listState.scrollToItem(lastIndex)
         }
     }
@@ -256,8 +259,8 @@ fun ItemDetailView(
                 verticalArrangement = Arrangement.spacedBy(ItemTypography.threadSpacing),
             ) {
                 item(key = "header") { Header(model, onOpenConversation) }
-                if (item.labels.isNotEmpty() || item.links.isNotEmpty()) item(key = "meta") { Meta(item, onOpenLink) }
-                if (item.body.isNotEmpty() || item.attachments.isNotEmpty()) {
+                if (hasMeta) item(key = "meta") { Meta(item, onOpenLink) }
+                if (hasBody) {
                     item(key = "body") {
                         ItemCard(mine = item.createdBy == ItemAuthor.USER) {
                             AuthorCaption(item.createdBy, item.createdAt, now)
@@ -276,7 +279,7 @@ fun ItemDetailView(
             if (itemThreadShowsJumpToBottom(placed, scrollable, atBottom)) {
                 val scope = rememberCoroutineScope()
                 JumpToBottomButton(
-                    onClick = { scope.launch { if (lastIndex >= 0) listState.animateScrollToItem(lastIndex) } },
+                    onClick = { scope.launch { listState.animateScrollToItem(lastIndex) } },
                     modifier = Modifier.align(Alignment.BottomEnd),
                 )
             }

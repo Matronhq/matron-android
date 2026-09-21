@@ -194,6 +194,12 @@ class ItemDetailViewModel(
         _error.value = null
     }
 
+    /// Surfaces a host-side failure (a recorder that won't start, an
+    /// unreadable pick) through the same banner as the VM's own errors.
+    fun reportError(message: String) {
+        _error.value = message
+    }
+
     private suspend fun run(op: suspend () -> Unit) {
         _isBusy.value = true
         try {

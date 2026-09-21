@@ -11,6 +11,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,6 +42,9 @@ import chat.matron.android.features.chat.SubChatView
 import chat.matron.android.features.chatlist.ChatListScreen
 import chat.matron.android.features.chatlist.NewChatSheet
 import chat.matron.android.features.chatlist.currentSummary
+import chat.matron.android.features.items.ItemDetailScreen
+import chat.matron.android.features.items.ItemsScreen
+import chat.matron.android.viewmodels.ItemReadMemory
 import chat.matron.android.features.onboarding.SignInScreen
 import chat.matron.android.features.search.SearchScreen
 import chat.matron.android.features.settings.DeviceLinkScreen
@@ -374,6 +378,45 @@ private fun SignedInApp(
                     }
                 },
                 onOpenConversation = onOpenConversation,
+                onOpenItems = { nav.navigate("items/$convoID") },
+            )
+        }
+
+        // The conversation's tasks page (apple #185 / #194): the items panel
+        // as its own destination, reached from the chat top bar.
+        composable(
+            route = "items/{convoID}",
+            arguments = listOf(navArgument("convoID") { type = NavType.StringType }),
+        ) { entry ->
+            val convoID = entry.arguments?.getString("convoID") ?: return@composable
+            val itemsVM = remember(convoID) { vmCache.itemsPanelViewModel(convoID) }
+            ItemsScreen(
+                viewModel = itemsVM,
+                originLabels = { deps.journalStore(session).conversationOriginLabels() },
+                onBack = { nav.popBackStack() },
+                onSelect = { item -> nav.navigate("item/${item.id}") },
+                onOpenConversation = onOpenConversation,
+            )
+        }
+
+        // One item's thread. Its own route (not a sheet inside the list) so
+        // the system back returns to the list and a later port can deep-link
+        // `matron://item/N` straight here.
+        composable(
+            route = "item/{itemID}",
+            arguments = listOf(navArgument("itemID") { type = NavType.StringType }),
+        ) { entry ->
+            val itemID = entry.arguments?.getString("itemID") ?: return@composable
+            val detailVM = remember(itemID) { vmCache.itemDetailViewModel(itemID) }
+            val readMemory = remember(session.userID) { ItemReadMemory(deps.preferences) }
+            ItemDetailScreen(
+                viewModel = detailVM,
+                media = deps.mediaService(session),
+                serverURL = session.homeserverURL.toHttpUrl(),
+                originLabel = { deps.journalStore(session).conversationOriginLabel(it) },
+                readMemory = readMemory,
+                onBack = { nav.popBackStack() },
+                onOpenConversation = onOpenConversation,
             )
         }
 
@@ -481,6 +524,8 @@ private fun ChatRoute(
     onOpenChild: (String) -> Unit,
     onSwitchTo: (String) -> Unit,
     onOpenConversation: (String) -> Unit,
+    /// Opens the conversation's tasks page (the tracker button in the top bar).
+    onOpenItems: () -> Unit,
     /// Which agent box runs this session, or null when the user has fewer
     /// than two boxes. Threaded from the list's ChatSummary (same source as
     /// the row chip) so header and row can never disagree.
@@ -520,6 +565,18 @@ private fun ChatRoute(
     } else {
         val (chatVM, composerVM) = vmCache.viewModels(convoID)
         val stripVM = vmCache.stripViewModel(convoID)
+        // The per-room items panel VM runs while the chat is open so the
+        // top-bar badge is live; the generation guard keeps a stale
+        // disposal (this route re-entered from the tasks page) from
+        // cancelling the successor's observation.
+        val itemsVM = remember(convoID) { vmCache.itemsPanelViewModel(convoID) }
+        DisposableEffect(itemsVM) {
+            itemsVM.start()
+            val generation = itemsVM.observationGeneration
+            onDispose { itemsVM.stop(generation) }
+        }
+        val needsYouCount by itemsVM.needsYouCount.collectAsStateWithLifecycle()
+        val itemsSupported by itemsVM.isSupported.collectAsStateWithLifecycle()
         ChatScreen(
             chatVM = chatVM,
             composerVM = composerVM,
@@ -533,6 +590,9 @@ private fun ChatRoute(
             onBack = onBack,
             onOpenChild = onOpenChild,
             onOpenConversation = onOpenConversation,
+            onOpenItems = onOpenItems,
+            itemsSupported = itemsSupported,
+            needsYouCount = needsYouCount,
             // Deferred: built when the browser sheet opens, on the sheet's own
             // scope, over the same store the sync engine writes (apple #142).
             mediaBrowser = { scope ->
