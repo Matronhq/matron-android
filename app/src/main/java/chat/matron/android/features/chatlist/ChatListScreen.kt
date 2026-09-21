@@ -73,6 +73,9 @@ fun ChatListScreen(
     onOpenSearch: () -> Unit,
     onOpenSettings: () -> Unit,
     onSignOut: () -> Unit,
+    /// The app shell's tab-swipe modifier (apple #196), applied to the list
+    /// content only — never to the top bar.
+    rootGesture: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
@@ -117,7 +120,7 @@ fun ChatListScreen(
             )
         },
     ) { padding ->
-        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+        Box(modifier = Modifier.fillMaxSize().padding(padding).then(rootGesture)) {
             when {
                 isLoading && groups.isEmpty() -> CenteredMessage(
                     // A backlog replay is progress, not a stalled socket —
