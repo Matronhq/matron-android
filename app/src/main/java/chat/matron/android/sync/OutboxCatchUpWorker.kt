@@ -11,6 +11,7 @@ import androidx.work.WorkerParameters
 import chat.matron.android.MatronApplication
 import chat.matron.android.models.MatronDebug
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Periodic background journal catch-up + outbox flush — the Android analog of
@@ -34,6 +35,19 @@ class OutboxCatchUpWorker(
         val session = runCatching { deps.auth.restoreSession() }.getOrNull() ?: return Result.success()
         runCatching { deps.backgroundCatchUp(session, isAppVisible = ::isAppInForeground) }
             .onFailure { MatronDebug.breadcrumb("OutboxCatchUpWorker: catch-up failed: $it") }
+        // Store housekeeping rides the same periodic wake rather than a
+        // second worker (apple #212's `JournalMaintenance` runs on an
+        // in-process hourly timer, which never ticks for a phone whose
+        // process is gone). It runs AFTER catch-up so the replay has the
+        // disk to itself, is watermark-gated (an hour since the last pass,
+        // so most wakes cost one `meta` read), skips the launch hold (a
+        // worker-started process has no first paint to protect), and is
+        // bounded: the sweeps commit per 500-row chunk and resume from
+        // their watermark, so abandoning the wait loses nothing.
+        withTimeoutOrNull(MAINTENANCE_BUDGET_MS) {
+            runCatching { deps.journalMaintenance(session).runIfDue(ignoreLaunchHold = true) }
+                .onFailure { MatronDebug.breadcrumb("OutboxCatchUpWorker: maintenance failed: $it") }
+        }
         return Result.success()
     }
 
@@ -48,6 +62,9 @@ class OutboxCatchUpWorker(
     companion object {
         /** Mirrors the iOS BGTaskScheduler identifier for grep-ability. */
         private const val UNIQUE_NAME = "chat.matron.refresh"
+
+        /** How long a worker run waits on a maintenance pass before returning. */
+        private const val MAINTENANCE_BUDGET_MS = 60_000L
 
         /**
          * Enqueues (or keeps) the periodic catch-up. 15 minutes is

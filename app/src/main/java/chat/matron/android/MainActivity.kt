@@ -321,6 +321,12 @@ private fun SignedInApp(
         // start() is a no-op on an already-running engine.
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
             runCatching { sync.start() }
+            // Foreground sweep (apple #212, spec §3.4): a process that has
+            // been backgrounded past the hour sweeps now rather than waiting
+            // out the in-process timer, which does not tick while the
+            // process is frozen. Watermark-gated, so a fresh foreground costs
+            // one `meta` read; the launch hold keeps it off a cold start.
+            launch { runCatching { deps.journalMaintenance(session).runIfDue() } }
             sync.stateStream.collect { state ->
                 connectionState = syncBannerStateFrom(state)
                 if (state is SyncConnectionState.Running) hasEverConnected = true

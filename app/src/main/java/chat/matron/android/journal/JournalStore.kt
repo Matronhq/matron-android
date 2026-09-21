@@ -41,7 +41,7 @@ interface MediaBrowserStoreReading {
 class JournalStore(
     private val db: MatronDatabase,
     private val ownSender: String,
-) : MediaBrowserStoreReading {
+) : MediaBrowserStoreReading, MaintenanceSweeping {
     private val conversationDao = db.conversationDao()
     private val eventDao = db.eventDao()
     private val metaDao = db.metaDao()
@@ -618,7 +618,7 @@ class JournalStore(
     /// path). The first run after the update has no watermark and therefore
     /// scans every tool-output row older than 24 h once, in the background.
     /// `now` (epoch ms) is injectable for tests.
-    suspend fun purgeExpiredToolOutputSnippets(now: Long = System.currentTimeMillis()) {
+    override suspend fun purgeExpiredToolOutputSnippets(now: Long) {
         sweepTombstones(
             types = listOf(JournalEventType.TOOL_OUTPUT),
             watermarkKey = SNIPPET_TTL_WATERMARK_KEY,
@@ -640,7 +640,7 @@ class JournalStore(
     /// learn about it. Search retirement runs off its own watermark
     /// ([pendingSearchRetirements]); this return value is reported, not
     /// anyone's only path to the index.
-    suspend fun applyRetention(now: Long = System.currentTimeMillis()): List<Long> =
+    override suspend fun applyRetention(now: Long): List<Long> =
         sweepTombstones(
             types = listOf(JournalEventType.TOOL_OUTPUT, JournalEventType.DIFF),
             watermarkKey = RETENTION_WATERMARK_KEY,
@@ -721,9 +721,9 @@ class JournalStore(
     /// When the maintenance sweeps last completed a full pass (epoch ms), or
     /// `null` when none has — the Settings › Storage "Last maintenance" row,
     /// and the scheduler's due-check.
-    suspend fun maintenanceLastRun(): Long? = metaDao.value(MAINTENANCE_LAST_RUN_KEY)?.toLongOrNull()
+    override suspend fun maintenanceLastRun(): Long? = metaDao.value(MAINTENANCE_LAST_RUN_KEY)?.toLongOrNull()
 
-    suspend fun recordMaintenanceRun(at: Long) = metaDao.upsert(MetaEntity(MAINTENANCE_LAST_RUN_KEY, at.toString()))
+    override suspend fun recordMaintenanceRun(at: Long) = metaDao.upsert(MetaEntity(MAINTENANCE_LAST_RUN_KEY, at.toString()))
 
     /// `tool_output`/`diff` seqs whose bodies have aged past the retention
     /// window and have not yet been retired from the search index, plus the
@@ -743,7 +743,7 @@ class JournalStore(
     /// same, still-outstanding range. (A cutoff derived from the last row
     /// seen is unsafe: a full chunk never proves every same-millisecond
     /// sibling was fetched.)
-    suspend fun pendingSearchRetirements(now: Long = System.currentTimeMillis()): SearchRetirements {
+    override suspend fun pendingSearchRetirements(now: Long): SearchRetirements {
         val cutoffMs = now - EventTombstone.RETENTION_WINDOW_MS
         val types = listOf(JournalEventType.TOOL_OUTPUT, JournalEventType.DIFF)
         var afterTS = metaDao.value(SEARCH_RETENTION_WATERMARK_KEY)?.toLongOrNull() ?: 0L
@@ -765,7 +765,7 @@ class JournalStore(
     /// Advances the search-retention watermark. Callers must only invoke
     /// this after `SearchService.removeAll` has actually succeeded for the
     /// seqs that came with this cutoff from [pendingSearchRetirements].
-    suspend fun recordSearchRetirement(upTo: Long) =
+    override suspend fun recordSearchRetirement(upTo: Long) =
         metaDao.upsert(MetaEntity(SEARCH_RETENTION_WATERMARK_KEY, upTo.toString()))
 
     /// Row counts for the Settings › Storage section. On demand only, never

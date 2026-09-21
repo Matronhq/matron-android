@@ -955,4 +955,51 @@ class JournalSyncEngineTest {
         probe.cancel()
         engine.endSync()
     }
+
+    // MARK: Catch-up-complete handler (apple #212)
+
+    /// The engine never touches `LaunchTimeline` itself; an app-layer handler
+    /// is fired exactly once, on the first replay that reaches the live
+    /// cursor, and cleared immediately after — so a later reconnect's
+    /// Running transition never re-invokes it.
+    @Test
+    fun catchUpCompleteHandlerFiresExactlyOnceAcrossAReconnect() = runBlocking {
+        val first = FakeWebSocketConnection()
+        first.serve(helloOK(2)); first.serve(journalLine(1)); first.serve(journalLine(2))
+        val second = FakeWebSocketConnection()
+        second.serve(helloOK(4)); second.serve(journalLine(3)); second.serve(journalLine(4))
+        val store = seededStore()
+        val connector = FakeConnector(listOf(first, second))
+        val engine = makeEngine(store, connector)
+        var fired = 0
+        engine.setCatchUpCompleteHandler { fired += 1 }
+
+        engine.beginSync()
+        engine.waitUntilReady() // first Running transition
+        first.closeFromServer()
+        waitUntil { store.cursor() >= 4 }
+        assertEquals("reconnect must land the second socket's frames", 4L, store.cursor())
+        waitUntil { engine.stateStream.value is SyncConnectionState.Running }
+        assertEquals("the handler must fire once, not again on the reconnect's Running transition", 1, fired)
+        engine.endSync()
+    }
+
+    /// The composition root installs the handler from a coroutine that
+    /// races the UI's `start()` — if the engine is already Running by then,
+    /// it must fire right away rather than wait for a transition that
+    /// already happened.
+    @Test
+    fun setCatchUpCompleteHandlerFiresImmediatelyWhenAlreadyRunning() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(1)); socket.serve(journalLine(1))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+
+        var fired = 0
+        engine.setCatchUpCompleteHandler { fired += 1 }
+        assertEquals("state was already Running — the handler must fire on install, not wait forever", 1, fired)
+        engine.endSync()
+    }
 }

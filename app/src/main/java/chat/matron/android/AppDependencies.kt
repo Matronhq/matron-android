@@ -16,6 +16,7 @@ import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineService
 import chat.matron.android.journal.AgentSpawnAnswering
 import chat.matron.android.journal.JournalApi
+import chat.matron.android.journal.JournalMaintenance
 import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.JournalSyncEngine
 import chat.matron.android.journal.OkHttpWebSocketConnector
@@ -159,8 +160,13 @@ class AppDependencies(
         val db: MatronDatabase,
         val store: JournalStore,
         val engine: JournalSyncEngine,
-        /** Boot-time TTL sweep; teardown joins it before wiping the same DB. */
-        var purgeJob: Job? = null,
+        /**
+         * Background store housekeeping (TTL + retention sweeps and the
+         * matching search removal). Replaces the boot-time purge the
+         * composition root used to launch at store creation; stopped (and
+         * its in-flight pass awaited) by sign-out before the wipe.
+         */
+        val maintenance: JournalMaintenance,
         /**
          * Background search-history backfill sweep for this session (see
          * [SearchBackfillCoordinator]). Cancelled on sign-out, and joined by
@@ -230,21 +236,31 @@ class AppDependencies(
             ownSender = "user:${session.userID}",
             search = search,
         )
-        val core = JournalCore(api, db, store, engine)
+        val maintenance = JournalMaintenance(store = store, search = search)
+        val core = JournalCore(api, db, store, engine, maintenance)
         cores[session.userID] = core
-        // Boot-time TTL sweep of expired tool-output snippets. Kotlin constructors
-        // can't suspend, so the composition root drives it once the store exists —
-        // documented on JournalStore.purgeExpiredToolOutputSnippets. Tracked on
-        // the core so sign-out teardown joins it before wipe()/close() — an
-        // untracked sweep could race the wipe on the same database (bugbot
-        // "Boot purge races sign-out wipe").
-        core.purgeJob = appScope.launch {
-            runCatching { store.purgeExpiredToolOutputSnippets() }
-                .onFailure { MatronDebug.breadcrumb("AppDependencies: boot purge failed: $it") }
+        // Nothing proportional to store history runs on the launch path any
+        // more (apple #212): the tool-output TTL sweep that used to be
+        // launched here at store creation — a full `event` scan in one write
+        // transaction on every launch — now runs watermarked and chunked
+        // inside JournalMaintenance, 10 s after this core is built or as soon
+        // as the first catch-up reaches the live cursor, whichever comes
+        // first, then hourly, and on every foreground when the last pass is
+        // older than an hour.
+        engine.attachMaintenance(maintenance)
+        engine.setCatchUpCompleteHandler {
+            appScope.launch { maintenance.runAfterCatchUp() }
         }
+        maintenance.start()
         core.backfillJob = startBackfill(search = search, api = api, store = store)
         return core
     }
+
+    /**
+     * The session's background sweeper — the foreground trigger and the
+     * periodic worker call `runIfDue()` on it.
+     */
+    fun journalMaintenance(session: UserSession): JournalMaintenance = core(session).maintenance
 
     /**
      * Kicks off the background search-history backfill for a session's core:
@@ -463,7 +479,13 @@ class AppDependencies(
                 // after the search wipe below.
                 core.backfillJob?.cancel()
                 core.backfillJob?.join()
-                core.purgeJob?.join()
+                // Stop the sweeper too, and WAIT for a pass already running:
+                // one suspended in `search.removeAll` would otherwise resume
+                // after the wipe below and stamp `maintenance_last_run` on an
+                // empty `meta`. stop() also fences every later trigger, so a
+                // Running transition during the seconds of push deregistration
+                // below can't open a fresh pass against the doomed store.
+                core.maintenance.stop()
                 val pushResult = withTimeoutOrNull(5_000) { runCatching { core.api.unregisterPush() } }
                 when {
                     pushResult == null ->
