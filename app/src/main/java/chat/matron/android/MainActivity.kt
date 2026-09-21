@@ -929,7 +929,7 @@ private fun ChatRoute(
         TrackerItemLinkHost(
             resolve = { num -> deps.trackerItemLinkOutcome(num, session) },
             open = onOpenItem,
-        ) {
+        ) { gatedOpenItem ->
             ChatScreen(
                 chatVM = chatVM,
                 composerVM = composerVM,
@@ -947,7 +947,9 @@ private fun ChatRoute(
                 showsBackButton = showsBackButton,
                 itemsSupported = itemsSupported,
                 needsYouCount = needsYouCount,
-                onOpenItem = onOpenItem,
+                // Through the host's gate, not straight to the route: a card
+                // tap must supersede a link resolve still in flight.
+                onOpenItem = gatedOpenItem,
                 // Deferred: built when the browser sheet opens, on the sheet's own
                 // scope, over the same store the sync engine writes (apple #142).
                 mediaBrowser = { scope ->

@@ -232,7 +232,7 @@ fun ItemDetailScreen(
             if (outcome is TrackerItemLinkOutcome.Open && outcome.itemID == viewModel.itemID) TrackerItemLinkOutcome.Ignore else outcome
         },
         open = { id -> onOpenItem?.invoke(id) },
-    ) {
+    ) { _ ->
         Scaffold(
             topBar = {
                 TopAppBar(
