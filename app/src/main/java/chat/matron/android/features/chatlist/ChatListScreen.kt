@@ -194,20 +194,24 @@ private fun ConnectionIndicator(state: SyncBannerState, hasEverConnected: Boolea
     }
 }
 
+/// One chat-list row. Internal so the coordinator chooser (apple #197) can
+/// reuse the exact row; there the long-press actions are `null` and the
+/// menu is not offered.
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChatRow(
+internal fun ChatRow(
     summary: ChatSummary,
     onOpen: () -> Unit,
-    onMute: () -> Unit,
-    onLeave: () -> Unit,
+    onMute: (() -> Unit)?,
+    onLeave: (() -> Unit)?,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    val hasMenu = onMute != null || onLeave != null
     Box {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .combinedClickable(onClick = onOpen, onLongClick = { menuOpen = true })
+                .combinedClickable(onClick = onOpen, onLongClick = if (hasMenu) ({ menuOpen = true }) else null)
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -254,8 +258,8 @@ private fun ChatRow(
             }
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-            DropdownMenuItem(text = { Text("Mute") }, onClick = { menuOpen = false; onMute() })
-            DropdownMenuItem(text = { Text("Leave") }, onClick = { menuOpen = false; onLeave() })
+            if (onMute != null) DropdownMenuItem(text = { Text("Mute") }, onClick = { menuOpen = false; onMute() })
+            if (onLeave != null) DropdownMenuItem(text = { Text("Leave") }, onClick = { menuOpen = false; onLeave() })
         }
     }
 }

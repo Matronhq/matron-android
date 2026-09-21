@@ -142,6 +142,67 @@ class ItemsViewsTest {
         assertFalse(itemThreadShowsJumpToBottom(placed = true, scrollable = true, atBottom = true))
     }
 
+    /// apple #200: a drag on the composer row hides the keyboard only when
+    /// it is a deliberate pull-down.
+    @Test
+    fun dragDownDismissesTheKeyboardOnlyForADeliberatePullDown() {
+        assertTrue(KeyboardDismiss.shouldDismiss(dx = 0f, dy = 24f))
+        assertTrue(KeyboardDismiss.shouldDismiss(dx = 10f, dy = 60f))
+        assertFalse("below the drop", KeyboardDismiss.shouldDismiss(dx = 0f, dy = 23f))
+        assertFalse("an upward drag never counts", KeyboardDismiss.shouldDismiss(dx = 0f, dy = -60f))
+        assertFalse("a sideways slip toward the send button never counts", KeyboardDismiss.shouldDismiss(dx = 80f, dy = 30f))
+        assertFalse(KeyboardDismiss.shouldDismiss(dx = -40f, dy = 40f))
+    }
+
+    /// apple #198: attached-keyboard Enter sends, Shift+Enter newlines, an
+    /// empty draft's Enter falls through.
+    @Test
+    fun enterSendsOnlyAPlainEnterWithSomethingToSend() {
+        fun action(isEnter: Boolean, shift: Boolean, draft: String) =
+            itemCommentEnterAction(isEnter = isEnter, shift = shift, isRepeat = false, isBusy = false, draft = draft)
+        assertEquals(ItemCommentEnterAction.SEND, action(isEnter = true, shift = false, draft = "ok"))
+        assertEquals(ItemCommentEnterAction.PASS_THROUGH, action(isEnter = true, shift = true, draft = "ok"))
+        assertEquals(ItemCommentEnterAction.PASS_THROUGH, action(isEnter = true, shift = false, draft = "  \n"))
+        assertEquals(ItemCommentEnterAction.PASS_THROUGH, action(isEnter = false, shift = false, draft = "ok"))
+    }
+
+    /// Bugbot on #76: the composable reads `draft`/`isBusy` from the
+    /// composition and `onSubmit` only launches the post, so both stay stale
+    /// until the next recomposition. An OS key-repeat of a held Enter must
+    /// therefore never decide anything — it must not send a second time, and
+    /// it must not fall through and type a newline into the draft the first
+    /// press just cleared. Enter while a post is in flight is swallowed for
+    /// the same reason, rather than falling through into the field.
+    @Test
+    fun heldEnterRepeatsAndBusyEntersAreSwallowedNotResent() {
+        // A repeat never sends, whatever the (stale) draft says.
+        assertEquals(
+            ItemCommentEnterAction.SWALLOW,
+            itemCommentEnterAction(isEnter = true, shift = false, isRepeat = true, isBusy = false, draft = "ok"),
+        )
+        // ...and never leaks a newline once the send has emptied the draft.
+        assertEquals(
+            ItemCommentEnterAction.SWALLOW,
+            itemCommentEnterAction(isEnter = true, shift = false, isRepeat = true, isBusy = true, draft = ""),
+        )
+        // A first press landing while the previous post is still in flight is
+        // swallowed rather than passed through to the field.
+        assertEquals(
+            ItemCommentEnterAction.SWALLOW,
+            itemCommentEnterAction(isEnter = true, shift = false, isRepeat = false, isBusy = true, draft = "ok"),
+        )
+        // Shift+Enter is never a send, so holding it still inserts newlines.
+        assertEquals(
+            ItemCommentEnterAction.PASS_THROUGH,
+            itemCommentEnterAction(isEnter = true, shift = true, isRepeat = true, isBusy = false, draft = "ok"),
+        )
+        // Non-Enter repeats (ordinary held letters) still reach the field.
+        assertEquals(
+            ItemCommentEnterAction.PASS_THROUGH,
+            itemCommentEnterAction(isEnter = false, shift = false, isRepeat = true, isBusy = false, draft = "ok"),
+        )
+    }
+
     @Test
     fun composerAndBadgeCopy() {
         assertFalse(itemCommentCanSubmit("   \n"))
