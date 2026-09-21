@@ -70,7 +70,8 @@ import chat.matron.android.designsystem.EmptyChatPlaceholder
 import chat.matron.android.designsystem.JumpToBottomButton
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.PaginatingHeader
-import chat.matron.android.designsystem.StopTurnButton
+import chat.matron.android.designsystem.ChatTopTrailingControls
+import chat.matron.android.designsystem.chatTopTrailingShowsJump
 import chat.matron.android.designsystem.SubtaskLinkCard
 import chat.matron.android.designsystem.TimelineLoadingIndicator
 import chat.matron.android.designsystem.UsageMetersFormat
@@ -363,6 +364,7 @@ fun ChatScreen(
                     activityLabel = activityLabel,
                     isTurnRunning = isTurnRunning,
                     onStopTurn = { compactScope.launch { chatVM.sendCommand("!esc") } },
+                    onJumpToLastOwnMessage = { compactScope.launch { chatVM.jumpToLastOwnMessage() } },
                     onOpenChild = onOpenChild,
                     onOpenConversation = onOpenConversation,
                     onPreviewImage = { previewModel = it },
@@ -477,6 +479,10 @@ fun TimelineList(
     // OR-ed in as a fast path in case a session_state frame is missed.
     isTurnRunning: Boolean = false,
     onStopTurn: (() -> Unit)? = null,
+    // Floating "jump to my last message" — also main-pane only. Sits under
+    // Stop, or in its place when no turn is running, and shows on the same
+    // signal as the bottom jump-to-latest pill (apple #211, tracker #270).
+    onJumpToLastOwnMessage: (() -> Unit)? = null,
 ) {
     val rows by chatVM.windowedRows.collectAsStateWithLifecycle()
     val settledEmpty by chatVM.settledEmpty.collectAsStateWithLifecycle()
@@ -650,9 +656,20 @@ fun TimelineList(
             )
         }
 
-        if (onStopTurn != null && (isTurnRunning || activityLabel != null)) {
-            StopTurnButton(
-                onClick = onStopTurn,
+        // Floating top-trailing controls: Stop above "jump to my last
+        // message" — or jump alone, in Stop's slot, once no turn is running.
+        // Stop is solid for the whole turn: `isTurnRunning` (durable
+        // session_state, flipped at turn start/end) carries it; the ephemeral
+        // activity label is OR-ed in as a fast path in case a session_state
+        // frame is missed. Jump is "the one thing scrolling can't find"
+        // (item #60) — agent-independent, needs no mission, no milestone, no
+        // summary model, only the local mirror.
+        if (onStopTurn != null || onJumpToLastOwnMessage != null) {
+            ChatTopTrailingControls(
+                showsStop = onStopTurn != null && (isTurnRunning || activityLabel != null),
+                showsJump = onJumpToLastOwnMessage != null && chatTopTrailingShowsJump(isFollowingTail = followTail),
+                onStop = onStopTurn ?: {},
+                onJump = onJumpToLastOwnMessage ?: {},
                 modifier = Modifier.align(Alignment.TopEnd),
             )
         }

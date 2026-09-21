@@ -3,7 +3,7 @@ package chat.matron.android.designsystem
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.VerticalAlignTop
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
@@ -13,17 +13,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.unit.dp
 
-/// Floating "stop the current turn" affordance for the chat timeline. Hosted
-/// inside [ChatTopTrailingControls], which owns the top-trailing placement and
-/// padding; shown while the conversation's durable session_state is "running"
-/// (with the ephemeral activity indicator OR-ed in as a fast path); tapping
-/// invokes [onClick], which the host binds to sending the bridge's `!esc`
-/// interrupt. Same shape language and tint as [JumpToBottomButton] so the
-/// floating chat controls read as one family — this one sits on the opposite
-/// end of the same trailing edge. Ported from matron-apple's `StopTurnButton`
-/// (neutral tint per Dan, 2026-08-05; padding moved to the stack in apple #211).
+/// Floating "jump to my last message" affordance for the chat timeline.
+/// Hosted inside [ChatTopTrailingControls], in the Stop pill's slot when no
+/// turn is running, or beneath it when one is — never in the header toolbar
+/// (apple #211). Same shape language and tint as [StopTurnButton] and
+/// [JumpToBottomButton] so all three floating chat controls read as one
+/// family. Ported from matron-apple's `JumpToLastOwnMessageButton`.
 @Composable
-fun StopTurnButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun JumpToLastOwnMessageButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
     FilledIconButton(
         onClick = onClick,
         modifier = modifier
@@ -35,8 +32,8 @@ fun StopTurnButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
         ),
     ) {
         Icon(
-            Icons.Filled.Stop,
-            contentDescription = "Stop the current turn",
+            Icons.Filled.VerticalAlignTop,
+            contentDescription = "Jump to my last message",
             modifier = Modifier.size(24.dp),
         )
     }
