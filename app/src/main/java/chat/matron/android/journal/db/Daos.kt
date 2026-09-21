@@ -311,9 +311,22 @@ interface ItemDao {
     @Query("SELECT MAX(updated_at) FROM item")
     suspend fun maxUpdatedAt(): Long?
 
+    /// Open items awaiting the user, counted per origin conversation — the
+    /// chat-list rows' needs-you badge (apple #187). ONE grouped query for
+    /// the whole list, live through Room's invalidation tracker, rather
+    /// than a per-row subscription.
+    @Query(
+        "SELECT origin_convo_id AS convoID, COUNT(*) AS count FROM item " +
+            "WHERE state = 'open' AND awaiting = 'user' GROUP BY origin_convo_id"
+    )
+    fun needsUserCountsFlow(): Flow<List<NeedsUserCountRow>>
+
     @Query("DELETE FROM item")
     suspend fun deleteAll()
 }
+
+/// Projection of [ItemDao.needsUserCountsFlow].
+data class NeedsUserCountRow(val convoID: String, val count: Int)
 
 @Dao
 interface ItemCommentDao {

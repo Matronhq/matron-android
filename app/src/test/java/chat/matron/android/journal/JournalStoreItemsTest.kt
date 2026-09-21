@@ -237,4 +237,29 @@ class JournalStoreItemsTest {
         assertNull(store.conversationOriginLabel("c3"))
         assertNull(store.conversationOriginLabel("nope"))
     }
+
+    /// The chat-list badge source (apple #187): one grouped query over the
+    /// cache, live, counting only open items awaiting the user.
+    @Test
+    fun needsUserCountsGroupOpenAwaitingUserItemsByOriginConversation() = runBlocking {
+        val store = makeStore()
+        store.needsUserCountsFlow().test {
+            assertEquals(emptyMap<String, Int>(), awaitItem())
+            store.upsertItems(
+                listOf(
+                    item("q1", 1, convo = "c1", kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER),
+                    item("q2", 2, convo = "c1", kind = ItemKind.DECISION, awaiting = ItemAwaiting.USER),
+                    item("t1", 3, convo = "c1", awaiting = ItemAwaiting.AGENT),
+                    item("q3", 4, convo = "c2", kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER),
+                    item("q4", 5, convo = "c3", kind = ItemKind.QUESTION, state = ItemState.CLOSED, awaiting = ItemAwaiting.USER),
+                ),
+            )
+            assertEquals("open + awaiting user only; c3's closed item never counts", mapOf("c1" to 2, "c2" to 1), awaitItem())
+            // Answering the question hands it back to the agent: the badge
+            // drops live, without any conversation write.
+            store.upsertItems(listOf(item("q3", 4, convo = "c2", kind = ItemKind.QUESTION, awaiting = ItemAwaiting.AGENT)))
+            assertEquals(mapOf("c1" to 2), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
 }

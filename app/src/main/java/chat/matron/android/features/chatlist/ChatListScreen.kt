@@ -45,6 +45,7 @@ import androidx.compose.ui.text.AnnotatedString
 import chat.matron.android.chat.ChatService
 import chat.matron.android.chat.ChatSummary
 import chat.matron.android.chat.SessionTag
+import chat.matron.android.designsystem.NeedsYouBadge
 import chat.matron.android.designsystem.RelativeMinuteTimeView
 import chat.matron.android.designsystem.SessionTagText
 import chat.matron.android.designsystem.SyncBannerState
@@ -240,7 +241,13 @@ private fun ChatRow(
                         style = MaterialTheme.typography.labelSmall,
                     )
                 }
-                UnreadBadge(count = summary.unreadCount)
+                // The needs-you badge sits BESIDE the unread pill, not above
+                // it — same font/padding metrics, so a row with both keeps
+                // the single-badge height (apple #187).
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    NeedsYouBadge(count = summary.needsUserCount)
+                    UnreadBadge(count = summary.unreadCount)
+                }
             }
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {

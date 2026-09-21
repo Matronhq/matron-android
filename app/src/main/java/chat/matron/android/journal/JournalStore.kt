@@ -528,6 +528,13 @@ class JournalStore(
 
     suspend fun itemsMaxUpdatedAt(): Instant? = itemDao.maxUpdatedAt()?.let(Instant::ofEpochMilli)
 
+    /// Origin-convo-id → count of open items awaiting the user, live. Feeds
+    /// `ChatSummary.needsUserCount` (apple #187): the journal has no such
+    /// endpoint, so the badge is app-local and derived from the tracker
+    /// cache. Conversations with nothing awaiting the user are absent.
+    fun needsUserCountsFlow(): Flow<Map<String, Int>> =
+        itemDao.needsUserCountsFlow().map { rows -> rows.associate { it.convoID to it.count } }.distinctUntilChanged()
+
     /// `meta` key for the per-scope refresh watermark. A shared GLOBAL
     /// `MAX(updated_at)` watermark was wrong on two counts — a `.convo`
     /// refresh using it could skip older items of a convo that had never

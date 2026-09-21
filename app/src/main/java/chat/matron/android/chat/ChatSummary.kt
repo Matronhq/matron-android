@@ -43,6 +43,12 @@ data class ChatSummary(
     /// order) — what the colored `A↔B` room tag actually prints. The name
     /// array carries the hue, this one the glyphs.
     val roomBoxShorts: List<String> = emptyList(),
+    /// Open items on this conversation still awaiting the user, from the
+    /// local items cache (`JournalStore.needsUserCountsFlow()`) — the
+    /// journal has no such endpoint, so this is app-local and derived, not
+    /// server-carried like [unreadCount]. Feeds the orange `NeedsYouBadge`
+    /// on chat-list rows, alongside the existing unread pill.
+    val needsUserCount: Int = 0,
 )
 
 /// A subagent child conversation as surfaced in its parent's running-subagent
