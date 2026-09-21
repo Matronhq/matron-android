@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -12,7 +13,6 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import chat.matron.android.MainActivity
-import chat.matron.android.R
 
 /// Keeps a voice-note capture alive while the app is in the background — the
 /// Android analogue of apple #180's `audio` `UIBackgroundModes` entry. Without
@@ -34,6 +34,16 @@ class VoiceRecordingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Stop is delivered as a start command, not `stopService()`: commands
+        // run in order, so a stop that lands right after the start (a
+        // too-short tap, an immediate cancel) still lets the start's
+        // `startForeground` satisfy the `startForegroundService` contract
+        // first. `stopService()` racing that contract killed the process with
+        // ForegroundServiceDidNotStartInTimeException.
+        if (intent?.action == ACTION_STOP) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         ensureChannel(this)
         ServiceCompat.startForeground(
             this,
@@ -56,6 +66,7 @@ class VoiceRecordingService : Service() {
     companion object {
         const val CHANNEL_ID = "voice-recording"
         const val NOTIFICATION_ID = 0x7601
+        const val ACTION_STOP = "chat.matron.android.action.STOP_VOICE_RECORDING"
 
         /// Claims the microphone foreground session. Call while the app is in
         /// the foreground, once capture has actually begun.
@@ -63,9 +74,13 @@ class VoiceRecordingService : Service() {
             context.startForegroundService(Intent(context, VoiceRecordingService::class.java))
         }
 
-        /// Releases the session; the notification goes with it.
+        /// Releases the session; the notification goes with it. Queued behind
+        /// any pending start (see [onStartCommand]). A background app with no
+        /// running service may not queue commands at all — then there is
+        /// nothing foregrounded to race, and a plain `stopService` suffices.
         fun stop(context: Context) {
-            context.stopService(Intent(context, VoiceRecordingService::class.java))
+            val stop = Intent(context, VoiceRecordingService::class.java).setAction(ACTION_STOP)
+            runCatching { context.startService(stop) }.onFailure { context.stopService(stop) }
         }
 
         internal fun ensureChannel(context: Context) {
@@ -82,15 +97,26 @@ class VoiceRecordingService : Service() {
             manager.createNotificationChannel(channel)
         }
 
+        /// The intent behind a tap on the notification: the same MAIN/LAUNCHER
+        /// intent the home screen icon sends, so the existing task is brought
+        /// forward. A bare `Intent(context, MainActivity)` would stack a second
+        /// (standard-launch-mode) MainActivity with a fresh composition — and a
+        /// fresh recorder — over the one holding the note.
+        internal fun openAppIntent(context: Context): Intent {
+            val launcher = context.packageManager.getLaunchIntentForPackage(context.packageName)
+                ?: Intent.makeMainActivity(ComponentName(context, MainActivity::class.java))
+            return launcher.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        }
+
         internal fun buildNotification(context: Context): Notification {
             val open = PendingIntent.getActivity(
                 context,
                 0,
-                Intent(context, MainActivity::class.java),
+                openAppIntent(context),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
             return NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_launcher_monochrome)
+                .setSmallIcon(chat.matron.android.R.drawable.ic_launcher_monochrome)
                 .setContentTitle("Recording voice note")
                 .setContentText("Return to Matron to send or cancel.")
                 .setContentIntent(open)

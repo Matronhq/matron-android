@@ -44,6 +44,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.AttachmentTray
+import chat.matron.android.designsystem.LocalAppLockActive
 import chat.matron.android.designsystem.UploadProgressBar
 import chat.matron.android.models.BotCommand
 import chat.matron.android.platform.AudioFocusInterruptions
@@ -68,6 +70,9 @@ import chat.matron.android.viewmodels.ComposerViewModel
 import chat.matron.android.viewmodels.MediaRecorderAudioRecording
 import chat.matron.android.viewmodels.PaletteSuggestion
 import chat.matron.android.viewmodels.VoiceRecorder
+import chat.matron.android.viewmodels.VoiceRecorderBindings
+import chat.matron.android.viewmodels.VoiceRecorderHandoff
+import chat.matron.android.viewmodels.VoiceRecorderHost
 import java.io.File
 import java.util.UUID
 import kotlin.time.Duration.Companion.seconds
@@ -124,46 +129,39 @@ fun ComposerView(viewModel: ComposerViewModel) {
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> pendingPermission[0]?.complete(granted); pendingPermission[0] = null }
-    val recorder = remember {
-        VoiceRecorder(
-            requestPermission = {
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
-                    == PackageManager.PERMISSION_GRANTED
-                ) {
-                    true
+    // A note still recording when the app lock replaced this composition is
+    // reclaimed here rather than started over (see VoiceRecorderHandoff); the
+    // composition-bound wiring is rebound below either way.
+    val host = remember {
+        VoiceRecorderHandoff.reclaim(viewModel.roomID) ?: makeVoiceRecorderHost(context)
+    }
+    val recorder = host.recorder
+    val isAppLocked = LocalAppLockActive.current
+    SideEffect {
+        host.bindings.requestPermission = {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED
+            ) {
+                true
+            } else {
+                val deferred = CompletableDeferred<Boolean>()
+                pendingPermission[0] = deferred
+                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                deferred.await()
+            }
+        }
+        // Locking the screen suspends the app and cuts the capture short, so
+        // the window keeps the screen on for exactly the span of a live
+        // recording (port of apple #159).
+        host.bindings.setKeepScreenAwake = { keepAwake ->
+            context.findActivity()?.window?.let { window ->
+                if (keepAwake) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 } else {
-                    val deferred = CompletableDeferred<Boolean>()
-                    pendingPermission[0] = deferred
-                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                    deferred.await()
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 }
-            },
-            makeRecorder = { file -> MediaRecorderAudioRecording(file) },
-            tempDirectory = File(context.cacheDir, "voice").apply { mkdirs() },
-            // Locking the screen suspends the app and cuts the capture short,
-            // so the window keeps the screen on for exactly the span of a live
-            // recording (port of apple #159).
-            setKeepScreenAwake = { keepAwake ->
-                context.findActivity()?.window?.let { window ->
-                    if (keepAwake) {
-                        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    } else {
-                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    }
-                }
-            },
-            // Switching apps mid-note used to kill the capture: a microphone
-            // foreground service holds mic access for exactly the span of a
-            // recording (port of apple #180's `audio` background mode).
-            holdRecordingSession = { hold ->
-                if (hold) VoiceRecordingService.start(context) else VoiceRecordingService.stop(context)
-            },
-            // A backgrounded recording is far more likely to be interrupted (a
-            // call, the assistant, another app taking the mic): audio-focus
-            // changes pause and resume the recorder (port of apple #180).
-            observeInterruptions = AudioFocusInterruptions(context)::observe,
-            describeInputRoute = AudioInputDiagnostics(context)::describe,
-        )
+            }
+        }
     }
     val recorderState by recorder.state.collectAsStateWithLifecycle()
     // Peak-level breadcrumbs every few seconds while capture is live, so a
@@ -191,7 +189,10 @@ fun ComposerView(viewModel: ComposerViewModel) {
         }
         onDispose {
             ComposerDraftMemory.store(viewModel.roomID, viewModel.input)
-            recorder.cancel()
+            // The lock shield replacing the composition is not the user
+            // leaving: a live note is parked for the composer that reopens
+            // this room after unlock. Any other teardown cancels, as before.
+            VoiceRecorderHandoff.onComposerDisposed(viewModel.roomID, host, appLocked = isAppLocked())
         }
     }
 
@@ -318,6 +319,31 @@ private fun AttachMenu(onPickPhoto: () -> Unit, onPickFile: () -> Unit) {
 
 /// Interval between the recorder's peak-level diagnostics samples.
 private val LEVEL_SAMPLE_INTERVAL = 5.seconds
+
+/// The composer's recorder with its process-scoped wiring. The
+/// composition-bound halves (permission launcher, window flag) go through
+/// [VoiceRecorderBindings] and are rebound by whichever composer holds it.
+private fun makeVoiceRecorderHost(context: Context): VoiceRecorderHost {
+    val bindings = VoiceRecorderBindings()
+    val recorder = VoiceRecorder(
+        requestPermission = { bindings.requestPermission() },
+        makeRecorder = { file -> MediaRecorderAudioRecording(file) },
+        tempDirectory = File(context.cacheDir, "voice").apply { mkdirs() },
+        setKeepScreenAwake = { bindings.setKeepScreenAwake(it) },
+        // Switching apps mid-note used to kill the capture: a microphone
+        // foreground service holds mic access for exactly the span of a
+        // recording (port of apple #180's `audio` background mode).
+        holdRecordingSession = { hold ->
+            if (hold) VoiceRecordingService.start(context) else VoiceRecordingService.stop(context)
+        },
+        // A backgrounded recording is far more likely to be interrupted (a
+        // call, the assistant, another app taking the mic): audio-focus
+        // changes pause and resume the recorder (port of apple #180).
+        observeInterruptions = AudioFocusInterruptions(context)::observe,
+        describeInputRoute = AudioInputDiagnostics(context)::describe,
+    )
+    return VoiceRecorderHost(bindings, recorder)
+}
 
 /// The live-recording strip. While an interruption holds the capture
 /// ([isPaused]) it says so: the spinner and "Recording…" would claim to be
