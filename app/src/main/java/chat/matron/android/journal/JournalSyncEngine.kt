@@ -140,6 +140,11 @@ class JournalSyncEngine(
     private val toolStreamListeners = mutableMapOf<UUID, Pair<String, (ToolStreamUpdate) -> Unit>>()
     private val sessionStatusListeners = mutableMapOf<UUID, Pair<String, (SessionStatusUpdate) -> Unit>>()
     private val newConvoListeners = mutableMapOf<UUID, (String) -> Unit>()
+    /// Live-born top-level convos whose auto-open verdict is still waiting
+    /// on their title: the first frame was neither the `convo_meta` that
+    /// carries it nor a message (see [considerAutoOpen]). Touched only from
+    /// the receive loop, which handles frames one at a time.
+    private val pendingAutoOpen = mutableSetOf<String>()
 
     // MARK: Offline outbox state (guarded by `lock`)
 
@@ -632,6 +637,34 @@ class JournalSyncEngine(
         newConvoListeners.values.forEach { it(convoID) }
     }
 
+    /// Decides whether a live-born top-level conversation auto-opens, on
+    /// whichever of its frames is in hand:
+    /// - a `convo_meta` that CARRIES a title settles it: a title led by an
+    ///   agent-chat room marker means a room (never opened); anything else
+    ///   is the user's own new session and opens now. A meta without a
+    ///   title proves nothing — the journal fans one on every membership
+    ///   change (`payload: { participants }` only), and for a room that can
+    ///   land ahead of the title-bearing meta — so it parks like any other
+    ///   frame instead of passing as "not a room".
+    /// - a message frame before any titled meta opens it too — the
+    ///   pre-title behaviour, kept so a bridge that never sends a meta
+    ///   still gets the /start UX.
+    /// - any other frame (session_status, read_marker…) parks the id in
+    ///   [pendingAutoOpen] until one of the above arrives.
+    /// A verdict, either way, retires the id from the pending set.
+    private fun considerAutoOpen(event: JournalEvent, firstFrame: Boolean) {
+        val title = if (event.type == JournalEventType.CONVO_META) event.payload.stringOrNull("title") else null
+        if (title != null) {
+            pendingAutoOpen.remove(event.convoID)
+            if (!JournalEventType.isAgentRoomTitle(title)) publishNewConversation(event.convoID)
+        } else if (event.type in JournalEventType.MESSAGE_TYPES) {
+            pendingAutoOpen.remove(event.convoID)
+            publishNewConversation(event.convoID)
+        } else if (firstFrame) {
+            pendingAutoOpen.add(event.convoID)
+        }
+    }
+
     // MARK: RPC correlator
 
     private fun resumeRPC(response: RPCResponse) {
@@ -903,14 +936,29 @@ class JournalSyncEngine(
                         applied = 0
                     }
                     // Surface a conversation the bridge created while we're live
-                    // and caught up. Two guards keep subagent children silent
-                    // regardless of frame ordering: structural (`:sub:` in the
-                    // id) and semantic (learned parent linkage).
+                    // and caught up. Three guards keep the wrong convos silent
+                    // regardless of frame ordering:
+                    //   1. structural — `:sub:` in the id keeps subagent
+                    //      children out.
+                    //   2. semantic — the learned parent linkage, kept as the
+                    //      forward-compatible filter.
+                    //   3. agent-chat rooms — born by an agent's
+                    //      `agent_chat_start`, never by the user, and
+                    //      recognisable only by the room marker on the title
+                    //      their `convo_meta` carries (which is not always the
+                    //      first frame: the bridge's session_status can land
+                    //      ahead of it). So the verdict waits for the title —
+                    //      see [considerAutoOpen]. Auto-opening a room yanked
+                    //      the Mac into it the instant it existed and marked
+                    //      its consent card read before the user had seen it
+                    //      (2026-09-06, apple #184).
                     if (isNewConvo && isRunningState() &&
                         !event.convoID.contains(JournalEventType.CHILD_CONVO_INFIX) &&
                         runCatching { store.parentConvoID(event.convoID) }.getOrNull() == null
                     ) {
-                        publishNewConversation(event.convoID)
+                        considerAutoOpen(event, firstFrame = true)
+                    } else if (!isNewConvo && event.convoID in pendingAutoOpen) {
+                        considerAutoOpen(event, firstFrame = false)
                     }
                 }
                 if (store.cursor() >= headSeq) setState(SyncConnectionState.Running)
