@@ -167,6 +167,24 @@ fun itemRelativeDate(date: Instant, now: Instant, zone: ZoneId = ZoneId.systemDe
 fun itemThreadShowsJumpToBottom(placed: Boolean, scrollable: Boolean, atBottom: Boolean): Boolean =
     placed && scrollable && !atBottom
 
+/// The one-time opening placement for an item: scroll to the tail first for a
+/// reader who left the thread at its bottom, and only then report the
+/// placement through [onPlaced]. The order matters — [itemThreadShowsJumpToBottom]
+/// is gated on that flag precisely so the button can't appear during the
+/// opening scroll, and a long thread reopened at its tail measures as "not at
+/// bottom" until the scroll lands, so flagging the placement first flashes the
+/// button at the top of the thread for a frame. A reader who isn't starting at
+/// the bottom has nothing to scroll and is placed straight away (staying at
+/// the top still arms follow-tail).
+suspend fun itemThreadPlaceInitially(
+    startsAtBottom: Boolean,
+    scrollToBottom: suspend () -> Unit,
+    onPlaced: () -> Unit,
+) {
+    if (startsAtBottom) scrollToBottom()
+    onPlaced()
+}
+
 /// The follow-tail decision for a thread that just grew. Only re-pins when
 /// the growth started from a thread that was already loaded — [oldCount] at
 /// or above [loadedCount] — so the opening refetch of an unread item is never
@@ -237,8 +255,7 @@ fun ItemDetailView(
     val lastIndex = 1 + (if (hasMeta) 1 else 0) + (if (hasBody) 1 else 0) + 1 + rowCount
 
     LaunchedEffect(item.id) {
-        placed = true
-        if (startsAtBottom) listState.scrollToItem(lastIndex)
+        itemThreadPlaceInitially(startsAtBottom, { listState.scrollToItem(lastIndex) }) { placed = true }
     }
     var previousCount by remember(item.id) { mutableStateOf(rowCount) }
     LaunchedEffect(rowCount) {

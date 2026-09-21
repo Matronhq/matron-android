@@ -7,6 +7,7 @@ import chat.matron.android.models.ItemsScope
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.TrackerAttachment
+import chat.matron.android.models.TrackerItem
 import java.time.Instant
 import kotlin.math.min
 import kotlin.math.pow
@@ -58,6 +59,15 @@ sealed interface ItemsRefreshOutcome {
 interface ItemsSyncing {
     suspend fun refresh(scope: ItemsScope): ItemsRefreshOutcome
     suspend fun refreshItem(id: String)
+
+    /// Writes an item the server has just handed back (a close, a reopen)
+    /// straight into the local cache. [refreshItem] is the only other way in
+    /// and it swallows every failure by design — so a mutation that succeeds
+    /// on the journal and is then followed by a refetch that doesn't would
+    /// leave the local copy stale, showing an item as open after it was
+    /// closed. Landing the returned item first makes the local state honest
+    /// whatever the refetch does.
+    suspend fun applyItem(item: TrackerItem)
     suspend fun enqueueComment(itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>)
 
     /// Returns whether the outbox insert itself succeeded — `false` when the
@@ -328,6 +338,17 @@ class ItemsSync(
         }
         run.start()
         run.join()
+    }
+
+    override suspend fun applyItem(item: TrackerItem) {
+        if (stopped) return
+        try {
+            store.upsertItems(listOf(item))
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            MatronDebug.breadcrumb("ItemsSync: applying returned item ${item.id} failed: $error")
+        }
     }
 
     private suspend fun refreshItemOnce(id: String) {

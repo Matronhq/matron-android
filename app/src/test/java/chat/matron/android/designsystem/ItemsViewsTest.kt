@@ -10,6 +10,7 @@ import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
 import java.time.Instant
 import java.time.ZoneOffset
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -140,6 +141,21 @@ class ItemsViewsTest {
         assertFalse(itemThreadShowsJumpToBottom(placed = false, scrollable = true, atBottom = false))
         assertFalse("a thread that fits never offers a jump", itemThreadShowsJumpToBottom(placed = true, scrollable = false, atBottom = false))
         assertFalse(itemThreadShowsJumpToBottom(placed = true, scrollable = true, atBottom = true))
+    }
+
+    @Test
+    fun openingPlacementReportsItselfOnlyAfterTheScrollHasRun() = runBlocking {
+        // The jump-to-bottom button is gated on `placed`; flagging it before
+        // the opening scroll lands makes the button flash at the top of a long
+        // thread reopened at its tail.
+        val log = mutableListOf<String>()
+        itemThreadPlaceInitially(startsAtBottom = true, scrollToBottom = { log += "scroll" }) { log += "placed" }
+        assertEquals(listOf("scroll", "placed"), log)
+
+        // Nothing to scroll for a reader who wasn't at the bottom — placed straight away.
+        val top = mutableListOf<String>()
+        itemThreadPlaceInitially(startsAtBottom = false, scrollToBottom = { top += "scroll" }) { top += "placed" }
+        assertEquals(listOf("placed"), top)
     }
 
     @Test
