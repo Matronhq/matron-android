@@ -78,8 +78,9 @@ internal open class FakeItemsSync : ItemsSyncing {
     val refetched = mutableListOf<String>()
     val comments = mutableListOf<Triple<String, String, List<TrackerAttachment>>>()
     var createSucceeds = true
+    var refreshOutcome: ItemsRefreshOutcome = ItemsRefreshOutcome.Succeeded
     override val isSupported = MutableStateFlow(true)
-    override suspend fun refresh(scope: ItemsScope): ItemsRefreshOutcome { refreshed += scope; return ItemsRefreshOutcome.Succeeded }
+    override suspend fun refresh(scope: ItemsScope): ItemsRefreshOutcome { refreshed += scope; return refreshOutcome }
     override suspend fun refreshItem(id: String) { refetched += id }
     override suspend fun enqueueComment(itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>) {
         comments += Triple(itemID, body, attachments)
@@ -353,6 +354,26 @@ class ItemsPanelViewModelTest {
             t("x", 4, awaiting = ItemAwaiting.USER, state = ItemState.CLOSED, rank = 0.0, closedMs = 40),
         )
         assertEquals("open + awaiting user, newest first; a closed item never needs you", listOf("d", "q"), ItemsPanelViewModel.awaitingYou(items).map { it.id })
+    }
+
+    /// Bugbot (#75): a failed pull-to-refresh must say so — the inline
+    /// error row is the only explanation for a stale or empty list.
+    @Test
+    fun refreshSurfacesAFailedFetch_butTheOpeningRefreshStaysQuiet() = runBlocking {
+        val sync = FakeItemsSync().apply { refreshOutcome = ItemsRefreshOutcome.Failed("offline") }
+        val store = FakeItemsStore()
+        val vm = ItemsPanelViewModel(null, store, FakeItemsApi(), sync, this)
+        vm.start()
+        waitUntil { sync.refreshed.size == 1 }
+        assertNull("the opening refresh must not greet an offline open with an error row", vm.error.value)
+        vm.refresh()
+        assertEquals("offline", vm.error.value)
+        assertFalse(vm.isRefreshing.value)
+        vm.dismissError()
+        sync.refreshOutcome = ItemsRefreshOutcome.Unsupported
+        vm.refresh()
+        assertNull("unsupported is carried by isSupported, not the error row", vm.error.value)
+        vm.stop()
     }
 
     @Test

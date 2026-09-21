@@ -109,7 +109,8 @@ class AppShellNavigation(var host: Host? = null) {
             field = value
             if (coordinatorPath.isNotEmpty()) {
                 coordinatorPath = emptyList()
-                host?.popToRoot(AppTab.COORDINATOR)
+                entryIDs.getValue(AppTab.COORDINATOR).clear()
+                drivingController { host?.popToRoot(AppTab.COORDINATOR) }
             }
             redirectCoordinatorPush()
         }
@@ -134,6 +135,41 @@ class AppShellNavigation(var host: Host? = null) {
     private fun navigateExpecting(tab: AppTab, pathValue: String, command: () -> Unit) {
         expected[tab] = pathValue
         command()
+    }
+
+    /// Set while a rule drives the controller through pops whose end state
+    /// the model has ALREADY applied ([redirectCoordinatorPush]'s eviction,
+    /// [landOnCoordinatorRoot]): each pop — and the restore `popChats` may
+    /// need first — re-enters [noteDestination], which would re-append the
+    /// evicted room and re-run the redirect mid-mutation, over-popping the
+    /// stack (Bugbot, #76). The mirror ignores reports while this is set;
+    /// the tab switch that follows is outside the guard and reports normally.
+    private var drivingController = false
+
+    private inline fun drivingController(command: () -> Unit) {
+        val outer = drivingController
+        drivingController = true
+        try {
+            command()
+        } finally {
+            drivingController = outer
+        }
+    }
+
+    /// Settings → Coordinator / the chooser: persist the choice, mirror it
+    /// into these rules SYNCHRONOUSLY (Compose copies the persisted value in
+    /// later — too late for the `openChat` that follows a pick, which would
+    /// mount the room in Conversations first and only then evict it —
+    /// Bugbot, #76), and evict the room from wherever it is mounted.
+    fun assignCoordinator(convoID: String?, persist: (String?) -> Unit) {
+        persist(convoID)
+        coordinatorConvoID = convoID
+    }
+
+    /// A chooser pick: assign, then land on the Coordinator tab's root.
+    fun chooseCoordinator(convoID: String, persist: (String?) -> Unit) {
+        assignCoordinator(convoID, persist)
+        openChat(convoID)
     }
 
     /// Open a top-level conversation by REPLACING the whole Conversations
@@ -258,7 +294,7 @@ class AppShellNavigation(var host: Host? = null) {
         if (coordinatorPath.contains(coordinator)) {
             coordinatorPath = emptyList()
             entryIDs.getValue(AppTab.COORDINATOR).clear()
-            host?.popToRoot(AppTab.COORDINATOR)
+            drivingController { host?.popToRoot(AppTab.COORDINATOR) }
             moved = true
         }
         val index = chatPath.indexOf(coordinator)
@@ -266,7 +302,7 @@ class AppShellNavigation(var host: Host? = null) {
             val count = chatPath.size - index
             chatPath = chatPath.take(index)
             entryIDs.getValue(AppTab.CONVERSATIONS).let { ids -> while (ids.size > index) ids.removeAt(ids.size - 1) }
-            host?.popChats(count)
+            drivingController { host?.popChats(count) }
             _tab.value = AppTab.COORDINATOR
             host?.switchTab(AppTab.COORDINATOR)
             moved = true
@@ -313,6 +349,7 @@ class AppShellNavigation(var host: Host? = null) {
     /// Conversations reselects the right item in the bar. A coordinator
     /// landing anywhere it should not is redirected as a backstop.
     fun noteDestination(tab: AppTab, entryID: String, pathValue: String?) {
+        if (drivingController) return
         _tab.value = tab
         val ids = entryIDs.getValue(tab)
         if (pathValue == null) {
@@ -346,7 +383,7 @@ class AppShellNavigation(var host: Host? = null) {
         if (coordinatorPath.isNotEmpty()) {
             coordinatorPath = emptyList()
             entryIDs.getValue(AppTab.COORDINATOR).clear()
-            host?.popToRoot(AppTab.COORDINATOR)
+            drivingController { host?.popToRoot(AppTab.COORDINATOR) }
         }
         selectTabInternal(AppTab.COORDINATOR)
     }

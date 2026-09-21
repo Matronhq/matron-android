@@ -99,22 +99,30 @@ object MarkdownAttributed {
     const val headerSpacingAfter: Float = 6f
     private const val listSpacing: Float = 2f
 
-    private val cache = object : LinkedHashMap<Pair<String, MarkdownColors>, MarkdownDocument>(
+    private data class CacheKey(val source: String, val colors: MarkdownColors, val bodySize: Float)
+
+    private val cache = object : LinkedHashMap<CacheKey, MarkdownDocument>(
         16, 0.75f, true
     ) {
         override fun removeEldestEntry(
-            eldest: MutableMap.MutableEntry<Pair<String, MarkdownColors>, MarkdownDocument>?
+            eldest: MutableMap.MutableEntry<CacheKey, MarkdownDocument>?
         ): Boolean = size > 400
     }
 
     /// Converts markdown [source] to a display-ready [MarkdownDocument].
-    /// Memoised: the same (source, colours) returns the same instance.
-    fun parse(source: String, colors: MarkdownColors): MarkdownDocument {
-        val key = source to colors
+    /// Memoised: the same (source, colours, body size) returns the same
+    /// instance. [bodySize] is the body text size in sp that every body span
+    /// is baked at — headers and inline code scale relative to it, code
+    /// blocks stay flat — so a surface that renders at a different scale
+    /// (the item thread, apple #218) passes its own; span sizes win over the
+    /// paragraph style in Compose, so a paragraph-level size alone would be a
+    /// silent no-op.
+    fun parse(source: String, colors: MarkdownColors, bodySize: Float = baseFontSize): MarkdownDocument {
+        val key = CacheKey(source, colors, bodySize)
         synchronized(cache) {
             cache[key]?.let { return it }
         }
-        val built = MarkdownDocument(buildBlocks(source, colors))
+        val built = MarkdownDocument(buildBlocks(source, colors, bodySize))
         synchronized(cache) {
             cache[key]?.let { return it }
             cache[key] = built
@@ -122,14 +130,14 @@ object MarkdownAttributed {
         return built
     }
 
-    private fun headerFontSize(level: Int): Float = when (level) {
-        1 -> baseFontSize * 1.3f
-        2 -> baseFontSize * 1.15f
-        3 -> baseFontSize * 1.05f
-        else -> baseFontSize
+    private fun headerFontSize(level: Int, bodySize: Float): Float = when (level) {
+        1 -> bodySize * 1.3f
+        2 -> bodySize * 1.15f
+        3 -> bodySize * 1.05f
+        else -> bodySize
     }
 
-    private fun buildBlocks(source: String, colors: MarkdownColors): List<MarkdownBlock> {
+    private fun buildBlocks(source: String, colors: MarkdownColors, bodySize: Float): List<MarkdownBlock> {
         val lines = source.split("\n")
         val blocks = mutableListOf<MarkdownBlock>()
         var i = 0
@@ -175,7 +183,7 @@ object MarkdownAttributed {
             if (header != null) {
                 val level = header.groupValues[1].length
                 val base = SpanStyle(
-                    fontSize = headerFontSize(level).sp,
+                    fontSize = headerFontSize(level, bodySize).sp,
                     fontWeight = FontWeight.Bold,
                     color = colors.onSurface,
                 )
@@ -199,7 +207,7 @@ object MarkdownAttributed {
                     quoteLines.add(lines[i].trimStart().removePrefix(">").removePrefix(" "))
                     i++
                 }
-                val base = SpanStyle(fontSize = baseFontSize.sp, color = colors.secondary)
+                val base = SpanStyle(fontSize = bodySize.sp, color = colors.secondary)
                 val text = buildAnnotatedString { appendInline(quoteLines.joinToString(" "), base, colors) }
                 blocks.add(MarkdownBlock(MarkdownBlockKind.BlockQuote, text, spacingAfter = paragraphSpacing))
                 isFirstBlock = false
@@ -212,7 +220,7 @@ object MarkdownAttributed {
             if (unordered != null || ordered != null) {
                 val marker = if (ordered != null) "${ordered.groupValues[1]}. " else "• "
                 val content = if (ordered != null) ordered.groupValues[2] else unordered!!.groupValues[1]
-                val base = SpanStyle(fontSize = baseFontSize.sp, color = colors.onSurface)
+                val base = SpanStyle(fontSize = bodySize.sp, color = colors.onSurface)
                 val text = buildAnnotatedString {
                     pushStyle(base); append(marker); pop()
                     appendInline(content, base, colors)
@@ -245,7 +253,7 @@ object MarkdownAttributed {
                     ) break
                     bodyRows.add(splitTableRow(l)); i++
                 }
-                val base = SpanStyle(fontSize = baseFontSize.sp, color = colors.onSurface)
+                val base = SpanStyle(fontSize = bodySize.sp, color = colors.onSurface)
                 val headerBase = base.merge(SpanStyle(fontWeight = FontWeight.Bold))
                 fun cell(text: String, style: SpanStyle) =
                     buildAnnotatedString { appendInline(text, style, colors) }
@@ -279,7 +287,7 @@ object MarkdownAttributed {
                 ) break
                 paraLines.add(l); i++
             }
-            val base = SpanStyle(fontSize = baseFontSize.sp, color = colors.onSurface)
+            val base = SpanStyle(fontSize = bodySize.sp, color = colors.onSurface)
             val text = buildAnnotatedString { appendInline(paraLines.joinToString(" "), base, colors) }
             blocks.add(MarkdownBlock(MarkdownBlockKind.Paragraph, text, spacingAfter = paragraphSpacing))
             isFirstBlock = false
@@ -414,7 +422,9 @@ object MarkdownAttributed {
                     val codeStyle = base.merge(
                         SpanStyle(
                             fontFamily = FontFamily.Monospace,
-                            fontSize = (baseFontSize * inlineCodeScale).sp,
+                            // Relative to the enclosing body span's size, so
+                            // inline code follows the surface's scale too.
+                            fontSize = ((if (base.fontSize.isSp) base.fontSize.value else baseFontSize) * inlineCodeScale).sp,
                             background = colors.codeBg,
                         )
                     )

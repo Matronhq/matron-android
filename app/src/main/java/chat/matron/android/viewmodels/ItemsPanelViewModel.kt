@@ -2,6 +2,7 @@ package chat.matron.android.viewmodels
 
 import chat.matron.android.journal.ItemRankChange
 import chat.matron.android.journal.ItemsProviding
+import chat.matron.android.journal.ItemsRefreshOutcome
 import chat.matron.android.journal.ItemsStoreReading
 import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.ItemsSyncing
@@ -177,14 +178,25 @@ class ItemsPanelViewModel(
                 }
             }
         }
+        // The opening refresh stays quiet: an offline open would otherwise
+        // greet every tasks page with an error row for a cache that is
+        // rendering fine. A pull the user asked for is different (below).
         refreshJob?.cancel()
-        refreshJob = scope.launch { refresh() }
+        refreshJob = scope.launch { runRefresh(surfaceFailure = false) }
     }
 
-    suspend fun refresh() {
+    /// Pull to refresh. A failed fetch surfaces through [error] (spec §7:
+    /// "refresh failure surfaces via the view model's existing error") —
+    /// otherwise a stale or empty list and badge stay on screen with no
+    /// explanation (Bugbot, #75). `Unsupported` is already carried by
+    /// [isSupported].
+    suspend fun refresh() = runRefresh(surfaceFailure = true)
+
+    private suspend fun runRefresh(surfaceFailure: Boolean) {
         _isRefreshing.value = true
         try {
-            sync.refresh(_itemsScope.value)
+            val outcome = sync.refresh(_itemsScope.value)
+            if (surfaceFailure && outcome is ItemsRefreshOutcome.Failed) _error.value = outcome.message
         } finally {
             _isRefreshing.value = false
         }

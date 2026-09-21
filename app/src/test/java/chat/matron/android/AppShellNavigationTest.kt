@@ -273,20 +273,107 @@ class AppShellNavigationTest {
     /// A host that behaves like the controller: every navigation reports
     /// its new destination back through `noteDestination` synchronously,
     /// as `NavController` does from inside `navigate()`.
+    /// A host that behaves like the controller: it keeps a stack per tab,
+    /// every navigation reports its new destination back through
+    /// `noteDestination` synchronously (as `NavController` does from inside
+    /// `navigate()`), a tab switch restores that tab's saved stack, and
+    /// `popChats` restores Conversations first when another tab shows.
     private class SimulatedControllerHost : AppShellNavigation.Host {
         lateinit var nav: AppShellNavigation
         val commands = mutableListOf<String>()
+        var current = AppTab.CONVERSATIONS
         private var nextID = 0
-        private fun report(tab: AppTab, value: String?) { nav.noteDestination(tab, "e${nextID++}", value) }
-        override fun switchTab(tab: AppTab) { commands += "switch:${tab.name}"; report(tab, null) }
-        override fun replaceChats(roomID: String) { commands += "replace:$roomID"; report(AppTab.CONVERSATIONS, roomID) }
-        override fun pushChat(tab: AppTab, roomID: String) { commands += "pushChat:${tab.name}:$roomID"; report(tab, roomID) }
-        override fun pushDecision(itemID: String) { commands += "pushDecision:$itemID"; report(AppTab.DECISIONS, "item/$itemID") }
-        override fun pushMission(tab: AppTab, missionID: String) { commands += "pushMission:${tab.name}:$missionID"; report(tab, "mission/$missionID") }
-        override fun replaceMissions(missionID: String) { commands += "replaceMissions:$missionID"; report(AppTab.MISSIONS, "mission/$missionID") }
-        override fun pushMissionItem(itemID: String) { commands += "pushMissionItem:$itemID"; report(AppTab.MISSIONS, "item/$itemID") }
-        override fun popToRoot(tab: AppTab) { commands += "popToRoot:${tab.name}"; report(tab, null) }
-        override fun popChats(count: Int) { commands += "popChats:$count" }
+        private val stacks: Map<AppTab, MutableList<Pair<String, String?>>> =
+            AppTab.entries.associateWith { mutableListOf<Pair<String, String?>>("root-${it.name}" to null) }
+        fun stack(tab: AppTab): List<String?> = stacks.getValue(tab).map { it.second }
+        private fun report(tab: AppTab) { val top = stacks.getValue(tab).last(); nav.noteDestination(tab, top.first, top.second) }
+        private fun push(tab: AppTab, value: String) { current = tab; stacks.getValue(tab).add("e${nextID++}" to value); report(tab) }
+        /// A push the model did not drive (a chat-list row's own navigate).
+        fun externalPush(tab: AppTab, value: String) = push(tab, value)
+        override fun switchTab(tab: AppTab) { commands += "switch:${tab.name}"; current = tab; report(tab) }
+        override fun replaceChats(roomID: String) {
+            commands += "replace:$roomID"
+            val s = stacks.getValue(AppTab.CONVERSATIONS); while (s.size > 1) s.removeAt(s.size - 1)
+            push(AppTab.CONVERSATIONS, roomID)
+        }
+        override fun pushChat(tab: AppTab, roomID: String) { commands += "pushChat:${tab.name}:$roomID"; push(tab, roomID) }
+        override fun pushDecision(itemID: String) { commands += "pushDecision:$itemID"; push(AppTab.DECISIONS, "item/$itemID") }
+        override fun pushMission(tab: AppTab, missionID: String) { commands += "pushMission:${tab.name}:$missionID"; push(tab, "mission/$missionID") }
+        override fun replaceMissions(missionID: String) {
+            commands += "replaceMissions:$missionID"
+            val s = stacks.getValue(AppTab.MISSIONS); while (s.size > 1) s.removeAt(s.size - 1)
+            push(AppTab.MISSIONS, "mission/$missionID")
+        }
+        override fun pushMissionItem(itemID: String) { commands += "pushMissionItem:$itemID"; push(AppTab.MISSIONS, "item/$itemID") }
+        override fun popToRoot(tab: AppTab) {
+            commands += "popToRoot:${tab.name}"
+            if (current != tab) return // a saved stack is not on the controller's back stack
+            val s = stacks.getValue(tab); while (s.size > 1) s.removeAt(s.size - 1)
+            report(tab)
+        }
+        override fun popChats(count: Int) {
+            commands += "popChats:$count"
+            if (current != AppTab.CONVERSATIONS) switchTab(AppTab.CONVERSATIONS)
+            repeat(count) {
+                val s = stacks.getValue(AppTab.CONVERSATIONS); if (s.size > 1) s.removeAt(s.size - 1)
+                report(AppTab.CONVERSATIONS)
+            }
+        }
+    }
+
+    /// Bugbot (#76): evicting the coordinator drives the controller through
+    /// a restore and pops that each re-enter the listener AFTER the model
+    /// already trimmed its mirror — without the guard the re-entered
+    /// redirect re-appended the room and the outer pops over-popped.
+    @Test
+    fun coordinatorEvictionNeitherOverPopsNorReappendsWhileTheControllerCatchesUp() {
+        val host = SimulatedControllerHost()
+        val nav = AppShellNavigation(host).also { host.nav = it }
+        nav.noteDestination(AppTab.CONVERSATIONS, "root-CONVERSATIONS", null)
+        nav.pushChat("!other:s")
+        nav.pushChat("!coord:s")
+        // Assignment from Settings while the chat is open (another tab may show).
+        nav.selectTab(AppTab.DECISIONS)
+        nav.assignCoordinator("!coord:s") { }
+        assertEquals(AppTab.COORDINATOR, nav.tab.value)
+        assertEquals(AppTab.COORDINATOR, host.current)
+        assertEquals("only the coordinator left the Conversations stack", listOf("!other:s"), nav.chatPath)
+        assertEquals(listOf(null, "!other:s"), host.stack(AppTab.CONVERSATIONS))
+        assertEquals(emptyList<String>(), nav.coordinatorPath)
+        // A chat-list row's own push of the coordinator (not model-driven).
+        nav.selectTab(AppTab.CONVERSATIONS)
+        assertEquals(listOf("!other:s"), nav.chatPath)
+        host.externalPush(AppTab.CONVERSATIONS, "!coord:s")
+        assertEquals(AppTab.COORDINATOR, nav.tab.value)
+        assertEquals(listOf("!other:s"), nav.chatPath)
+        assertEquals(listOf(null, "!other:s"), host.stack(AppTab.CONVERSATIONS))
+        assertEquals(listOf<String?>(null), host.stack(AppTab.COORDINATOR))
+        // Back in Conversations still lines up with the controller.
+        nav.selectTab(AppTab.CONVERSATIONS)
+        nav.noteDestination(AppTab.CONVERSATIONS, "root-CONVERSATIONS", null)
+        assertTrue(nav.isAtRoot)
+    }
+
+    /// Bugbot (#76): a chooser pick must mirror the new coordinator into
+    /// the rules BEFORE opening it, or the open mounts it in Conversations
+    /// (wiping that stack) and only a later effect evicts it.
+    @Test
+    fun chooseCoordinatorRedirectsBeforeOpening() {
+        val host = SimulatedControllerHost()
+        val nav = AppShellNavigation(host).also { host.nav = it }
+        nav.noteDestination(AppTab.CONVERSATIONS, "root-CONVERSATIONS", null)
+        nav.pushChat("!other:s")
+        var persisted: String? = "unset"
+        nav.chooseCoordinator("!coord:s") { persisted = it }
+        assertEquals("!coord:s", persisted)
+        assertEquals(AppTab.COORDINATOR, nav.tab.value)
+        assertTrue("never mounted in Conversations", host.commands.none { it.startsWith("replace:") })
+        assertEquals("the Conversations stack is untouched", listOf("!other:s"), nav.chatPath)
+        assertEquals(listOf(null, "!other:s"), host.stack(AppTab.CONVERSATIONS))
+        // Clear from Settings persists null and returns the tab to setup.
+        nav.assignCoordinator(null) { persisted = it }
+        assertNull(persisted)
+        assertNull(nav.coordinatorConvoID)
     }
 
     /// Bugbot (#75): the rules update the path FIRST and the controller then
