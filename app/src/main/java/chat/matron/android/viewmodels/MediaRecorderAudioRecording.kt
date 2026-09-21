@@ -27,6 +27,14 @@ class MediaRecorderAudioRecording(private val file: File) : AudioRecording {
         true
     }.getOrDefault(false)
 
+    // pause()/resume() exist since API 24 (minSdk is 26) and continue into the
+    // same output file, which is what an interruption needs (apple #180).
+    // Both throw IllegalStateException when called out of order — reported as
+    // `false` so the state machine leaves the recorder as it found it.
+    override fun pause(): Boolean = runCatching { recorder.pause() }.isSuccess
+
+    override fun resume(): Boolean = runCatching { recorder.resume() }.isSuccess
+
     override fun stop(): Boolean {
         // MediaRecorder.stop() throws RuntimeException when the session
         // captured no valid data (e.g. stopped a moment after start()) —
@@ -37,4 +45,8 @@ class MediaRecorderAudioRecording(private val file: File) : AudioRecording {
         runCatching { recorder.release() }
         return stopped
     }
+
+    // Throws when the recorder isn't running; -1 keeps the diagnostics line
+    // honest rather than reporting a silent 0.
+    override fun peakAmplitude(): Int = runCatching { recorder.maxAmplitude }.getOrDefault(-1)
 }
