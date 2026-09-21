@@ -9,6 +9,7 @@ import chat.matron.android.models.ItemAuthor
 import chat.matron.android.models.ItemAwaiting
 import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemResolution
+import chat.matron.android.models.ItemState
 import chat.matron.android.models.ItemsScope
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.TrackerAttachment
@@ -356,6 +357,42 @@ class ItemsSyncTest {
         api.releaseItemGate()
         first.join(); second.join()
         assertEquals("the in-flight run repeats once for the coalesced request", 2, api.itemCalls)
+        assertEquals(listOf("ic_1"), rig.store.comments("it_1").map { it.id })
+    }
+
+    /// `applyItem` lands the item a close/reopen returned so the screen is
+    /// honest even if the follow-up refetch fails. A refetch that was ALREADY
+    /// in flight when that happened is carrying the pre-mutation snapshot, and
+    /// must not put it back: the thread would read as open again right after a
+    /// close, and the retry that invites hits a conflict.
+    @Test
+    fun aRefetchInFlightAcrossAnApplyItemDoesNotPutTheOldSnapshotBack() = runBlocking {
+        val api = FakeItems()
+        val open = item("it_1", 1, 5_000)
+        api.detail("it_1", open, listOf(TrackerComment("ic_1", "it_1", ItemAuthor.USER, body = "x")))
+        val rig = make(api)
+        api.blockNextItem = true
+        val refetch = launch(Dispatchers.Default) { rig.sync.refreshItem("it_1") }
+        waitUntil { api.isItemGated }
+
+        // The close's own result, while that GET is still open.
+        val closed = open.copy(
+            state = ItemState.CLOSED, resolution = ItemResolution.DONE, updatedAt = Instant.ofEpochMilli(9_000),
+        )
+        rig.sync.applyItem(closed)
+        assertEquals(ItemState.CLOSED, rig.store.item("it_1")?.state)
+
+        api.releaseItemGate()
+        withTimeout(2_000) { refetch.join() }
+        assertEquals(
+            "a response produced before the mutation must not overwrite it",
+            ItemState.CLOSED, rig.store.item("it_1")?.state,
+        )
+        assertEquals("and its thread is dropped with it", emptyList<String>(), rig.store.comments("it_1").map { it.id })
+
+        // A refetch that STARTS after the local write is authoritative again.
+        rig.sync.refreshItem("it_1")
+        assertEquals(ItemState.OPEN, rig.store.item("it_1")?.state)
         assertEquals(listOf("ic_1"), rig.store.comments("it_1").map { it.id })
     }
 

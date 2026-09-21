@@ -81,6 +81,21 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
 
+/// The image blobs a load pass must start: everything the screen hasn't
+/// resolved yet, each blob once however many attachments carry it.
+///
+/// Deliberately NOT filtered by an "in flight" set. This effect restarts when
+/// the attachment list changes, and Compose cancels the previous pass without
+/// waiting for it, so a blob that pass left behind is a load that is STOPPING,
+/// not one that will arrive — skipping it left the image neither loaded nor
+/// queued, with nothing to start it until the list changed again (Bugbot,
+/// round 2). Restarting a load that was about to be cancelled costs one
+/// request; never starting it costs the image.
+internal fun imageBlobsToLoad(attachments: List<TrackerAttachment>, loaded: Set<String>): List<TrackerAttachment> {
+    val started = mutableSetOf<String>()
+    return attachments.filter { it.blobRef !in loaded && started.add(it.blobRef) }
+}
+
 /// `runCatching` for suspending work: a real failure becomes `null` (the
 /// caller turns that into a banner), while cancellation is rethrown —
 /// `runCatching` would swallow it, letting a cancelled load carry on writing
@@ -136,30 +151,22 @@ fun ItemDetailScreen(
 
     // Image attachments resolve through the (authenticated) media service to
     // bytes Coil can decode; a small per-screen cache keyed by blob ref.
-    val images = remember { mutableStateMapOf<String, Any?>() }
-    val inFlight = remember { mutableSetOf<String>() }
+    val images = remember { mutableStateMapOf<String, Any>() }
     fun mediaURL(a: TrackerAttachment): String =
         serverURL.newBuilder().addPathSegment("media").addPathSegment(a.blobRef).build().toString()
     val imageAttachments = remember(item, comments) {
         (item?.attachments.orEmpty() + comments.flatMap { it.attachments }).filter { it.isImage }
     }
     LaunchedEffect(imageAttachments) {
-        for (a in imageAttachments) {
-            if (a.blobRef in images || !inFlight.add(a.blobRef)) continue
+        for (a in imageBlobsToLoad(imageAttachments, images.keys)) {
             launch {
-                try {
-                    // A miss is deliberately NOT cached: `images` doubles as
-                    // the "already handled" set above, so storing `null` for a
-                    // failed load would retire that blob for the life of the
-                    // screen — one flaky fetch and the image never appears.
-                    // Leaving the key out lets the next pass try again.
-                    val bytes = nullOnFailure { media.image(mediaURL(a)) }
-                    if (bytes != null) images[a.blobRef] = bytes
-                } finally {
-                    // Cleared whatever happened (including cancellation) so a
-                    // blob is never stuck "in flight" with nothing running.
-                    inFlight.remove(a.blobRef)
-                }
+                // A miss is deliberately NOT cached: `images` doubles as the
+                // "already resolved" set, so storing `null` for a failed load
+                // would retire that blob for the life of the screen — one
+                // flaky fetch and the image never appears. Leaving the key
+                // out lets the next pass try again.
+                val bytes = nullOnFailure { media.image(mediaURL(a)) }
+                if (bytes != null) images[a.blobRef] = bytes
             }
         }
     }
