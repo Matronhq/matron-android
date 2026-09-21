@@ -125,6 +125,10 @@ class ItemsSync(
     /// scope. Deliberately no `refetchAgain`-style repeat: a joiner wants
     /// "the list, freshly fetched", not "a fetch that started after I asked".
     private val inFlightRefreshes = mutableMapOf<ItemsScope, Deferred<ItemsRefreshOutcome>>()
+    /// Every drain pass runs as its own job here (callers join it), so
+    /// [stop] can cancel and await a drain the same way it does a refresh —
+    /// including the background one `enqueueCreate` kicks and never awaits.
+    private val drainJobs = mutableSetOf<Job>()
 
     /// Set by [stop], cleared by [start]. Every write site in refresh /
     /// refetch / drain re-checks this immediately after its await, before
@@ -161,15 +165,18 @@ class ItemsSync(
     }
 
     /// Suspends until nothing more will happen: cancels the marker/state/retry
-    /// jobs AND every in-flight refresh, and joins them all, so a caller's
-    /// sign-out wipe can never race a resuming network call's store write —
-    /// and a `start()` for a new session can never run until the old tasks
-    /// have actually exited.
+    /// jobs AND every in-flight refresh, per-item refetch and drain pass, and
+    /// joins them all, so a caller's sign-out wipe can never race a resuming
+    /// network call's store write — and a `start()` for a new session can
+    /// never run until the old tasks have actually exited. Every piece of
+    /// work that can write to the store runs as a job on this sync's own
+    /// scope precisely so it is reachable from here (Bugbot, #71).
     suspend fun stop() {
         val toJoin: List<Job>
         synchronized(lock) {
             stopped = true
-            toJoin = listOfNotNull(markerJob, stateJob, retryJob) + inFlightRefreshes.values.toList()
+            toJoin = listOfNotNull(markerJob, stateJob, retryJob) +
+                inFlightRefreshes.values + inFlightRefetches.values + drainJobs
             markerJob = null; stateJob = null; retryJob = null
         }
         toJoin.forEach { it.cancel() }
@@ -389,11 +396,33 @@ class ItemsSync(
             )
         }.onFailure { MatronDebug.breadcrumb("ItemsSync: enqueueCreate insert failed for $localID: $it") }
         if (inserted.isFailure) return false
-        scope.launch { drainOutbox() }
+        startDrain()
         return true
     }
 
-    suspend fun drainOutbox() {
+    /// Runs one drain pass to completion. The pass itself is a job on this
+    /// sync's scope (see [startDrain]) so [stop] can cancel and await it; a
+    /// caller cancelled while waiting leaves the pass running for `stop()`
+    /// to own.
+    suspend fun drainOutbox() = startDrain().join()
+
+    private fun startDrain(): Job {
+        lateinit var self: Job
+        synchronized(lock) {
+            self = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    drainPass()
+                } finally {
+                    synchronized(lock) { drainJobs.remove(self) }
+                }
+            }
+            drainJobs.add(self)
+        }
+        self.start()
+        return self
+    }
+
+    private suspend fun drainPass() {
         val supersededRetry: Job?
         val alreadyDraining: Boolean
         synchronized(lock) {

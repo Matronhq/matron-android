@@ -218,6 +218,43 @@ class JournalStoreItemsTest {
         assertTrue(store.itemOutboxPending().isEmpty())
     }
 
+    private fun fallbackTwin(seq: Long, sender: String = "agent:a") = JournalEvent(
+        seq, "c1", Instant.ofEpochMilli(seq * 1000), sender, JournalEventType.TEXT,
+        buildJsonObject {
+            put("body", "📌 Needs you — question #12: Which auth?"); put("fallback_for", "item")
+            put("item_id", "it_1"); put("num", 12); put("action", "created")
+        },
+    )
+
+    /// The item marker's old-client `fallback_for` text twin is hidden from
+    /// the timeline and never indexed for search, but it deliberately still
+    /// counts as a message for the chat list — unread, activity and snippet
+    /// follow the server (spec "Old-client fallback"; Apple's store is the
+    /// same): it is the signal that an agent filed a question while the chat
+    /// was closed, and the inline marker card (#72) is what the reader then
+    /// sees on opening it.
+    @Test
+    fun fallbackTwinCountsForTheChatListButNotForSearch() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(JournalEvent(1, "c1", Instant.ofEpochMilli(1_000), "agent:a", JournalEventType.TEXT, buildJsonObject { put("body", "real message") }))
+        val before = store.conversation("c1")!!
+        assertEquals(1, before.unreadCount); assertEquals("real message", before.snippet)
+
+        val twin = fallbackTwin(2)
+        assertTrue(store.applyJournal(twin))
+        val after = store.conversation("c1")!!
+        assertEquals(2L, after.lastSeq)
+        assertEquals("an agent's filed question bumps unread", 2, after.unreadCount)
+        assertEquals("and sets the snippet, like the server's snippetOf", "📌 Needs you — question #12: Which auth?", after.snippet)
+        assertEquals("and the activity timestamp", 2_000L, after.lastActivityTS)
+        assertNull("but is never indexed for search", twin.previewText())
+        assertTrue("and the mapper hides it (the card renders instead)", twin.isItemFallbackText())
+
+        // The read-marker recount agrees with the incremental count.
+        store.applyJournal(JournalEvent(3, "c1", Instant.ofEpochMilli(3_000), "user:dan", JournalEventType.READ_MARKER, buildJsonObject { put("up_to_seq", 0) }))
+        assertEquals(2, store.conversation("c1")!!.unreadCount)
+    }
+
     @Test
     fun conversationOriginLabelsNameTheBox() = runBlocking {
         val store = makeStore()
