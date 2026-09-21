@@ -10,9 +10,11 @@ import chat.matron.android.journal.db.MetaEntity
 import chat.matron.android.journal.db.OutboxEntity
 import chat.matron.android.journal.db.SummaryEntryEntity
 import kotlin.math.max
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
 import kotlinx.serialization.json.JsonObject
 
 /// Thrown by the [JournalStore.failApplyForTesting] injection hook to simulate
@@ -603,24 +605,173 @@ class JournalStore(
     fun summaryEntriesFlow(convoID: String): Flow<List<SummaryEntryEntity>> =
         summaryEntryDao.forConversationFlow(convoID)
 
-    // MARK: Tool-output TTL
+    // MARK: Background maintenance sweeps
 
-    /// Rewrites every `tool_output` event payload with `live_log: true` older
-    /// than 24h to the server's tombstone shape — snippet removed,
-    /// `expired: true`, `blob_ref: null`. Idempotent. `now` (epoch ms) is
-    /// injectable for tests. No longer rewrites `conversation.snippet`: the
-    /// read path derives the `$ <command>` preview from the columns.
+    /// Rewrites aged-out `tool_output` payloads to the tombstone shape,
+    /// incrementally: everything at or below `meta.snippet_ttl_ts` was
+    /// covered by an earlier sweep and is skipped, and the range scan uses
+    /// the `event_type_ts` index rather than reading the whole table.
+    ///
+    /// Same name and signature as the boot-time sweep it replaces — the
+    /// difference is that nothing calls it from the composition root at
+    /// store creation any more (`JournalMaintenance` owns it, off the launch
+    /// path). The first run after the update has no watermark and therefore
+    /// scans every tool-output row older than 24 h once, in the background.
+    /// `now` (epoch ms) is injectable for tests.
     suspend fun purgeExpiredToolOutputSnippets(now: Long = System.currentTimeMillis()) {
-        val cutoff = now - TTL_MS
-        db.withTransaction {
-            val rows = eventDao.ofTypeAtOrBefore(JournalEventType.TOOL_OUTPUT, cutoff)
-            for (row in rows) {
-                val payload = parseJsonObjectOrNull(row.payload) ?: continue
-                val tombstone = EventTombstone.apply(payload, row.type, row.ts, now) ?: continue
-                eventDao.updatePayload(row.seq, tombstone.toString())
-            }
-        }
+        sweepTombstones(
+            types = listOf(JournalEventType.TOOL_OUTPUT),
+            watermarkKey = SNIPPET_TTL_WATERMARK_KEY,
+            cutoffMs = now - EventTombstone.TOOL_LOG_TTL_MS,
+            now = now,
+        )
     }
+
+    /// Local retention (spec §3.4 / §4 decision 1): tool-output and diff
+    /// BODIES older than 30 days are tombstoned on this device. The server
+    /// still has them; recovering them locally means a wipe + re-sync, which
+    /// is the existing `snapshot_required` path.
+    ///
+    /// Returns every `tool_output`/`diff` seq this pass VISITED inside the
+    /// retention range — not just the ones it rewrote. A row the 24 h sweep
+    /// already tombstoned is typically a no-op for the 30-day rule, so it
+    /// would never appear in a rewrite-only list — but the watermark
+    /// guarantees exactly one visit, so this is the caller's one chance to
+    /// learn about it. Search retirement runs off its own watermark
+    /// ([pendingSearchRetirements]); this return value is reported, not
+    /// anyone's only path to the index.
+    suspend fun applyRetention(now: Long = System.currentTimeMillis()): List<Long> =
+        sweepTombstones(
+            types = listOf(JournalEventType.TOOL_OUTPUT, JournalEventType.DIFF),
+            watermarkKey = RETENTION_WATERMARK_KEY,
+            cutoffMs = now - EventTombstone.RETENTION_WINDOW_MS,
+            now = now,
+            returnAllVisited = true,
+        )
+
+    /// The shared sweep engine: walk `(type, ts)` forward from the watermark
+    /// to [cutoffMs] in chunks of [SWEEP_CHUNK_SIZE] rows per write
+    /// transaction (so UI reads interleave), rewrite what [EventTombstone]
+    /// changes, then move the watermark to the cutoff.
+    ///
+    /// Cancellation is observed at chunk boundaries: a cancelled sweep
+    /// leaves the chunks already committed (idempotent, durable) and skips
+    /// the watermark write, so the next call resumes over the same range.
+    /// `JournalMaintenance.stop()` relies on this to await an in-flight pass
+    /// instead of waiting one out.
+    private suspend fun sweepTombstones(
+        types: List<String>,
+        watermarkKey: String,
+        cutoffMs: Long,
+        now: Long,
+        returnAllVisited: Boolean = false,
+    ): List<Long> {
+        val tombstoned = mutableListOf<Long>()
+        val visited = mutableListOf<Long>()
+        var afterTS = metaDao.value(watermarkKey)?.toLongOrNull() ?: 0L
+        // A persisted watermark can sit ABOVE this call's own cutoff (an
+        // injected or stepped clock in tests, or a caller stepping `now`
+        // backwards). A watermark only certifies the range it was computed
+        // against, so treat "past our cutoff" as no coverage for THIS range
+        // rather than letting it blind the scan.
+        if (afterTS > cutoffMs) afterTS = 0L
+        // `Long.MAX_VALUE` on the first page makes the seed behave as
+        // `ts > watermark`, so a row exactly at the watermark is not re-swept.
+        var afterSeq = Long.MAX_VALUE
+        while (true) {
+            if (!currentCoroutineContext().isActive) return if (returnAllVisited) visited else tombstoned
+            val chunk = db.withTransaction {
+                val rows = eventDao.sweepPage(types, cutoffMs, afterTS, afterSeq, SWEEP_CHUNK_SIZE)
+                val touched = mutableSetOf<String>()
+                for (row in rows) {
+                    visited += row.seq
+                    val payload = parseJsonObjectOrNull(row.payload) ?: continue
+                    val rewritten = EventTombstone.apply(payload, row.type, row.ts, now) ?: continue
+                    eventDao.updatePayload(row.seq, rewritten.toString())
+                    tombstoned += row.seq
+                    touched += row.convoID
+                }
+                // A tombstoned row can be its conversation's newest message —
+                // and a payload that was never a live log had no
+                // `expired_snippet` at insert time, so the list would keep
+                // showing a body that is no longer on disk. One indexed
+                // lookup per touched conversation, and no write at all when
+                // the columns already agree (so the chat-list observation
+                // does not re-fire for a sweep that changed nothing it shows).
+                for (convoID in touched) refreshLastMessageColumns(convoID)
+                rows
+            }
+            val last = chunk.lastOrNull() ?: break
+            afterTS = last.ts
+            afterSeq = last.seq
+        }
+        metaDao.upsert(MetaEntity(watermarkKey, cutoffMs.toString()))
+        return if (returnAllVisited) visited else tombstoned
+    }
+
+    /// Recomputes `last_message_type` / `expired_snippet` for one
+    /// conversation, writing only when a value actually changed.
+    private suspend fun refreshLastMessageColumns(convoID: String) {
+        val convo = conversationDao.byId(convoID) ?: return
+        val (type, expiredSnippet) = newestMessageColumns(convoID)
+        if (convo.lastMessageType == type && convo.expiredSnippet == expiredSnippet) return
+        conversationDao.setLastMessageColumns(convoID, type, expiredSnippet)
+    }
+
+    /// When the maintenance sweeps last completed a full pass (epoch ms), or
+    /// `null` when none has — the Settings › Storage "Last maintenance" row,
+    /// and the scheduler's due-check.
+    suspend fun maintenanceLastRun(): Long? = metaDao.value(MAINTENANCE_LAST_RUN_KEY)?.toLongOrNull()
+
+    suspend fun recordMaintenanceRun(at: Long) = metaDao.upsert(MetaEntity(MAINTENANCE_LAST_RUN_KEY, at.toString()))
+
+    /// `tool_output`/`diff` seqs whose bodies have aged past the retention
+    /// window and have not yet been retired from the search index, plus the
+    /// cutoff this call actually finished scanning up to.
+    ///
+    /// A read-only sibling of the retention sweep over the same
+    /// `event_type_ts` range and the same 30-day cutoff, but gated on its
+    /// own `search_retention_ts` watermark rather than `retention_ts`: the
+    /// tombstone sweep runs whether or not a search index is attached, and
+    /// sharing one watermark would let a pass with no search silently skip
+    /// rows past that nothing ever removed from the index. Paged the same
+    /// way so a large backlog doesn't hold one long read.
+    ///
+    /// On cancellation the returned cutoff is the watermark the scan started
+    /// from, so a caller persisting it via [recordSearchRetirement] writes
+    /// back exactly what was already there and the next call re-scans the
+    /// same, still-outstanding range. (A cutoff derived from the last row
+    /// seen is unsafe: a full chunk never proves every same-millisecond
+    /// sibling was fetched.)
+    suspend fun pendingSearchRetirements(now: Long = System.currentTimeMillis()): SearchRetirements {
+        val cutoffMs = now - EventTombstone.RETENTION_WINDOW_MS
+        val types = listOf(JournalEventType.TOOL_OUTPUT, JournalEventType.DIFF)
+        var afterTS = metaDao.value(SEARCH_RETENTION_WATERMARK_KEY)?.toLongOrNull() ?: 0L
+        if (afterTS > cutoffMs) afterTS = 0L
+        val startTS = afterTS
+        var afterSeq = Long.MAX_VALUE
+        val seqs = mutableListOf<Long>()
+        while (true) {
+            if (!currentCoroutineContext().isActive) return SearchRetirements(seqs, startTS)
+            val chunk = eventDao.sweepPageKeys(types, cutoffMs, afterTS, afterSeq, SWEEP_CHUNK_SIZE)
+            val last = chunk.lastOrNull() ?: break
+            seqs += chunk.map { it.seq }
+            afterTS = last.ts
+            afterSeq = last.seq
+        }
+        return SearchRetirements(seqs, cutoffMs)
+    }
+
+    /// Advances the search-retention watermark. Callers must only invoke
+    /// this after `SearchService.removeAll` has actually succeeded for the
+    /// seqs that came with this cutoff from [pendingSearchRetirements].
+    suspend fun recordSearchRetirement(upTo: Long) =
+        metaDao.upsert(MetaEntity(SEARCH_RETENTION_WATERMARK_KEY, upTo.toString()))
+
+    /// Row counts for the Settings › Storage section. On demand only, never
+    /// on the launch path; SQLite answers `COUNT(*)` from the smallest
+    /// covering index, so this is an index-only scan.
+    suspend fun rowCounts(): RowCounts = RowCounts(events = eventDao.count(), conversations = conversationDao.count())
 
     /// The form of [event] that actually goes to disk: a `tool_output` or
     /// `diff` that is ALREADY past one of [EventTombstone]'s cutoffs when it
@@ -692,9 +843,29 @@ class JournalStore(
         else -> event.snippet()?.take(120) ?: "[${event.type}]"
     }
 
+    /// Result of [pendingSearchRetirements]: the seqs to retire from the
+    /// search index and the cutoff (epoch ms) to record once that succeeded.
+    data class SearchRetirements(val seqs: List<Long>, val cutoffMs: Long)
+
+    data class RowCounts(val events: Int, val conversations: Int)
+
     companion object {
         private const val CURSOR_KEY = "cursor"
-        private const val TTL_MS = 24L * 3600 * 1000
+        private const val TTL_MS = EventTombstone.TOOL_LOG_TTL_MS
+
+        /// `meta` keys written by the sweeps. None is written by a migration;
+        /// [wipe]'s `DELETE FROM meta` resets all four, which is exactly
+        /// right — a re-bootstrapped mirror must re-sweep from scratch.
+        internal const val SNIPPET_TTL_WATERMARK_KEY = "snippet_ttl_ts"
+        internal const val RETENTION_WATERMARK_KEY = "retention_ts"
+        internal const val SEARCH_RETENTION_WATERMARK_KEY = "search_retention_ts"
+        internal const val MAINTENANCE_LAST_RUN_KEY = "maintenance_last_run"
+
+        /// Rows per sweep write transaction. A sweep that took one
+        /// transaction for the whole range would hold Room's single write
+        /// connection for its duration; 500 keeps each transaction short
+        /// enough for UI reads to interleave.
+        internal const val SWEEP_CHUNK_SIZE = 500
 
         /// The chat-list preview a tool_output falls back to once its output
         /// is gone — the server's own `"$ <command>"` shape, capped at the

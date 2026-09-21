@@ -67,9 +67,18 @@ interface ConversationDao {
     @Query("UPDATE conversation SET hidden = :hidden WHERE id = :convoID")
     suspend fun setHidden(hidden: Boolean, convoID: String)
 
+    @Query("UPDATE conversation SET last_message_type = :type, expired_snippet = :expiredSnippet WHERE id = :id")
+    suspend fun setLastMessageColumns(id: String, type: String?, expiredSnippet: String?)
+
+    @Query("SELECT COUNT(*) FROM conversation")
+    suspend fun count(): Int
+
     @Query("DELETE FROM conversation")
     suspend fun deleteAll()
 }
+
+/// `(seq, ts)` projection for the key-only sweep page.
+data class EventKey(val seq: Long, val ts: Long)
 
 @Dao
 interface AgentDao {
@@ -151,8 +160,30 @@ interface EventDao {
     )
     suspend fun countUnread(convoID: String, afterSeq: Long, messageTypes: Collection<String>, ownSender: String): Int
 
-    @Query("SELECT * FROM event WHERE type = :type AND ts <= :cutoff")
-    suspend fun ofTypeAtOrBefore(type: String, cutoff: Long): List<EventEntity>
+    /// One page of a maintenance sweep: rows of the given [types] with
+    /// `ts <= cutoff`, walking the `event_type_ts` index forward from the
+    /// keyset `(afterTS, afterSeq)`. Keyset rather than OFFSET paging: rows
+    /// sharing a millisecond are routine (a batch apply stamps many at
+    /// once), and an offset walk over a table being written underneath
+    /// would skip them (apple #212).
+    @Query(
+        "SELECT * FROM event WHERE type IN (:types) AND ts <= :cutoff " +
+            "AND (ts > :afterTS OR (ts = :afterTS AND seq > :afterSeq)) " +
+            "ORDER BY ts, seq LIMIT :limit"
+    )
+    suspend fun sweepPage(types: Collection<String>, cutoff: Long, afterTS: Long, afterSeq: Long, limit: Int): List<EventEntity>
+
+    /// The read-only sibling of [sweepPage] for the search-retirement scan:
+    /// keys only, no payload decode.
+    @Query(
+        "SELECT seq, ts FROM event WHERE type IN (:types) AND ts <= :cutoff " +
+            "AND (ts > :afterTS OR (ts = :afterTS AND seq > :afterSeq)) " +
+            "ORDER BY ts, seq LIMIT :limit"
+    )
+    suspend fun sweepPageKeys(types: Collection<String>, cutoff: Long, afterTS: Long, afterSeq: Long, limit: Int): List<EventKey>
+
+    @Query("SELECT COUNT(*) FROM event")
+    suspend fun count(): Int
 
     /// Events of the given [types] for one conversation, newest first — the
     /// media & links browser's Media and Files tabs (port of apple #142's
