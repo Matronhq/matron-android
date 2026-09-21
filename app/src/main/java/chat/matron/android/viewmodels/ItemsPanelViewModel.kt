@@ -196,7 +196,11 @@ class ItemsPanelViewModel(
         _isRefreshing.value = true
         try {
             val outcome = sync.refresh(_itemsScope.value)
-            if (surfaceFailure && outcome is ItemsRefreshOutcome.Failed) _error.value = outcome.message
+            // A user-driven pull owns the error row: a failure fills it, a
+            // later success (or an unsupported journal, carried by
+            // isSupported) clears it — otherwise a retry that just updated
+            // the list would leave the stale row up (Bugbot, #75).
+            if (surfaceFailure) _error.value = (outcome as? ItemsRefreshOutcome.Failed)?.message
         } finally {
             _isRefreshing.value = false
         }
