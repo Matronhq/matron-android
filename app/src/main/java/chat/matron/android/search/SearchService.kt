@@ -37,6 +37,13 @@ interface SearchService : SearchIndexer {
     /// Removes a single event (used for redactions).
     suspend fun remove(eventID: String)
 
+    /// Removes many events in one call — the retention sweep's form
+    /// (apple #212). Default: one call per id, correct but slow;
+    /// [SearchServiceLive] overrides with one transaction per 500-id chunk.
+    suspend fun removeAll(eventIDs: List<String>) {
+        for (eventID in eventIDs) remove(eventID)
+    }
+
     /// Queries by free-text. Returns at most [limit] hits, newest first.
     suspend fun query(text: String, limit: Int): List<SearchHit>
 

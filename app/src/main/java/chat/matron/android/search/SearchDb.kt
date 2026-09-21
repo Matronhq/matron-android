@@ -75,6 +75,11 @@ interface SearchDao {
     @Query("DELETE FROM messages_fts WHERE rowid = :rowid")
     suspend fun deleteByRowid(rowid: Long)
 
+    /// Batch form for the retention sweep; the caller chunks the list so the
+    /// `IN (…)` stays well inside SQLite's bound-variable limit.
+    @Query("DELETE FROM messages_fts WHERE event_id IN (:eventIds)")
+    suspend fun deleteByEventIds(eventIds: List<String>)
+
     @Insert
     suspend fun insertMessage(row: MessageFtsEntity): Long
 

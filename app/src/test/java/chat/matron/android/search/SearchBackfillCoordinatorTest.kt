@@ -102,12 +102,16 @@ private fun makeEvent(
 )
 
 class SearchBackfillCoordinatorTest {
+    /// `now` defaults to epoch+10 s: the fixtures stamp `ts = seq` seconds,
+    /// so a wall clock would put every tool_output/diff past the 30-day
+    /// retention window and the walk would (correctly) skip them.
     private fun makeCoordinator(
         search: InMemorySearchService,
         pager: ScriptedPager,
         pageSize: Int = 2,
+        now: () -> Instant = { Instant.ofEpochSecond(10) },
     ): SearchBackfillCoordinator = SearchBackfillCoordinator(
-        search = search, pageSize = pageSize, throttleMillis = 0,
+        search = search, pageSize = pageSize, throttleMillis = 0, now = now,
     ) { convoID, beforeSeq, limit ->
         pager.page(convoID, beforeSeq, limit)
     }
@@ -326,10 +330,11 @@ class SearchBackfillCoordinatorTest {
     /// unsearchable.
     @Test
     fun previewTextMapsEventTypesLikeTheTimelineMapper() {
-        assertEquals("hi", makeEvent(seq = 1, payload = buildJsonObject { put("body", "hi") }).previewText())
+        val now = Instant.ofEpochSecond(10)
+        assertEquals("hi", makeEvent(seq = 1, payload = buildJsonObject { put("body", "hi") }).previewText(now))
         assertEquals(
             "out",
-            makeEvent(seq = 2, type = JournalEventType.TOOL_OUTPUT, payload = buildJsonObject { put("snippet", "out") }).previewText(),
+            makeEvent(seq = 2, type = JournalEventType.TOOL_OUTPUT, payload = buildJsonObject { put("snippet", "out") }).previewText(now),
         )
         // diff precedence: `diff` wins over `snippet`, snippet is the fallback.
         assertEquals(
@@ -337,13 +342,65 @@ class SearchBackfillCoordinatorTest {
             makeEvent(
                 seq = 3, type = JournalEventType.DIFF,
                 payload = buildJsonObject { put("diff", "+ d"); put("snippet", "s") },
-            ).previewText(),
+            ).previewText(now),
         )
         assertEquals(
             "s",
-            makeEvent(seq = 4, type = JournalEventType.DIFF, payload = buildJsonObject { put("snippet", "s") }).previewText(),
+            makeEvent(seq = 4, type = JournalEventType.DIFF, payload = buildJsonObject { put("snippet", "s") }).previewText(now),
         )
-        assertNull(makeEvent(seq = 5, type = JournalEventType.IMAGE, payload = buildJsonObject { put("blob_ref", "b") }).previewText())
-        assertTrue(makeEvent(seq = 6, payload = buildJsonObject { put("body", "") }).previewText().isNullOrEmpty())
+        assertNull(makeEvent(seq = 5, type = JournalEventType.IMAGE, payload = buildJsonObject { put("blob_ref", "b") }).previewText(now))
+        assertTrue(makeEvent(seq = 6, payload = buildJsonObject { put("body", "") }).previewText(now).isNullOrEmpty())
+    }
+
+    /// Retention removed these rows from the index; the server-backed
+    /// feeders (backfill, backward pagination) would otherwise put them
+    /// straight back, because the server keeps bodies forever.
+    @Test
+    fun previewTextIsNullForToolOutputAndDiffPastTheRetentionWindow() {
+        val past = Instant.ofEpochSecond(1).plusSeconds(31L * 24 * 3600)
+        assertNull(makeEvent(seq = 1, type = JournalEventType.TOOL_OUTPUT, payload = buildJsonObject { put("snippet", "out") }).previewText(past))
+        assertNull(makeEvent(seq = 1, type = JournalEventType.DIFF, payload = buildJsonObject { put("diff", "+ d") }).previewText(past))
+        assertEquals(
+            "retention covers tool output and diffs only — message text stays searchable",
+            "text is kept forever",
+            makeEvent(seq = 1, payload = buildJsonObject { put("body", "text is kept forever") }).previewText(past),
+        )
+    }
+
+    /// The live feeder's case: `applyJournalBatch` returns the events it was
+    /// given, not the tombstoned rows it stored, so the 24 h rule has to be
+    /// enforced here too or search keeps a body the store dropped.
+    @Test
+    fun previewTextIsNullForAStaleLiveLogToolOutput() {
+        val past = Instant.ofEpochSecond(1).plusSeconds(25L * 3600)
+        assertNull(
+            makeEvent(seq = 1, type = JournalEventType.TOOL_OUTPUT,
+                payload = buildJsonObject { put("snippet", "out"); put("live_log", true) }).previewText(past),
+        )
+        assertEquals(
+            "an offloaded tool output has no 24 h TTL — it stays searchable until retention",
+            "out",
+            makeEvent(seq = 1, type = JournalEventType.TOOL_OUTPUT, payload = buildJsonObject { put("snippet", "out") }).previewText(past),
+        )
+    }
+
+    @Test
+    fun backfillSkipsToolOutputAndDiffPastTheRetentionWindow() = runTest {
+        val search = InMemorySearchService()
+        val events = listOf(
+            makeEvent(seq = 1, payload = buildJsonObject { put("body", "real text") }),
+            makeEvent(seq = 2, type = JournalEventType.TOOL_OUTPUT, payload = buildJsonObject { put("snippet", "tool says") }),
+            makeEvent(seq = 3, type = JournalEventType.DIFF, payload = buildJsonObject { put("diff", "+ added line") }),
+        )
+        val pager = ScriptedPager(events)
+        val coordinator = makeCoordinator(
+            search, pager, pageSize = 10,
+            now = { Instant.ofEpochSecond(3).plusSeconds(31L * 24 * 3600) },
+        )
+
+        val allComplete = coordinator.run(listOf("c1"))
+
+        assertTrue("skipping bodies must not stall the walk", allComplete)
+        assertEquals("the backfill re-indexed rows retention had removed", setOf("1"), search.indexed.keys)
     }
 }

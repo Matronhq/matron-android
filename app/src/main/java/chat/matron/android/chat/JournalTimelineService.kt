@@ -643,8 +643,9 @@ class JournalTimelineService(
             itemsSignal?.invoke()
         }
         search?.let { s ->
+            val indexedAt = Instant.now()
             for (event in newOnes) {
-                val body = event.previewText()
+                val body = event.previewText(indexedAt)
                 if (!body.isNullOrEmpty()) {
                     runCatching { s.index(event.convoID, event.seq.toString(), event.sender, event.ts, body) }
                 }
