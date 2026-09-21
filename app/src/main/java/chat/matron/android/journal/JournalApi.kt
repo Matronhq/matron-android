@@ -3,6 +3,10 @@ package chat.matron.android.journal
 import java.io.IOException
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
+import chat.matron.android.models.ItemResolution
+import chat.matron.android.models.TrackerAttachment
+import chat.matron.android.models.TrackerComment
+import chat.matron.android.models.TrackerItem
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -231,7 +235,7 @@ class JournalApi(
     private val baseUrl: HttpUrl,
     private val client: OkHttpClient = OkHttpClient(),
     token: String? = null,
-) : SnapshotSource, AgentSpawnAnswering {
+) : SnapshotSource, AgentSpawnAnswering, ItemsProviding {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -335,7 +339,7 @@ class JournalApi(
     /// uplink, where a multi-MB screenshot otherwise looks frozen. The write/
     /// read timeouts are raised well past the client default for the same
     /// reason: a legitimate slow upload must not die mid-body.
-    suspend fun uploadMedia(data: ByteArray, contentType: String, progress: ((Double) -> Unit)? = null): String {
+    override suspend fun uploadMedia(data: ByteArray, contentType: String, progress: ((Double) -> Unit)?): String {
         val body = data.toRequestBody((contentType.ifEmpty { "application/octet-stream" }).toMediaTypeOrNull())
         val counted = if (progress != null) ProgressRequestBody(body, data.size.toLong(), progress) else body
         val builder = Request.Builder().url(buildUrl("/media", emptyList()))
@@ -635,6 +639,87 @@ class JournalApi(
         })
     }
 
+    // MARK: Items (task & decision tracker)
+    //
+    // protocol.md "Items → Routes". Ported from matron-apple's
+    // `JournalAPI+Items.swift`. A journal predating the tracker 404s on
+    // every one of these; `ItemsSync` turns the `GET /items` 404 into
+    // "unsupported" and hides the tracker UI.
+
+    private fun decodeItem(obj: JsonObject): TrackerItem =
+        obj.objectOrNull("item")?.let(TrackerItem::fromJson)
+            ?: throw JournalApiError.Transport("malformed item response")
+
+    private fun idempotencyHeaders(key: String?): Map<String, String> =
+        if (key != null) mapOf("Idempotency-Key" to key) else emptyMap()
+
+    override suspend fun listItems(query: ItemsListQuery): ItemsPage {
+        val obj = request(path = "/items", query = query.queryItems)
+        val items = obj.arrayOrNull("items")?.objects()?.mapNotNull(TrackerItem::fromJson) ?: emptyList()
+        return ItemsPage(items, obj.stringOrNull("next_cursor"))
+    }
+
+    /// [id] is `it_…` or `#num`; the `#` is percent-encoded by [pathSegment].
+    override suspend fun item(id: String): ItemDetail {
+        val obj = request(path = "/items/${pathSegment(id)}")
+        val comments = obj.arrayOrNull("comments")?.objects()?.mapNotNull(TrackerComment::fromJson) ?: emptyList()
+        return ItemDetail(decodeItem(obj), comments)
+    }
+
+    override suspend fun createItem(new: NewItem, idempotencyKey: String?): TrackerItem =
+        decodeItem(
+            request(
+                path = "/items", method = "POST", jsonBody = new.toJson(),
+                accept = setOf(200, 201), headers = idempotencyHeaders(idempotencyKey),
+            ),
+        )
+
+    override suspend fun updateItem(id: String, patch: ItemPatch): TrackerItem =
+        decodeItem(request(path = "/items/${pathSegment(id)}", method = "PATCH", jsonBody = patch.toJson()))
+
+    override suspend fun commentItem(
+        id: String,
+        body: String,
+        attachments: List<TrackerAttachment>,
+        idempotencyKey: String?,
+    ): ItemCommentResult {
+        val json = buildJsonObject {
+            put("body", body)
+            if (attachments.isNotEmpty()) {
+                put("attachments", kotlinx.serialization.json.buildJsonArray { attachments.forEach { add(it.outgoingJson()) } })
+            }
+        }
+        val obj = request(
+            path = "/items/${pathSegment(id)}/comments", method = "POST", jsonBody = json,
+            accept = setOf(200, 201), headers = idempotencyHeaders(idempotencyKey),
+        )
+        val comment = obj.objectOrNull("comment")?.let(TrackerComment::fromJson)
+            ?: throw JournalApiError.Transport("malformed comment response")
+        return ItemCommentResult(decodeItem(obj), comment)
+    }
+
+    override suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem =
+        decodeItem(
+            request(
+                path = "/items/${pathSegment(id)}/close", method = "POST",
+                jsonBody = buildJsonObject {
+                    put("resolution", resolution.wire)
+                    comment?.let { put("comment", it) }
+                },
+            ),
+        )
+
+    override suspend fun reopenItem(id: String, comment: String?): TrackerItem =
+        decodeItem(
+            request(
+                path = "/items/${pathSegment(id)}/reopen", method = "POST",
+                jsonBody = buildJsonObject { comment?.let { put("comment", it) } },
+            ),
+        )
+
+    override suspend fun rankItem(id: String, change: ItemRankChange): TrackerItem =
+        decodeItem(request(path = "/items/${pathSegment(id)}/rank", method = "POST", jsonBody = change.toJson()))
+
     // MARK: Internals
 
     /// Escapes one path segment: everything but unreserved characters is
@@ -659,15 +744,20 @@ class JournalApi(
         return builder.build()
     }
 
+    /// [accept] is the set of statuses that count as success (the tracker's
+    /// create/comment routes answer 201, or 200 on an idempotent replay);
+    /// [headers] carries per-request extras such as `Idempotency-Key`.
     private suspend fun request(
         path: String,
         method: String = "GET",
         jsonBody: JsonObject? = null,
         query: List<Pair<String, String>> = emptyList(),
         authenticated: Boolean = true,
+        accept: Set<Int> = setOf(200),
+        headers: Map<String, String> = emptyMap(),
     ): JsonObject {
-        val (status, data) = raw(path, method, jsonBody, query, authenticated)
-        if (status != 200) throw error(status, data)
+        val (status, data) = raw(path, method, jsonBody, query, authenticated, headers = headers)
+        if (status !in accept) throw error(status, data)
         return parseJsonObjectOrNull(String(data, Charsets.UTF_8))
             ?: throw JournalApiError.Transport("non-JSON response for $path")
     }
@@ -680,9 +770,11 @@ class JournalApi(
         authenticated: Boolean = true,
         rawBody: ByteArray? = null,
         rawContentType: String? = null,
+        headers: Map<String, String> = emptyMap(),
     ): Pair<Int, ByteArray> {
         val builder = Request.Builder().url(buildUrl(path, query))
         if (authenticated) token?.let { builder.header("Authorization", "Bearer $it") }
+        headers.forEach { (name, value) -> builder.header(name, value) }
         // A raw body (media upload) sends bytes verbatim under its own content
         // type; the JSON body path is mutually exclusive with it.
         val body = when {
