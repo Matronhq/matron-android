@@ -492,6 +492,11 @@ class NewChatViewModel(
         folderCache[agent.id]?.let {
             _folders.value = it
             _foldersError.value = null
+            // The offer landed alongside those folders, after this step
+            // adopted the (then-empty) cache on entry — take it too, or the
+            // pickers stay hidden over a box that offered (Bugbot, #65).
+            adoptModelOptions(modelOptionsCache[agent.id] ?: emptyList(), defaultModelCache[agent.id])
+            adoptAgentOptions(agentOptionsCache[agent.id] ?: emptyList(), defaultAgentCache[agent.id])
             return
         }
         _foldersError.value = FOLDERS_ERROR_COPY
@@ -593,22 +598,29 @@ class NewChatViewModel(
                 capacityCache.save(capacity, agentID, now())
                 val folders = parseFolders(reply.result)
                 folderCache[agentID] = folders
-                modelOptionsCache[agentID] = parseModelOptions(reply.result)
-                agentOptionsCache[agentID] = parseAgentOptions(reply.result)
+                val offered = parseModelOptions(reply.result)
+                val agents = parseAgentOptions(reply.result)
+                val boxDefaultModel = parseDefaultModel(reply.result)
+                val boxDefaultAgent = parseDefaultAgent(reply.result)
+                modelOptionsCache[agentID] = offered
+                agentOptionsCache[agentID] = agents
                 // Absent on the wire means absent in the cache: a box that
                 // stopped declaring a default must not keep its old one.
-                val boxDefaultModel = parseDefaultModel(reply.result)
                 if (boxDefaultModel != null) defaultModelCache[agentID] = boxDefaultModel else defaultModelCache.remove(agentID)
-                val boxDefaultAgent = parseDefaultAgent(reply.result)
                 if (boxDefaultAgent != null) defaultAgentCache[agentID] = boxDefaultAgent else defaultAgentCache.remove(agentID)
                 // The folder step may already be showing this box with its own
                 // live fetch failed (it raced ahead of this reply): swap the
                 // fan-out's answer in rather than leaving a stale error over a
-                // now-warm cache (Bugbot, #36).
+                // now-warm cache (Bugbot, #36). The whole answer, not just the
+                // folders — the step opened on an empty offer, so the model
+                // picker and agent switch are waiting on this reply too
+                // (Bugbot, #65).
                 val phaseNow = _phase.value
                 if (phaseNow is Phase.Folders && phaseNow.agent.id == agentID && _foldersError.value != null) {
                     _folders.value = folders
                     _foldersError.value = null
+                    adoptModelOptions(offered, boxDefaultModel)
+                    adoptAgentOptions(agents, boxDefaultAgent)
                 }
             }
         } catch (cancel: CancellationException) {

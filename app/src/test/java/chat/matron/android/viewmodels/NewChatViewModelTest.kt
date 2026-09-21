@@ -657,6 +657,99 @@ class NewChatViewModelTest {
         assertFalse(vm.agentSwitchVisible)
     }
 
+    /// Bugbot (#65): the fan-out repair of a folder step whose live fetch
+    /// failed (see `fanOutSuccess_repairsFolderStepAfterLiveFetchFailed`)
+    /// must adopt the whole reply, not just its folders — the step opened
+    /// on an empty offer, so the switch, the default label and the `agent`
+    /// key on `start` are all waiting on it.
+    @Test
+    fun fanOutRepair_adoptsAgentAndModelOfferToo() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
+        fake.devicesResult = Result.success(agents)
+        val gate = CompletableDeferred<Unit>()
+        fake.foldersGatesByDevice[1] = ArrayDeque(listOf(gate))
+        fake.foldersSequenceByDevice[1] = ArrayDeque(
+            listOf(
+                foldersReply(
+                    """{"folders":[{"path":"/w/app","last_used":100}],"default_model":"fable",
+                     "model_options":[{"value":"fable","label":"Fable"}],"default_agent":"claude",
+                     "agent_options":[{"value":"claude","label":"Claude Code"},{"value":"codex","label":"Codex"}]}""",
+                ), // fan-out, parked
+                RPCReply.Failure("internal", null), // select()'s live call
+            ),
+        )
+        fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
+        fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
+        val vm = vmWith(fake)
+        val loading = async { vm.load() }
+        while (fake.requests.count { it.method == "recent_folders" } < 2) yield()
+
+        vm.select(agents[0]) // cache still cold → live call → fails
+        assertNotNull(vm.foldersError.value)
+        assertFalse(vm.agentSwitchVisible)
+        assertEquals("Default", vm.defaultRowTitle)
+
+        gate.complete(Unit) // the fan-out reply lands after the failure
+        loading.await()
+        assertNull(vm.foldersError.value)
+        assertEquals(listOf("/w/app"), vm.folders.value.map { it.path })
+        assertTrue("the repair brought the offer with it", vm.agentSwitchVisible)
+        assertEquals("claude", vm.selectedAgent.value)
+        assertTrue(vm.modelPickerVisible)
+        assertEquals("Default (Fable)", vm.defaultRowTitle)
+        vm.start("/w/app")
+        assertEquals(
+            "the box offered agents, so start names one",
+            "claude",
+            fake.requests.last().params["agent"]?.jsonPrimitive?.content,
+        )
+    }
+
+    /// The other completion order (see
+    /// `selectFailure_fallsBackToFanOutFoldersThatLandedMeanwhile`): the
+    /// fan-out warmed the cache while the live call was out, and the live
+    /// call then failed. Falling back to the cached folders must take the
+    /// cached offer too — the step adopted an empty cache on entry.
+    @Test
+    fun selectFailure_fallsBackToFanOutOfferThatLandedMeanwhile() = runBlocking {
+        val fake = FakeAgentRPCProvider()
+        val agents = listOf(agent(1, name = "a", connected = true), agent(2, name = "b", connected = true))
+        fake.devicesResult = Result.success(agents)
+        val fanOutGate = CompletableDeferred<Unit>()
+        val selectGate = CompletableDeferred<Unit>()
+        fake.foldersGatesByDevice[1] = ArrayDeque(listOf(fanOutGate, selectGate))
+        fake.foldersSequenceByDevice[1] = ArrayDeque(
+            listOf(
+                foldersReply(
+                    """{"folders":[],"default_model":"fable","model_options":[{"value":"fable","label":"Fable"}],
+                     "default_agent":"codex","agent_options":[{"value":"claude","label":"Claude Code"},{"value":"codex","label":"Codex"}]}""",
+                ), // fan-out
+                RPCReply.Failure("internal", null), // select()'s live call
+            ),
+        )
+        fake.repliesByDevice[2] = foldersReply("""{"folders":[]}""")
+        fake.replies["start"] = RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}"""))
+        val vm = vmWith(fake)
+        val loading = async { vm.load() }
+        while (fake.requests.count { it.method == "recent_folders" } < 2) yield()
+
+        val selecting = async { vm.select(agents[0]) } // cache cold → live call, parked
+        while (fake.requests.count { it.method == "recent_folders" } < 3) yield()
+
+        fanOutGate.complete(Unit) // cache warms while the live call is still out
+        loading.await()
+        selectGate.complete(Unit) // …and then the live call fails
+        selecting.await()
+        assertNull(vm.foldersError.value)
+        assertTrue(vm.agentSwitchVisible)
+        assertEquals("opens on the box default the cached reply named", "codex", vm.selectedAgent.value)
+        assertEquals("Fable", vm.defaultModelLabel.value)
+        vm.start("/x")
+        assertEquals("codex", fake.requests.last().params["agent"]?.jsonPrimitive?.content)
+        assertFalse("a Codex start carries no Claude model", fake.requests.last().params.containsKey("model"))
+    }
+
     @Test
     fun startErrorCopy_badAgent() {
         assertEquals(
