@@ -52,6 +52,9 @@ fun SubChatView(
     fallbackTitle: String,
     onBack: () -> Unit,
     onSwitchTo: (String) -> Unit,
+    /// `false` at the Coordinator tab's root (apple #197): that chat IS the
+    /// tab, so there is nothing to go back to — the bottom bar is the way out.
+    showsBackButton: Boolean = true,
     /// Opens a spawned session's room from an agent-spawn card or its
     /// `SpawnOutcomeRow` in this sub-chat's own timeline — same callback
     /// [ChatScreen] gets, threaded through [TimelineList].
@@ -85,8 +88,10 @@ fun SubChatView(
             TopAppBar(
                 title = { Text(title, maxLines = 1) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    if (showsBackButton) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
                     }
                 },
                 actions = {
