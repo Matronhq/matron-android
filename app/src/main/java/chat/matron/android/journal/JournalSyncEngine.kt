@@ -4,6 +4,9 @@ import chat.matron.android.journal.db.OutboxEntity
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.SessionStatusUpdate
 import chat.matron.android.events.ItemMarkerEvent
+import chat.matron.android.events.MilestoneMarkerEvent
+import chat.matron.android.events.MissionMarker
+import chat.matron.android.events.MissionMarkerEvent
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.sync.SyncService
 import java.time.Instant
@@ -144,6 +147,9 @@ class JournalSyncEngine(
     /// Tracker markers (`item` events) as they are applied — the invalidation
     /// feed for `ItemsSync`. Keyed like the other listener maps.
     private val itemMarkerListeners = mutableMapOf<UUID, (Pair<String, ItemMarkerEvent>) -> Unit>()
+    /// Mission markers (`mission` and `milestone` events) — the invalidation
+    /// feed for `MissionsSync`. One map for both types.
+    private val missionMarkerListeners = mutableMapOf<UUID, (Pair<String, MissionMarker>) -> Unit>()
 
     // MARK: Offline outbox state (guarded by `lock`)
 
@@ -569,6 +575,16 @@ class JournalSyncEngine(
         awaitClose { synchronized(lock) { itemMarkerListeners.remove(id) } }
     }
 
+    /// Mission markers (`mission` and `milestone` events) as they are
+    /// applied, live AND from a reconnect replay — `(convoID, marker)` pairs.
+    /// One stream for both types: `MissionsSync`'s reaction to either is the
+    /// same, refetch that mission. Mirrors [itemMarkers].
+    fun missionMarkers(): Flow<Pair<String, MissionMarker>> = callbackFlow {
+        val id = UUID.randomUUID()
+        synchronized(lock) { missionMarkerListeners[id] = { m -> trySend(m) } }
+        awaitClose { synchronized(lock) { missionMarkerListeners.remove(id) } }
+    }
+
     /// Emits the id of a conversation created live (first-ever frame while
     /// `.running`). A reconnect backlog does NOT replay through here.
     override fun newConversations(): Flow<String> = callbackFlow {
@@ -650,6 +666,15 @@ class JournalSyncEngine(
         if (event.type != JournalEventType.ITEM) return
         val marker = ItemMarkerEvent.parse(event.payload) ?: return
         synchronized(lock) { itemMarkerListeners.values.forEach { it(event.convoID to marker) } }
+    }
+
+    private fun publishMissionMarker(event: JournalEvent) {
+        val marker: MissionMarker = when (event.type) {
+            JournalEventType.MILESTONE -> MilestoneMarkerEvent.parse(event.payload)?.let { MissionMarker.Milestone(it) } ?: return
+            JournalEventType.MISSION -> MissionMarkerEvent.parse(event.payload)?.let { MissionMarker.Mission(it) } ?: return
+            else -> return
+        }
+        synchronized(lock) { missionMarkerListeners.values.forEach { it(event.convoID to marker) } }
     }
 
     // MARK: RPC correlator
@@ -880,7 +905,7 @@ class JournalSyncEngine(
         }
         val applied = store.applyJournalBatch(buffer.toList())
         buffer.clear()
-        applied.forEach { indexForSearch(it); publishItemMarker(it) }
+        applied.forEach { indexForSearch(it); publishItemMarker(it); publishMissionMarker(it) }
         var count = appliedSinceAck + applied.size
         if (count >= 50) {
             runCatching { connection.send(ClientOp.Ack(store.cursor())) }
@@ -918,6 +943,7 @@ class JournalSyncEngine(
                 if (store.applyJournal(event)) {
                     indexForSearch(event)
                     publishItemMarker(event)
+                    publishMissionMarker(event)
                     applied += 1
                     if (applied >= 50) {
                         runCatching { connection.send(ClientOp.Ack(store.cursor())) }
