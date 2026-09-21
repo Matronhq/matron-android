@@ -59,6 +59,23 @@ class AppShellNavigation(var host: Host? = null) {
     private val entryIDs: MutableMap<AppTab, MutableList<String>> =
         AppTab.entries.associateWith { mutableListOf<String>() }.toMutableMap()
 
+    /// The path value a rule below has just navigated to, per tab, so the
+    /// mirror stays idempotent (Bugbot, #75): the rule updates the path
+    /// FIRST and the controller then reports the same destination as a new
+    /// entry — without this token [noteDestination] would append it a
+    /// second time (`[id, id]`), the sole-open-chat check would stop
+    /// matching, and a repeated `openChat` for the same room would remount
+    /// the screen. A matching report binds the entry id to the existing
+    /// top instead; the token is one-shot.
+    private val expected: MutableMap<AppTab, String?> = mutableMapOf()
+
+    /// Records [pathValue] as the destination the controller is about to
+    /// report for [tab], then runs the host command that navigates there.
+    private fun navigateExpecting(tab: AppTab, pathValue: String, command: () -> Unit) {
+        expected[tab] = pathValue
+        command()
+    }
+
     /// Open a top-level conversation by REPLACING the whole Conversations
     /// path, never appending: notification taps, search results and
     /// auto-opened new conversations used to stack chat-on-chat. Back from
@@ -68,7 +85,7 @@ class AppShellNavigation(var host: Host? = null) {
         selectTabInternal(AppTab.CONVERSATIONS)
         if (chatPath != listOf(roomID)) {
             chatPath = listOf(roomID)
-            host?.replaceChats(roomID)
+            navigateExpecting(AppTab.CONVERSATIONS, roomID) { host?.replaceChats(roomID) }
         }
     }
 
@@ -79,14 +96,15 @@ class AppShellNavigation(var host: Host? = null) {
         selectTabInternal(AppTab.CONVERSATIONS)
         if (chatPath.lastOrNull() != convoID) {
             chatPath = chatPath + convoID
-            host?.pushChat(convoID)
+            navigateExpecting(AppTab.CONVERSATIONS, convoID) { host?.pushChat(convoID) }
         }
     }
 
     /// Push an item's detail on the Decisions stack. Never changes the tab.
     fun pushDecision(itemID: String) {
-        decisionsPath = decisionsPath + itemRoute(itemID)
-        host?.pushDecision(itemID)
+        val value = itemRoute(itemID)
+        decisionsPath = decisionsPath + value
+        navigateExpecting(AppTab.DECISIONS, value) { host?.pushDecision(itemID) }
     }
 
     /// A bar tap: select [tab], or pop the already-selected tab to its root
@@ -134,12 +152,22 @@ class AppShellNavigation(var host: Host? = null) {
         }
         val current = path(tab)
         val index = ids.indexOf(entryID)
-        if (index >= 0 && index < current.size) {
-            while (ids.size > index + 1) ids.removeAt(ids.size - 1)
-            setPath(tab, current.take(index + 1))
-        } else {
-            ids.add(entryID)
-            setPath(tab, current + pathValue)
+        val pending = expected.remove(tab)
+        when {
+            index >= 0 && index < current.size -> {
+                while (ids.size > index + 1) ids.removeAt(ids.size - 1)
+                setPath(tab, current.take(index + 1))
+            }
+            pending != null && pending == pathValue && pathValue == current.lastOrNull() -> {
+                // The rule already put this value on top; bind the entry id
+                // to it rather than appending a duplicate.
+                while (ids.size > current.size - 1) ids.removeAt(ids.size - 1)
+                ids.add(entryID)
+            }
+            else -> {
+                ids.add(entryID)
+                setPath(tab, current + pathValue)
+            }
         }
     }
 
