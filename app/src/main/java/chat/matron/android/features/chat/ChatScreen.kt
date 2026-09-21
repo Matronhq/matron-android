@@ -16,8 +16,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.AccountTree
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
@@ -26,7 +24,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -72,7 +69,8 @@ import chat.matron.android.designsystem.EmptyChatPlaceholder
 import chat.matron.android.designsystem.JumpToBottomButton
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.PaginatingHeader
-import chat.matron.android.designsystem.StopTurnButton
+import chat.matron.android.designsystem.ChatTopTrailingControls
+import chat.matron.android.designsystem.chatTopTrailingShowsJump
 import chat.matron.android.designsystem.SubtaskLinkCard
 import chat.matron.android.designsystem.TimelineLoadingIndicator
 import chat.matron.android.designsystem.UsageMetersFormat
@@ -89,10 +87,10 @@ import kotlinx.coroutines.launch
 
 /**
  * Full chat screen. Ports Features/Chat/ChatView.swift: the timeline (windowed
- * rows via [TimelineList]) above a [ComposerView], a running-subagent strip, a
- * session-status sheet, and a subagent switcher. The elaborate iOS scroll-
- * anchoring machinery has no Compose analogue — a [LazyListState] keeps the tail
- * pinned and drives near-top backward pagination.
+ * rows via [TimelineList]) above a [ComposerView], a running-subagent strip, and
+ * a session-status sheet (context gauge, usage bars, this chat's subagents). The
+ * elaborate iOS scroll-anchoring machinery has no Compose analogue — a
+ * [LazyListState] keeps the tail pinned and drives near-top backward pagination.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -300,39 +298,14 @@ fun ChatScreen(
                     }
                     // One ellipsis menu instead of a row of icon buttons —
                     // trailing icons squeezed the title down to a few
-                    // characters (apple #150). Sub-chats stay a flat section
-                    // shown whenever this chat has ANY children (running or
-                    // finished): the running strip hides itself the moment
-                    // the last subagent finishes, so without this the only
-                    // way back into a finished sub-chat is its timeline card.
+                    // characters (apple #150). The sub-chats section that
+                    // used to lead this menu now lives in the Session Info
+                    // sheet (Dan, 2026-09-09, apple #189: the toolbar carried
+                    // too many items and the subagents menu is rarely used).
                     IconButton(onClick = { menuOpen = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "Chat options")
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        if (children.isNotEmpty()) {
-                            Text(
-                                "Subagents",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                            )
-                            children.forEach { child ->
-                                DropdownMenuItem(
-                                    text = { Text(child.title) },
-                                    leadingIcon = {
-                                        Icon(
-                                            if (child.isRunning) Icons.Default.AccountTree else Icons.Default.Check,
-                                            contentDescription = if (child.isRunning) "Running" else "Finished",
-                                        )
-                                    },
-                                    onClick = {
-                                        menuOpen = false
-                                        onOpenChild(child.id)
-                                    },
-                                )
-                            }
-                            HorizontalDivider()
-                        }
                         // Apple's photo.on.rectangle.angled toolbar button lives
                         // in the single ellipsis menu here (apple #142 + #150).
                         if (mediaBrowser != null) {
@@ -408,6 +381,7 @@ fun ChatScreen(
                     activityLabel = activityLabel,
                     isTurnRunning = isTurnRunning,
                     onStopTurn = { compactScope.launch { chatVM.sendCommand("!esc") } },
+                    onJumpToLastOwnMessage = { compactScope.launch { chatVM.jumpToLastOwnMessage() } },
                     onOpenChild = onOpenChild,
                     onOpenConversation = onOpenConversation,
                     onPreviewImage = { previewModel = it },
@@ -423,7 +397,17 @@ fun ChatScreen(
     if (showSessionStatus) {
         val sheetState = rememberModalBottomSheetState()
         ModalBottomSheet(onDismissRequest = { showSessionStatus = false }, sheetState = sheetState) {
-            SessionStatusSheet(viewModel = chatVM, onDismiss = { showSessionStatus = false }, boxName = boxName)
+            // The sheet carries this chat's subagents (apple #189). It can't
+            // navigate itself; a row tap dismisses it, then reports the
+            // child's id here — the same dismiss-then-act handoff the
+            // summaries sheet uses for its jump.
+            SessionStatusSheet(
+                viewModel = chatVM,
+                onDismiss = { showSessionStatus = false },
+                boxName = boxName,
+                subagents = children,
+                onOpenSubagent = onOpenChild,
+            )
         }
     }
     if (showMediaBrowser && mediaBrowser != null) {
@@ -432,27 +416,6 @@ fun ChatScreen(
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(onDismissRequest = { showMediaBrowser = false }, sheetState = sheetState) {
             MediaBrowserSheet(chatVM = chatVM, viewModelFactory = mediaBrowser)
-        }
-    }
-    if (showSwitcher) {
-        val sheetState = rememberModalBottomSheetState()
-        ModalBottomSheet(onDismissRequest = { showSwitcher = false }, sheetState = sheetState) {
-            Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-                Text("Subagents", style = MaterialTheme.typography.titleMedium)
-                children.forEach { child ->
-                    Text(
-                        text = (if (child.isRunning) "● " else "✓ ") + child.title,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                showSwitcher = false
-                                onOpenChild(child.id)
-                            }
-                            .padding(vertical = 12.dp),
-                    )
-                    androidx.compose.material3.HorizontalDivider()
-                }
-            }
         }
     }
     previewGallery?.let { gallery ->
@@ -518,6 +481,10 @@ fun TimelineList(
     // OR-ed in as a fast path in case a session_state frame is missed.
     isTurnRunning: Boolean = false,
     onStopTurn: (() -> Unit)? = null,
+    // Floating "jump to my last message" — also main-pane only. Sits under
+    // Stop, or in its place when no turn is running, and shows on the same
+    // signal as the bottom jump-to-latest pill (apple #211, tracker #270).
+    onJumpToLastOwnMessage: (() -> Unit)? = null,
 ) {
     val rows by chatVM.windowedRows.collectAsStateWithLifecycle()
     val settledEmpty by chatVM.settledEmpty.collectAsStateWithLifecycle()
@@ -693,9 +660,20 @@ fun TimelineList(
             )
         }
 
-        if (onStopTurn != null && (isTurnRunning || activityLabel != null)) {
-            StopTurnButton(
-                onClick = onStopTurn,
+        // Floating top-trailing controls: Stop above "jump to my last
+        // message" — or jump alone, in Stop's slot, once no turn is running.
+        // Stop is solid for the whole turn: `isTurnRunning` (durable
+        // session_state, flipped at turn start/end) carries it; the ephemeral
+        // activity label is OR-ed in as a fast path in case a session_state
+        // frame is missed. Jump is "the one thing scrolling can't find"
+        // (item #60) — agent-independent, needs no mission, no milestone, no
+        // summary model, only the local mirror.
+        if (onStopTurn != null || onJumpToLastOwnMessage != null) {
+            ChatTopTrailingControls(
+                showsStop = onStopTurn != null && (isTurnRunning || activityLabel != null),
+                showsJump = onJumpToLastOwnMessage != null && chatTopTrailingShowsJump(isFollowingTail = followTail),
+                onStop = onStopTurn ?: {},
+                onJump = onJumpToLastOwnMessage ?: {},
                 modifier = Modifier.align(Alignment.TopEnd),
             )
         }

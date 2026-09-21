@@ -659,6 +659,8 @@ class JournalTimelineService(
 
     override fun connectionState(): Flow<SyncConnectionState> = engine.stateStream
 
+    override suspend fun newestOwnMessageSeq(): Long? = store.newestOwnMessageSeq(convoID)
+
     override suspend fun markAsRead() {
         val maxSeq = store.maxSeq(convoID) ?: return
         try {

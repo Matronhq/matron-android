@@ -366,6 +366,31 @@ class JournalStore(
 
     suspend fun maxSeq(convoID: String): Long? = eventDao.maxSeq(convoID)
 
+    /// Seq of the newest message the user themself sent in [convoID] — a
+    /// `text`, `image` or `file` row from [ownSender] — or null when they
+    /// never wrote there. The chat view's "jump to my last message" control
+    /// lands on it (apple #202, item #60). Skips the journal's `fallback_for`
+    /// text mirrors of item markers: those carry the user's sender but were
+    /// never typed. The mirror check reads the payload in Kotlin rather than
+    /// via `json_extract` (the Apple original's reason is a BLOB column; here
+    /// it keeps the query free of the JSON1 extension), so the scan walks own
+    /// rows newest-first in batches until it finds a real message or runs out
+    /// (CodeRabbit, apple #202: a fixed cut-off could be exhausted by mirrors
+    /// alone).
+    suspend fun newestOwnMessageSeq(convoID: String): Long? {
+        var before = Long.MAX_VALUE
+        while (true) {
+            val batch = eventDao.ownMessagesBeforeNewestFirst(
+                convoID, ownSender, OWN_MESSAGE_TYPES, before, OWN_MESSAGE_SCAN_BATCH,
+            )
+            batch.firstOrNull { row ->
+                (parseJsonObjectOrNull(row.payload) ?: JsonObject(emptyMap()))["fallback_for"] == null
+            }?.let { return it.seq }
+            if (batch.size < OWN_MESSAGE_SCAN_BATCH) return null
+            before = batch.last().seq
+        }
+    }
+
     suspend fun setMuted(muted: Boolean, convoID: String) = conversationDao.setMuted(muted, convoID)
 
     suspend fun setHidden(hidden: Boolean, convoID: String) = conversationDao.setHidden(hidden, convoID)
@@ -1016,11 +1041,19 @@ class JournalStore(
         else -> event.snippet()?.take(120) ?: "[${event.type}]"
     }
 
-    private companion object {
-        const val CURSOR_KEY = "cursor"
-        const val TTL_MS = 24L * 3600 * 1000
-        const val ITEMS_WATERMARK_PREFIX = "items_watermark_"
-        const val ITEMS_WATERMARK_ALL_KEY = "items_watermark_all"
-        const val ITEMS_WATERMARK_CONVO_PREFIX = "items_watermark_convo_"
+    companion object {
+        private const val CURSOR_KEY = "cursor"
+        private const val TTL_MS = 24L * 3600 * 1000
+        private const val ITEMS_WATERMARK_PREFIX = "items_watermark_"
+        private const val ITEMS_WATERMARK_ALL_KEY = "items_watermark_all"
+        private const val ITEMS_WATERMARK_CONVO_PREFIX = "items_watermark_convo_"
+
+        /// The event types a person produces from the composer.
+        private val OWN_MESSAGE_TYPES = listOf(JournalEventType.TEXT, JournalEventType.IMAGE, JournalEventType.FILE)
+
+        /// Rows per batch in [newestOwnMessageSeq]'s scan. Mirrors are rare —
+        /// one per item marker at most — so the first batch almost always
+        /// answers; the loop exists for correctness, not throughput.
+        internal const val OWN_MESSAGE_SCAN_BATCH = 50
     }
 }

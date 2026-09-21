@@ -109,8 +109,16 @@ class ChatViewModel(
     /// the destination's start(), or a cached VM whose previous view already
     /// ran stop()): fires on the restarted stream's first delivery. Focusing
     /// against a dead stream would sample paginate growth against nothing and
-    /// falsely latch `reachedHistoryStart`.
+    /// falsely latch `reachedHistoryStart`. Shared by in-conversation search
+    /// and the last-own-message jump; [focusOwner] says whose it is.
     private var pendingChatSearchFocusSeq: Long? = null
+
+    /// Which feature started the jump [focusOrPark] is running or has parked.
+    /// Dismissing the search bar must abort only search's own jump — a "jump
+    /// to my last message" in flight while the bar happens to be up would
+    /// otherwise die with it (Bugbot, apple #202).
+    private enum class FocusOwner { Search, LastOwnMessage }
+    private var focusOwner: FocusOwner? = null
 
     /// Bumped by every [beginChatSearch] and [endChatSearch]; an in-flight
     /// query whose generation moved on discards its result.
@@ -138,12 +146,31 @@ class ChatViewModel(
         // dropped rather than derailing navigation.
         val seqs = hits.mapNotNull { it.id.toLongOrNull() }
         _chatSearch.value = ChatSearchState(trimmed, seqs, 0)
-        pendingChatSearchFocusSeq = null
-        val newest = seqs.firstOrNull() ?: run { focusTask?.cancel(); return }
-        focusOrPark(newest)
+        val newest = seqs.firstOrNull() ?: run {
+            // A re-query with no hits shows "No matches" — an earlier query's
+            // still-paginating deep jump landing after that would scroll the
+            // transcript to a match that no longer exists in the bar, and its
+            // parked seq must not fire on the next snapshot either. Only
+            // search's OWN jump dies here: a last-message jump in flight
+            // while the user types a query that finds nothing keeps going
+            // (Bugbot, apple #202 — see [FocusOwner]).
+            if (focusOwner == FocusOwner.Search) {
+                pendingChatSearchFocusSeq = null
+                focusTask?.cancel()
+                focusOwner = null
+            }
+            return
+        }
+        // A hit supersedes whatever jump was running or parked, whoever owned
+        // it — the user just asked for this one.
+        focusOrPark(newest, FocusOwner.Search)
     }
 
-    private suspend fun focusOrPark(seq: Long) {
+    /// Runs a jump when the items stream is live; parks it otherwise (see
+    /// [pendingChatSearchFocusSeq]). Shared by search and the last-own-message
+    /// jump; [owner] records whose jump is running or parked.
+    private suspend fun focusOrPark(seq: Long, owner: FocusOwner) {
+        focusOwner = owner
         if (_hasReceivedFirstSnapshot.value && observationTask?.isActive == true) {
             pendingChatSearchFocusSeq = null
             focus(seq)
@@ -182,17 +209,65 @@ class ChatViewModel(
         val next = state.index + (if (older) 1 else -1)
         if (next !in state.matchSeqs.indices) return
         _chatSearch.value = state.copy(index = next)
-        focusOrPark(state.matchSeqs[next])
+        focusOrPark(state.matchSeqs[next], FocusOwner.Search)
     }
 
-    /// Dismisses the bar and abandons any jump in flight — a deep hit's
-    /// pagination would otherwise land `pendingFocusID` after the user closed
-    /// search, scrolling the transcript out from under them.
+    /// Dismisses the bar and abandons search's own jump in flight — a deep
+    /// hit's pagination would otherwise land `pendingFocusID` after the user
+    /// closed search, scrolling the transcript out from under them.
     fun endChatSearch() {
         chatSearchGeneration += 1
         _chatSearch.value = null
+        // Only search's own jump dies with the bar; see [FocusOwner].
+        if (focusOwner != FocusOwner.Search) return
         pendingChatSearchFocusSeq = null
         focusTask?.cancel()
+        focusOwner = null
+    }
+
+    // MARK: - Jump to my last message (apple #202, item #60)
+
+    /// Scrolls the transcript to the newest message the user themself sent:
+    /// the one thing scrolling can't find once an agent has run unattended
+    /// for hours. Asks the timeline service first — the journal mirror knows
+    /// the answer across the whole history — and falls back to the newest own
+    /// row already loaded for transports without a mirror. Rides the same
+    /// park-until-live jump as in-conversation search, so a tap before the
+    /// first snapshot lands once the stream is up. Returns `false` when there
+    /// is nothing to land on (the user never wrote in this conversation); the
+    /// view keeps the transcript where it is.
+    suspend fun jumpToLastOwnMessage(): Boolean {
+        val wasLive = observationTask != null
+        val mirrorSeq = try {
+            timeline.newestOwnMessageSeq()
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            null
+        }
+        // The view left while the mirror was answering (`stop()` ran):
+        // parking now would fire a jump the user no longer wants on the next
+        // open of this room (CodeRabbit, apple #202). A cold tap — never
+        // live — still parks, as intended.
+        if (wasLive && observationTask == null) return false
+        val seq = mirrorSeq ?: newestLoadedOwnMessageSeq() ?: return false
+        focusOrPark(seq, FocusOwner.LastOwnMessage)
+        return true
+    }
+
+    /// Newest loaded row the user sent from the composer, by seq. A local
+    /// echo's id isn't a seq (`echo:…`) and isn't a landable row either, so
+    /// it's skipped rather than ending the scan.
+    private fun newestLoadedOwnMessageSeq(): Long? {
+        for (item in _items.value.asReversed()) {
+            if (!item.isOwn) continue
+            when (item.kind) {
+                is TimelineItem.Kind.Text, is TimelineItem.Kind.Image, is TimelineItem.Kind.File ->
+                    item.id.toLongOrNull()?.let { return it }
+                else -> continue
+            }
+        }
+        return null
     }
 
     // MARK: - Published state
@@ -1104,6 +1179,11 @@ class ChatViewModel(
         historyRefillTask = null
         focusTask?.cancel()
         focusTask = null
+        // Leaving the room drops any parked jump, whoever owns it: a target
+        // parked before this view's first snapshot must not fire on the
+        // room's next open, days later (apple #202).
+        pendingChatSearchFocusSeq = null
+        focusOwner = null
         // Drop any unconsumed TOC jump target. VM instances are cached across
         // visits and `pendingFocusID` is a StateFlow, so a new collector
         // receives the current value immediately: a target still set when the
