@@ -48,11 +48,42 @@ class VoiceRecorderHandoffTest {
         assertEquals(0, fake.stopCalls)
         assertEquals("room", VoiceRecorderHandoff.parkedRoomID())
 
-        val reclaimed = VoiceRecorderHandoff.reclaim("room")
+        val reclaimed = VoiceRecorderHandoff.parkedFor("room")
         assertSame(host, reclaimed)
         assertTrue(reclaimed!!.recorder.state.value is VoiceRecorder.State.Recording)
-        assertNull("handed over once", VoiceRecorderHandoff.reclaim("room"))
+        VoiceRecorderHandoff.confirmReclaim("room", reclaimed)
+        assertNull("handed over once", VoiceRecorderHandoff.parkedFor("room"))
         assertNull(VoiceRecorderHandoff.parkedRoomID())
+    }
+
+    /// A `remember` calculation may run in a composition Compose discards and
+    /// retries (Bugbot, android #70): reading the parked note must not take
+    /// it, or the retry finds nothing and the live capture is orphaned with
+    /// its microphone session. Only the committed composer's confirmation
+    /// releases the entry.
+    @Test
+    fun readingTheParkedNoteTwice_returnsTheSameLiveHostUntilConfirmed() {
+        val fake = FakeAudioRecorder()
+        val host = recordingHost(fake)
+        VoiceRecorderHandoff.onComposerDisposed("room", host, appLocked = true)
+
+        assertSame("abandoned composition", host, VoiceRecorderHandoff.parkedFor("room"))
+        assertSame("retried composition", host, VoiceRecorderHandoff.parkedFor("room"))
+        assertTrue(host.recorder.state.value is VoiceRecorder.State.Recording)
+        assertEquals(0, fake.stopCalls)
+
+        VoiceRecorderHandoff.confirmReclaim("room", host)
+        assertNull(VoiceRecorderHandoff.parkedFor("room"))
+    }
+
+    /// A composer that ended up with a fresh recorder (the read happened
+    /// before the park) must not evict the note parked for its room.
+    @Test
+    fun confirmingWithADifferentHost_leavesTheParkedNoteAlone() {
+        val parkedHost = recordingHost()
+        VoiceRecorderHandoff.onComposerDisposed("room", parkedHost, appLocked = true)
+        VoiceRecorderHandoff.confirmReclaim("room", host())
+        assertSame(parkedHost, VoiceRecorderHandoff.parkedFor("room"))
     }
 
     @Test
@@ -62,22 +93,22 @@ class VoiceRecorderHandoffTest {
         assertFalse(VoiceRecorderHandoff.onComposerDisposed("room", host, appLocked = false))
         assertEquals(1, fake.stopCalls)
         assertEquals(VoiceRecorder.State.Idle, host.recorder.state.value)
-        assertNull(VoiceRecorderHandoff.reclaim("room"))
+        assertNull(VoiceRecorderHandoff.parkedFor("room"))
     }
 
     @Test
     fun lockedWhileIdle_parksNothing() {
         val host = host()
         assertFalse(VoiceRecorderHandoff.onComposerDisposed("room", host, appLocked = true))
-        assertNull(VoiceRecorderHandoff.reclaim("room"))
+        assertNull(VoiceRecorderHandoff.parkedFor("room"))
     }
 
     @Test
     fun reclaimForAnotherRoom_leavesTheParkedNoteAlone() {
         val host = recordingHost()
         VoiceRecorderHandoff.onComposerDisposed("a", host, appLocked = true)
-        assertNull(VoiceRecorderHandoff.reclaim("b"))
-        assertSame(host, VoiceRecorderHandoff.reclaim("a"))
+        assertNull(VoiceRecorderHandoff.parkedFor("b"))
+        assertSame(host, VoiceRecorderHandoff.parkedFor("a"))
     }
 
     @Test
@@ -88,7 +119,7 @@ class VoiceRecorderHandoffTest {
         val fresh = recordingHost()
         VoiceRecorderHandoff.onComposerDisposed("room", fresh, appLocked = true)
         assertEquals("the stale mic claim is released", 1, staleFake.stopCalls)
-        assertSame(fresh, VoiceRecorderHandoff.reclaim("room"))
+        assertSame(fresh, VoiceRecorderHandoff.parkedFor("room"))
     }
 
     /// The reclaimed recorder must run the NEXT composer's launcher, not the

@@ -22,8 +22,9 @@ class VoiceRecorderHost(val bindings: VoiceRecorderBindings, val recorder: Voice
 /// alive in the background, that turned every app switch (with the Immediate
 /// timeout) into a discarded note. A composer disposed while the app is locked
 /// parks its live recording here instead; the composer that next opens the
-/// same room reclaims it, still recording, and `SignedInApp` steers the
-/// post-unlock navigation into that room so the reclaim actually happens.
+/// same room reads it back ([parkedFor]) still recording, takes ownership once
+/// its composition is committed ([confirmReclaim]), and `SignedInApp` steers
+/// the post-unlock navigation into that room so that actually happens.
 /// Any other teardown — navigating away, leaving the chat — still cancels, as
 /// before: the note is bound to the room it was started in.
 ///
@@ -49,8 +50,20 @@ object VoiceRecorderHandoff {
         return true
     }
 
-    /// Hands a parked recording back to the composer for [roomID], once.
-    fun reclaim(roomID: String): VoiceRecorderHost? = parked.remove(roomID)
+    /// The recording parked for [roomID], if any — a read, not a takeover.
+    /// Meant to be called from composition (inside `remember`), which Compose
+    /// may run and then discard without retaining the result; removing the
+    /// entry there would orphan a live capture and its microphone session.
+    /// Calling this twice before [confirmReclaim] returns the same host.
+    fun parkedFor(roomID: String): VoiceRecorderHost? = parked[roomID]
+
+    /// The composer that read [host] via [parkedFor] is now committed (a
+    /// `DisposableEffect` ran) and owns it: drop the parked entry. Identity-
+    /// checked so a composer holding a fresh recorder never evicts a note
+    /// parked for the same room by someone else.
+    fun confirmReclaim(roomID: String, host: VoiceRecorderHost) {
+        if (parked[roomID] === host) parked.remove(roomID)
+    }
 
     /// The room a parked recording belongs to, if any — where the app should
     /// land after unlock.

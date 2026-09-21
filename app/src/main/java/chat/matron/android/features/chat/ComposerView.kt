@@ -130,10 +130,13 @@ fun ComposerView(viewModel: ComposerViewModel) {
         ActivityResultContracts.RequestPermission(),
     ) { granted -> pendingPermission[0]?.complete(granted); pendingPermission[0] = null }
     // A note still recording when the app lock replaced this composition is
-    // reclaimed here rather than started over (see VoiceRecorderHandoff); the
-    // composition-bound wiring is rebound below either way.
+    // picked up here rather than started over (see VoiceRecorderHandoff); the
+    // composition-bound wiring is rebound below either way. Only a read: a
+    // `remember` calculation can run in a composition Compose then discards,
+    // so the parked entry is released in the DisposableEffect below, once
+    // this composition has actually committed.
     val host = remember {
-        VoiceRecorderHandoff.reclaim(viewModel.roomID) ?: makeVoiceRecorderHost(context)
+        VoiceRecorderHandoff.parkedFor(viewModel.roomID) ?: makeVoiceRecorderHost(context)
     }
     val recorder = host.recorder
     val isAppLocked = LocalAppLockActive.current
@@ -181,6 +184,8 @@ fun ComposerView(viewModel: ComposerViewModel) {
         // reused on revisit, so a `sendError` left undismissed from a prior
         // visit would otherwise resurface here as if it just happened.
         viewModel.dismissError()
+        // Committed: this composer owns the recorder it read from the handoff.
+        VoiceRecorderHandoff.confirmReclaim(viewModel.roomID, host)
         if (viewModel.input.isEmpty()) {
             ComposerDraftMemory.retrieve(viewModel.roomID)?.let { draft ->
                 viewModel.input = draft
