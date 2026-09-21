@@ -4,6 +4,7 @@ import chat.matron.android.events.AgentChatRequest
 import chat.matron.android.events.AgentSpawnRequest
 import chat.matron.android.events.AskUserEvent
 import chat.matron.android.events.DiffEvent
+import chat.matron.android.events.ItemMarkerEvent
 import chat.matron.android.events.LiveOutputEvent
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.events.ToolCallEvent
@@ -130,6 +131,13 @@ data class TimelineItem(
             val eventID: String,
             val outcome: SpawnOutcome,
         ) : Kind
+        /// Tracker marker (spec 2026-09-08, apple #186): `created`/`closed`
+        /// render as a compact card, `commented`/`reopened` as a one-line
+        /// note with the reply body in full underneath (apple #210);
+        /// `reordered`/`updated` never reach the timeline. `eventID` is the
+        /// journal seq — there is no underlying Matrix event to correlate
+        /// against, the row exists purely to surface the marker inline.
+        data class ItemMarker(val eventID: String, val marker: ItemMarkerEvent) : Kind
         /// Transient typing / tool-use indicator. Not persisted; appended as a
         /// trailing overlay row while the agent is thinking or running a tool.
         data class ActivityIndicator(val label: String) : Kind

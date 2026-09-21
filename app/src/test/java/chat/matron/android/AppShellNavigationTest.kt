@@ -88,6 +88,33 @@ class AppShellNavigationTest {
         assertEquals(listOf("pushDecision:it_9"), host.commands)
     }
 
+    /// A double tap on a Decisions row: the host's own push no-ops for the
+    /// item already on top, so the shell must not grow the mirror or arm a
+    /// second expectation for it — the same rule `pushChat` applies at the
+    /// shell (Bugbot on #78).
+    @Test
+    fun pushDecisionIsIdempotentForTheItemAlreadyOnTop() {
+        val host = RecordingHost()
+        val nav = AppShellNavigation(host)
+        nav.pushDecision("it_9")
+        nav.pushDecision("it_9")
+        assertEquals("one path entry, not two", listOf("item/it_9"), nav.decisionsPath)
+        assertEquals("one host command, not two", listOf("pushDecision:it_9"), host.commands)
+        // The controller reports the one entry the first push made: the
+        // expectation binds it, and the mirror still shows one entry.
+        nav.noteDestination(AppTab.DECISIONS, "e1", "item/it_9")
+        assertEquals(listOf("item/it_9"), nav.decisionsPath)
+        // No token is left dangling: a later, genuine second entry for the
+        // same value (pushed by the controller itself) is mirrored as a
+        // push rather than swallowed as the tail of the earlier tap.
+        nav.noteDestination(AppTab.DECISIONS, "e2", "item/it_9")
+        assertEquals(listOf("item/it_9", "item/it_9"), nav.decisionsPath)
+        // A different item still pushes normally afterwards.
+        nav.pushDecision("it_10")
+        assertEquals(listOf("item/it_9", "item/it_9", "item/it_10"), nav.decisionsPath)
+        assertEquals(listOf("pushDecision:it_9", "pushDecision:it_10"), host.commands)
+    }
+
     @Test
     fun selectTabSwitchesOrPopsTheSelectedTabToRoot() {
         val host = RecordingHost()

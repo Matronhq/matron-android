@@ -6,6 +6,7 @@ import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.ItemState
 import chat.matron.android.models.ItemsScope
+import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
 import java.time.Instant
@@ -46,6 +47,18 @@ class ItemsViewsTest {
         assertEquals("Question 12, Which auth?, needs you, mission #61", itemRowAccessibilityLabel(item(kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, missionNum = 61)))
         assertEquals("#61", itemMissionChipText(item(missionNum = 61)))
         assertNull(itemMissionChipText(item()))
+    }
+
+    /// apple #227: a wordless voice note reads "Transcribing…" while the
+    /// journal's job runs, and "Couldn't transcribe — tap to listen" once it
+    /// failed; words, when present, win over either state.
+    @Test
+    fun voiceNoteCaptionShowsTheTranscriptionState() {
+        val note = TrackerAttachment(blobRef = "b", mime = "audio/m4a", name = "v.m4a", size = 1)
+        assertEquals("Transcribing…" to true, itemVoiceNoteCaption(note))
+        assertEquals("Transcribing…" to true, itemVoiceNoteCaption(note.copy(transcriptStatus = "pending")))
+        assertEquals("Couldn’t transcribe — tap to listen" to true, itemVoiceNoteCaption(note.copy(transcriptStatus = "failed")))
+        assertEquals("use option A" to false, itemVoiceNoteCaption(note.copy(transcript = "use option A", transcriptStatus = "failed")))
     }
 
     @Test

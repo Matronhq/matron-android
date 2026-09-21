@@ -226,8 +226,15 @@ class AppShellNavigation(var host: Host? = null) {
     }
 
     /// Push an item's detail on the Decisions stack. Never changes the tab.
+    /// Idempotent for the item already on top, decided HERE like [pushChat]
+    /// — before the mirror grows and before the one-shot expectation is
+    /// set — so a double tap on a Decisions row cannot leave the path with
+    /// an entry the controller (whose own push no-ops for the same item)
+    /// never has, nor a dangling token that would swallow the next genuine
+    /// report of that value (Bugbot on #78).
     fun pushDecision(itemID: String) {
         val value = itemRoute(itemID)
+        if (decisionsPath.lastOrNull() == value) return
         decisionsPath = decisionsPath + value
         navigateExpecting(AppTab.DECISIONS, value) { host?.pushDecision(itemID) }
     }

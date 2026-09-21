@@ -58,6 +58,8 @@ import chat.matron.android.designsystem.AppLockShield
 import chat.matron.android.designsystem.LocalAppLockActive
 import chat.matron.android.designsystem.MatronAppearance
 import chat.matron.android.designsystem.MatronTheme
+import chat.matron.android.designsystem.TrackerItemLinkHost
+import chat.matron.android.designsystem.TrackerItemLinkOutcome
 import chat.matron.android.designsystem.SyncBannerState
 import chat.matron.android.designsystem.needsYouBadgeText
 import chat.matron.android.designsystem.syncBannerStateFrom
@@ -292,6 +294,24 @@ fun openConversationCallback(
     }
 }
 
+/// Whether item [itemID]'s detail is already the top destination of the tab
+/// whose routes start with [prefix] — in which case a push must no-op, the
+/// same rule the chat opens follow (`AppShellNavigation.pushChat`). An inline
+/// card's tap navigates at once, so a double tap would otherwise push two
+/// identical details and Back would land on the same item again (Bugbot on
+/// #78). Pure over the current entry's route pattern and its `itemID`
+/// argument so the rule is unit-testable without a NavController.
+fun itemIsAlreadyOnTop(currentRoute: String?, currentItemID: String?, prefix: String, itemID: String): Boolean =
+    currentRoute == "${prefix}item/{itemID}" && currentItemID == itemID
+
+/// Push item [itemID]'s detail on the tab whose routes start with [prefix],
+/// unless it is already on top (see [itemIsAlreadyOnTop]).
+private fun NavHostController.pushItem(prefix: String, itemID: String) {
+    val entry = currentBackStackEntry
+    if (itemIsAlreadyOnTop(entry?.destination?.route, entry?.arguments?.getString("itemID"), prefix, itemID)) return
+    navigate("${prefix}item/$itemID")
+}
+
 /// The tab-root routes: the only destinations where the bottom bar shows
 /// (spec §3 — hidden inside a pushed chat and inside item detail).
 private val tabRootRoutes: Set<String> = AppTab.entries.map { it.rootRoute }.toSet()
@@ -330,7 +350,7 @@ private class NavControllerShellHost(private val nav: NavHostController) : AppSh
     }
 
     override fun pushDecision(itemID: String) {
-        nav.navigate("${AppTab.DECISIONS.routePrefix}item/$itemID")
+        nav.pushItem(AppTab.DECISIONS.routePrefix, itemID)
     }
 
     /// A tab that is saved away (another tab showing) is not on the
@@ -536,6 +556,7 @@ private fun SignedInApp(
                 onSwitchTo = { sibling -> shell.switchSubChat(convoID, sibling) },
                 onOpenConversation = onOpenConversation,
                 onOpenItems = { nav.navigate("${prefix}items/$convoID") },
+                onOpenItem = { nav.pushItem(prefix, it) },
             )
         }
 
@@ -551,7 +572,7 @@ private fun SignedInApp(
                 viewModel = itemsVM,
                 originLabels = { deps.journalStore(session).conversationOriginLabels() },
                 onBack = { nav.popBackStack() },
-                onSelect = { item -> nav.navigate("${prefix}item/${item.id}") },
+                onSelect = { item -> nav.pushItem(prefix, item.id) },
                 onOpenConversation = onOpenConversation,
             )
         }
@@ -568,6 +589,10 @@ private fun SignedInApp(
                 deps = deps, session = session, vmCache = vmCache, itemID = itemID,
                 onBack = { nav.popBackStack() },
                 onOpenConversation = onOpenConversation,
+                // `[#12](matron://item/12)` inside the body or a comment pushes
+                // that item over this one (apple #208).
+                resolveItemLink = { num -> deps.trackerItemLinkOutcome(num, session) },
+                onOpenItem = { nav.pushItem(prefix, it) },
             )
         }
     }
@@ -623,6 +648,7 @@ private fun SignedInApp(
                                 onSwitchTo = { sibling -> shell.switchSubChat(convoID, sibling) },
                                 onOpenConversation = onOpenConversation,
                                 onOpenItems = { nav.navigate("${AppTab.COORDINATOR.routePrefix}items/$convoID") },
+                                onOpenItem = { nav.pushItem(AppTab.COORDINATOR.routePrefix, it) },
                             )
                         }
                     }
@@ -748,6 +774,10 @@ private fun SignedInApp(
                         deps = deps, session = session, vmCache = vmCache, itemID = itemID,
                         onBack = { nav.popBackStack() },
                         onOpenConversation = onOpenConversationFromDecisions,
+                        // A linked item pushes within the Decisions tab too, so
+                        // Back returns to the decision the link was tapped in.
+                        resolveItemLink = { num -> deps.trackerItemLinkOutcome(num, session) },
+                        onOpenItem = { nav.pushItem(AppTab.DECISIONS.routePrefix, it) },
                     )
                 }
             }
@@ -846,6 +876,12 @@ private fun ItemDetailRoute(
     itemID: String,
     onBack: () -> Unit,
     onOpenConversation: (String) -> Unit,
+    /// `[#12](matron://item/12)` inside the body or a comment (apple #208):
+    /// resolved through the session's store + sync …
+    resolveItemLink: suspend (Int) -> TrackerItemLinkOutcome,
+    /// … and pushed over this item WITHIN the hosting tab, so Back returns
+    /// to the item the link was tapped in.
+    onOpenItem: (String) -> Unit,
 ) {
     val detailVM = remember(itemID) { vmCache.itemDetailViewModel(itemID) }
     val readMemory = remember(session.userID) { ItemReadMemory(deps.preferences) }
@@ -857,6 +893,8 @@ private fun ItemDetailRoute(
         readMemory = readMemory,
         onBack = onBack,
         onOpenConversation = onOpenConversation,
+        resolveItemLink = resolveItemLink,
+        onOpenItem = onOpenItem,
     )
 }
 
@@ -878,6 +916,10 @@ private fun ChatRoute(
     onOpenConversation: (String) -> Unit,
     /// Opens the conversation's tasks page (the tracker button in the top bar).
     onOpenItems: () -> Unit,
+    /// Opens one item's thread from an inline marker card in the timeline
+    /// (apple #186) — the same `item/{itemID}` route the tasks page pushes,
+    /// under the hosting tab's prefix.
+    onOpenItem: (String) -> Unit,
     /// `false` at the Coordinator tab's root, where the chat IS the tab.
     showsBackButton: Boolean = true,
     /// Which agent box runs this session, or null when the user has fewer
@@ -891,79 +933,103 @@ private fun ChatRoute(
     roomBoxNames: List<String> = emptyList(),
     roomBoxShorts: List<String> = emptyList(),
 ) {
-    // Observed, not one-shot: the mirror can learn parent_convo_id AFTER this
-    // route composes (convo_meta or a snapshot upsert), and the route must
-    // switch to the read-only sub-chat presentation when it does (bugbot
-    // "Sub-chat parent never refreshes"). Linkage is immutable once set, so
-    // emissions only ever go null → parent.
-    val lookup by produceState<ParentLookup?>(initialValue = null, convoID) {
-        deps.parentConvoIDFlow(session, convoID).collect { value = ParentLookup(it) }
-    }
-    val resolved = lookup
-    if (resolved == null) {
-        LoadingScreen()
-        return
-    }
-    val parent = resolved.parent
-    if (parent != null) {
-        val (chatVM, stripVM) = vmCache.subChatViewModels(convoID, parent)
-        SubChatView(
-            chatVM = chatVM,
-            stripVM = stripVM,
-            childID = convoID,
-            fallbackTitle = "Subagent",
-            onBack = onBack,
-            // A coordinator that is itself a sub-chat (or learns its parent
-            // later) is still the tab's root: no back control there either
-            // (Apple hides it on the whole ChatDestinationView).
-            showsBackButton = showsBackButton,
-            onSwitchTo = onSwitchTo,
-            onOpenConversation = onOpenConversation,
-        )
-    } else {
-        val (chatVM, composerVM) = vmCache.viewModels(convoID)
-        val stripVM = vmCache.stripViewModel(convoID)
-        // The per-room items panel VM runs while the chat is open so the
-        // top-bar badge is live; the generation guard keeps a stale
-        // disposal (this route re-entered from the tasks page) from
-        // cancelling the successor's observation.
-        val itemsVM = remember(convoID) { vmCache.itemsPanelViewModel(convoID) }
-        DisposableEffect(itemsVM) {
-            itemsVM.start()
-            val generation = itemsVM.observationGeneration
-            onDispose { itemsVM.stop(generation) }
+    // `[#65](matron://item/65)` links in any message body (apple #208):
+    // resolved through the session's store + sync, opened where an inline
+    // item card opens it; a miss stays put and explains itself.
+    //
+    // Installed over the WHOLE route, not just the full-chat branch: a
+    // sub-chat renders its bodies through the same [MarkdownText], so an
+    // item link there is underlined, accent and tappable exactly like one
+    // in the parent chat. With the host only on the [ChatScreen] branch the
+    // tap found a null `LocalOpenTrackerItem` and was swallowed — a link
+    // that looks live and does nothing, with no navigation and no miss
+    // alert (Bugbot on #78). One install per destination, so the gate's
+    // "last tap wins" rule spans the whole route, including the flip from
+    // the full chat to the sub-chat presentation.
+    TrackerItemLinkHost(
+        resolve = { num -> deps.trackerItemLinkOutcome(num, session) },
+        open = onOpenItem,
+    ) { gatedOpenItem ->
+        // Observed, not one-shot: the mirror can learn parent_convo_id AFTER this
+        // route composes (convo_meta or a snapshot upsert), and the route must
+        // switch to the read-only sub-chat presentation when it does (bugbot
+        // "Sub-chat parent never refreshes"). Linkage is immutable once set, so
+        // emissions only ever go null → parent.
+        val lookup by produceState<ParentLookup?>(initialValue = null, convoID) {
+            deps.parentConvoIDFlow(session, convoID).collect { value = ParentLookup(it) }
         }
-        val needsYouCount by itemsVM.needsYouCount.collectAsStateWithLifecycle()
-        val itemsSupported by itemsVM.isSupported.collectAsStateWithLifecycle()
-        ChatScreen(
-            chatVM = chatVM,
-            composerVM = composerVM,
-            stripVM = stripVM,
-            chatTitle = title,
-            boxName = boxName,
-            sessionShort = sessionShort,
-            boxShort = boxShort,
-            roomBoxNames = roomBoxNames,
-            roomBoxShorts = roomBoxShorts,
-            onBack = onBack,
-            onOpenChild = onOpenChild,
-            onOpenConversation = onOpenConversation,
-            onOpenItems = onOpenItems,
-            showsBackButton = showsBackButton,
-            itemsSupported = itemsSupported,
-            needsYouCount = needsYouCount,
-            // Deferred: built when the browser sheet opens, on the sheet's own
-            // scope, over the same store the sync engine writes (apple #142).
-            mediaBrowser = { scope ->
-                MediaBrowserViewModel(
-                    store = deps.journalStore(session),
-                    convoID = convoID,
-                    serverURL = session.homeserverURL.toHttpUrl(),
-                    media = deps.mediaService(session),
-                    scope = scope,
-                )
-            },
-        )
+        val resolved = lookup
+        if (resolved == null) {
+            LoadingScreen()
+            return@TrackerItemLinkHost
+        }
+        val parent = resolved.parent
+        if (parent != null) {
+            val (chatVM, stripVM) = vmCache.subChatViewModels(convoID, parent)
+            // No `onOpenItem` here: an inline item CARD stays tap-inert in a
+            // sub-chat (apple #186's scope decision, [TimelineList]). Only
+            // the body links this host serves navigate out of it.
+            SubChatView(
+                chatVM = chatVM,
+                stripVM = stripVM,
+                childID = convoID,
+                fallbackTitle = "Subagent",
+                onBack = onBack,
+                // A coordinator that is itself a sub-chat (or learns its parent
+                // later) is still the tab's root: no back control there either
+                // (Apple hides it on the whole ChatDestinationView).
+                showsBackButton = showsBackButton,
+                onSwitchTo = onSwitchTo,
+                onOpenConversation = onOpenConversation,
+            )
+        } else {
+            val (chatVM, composerVM) = vmCache.viewModels(convoID)
+            val stripVM = vmCache.stripViewModel(convoID)
+            // The per-room items panel VM runs while the chat is open so the
+            // top-bar badge is live; the generation guard keeps a stale
+            // disposal (this route re-entered from the tasks page) from
+            // cancelling the successor's observation.
+            val itemsVM = remember(convoID) { vmCache.itemsPanelViewModel(convoID) }
+            DisposableEffect(itemsVM) {
+                itemsVM.start()
+                val generation = itemsVM.observationGeneration
+                onDispose { itemsVM.stop(generation) }
+            }
+            val needsYouCount by itemsVM.needsYouCount.collectAsStateWithLifecycle()
+            val itemsSupported by itemsVM.isSupported.collectAsStateWithLifecycle()
+            ChatScreen(
+                chatVM = chatVM,
+                composerVM = composerVM,
+                stripVM = stripVM,
+                chatTitle = title,
+                boxName = boxName,
+                sessionShort = sessionShort,
+                boxShort = boxShort,
+                roomBoxNames = roomBoxNames,
+                roomBoxShorts = roomBoxShorts,
+                onBack = onBack,
+                onOpenChild = onOpenChild,
+                onOpenConversation = onOpenConversation,
+                onOpenItems = onOpenItems,
+                showsBackButton = showsBackButton,
+                itemsSupported = itemsSupported,
+                needsYouCount = needsYouCount,
+                // Through the host's gate, not straight to the route: a card
+                // tap must supersede a link resolve still in flight.
+                onOpenItem = gatedOpenItem,
+                // Deferred: built when the browser sheet opens, on the sheet's own
+                // scope, over the same store the sync engine writes (apple #142).
+                mediaBrowser = { scope ->
+                    MediaBrowserViewModel(
+                        store = deps.journalStore(session),
+                        convoID = convoID,
+                        serverURL = session.homeserverURL.toHttpUrl(),
+                        media = deps.mediaService(session),
+                        scope = scope,
+                    )
+                },
+            )
+        }
     }
 }
 

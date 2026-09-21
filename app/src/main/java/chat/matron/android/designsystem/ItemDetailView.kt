@@ -46,8 +46,11 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.isSpecified
+import androidx.compose.ui.unit.sp
 import chat.matron.android.models.ItemAuthor
 import chat.matron.android.models.ItemAwaiting
 import chat.matron.android.models.ItemResolution
@@ -69,14 +72,62 @@ import kotlinx.coroutines.launch
 /// centred column instead of stretching across a wide screen. Ported from
 /// matron-apple's `ItemTypography`.
 object ItemTypography {
+    /// ×1.18 over the chat body (`bodyLarge`, 16sp ⇒ ≈19sp) — the same step
+    /// iOS takes (17pt ⇒ ≈20pt). Chat bodies stay at the system size by
+    /// decision; the item thread is the one surface that reads a step above.
+    const val bodyScale: Float = 1.18f
+
+    /// Extra leading between wrapped lines, in sp, on top of the scaled line
+    /// height.
+    const val lineSpacing: Float = 3f
+
+    /// Gap after each markdown paragraph inside a body, in dp — a real
+    /// paragraph break, not just a wrapped line, so multi-paragraph items
+    /// read as prose rather than a wall.
+    const val paragraphSpacing: Float = 14f
+
     /// Maximum width of the thread column — roughly 70–75 characters per line.
     val measure: Dp = 640.dp
+
+    /// The item reading style for markdown bodies AND the plain text beside
+    /// them (pending replies, voice transcripts), so the two never drift.
+    @Composable
+    fun bodyStyle(): TextStyle = itemBodyStyle(MaterialTheme.typography.bodyLarge)
 
     /// Vertical gap between thread rows (header, body card, comments).
     val threadSpacing: Dp = 18.dp
 
     /// Inner padding of a body/comment card.
     val cardPadding: Dp = 14.dp
+}
+
+/// [base] (the chat body, `bodyLarge`) scaled to the item reading size with
+/// the thread's leading: font size × [ItemTypography.bodyScale], line height
+/// scaled the same and then given [ItemTypography.lineSpacing] more. Pure so
+/// `ItemTypographyTest` can pin that it really is larger than the chat body.
+fun itemBodyStyle(base: TextStyle): TextStyle {
+    val size = if (base.fontSize.isSpecified) base.fontSize * ItemTypography.bodyScale else 19.sp
+    val lineHeight = if (base.lineHeight.isSp) {
+        (base.lineHeight.value * ItemTypography.bodyScale + ItemTypography.lineSpacing).sp
+    } else {
+        (size.value * 1.5f + ItemTypography.lineSpacing).sp
+    }
+    return base.copy(fontSize = size, lineHeight = lineHeight)
+}
+
+/// The line under a voice note's "Voice note" row: the transcript when there
+/// is one; otherwise the journal's transcription state — "Transcribing…"
+/// while the job runs (or nobody has taken it), and "Couldn’t transcribe —
+/// tap to listen" once it failed, instead of transcribing forever (apple
+/// #227). `second` is whether the line is a status (italic, muted) rather
+/// than words.
+fun itemVoiceNoteCaption(attachment: TrackerAttachment): Pair<String, Boolean> {
+    val transcript = attachment.transcript
+    return when {
+        !transcript.isNullOrEmpty() -> transcript to false
+        attachment.transcriptionFailed -> "Couldn’t transcribe — tap to listen" to true
+        else -> "Transcribing…" to true
+    }
 }
 
 /// A comment queued locally (offline outbox / in-flight send) that hasn't
@@ -264,7 +315,7 @@ fun ItemDetailView(
                     item(key = "body") {
                         ItemCard(mine = item.createdBy == ItemAuthor.USER) {
                             AuthorCaption(item.createdBy, item.createdAt, now)
-                            if (item.body.isNotEmpty()) MarkdownText(item.body, onLinkClick = onOpenLink)
+                            if (item.body.isNotEmpty()) ItemBody(item.body, onOpenLink)
                             Attachments(item.attachments, image, onOpenAttachment)
                         }
                     }
@@ -388,11 +439,12 @@ private fun Attachments(list: List<TrackerAttachment>, image: (TrackerAttachment
                     Icon(Icons.Filled.GraphicEq, contentDescription = null, modifier = Modifier.size(18.dp))
                     Text("Voice note", style = MaterialTheme.typography.bodyMedium)
                 }
-                val transcript = a.transcript
-                when {
-                    !transcript.isNullOrEmpty() -> Text(transcript, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    a.transcriptionFailed -> Text("Couldn’t transcribe — tap to listen", style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    else -> Text("Transcribing…", style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val (caption, isStatus) = itemVoiceNoteCaption(a)
+                if (isStatus) {
+                    Text(caption, style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    // Words beside a markdown body: the same reading size.
+                    Text(caption, style = ItemTypography.bodyStyle(), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             else -> AttachmentFile(filename = a.name, sizeBytes = a.size, onTap = { onOpen(a) })
@@ -414,7 +466,7 @@ private fun CommentView(c: TrackerComment, now: Instant, image: (TrackerAttachme
     } else {
         ItemCard(mine = c.author == ItemAuthor.USER) {
             AuthorCaption(c.author, c.createdAt, now)
-            if (c.body.isNotEmpty()) MarkdownText(c.body, onLinkClick = onOpenLink)
+            if (c.body.isNotEmpty()) ItemBody(c.body, onOpenLink)
             Attachments(c.attachments, image, onOpen)
         }
     }
@@ -424,7 +476,7 @@ private fun CommentView(c: TrackerComment, now: Instant, image: (TrackerAttachme
 private fun PendingView(p: PendingCommentModel) {
     ItemCard(mine = true, alpha = 0.85f) {
         Text("You", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-        if (p.body.isNotEmpty()) Text(p.body, style = MaterialTheme.typography.bodyLarge)
+        if (p.body.isNotEmpty()) Text(p.body, style = ItemTypography.bodyStyle())
         if (p.attachmentCount > 0) {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.AttachFile, contentDescription = null, modifier = Modifier.size(14.dp))
@@ -433,6 +485,18 @@ private fun PendingView(p: PendingCommentModel) {
         }
         SendStateIndicator(pendingCommentSendState(p.attempts, p.lastError))
     }
+}
+
+/// A markdown body at the item reading scale with the thread's leading and
+/// paragraph gap — one call for the item body and every comment.
+@Composable
+private fun ItemBody(markdown: String, onOpenLink: (String) -> Unit) {
+    MarkdownText(
+        markdown,
+        textStyle = ItemTypography.bodyStyle(),
+        onLinkClick = onOpenLink,
+        paragraphSpacing = ItemTypography.paragraphSpacing,
+    )
 }
 
 /// The thread's card chrome — the chat bubble surfaces on a rounded
