@@ -52,6 +52,17 @@ object JournalEventType {
     /// Infix in a subagent child's convo id: `<parent>:sub:<agentId>`.
     const val CHILD_CONVO_INFIX = ":sub:"
 
+    /// Markers the bridge puts at the head of every agent-chat room title
+    /// (`↔️ [ab] mac ↔ dev-z`, matron-bridge#225/#228; `🔗 ` is the legacy
+    /// marker rooms minted before #228 still carry). A room is born by an
+    /// agent's `agent_chat_start`, not by the user, so it must never
+    /// auto-open — the title, carried by `convo_meta`, is the only frame
+    /// that tells a room apart from the session the user just started.
+    val AGENT_ROOM_TITLE_MARKERS: List<String> = listOf("↔️ ", "🔗 ")
+
+    /// Whether a title is an agent-chat room's (see [AGENT_ROOM_TITLE_MARKERS]).
+    fun isAgentRoomTitle(title: String): Boolean = AGENT_ROOM_TITLE_MARKERS.any { title.startsWith(it) }
+
     /// Types that bump unread counts and set the conversation snippet.
     /// `SPAWN_OUTCOME` joins the set for the same reason the card
     /// (`PERMISSION_REQUEST`) is in it: the chat-list row must stop
