@@ -12,6 +12,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,6 +33,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import chat.matron.android.designsystem.AppLockShield
+import chat.matron.android.designsystem.LocalAppLockActive
 import chat.matron.android.designsystem.MatronAppearance
 import chat.matron.android.designsystem.MatronTheme
 import chat.matron.android.designsystem.SyncBannerState
@@ -58,6 +60,7 @@ import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.UserSession
 import chat.matron.android.platform.AndroidBiometricAuthenticator
 import chat.matron.android.viewmodels.AppLockController
+import chat.matron.android.viewmodels.VoiceRecorderHandoff
 import chat.matron.android.viewmodels.KeyValueBoxCapacityCache
 import chat.matron.android.viewmodels.ChatListViewModel
 import chat.matron.android.viewmodels.LinkSignInViewModel
@@ -100,7 +103,13 @@ class MainActivity : FragmentActivity() {
             auth = AndroidBiometricAuthenticator(this),
             store = deps.preferences,
         )
-        setContent { MatronApp(deps, appLock) }
+        setContent {
+            // Read lazily by dispose handlers that must tell the lock shield's
+            // teardown from the user's (see LocalAppLockActive).
+            CompositionLocalProvider(LocalAppLockActive provides { appLock.isLocked.value }) {
+                MatronApp(deps, appLock)
+            }
+        }
     }
 
     // Activity start/stop rather than ProcessLifecycleOwner: this is a
@@ -264,6 +273,12 @@ private fun SignedInApp(
     val nav = rememberNavController()
     val sessionScope = rememberCoroutineScope()
     val vmCache = remember(session.userID) { ChatVMCache(deps, session, sessionScope) }
+    // The lock shield resets this navigation stack. A voice note that was
+    // still recording when the lock engaged is parked, not cancelled — land
+    // back in its room so the composer reclaims it (see VoiceRecorderHandoff).
+    LaunchedEffect(Unit) {
+        VoiceRecorderHandoff.parkedRoomID()?.let { nav.navigate("chat/$it") }
+    }
     val chatListVM = remember(session.userID) { ChatListViewModel(deps.chatService(session), sessionScope) }
 
     var connectionState by remember { mutableStateOf<SyncBannerState>(SyncBannerState.Connecting) }
