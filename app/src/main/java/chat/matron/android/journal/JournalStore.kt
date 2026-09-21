@@ -96,6 +96,29 @@ class JournalStore(
             }
             if (c.lastSeq > updated.lastSeq) {
                 updated = updated.copy(lastSeq = c.lastSeq, snippet = c.snippet)
+                // The wire snippet may now describe an event this mirror has
+                // not seen, while `last_message_type` / `expired_snippet`
+                // still describe the previous local newest message — and the
+                // read path trusts only those columns (Bugbot, #73). The
+                // snapshot carries no event type, so the row keeps derived
+                // columns only when the wire snippet provably came from the
+                // local newest message-type event: [snippet] is a byte-exact
+                // mirror of the server's `snippetOf`, so equality is that
+                // proof (server frames after it were bookkeeping). Otherwise
+                // the columns read as unknown and the wire snippet shows
+                // verbatim — never a stale `$ command` over a newer text, and
+                // never a fresh live log left un-hidden past its TTL by an
+                // older row's columns — until the newer event lands through
+                // `applyJournal` or `insertHistory`, both of which recompute.
+                // (A server-side TTL already stubs a >24 h live log's wire
+                // snippet to `$ command`, so that case displays correctly
+                // even before the event arrives.)
+                val newest = eventDao.newestMessageEvent(c.id, JournalEventType.MESSAGE_TYPES)?.toJournalEvent()
+                val wireSnippetIsLocalNewest = newest != null && snippet(newest) == c.snippet
+                updated = updated.copy(
+                    lastMessageType = if (wireSnippetIsLocalNewest) newest?.type else null,
+                    expiredSnippet = if (wireSnippetIsLocalNewest) expiredSnippet(newest!!.type, newest.payload) else null,
+                )
             }
             // Monotonic max so a stale snapshot can't roll a fresher live-frame
             // timestamp backwards; a missing last_ts leaves it alone.
@@ -711,8 +734,18 @@ class JournalStore(
 
     /// Recomputes `last_message_type` / `expired_snippet` for one
     /// conversation, writing only when a value actually changed.
+    ///
+    /// Skipped for a row whose `last_message_type` is NULL: the columns are
+    /// non-null exactly when the row's `snippet` was derived from the local
+    /// newest message-type event (`applyJournal`, `insertHistory`), and the
+    /// snapshot path clears them when a wire snippet advances the row past
+    /// that event. Re-deriving from the local event here would put an old
+    /// `$ command` stub back over a newer text preview the sweep knows
+    /// nothing about (Bugbot, #73); the next `applyJournal`/`insertHistory`
+    /// for that conversation repairs the columns from real rows.
     private suspend fun refreshLastMessageColumns(convoID: String) {
         val convo = conversationDao.byId(convoID) ?: return
+        if (convo.lastMessageType == null) return
         val (type, expiredSnippet) = newestMessageColumns(convoID)
         if (convo.lastMessageType == type && convo.expiredSnippet == expiredSnippet) return
         conversationDao.setLastMessageColumns(convoID, type, expiredSnippet)

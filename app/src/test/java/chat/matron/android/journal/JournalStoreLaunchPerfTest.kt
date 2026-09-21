@@ -282,6 +282,58 @@ class JournalStoreLaunchPerfTest {
         assertTrue(store.conversations(now = ms(1) + 25 * hour).first().snippet == "$ make build")
     }
 
+    // MARK: Snapshot path keeps the columns honest (Bugbot, #73)
+
+    private fun toolOutputSnapshot(seq: Long, snippet: String, lastTS: Long) =
+        ConvoSummaryDTO("c1", "T", "running", seq, snippet, 0, lastTS = lastTS)
+
+    /// A snapshot advances the row to a text message the mirror has not seen
+    /// yet: the previous newest message's `$ command` stub must not survive
+    /// on the row, or the TTL sweep would later paint it over the newer text.
+    @Test
+    fun snapshotAdvancingPastALocalToolOutputDoesNotKeepItsCommandStub() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(liveLog(1), now = ms(2))
+        assertEquals("$ make test", row().expiredSnippet)
+
+        store.refreshSummaries(listOf(toolOutputSnapshot(seq = 2, snippet = "later text", lastTS = ms(2))))
+        assertNull("the wire snippet came from an event the mirror lacks — type unknown", row().lastMessageType)
+        assertNull(row().expiredSnippet)
+
+        store.purgeExpiredToolOutputSnippets(now = ms(2) + 25 * hour)
+        assertEquals("later text", store.conversations(now = ms(2) + 25 * hour).first().snippet)
+    }
+
+    /// The server frames after the local newest tool_output were bookkeeping:
+    /// the wire snippet equals the one this store derives from that event, so
+    /// the columns stay and the 24 h hide still applies.
+    @Test
+    fun snapshotWhoseSnippetMatchesTheLocalNewestMessageKeepsTheTTL() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(liveLog(1), now = ms(2))
+        store.refreshSummaries(listOf(toolOutputSnapshot(seq = 3, snippet = "out", lastTS = ms(1))))
+        assertEquals(JournalEventType.TOOL_OUTPUT, row().lastMessageType)
+        assertEquals("out", store.conversations(now = ms(1) + 60_000).first().snippet)
+        assertEquals("$ make test", store.conversations(now = ms(1) + 25 * hour).first().snippet)
+    }
+
+    /// A snapshot whose newest message is a tool_output the mirror has not
+    /// seen: an older text row's columns must not decide anything, and once
+    /// the event itself lands the 24 h hide applies.
+    @Test
+    fun snapshotForAnUnseenToolOutputHidesOnceTheEventLands() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(event(1, payload = buildJsonObject { put("body", "hello") }), now = ms(2))
+        store.refreshSummaries(listOf(toolOutputSnapshot(seq = 2, snippet = "out", lastTS = ms(2))))
+        assertNull(row().lastMessageType)
+        assertEquals("unknown type: the wire snippet shows verbatim", "out",
+            store.conversations(now = ms(2) + 25 * hour).first().snippet)
+
+        store.applyJournal(liveLog(2), now = ms(3))
+        assertEquals(JournalEventType.TOOL_OUTPUT, row().lastMessageType)
+        assertEquals("$ make test", store.conversations(now = ms(2) + 25 * hour).first().snippet)
+    }
+
     // MARK: Watermarked sweeps
 
     private suspend fun watermark(key: String): Long? = db.metaDao().value(key)?.toLongOrNull()
