@@ -361,7 +361,7 @@ private class NavControllerShellHost(private val nav: NavHostController) : AppSh
     }
 
     override fun pushMissionItem(itemID: String) {
-        nav.navigate("${AppTab.MISSIONS.routePrefix}item/$itemID")
+        nav.pushItem(AppTab.MISSIONS.routePrefix, itemID)
     }
 
     /// A tab that is saved away (another tab showing) is not on the
@@ -859,7 +859,7 @@ private fun SignedInApp(
                         onBack = { nav.popBackStack() },
                         onOpenConversation = onOpenConversationFromMissions,
                         resolveItemLink = { num -> deps.trackerItemLinkOutcome(num, session) },
-                        onOpenItem = { nav.navigate("${AppTab.MISSIONS.routePrefix}item/$it") },
+                        onOpenItem = { nav.pushItem(AppTab.MISSIONS.routePrefix, it) },
                     )
                 }
             }
