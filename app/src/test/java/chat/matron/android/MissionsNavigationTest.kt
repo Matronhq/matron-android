@@ -15,6 +15,7 @@ class MissionsNavigationTest {
         override fun switchTab(tab: AppTab) { commands += "switch:${tab.name}" }
         override fun replaceChats(roomID: String) { commands += "replace:$roomID" }
         override fun pushChat(tab: AppTab, roomID: String) { commands += "pushChat:${tab.name}:$roomID" }
+        override fun replaceTopChat(tab: AppTab, current: String, sibling: String) { commands += "replaceTop:${tab.name}:$current>$sibling" }
         override fun pushDecision(itemID: String) { commands += "pushDecision:$itemID" }
         override fun pushMission(tab: AppTab, missionID: String) { commands += "pushMission:${tab.name}:$missionID" }
         override fun replaceMissions(missionID: String) { commands += "replaceMissions:$missionID" }
