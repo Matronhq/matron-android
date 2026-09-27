@@ -1,11 +1,14 @@
 package chat.matron.android.features
 
 import chat.matron.android.chat.TimelineItem
+import chat.matron.android.events.ItemMarkerEvent
 import chat.matron.android.features.chat.attachmentIsExpired
 import chat.matron.android.features.chat.attachmentIsLoading
 import chat.matron.android.features.chat.timelineAvatarSender
 import chat.matron.android.features.chat.timelineDisplayName
 import chat.matron.android.features.chat.timelineItemShouldRender
+import chat.matron.android.models.ItemAuthor
+import chat.matron.android.models.ItemKind
 import chat.matron.android.models.TimelineSendState
 import java.time.Instant
 import org.junit.Assert.assertEquals
@@ -72,6 +75,12 @@ class TimelineItemRenderingTest {
             TimelineItem.Kind.Image(null, null, null, expired = true),
             TimelineItem.Kind.File(null, "x.pdf", null, null, expired = true),
             TimelineItem.Kind.Unknown("m.audio"),
+            // Tracker markers are rows of their own (apple #186); the mapper
+            // already filtered the ones that render nothing.
+            TimelineItem.Kind.ItemMarker(
+                "k",
+                ItemMarkerEvent("it_1", 1, ItemKind.TASK, "T", ItemMarkerEvent.Action.CREATED, ItemAuthor.AGENT),
+            ),
         )
         for (kind in kinds) assertTrue("content kind $kind must render", timelineItemShouldRender(item(kind)))
     }

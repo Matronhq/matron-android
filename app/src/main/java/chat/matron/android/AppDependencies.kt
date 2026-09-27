@@ -16,8 +16,10 @@ import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineService
 import chat.matron.android.journal.AgentSpawnAnswering
 import chat.matron.android.journal.ItemsProviding
+import chat.matron.android.designsystem.TrackerItemLinkOutcome
 import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.ItemsSyncing
+import chat.matron.android.viewmodels.TrackerItemLinkResolver
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.JournalSyncEngine
@@ -366,6 +368,24 @@ class AppDependencies(
 
     /** The tracker's network surface — the session's API client. */
     fun itemsApi(session: UserSession): ItemsProviding = core(session).api
+
+    /**
+     * Resolves a tapped `[#65](matron://item/65)` link to a local item id,
+     * with one `refresh(All)` retry on a miss, expressed in the design
+     * system's vocabulary so a link-hosting screen can hand it straight to
+     * `TrackerItemLinkHost` (tracker item #115, apple #208). Lives here
+     * because this is the one layer that sees both the resolver and the
+     * session's store + sync; mapping in each host instead is how the miss
+     * path drifts between surfaces. `alertMessage` is null only for `Open`,
+     * which the `when` has already taken.
+     */
+    suspend fun trackerItemLinkOutcome(num: Int, session: UserSession): TrackerItemLinkOutcome {
+        val c = core(session)
+        return when (val resolution = TrackerItemLinkResolver(c.store, c.itemsSync).resolve(num)) {
+            is TrackerItemLinkResolver.Resolution.Open -> TrackerItemLinkOutcome.Open(resolution.itemID)
+            else -> TrackerItemLinkOutcome.Explain(resolution.alertMessage(num) ?: "Item #$num couldn't be opened.")
+        }
+    }
 
     fun pushService(session: UserSession): PushService =
         JournalPushService(api = core(session).api, environment = pushEnvironment)

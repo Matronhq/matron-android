@@ -49,7 +49,7 @@ interface MediaBrowserStoreReading {
 class JournalStore(
     private val db: MatronDatabase,
     private val ownSender: String,
-) : MediaBrowserStoreReading, ItemsStoreReading {
+) : MediaBrowserStoreReading, ItemsStoreReading, TrackerItemNumberReading {
     private val conversationDao = db.conversationDao()
     private val eventDao = db.eventDao()
     private val metaDao = db.metaDao()
@@ -533,9 +533,12 @@ class JournalStore(
 
     suspend fun item(id: String): TrackerItem? = itemDao.byId(id)?.toItem()
 
-    /// Lookup by the human-facing item NUMBER (`#65`) rather than its id.
-    /// `null` when this device has never synced that item.
-    suspend fun item(num: Int): TrackerItem? = itemDao.byNum(num)?.toItem()
+    /// Lookup by the human-facing item NUMBER (`#65`) rather than its id —
+    /// what a tapped `[#65](matron://item/65)` link has to resolve. `null`
+    /// when this device has never synced that item; `TrackerItemLinkResolver`
+    /// turns that into one refresh and then a "not on this device yet"
+    /// alert, never a navigation change.
+    override suspend fun item(num: Int): TrackerItem? = itemDao.byNum(num)?.toItem()
 
     suspend fun items(scope: ItemsScope): List<TrackerItem> = when (scope) {
         ItemsScope.All -> itemDao.all()

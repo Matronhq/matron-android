@@ -132,6 +132,10 @@ fun ChatScreen(
     onOpenItems: (() -> Unit)? = null,
     itemsSupported: Boolean = true,
     needsYouCount: Int = 0,
+    /// Opens one tracker item's thread (the `item/{itemID}` route) from an
+    /// inline marker card in the timeline (apple #186). `null`
+    /// (previews/tests) leaves the cards tap-inert.
+    onOpenItem: ((String) -> Unit)? = null,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val chatSearch by chatVM.chatSearch.collectAsStateWithLifecycle()
@@ -364,6 +368,7 @@ fun ChatScreen(
                     onOpenConversation = onOpenConversation,
                     onPreviewImage = { previewModel = it },
                     modifier = Modifier.weight(1f),
+                    onOpenItem = onOpenItem,
                 )
                 ComposerView(viewModel = composerVM)
             }
@@ -457,6 +462,11 @@ fun TimelineList(
     onOpenConversation: (String) -> Unit,
     onPreviewImage: (Any) -> Unit,
     modifier: Modifier = Modifier,
+    /// Opens a tracker item from an inline marker card. Supplied only by the
+    /// main chat pane: a sub-chat pane has no items page of its own, so its
+    /// cards render tap-inert — the same scope decision as apple's
+    /// `SubChatView` (#186).
+    onOpenItem: ((String) -> Unit)? = null,
     // Floating stop button — supplied only by the main chat pane (sub-chat
     // viewers are read-only, matching matron-apple). Visible while the durable
     // session_state says a turn is running, with the ephemeral activity label
@@ -619,6 +629,7 @@ fun TimelineList(
                         onOpenConversation = onOpenConversation,
                         onPreviewImage = onPreviewImage,
                         onTapFile = onTapFile,
+                        onOpenItem = onOpenItem,
                     )
                 }
                 if (activityLabel != null) {
@@ -713,6 +724,7 @@ private fun TimelineRowView(
     onOpenConversation: (String) -> Unit,
     onPreviewImage: (Any) -> Unit,
     onTapFile: (url: String, filename: String) -> Unit,
+    onOpenItem: ((String) -> Unit)?,
 ) {
     // Collected so a consent card's in-flight / answered state redraws: the
     // answer is an HTTP call with no journal event behind it, so nothing in the
@@ -794,6 +806,7 @@ private fun TimelineRowView(
                         chatVM.answerAgentSpawn(eventID = eventID, request = request, decision = decision)
                     },
                     onOpenSpawnedRoom = onOpenConversation,
+                    onOpenItem = onOpenItem,
                     hasMultipleSenders = hasMultipleSenders,
                 )
             }
