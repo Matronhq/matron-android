@@ -6,6 +6,8 @@ import chat.matron.android.events.AskUserEvent
 import chat.matron.android.events.DiffEvent
 import chat.matron.android.events.ItemMarkerEvent
 import chat.matron.android.events.LiveOutputEvent
+import chat.matron.android.events.MilestoneMarkerEvent
+import chat.matron.android.events.MissionMarkerEvent
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.journal.ActivityUpdate
@@ -56,9 +58,10 @@ object JournalTimelineMapper {
         val kind: TimelineItem.Kind = when (event.type) {
             JournalEventType.READ_MARKER, JournalEventType.EDIT,
             JournalEventType.SESSION_STATUS, JournalEventType.CONVO_META,
-            // Summary passes are TOC entries (the summaries sheet), never
-            // transcript rows — without this they'd render as
-            // "[unsupported event: summary]" noise.
+            // Summary passes are store-level TOC rows (`summary_entry`),
+            // never transcript rows — without this they'd render as
+            // "[unsupported event: summary]" noise. The summaries UI itself
+            // was retired for the mission page (apple #209 / #214).
             JournalEventType.SUMMARY -> return null
 
             JournalEventType.TEXT -> {
@@ -86,6 +89,22 @@ object JournalTimelineMapper {
                     marker.action == ItemMarkerEvent.Action.UPDATED
                 ) return null
                 TimelineItem.Kind.ItemMarker(event.seq.toString(), marker)
+            }
+
+            JournalEventType.MILESTONE -> {
+                // The marker's own seq is the anchor (protocol, "Marker
+                // events"), and `TimelineItem.id` is that seq — so nothing
+                // extra is needed to make a milestone tap land here. A
+                // payload that won't parse is skipped rather than rendered
+                // as `Unknown`: a half-drawn navigation affordance is worse
+                // than no row.
+                val marker = MilestoneMarkerEvent.parse(payload) ?: return null
+                TimelineItem.Kind.MilestoneMarker(event.seq.toString(), marker)
+            }
+
+            JournalEventType.MISSION -> {
+                val marker = MissionMarkerEvent.parse(payload) ?: return null
+                TimelineItem.Kind.MissionMarker(event.seq.toString(), marker)
             }
 
             JournalEventType.TOOL_OUTPUT -> {
