@@ -66,6 +66,18 @@ class AppDependenciesTest {
     }
 
     @Test
+    fun makeDecisionsViewModel_hasNoHomeConversation_andStartsInAll() {
+        val deps = deps()
+        val session = session()
+        val scope = CoroutineScope(SupervisorJob())
+        val vm = deps.makeDecisionsViewModel(session, scope)
+        assertEquals(null, vm.convoID)
+        assertEquals(chat.matron.android.models.ItemsScope.All, vm.itemsScope.value)
+        val perChat = deps.makeItemsPanelViewModel(session, convoID = "c1", scope = scope)
+        assertEquals(chat.matron.android.models.ItemsScope.Convo("c1"), perChat.itemsScope.value)
+    }
+
+    @Test
     fun mediaService_isCached_perSession() {
         val deps = deps()
         val session = session()

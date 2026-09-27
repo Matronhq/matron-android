@@ -5,6 +5,7 @@ import chat.matron.android.journal.ItemsSyncing
 import chat.matron.android.journal.TrackerItemNumberReading
 import chat.matron.android.models.ItemsScope
 import chat.matron.android.models.TrackerItem
+import kotlinx.coroutines.CancellationException
 
 /// Resolves a tapped `matron://item/<n>` link to a local item id (tracker
 /// item #115; port of matron-apple's `TrackerItemLinkResolver`, #208).
@@ -81,8 +82,14 @@ class TrackerItemLinkResolver(
     }
 
     /// `Open` on a hit, `Failed` on a throwing read, `null` on a clean miss.
+    /// Cancellation is NOT a failure: a lookup cut short because the tap was
+    /// superseded or the host left the screen must abort the resolve, not
+    /// return a bogus "couldn't open" the gate could still apply (Bugbot on
+    /// #78; the same rethrow `ItemsSync` does).
     private suspend fun read(num: Int): Resolution? = try {
         lookup(num)?.let { Resolution.Open(it.id) }
+    } catch (cancel: CancellationException) {
+        throw cancel
     } catch (e: Exception) {
         Resolution.Failed(e.message ?: e.javaClass.simpleName)
     }

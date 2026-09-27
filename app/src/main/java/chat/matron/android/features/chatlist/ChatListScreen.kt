@@ -45,6 +45,7 @@ import androidx.compose.ui.text.AnnotatedString
 import chat.matron.android.chat.ChatService
 import chat.matron.android.chat.ChatSummary
 import chat.matron.android.chat.SessionTag
+import chat.matron.android.designsystem.NeedsYouBadge
 import chat.matron.android.designsystem.RelativeMinuteTimeView
 import chat.matron.android.designsystem.SessionTagText
 import chat.matron.android.designsystem.SyncBannerState
@@ -72,6 +73,9 @@ fun ChatListScreen(
     onOpenSearch: () -> Unit,
     onOpenSettings: () -> Unit,
     onSignOut: () -> Unit,
+    /// The app shell's tab-swipe modifier (apple #196), applied to the list
+    /// content only — never to the top bar.
+    rootGesture: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
@@ -116,7 +120,7 @@ fun ChatListScreen(
             )
         },
     ) { padding ->
-        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+        Box(modifier = Modifier.fillMaxSize().padding(padding).then(rootGesture)) {
             when {
                 isLoading && groups.isEmpty() -> CenteredMessage(
                     // A backlog replay is progress, not a stalled socket —
@@ -190,20 +194,24 @@ private fun ConnectionIndicator(state: SyncBannerState, hasEverConnected: Boolea
     }
 }
 
+/// One chat-list row. Internal so the coordinator chooser (apple #197) can
+/// reuse the exact row; there the long-press actions are `null` and the
+/// menu is not offered.
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChatRow(
+internal fun ChatRow(
     summary: ChatSummary,
     onOpen: () -> Unit,
-    onMute: () -> Unit,
-    onLeave: () -> Unit,
+    onMute: (() -> Unit)?,
+    onLeave: (() -> Unit)?,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    val hasMenu = onMute != null || onLeave != null
     Box {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .combinedClickable(onClick = onOpen, onLongClick = { menuOpen = true })
+                .combinedClickable(onClick = onOpen, onLongClick = if (hasMenu) ({ menuOpen = true }) else null)
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -240,12 +248,18 @@ private fun ChatRow(
                         style = MaterialTheme.typography.labelSmall,
                     )
                 }
-                UnreadBadge(count = summary.unreadCount)
+                // The needs-you badge sits BESIDE the unread pill, not above
+                // it — same font/padding metrics, so a row with both keeps
+                // the single-badge height (apple #187).
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    NeedsYouBadge(count = summary.needsUserCount)
+                    UnreadBadge(count = summary.unreadCount)
+                }
             }
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-            DropdownMenuItem(text = { Text("Mute") }, onClick = { menuOpen = false; onMute() })
-            DropdownMenuItem(text = { Text("Leave") }, onClick = { menuOpen = false; onLeave() })
+            if (onMute != null) DropdownMenuItem(text = { Text("Mute") }, onClick = { menuOpen = false; onMute() })
+            if (onLeave != null) DropdownMenuItem(text = { Text("Leave") }, onClick = { menuOpen = false; onLeave() })
         }
     }
 }

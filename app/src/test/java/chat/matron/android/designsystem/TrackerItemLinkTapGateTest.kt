@@ -105,6 +105,56 @@ class TrackerItemLinkTapGateTest {
         assertEquals("one tap, one push — not two", listOf<TrackerItemLinkOutcome>(TrackerItemLinkOutcome.Open("id-65")), applied)
     }
 
+    /// An inline item card needs no resolving, but its tap is still a tap:
+    /// a miss-path link resolve still refreshing when the card was tapped
+    /// must not finish afterwards and push the OLDER item on top of the one
+    /// the user just opened (Bugbot on matron-android #78).
+    @Test
+    fun aCardTapSupersedesALinkResolveStillInFlight() = runTest {
+        val gate = TrackerItemLinkTapGate(this)
+        val applied = mutableListOf<TrackerItemLinkOutcome>()
+        val release = CompletableDeferred<Unit>()
+        var slowSawCancellation = false
+
+        gate.begin(65, { _ ->
+            try {
+                release.await()
+            } catch (e: CancellationException) {
+                slowSawCancellation = true
+                throw e
+            }
+            TrackerItemLinkOutcome.Open("id-65")
+        }) { applied += it }
+        advanceUntilIdle()
+
+        gate.openDirectly("id-card") { applied += it }
+        assertEquals("the card opens at once, no resolve", listOf<TrackerItemLinkOutcome>(TrackerItemLinkOutcome.Open("id-card")), applied)
+
+        release.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("the stale link resolve never navigates", listOf<TrackerItemLinkOutcome>(TrackerItemLinkOutcome.Open("id-card")), applied)
+        assertTrue("and it was cancelled, not just ignored", slowSawCancellation)
+    }
+
+    /// …and a resolve that ignores cancellation is still dropped on the way
+    /// out, because the card tap became the current one.
+    @Test
+    fun aCardTapDropsAnUncancellableResolveToo() = runTest {
+        val gate = TrackerItemLinkTapGate(this)
+        val applied = mutableListOf<TrackerItemLinkOutcome>()
+        val release = CompletableDeferred<Unit>()
+        gate.begin(65, { _ -> runCatching { release.await() }; TrackerItemLinkOutcome.Open("id-65") }) { applied += it }
+        advanceUntilIdle()
+        gate.openDirectly("id-card") { applied += it }
+        release.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(listOf<TrackerItemLinkOutcome>(TrackerItemLinkOutcome.Open("id-card")), applied)
+        // A link tap after the card still acts normally — the gate is not a latch.
+        gate.begin(9, { _ -> TrackerItemLinkOutcome.Open("id-9") }) { applied += it }
+        advanceUntilIdle()
+        assertEquals(listOf<TrackerItemLinkOutcome>(TrackerItemLinkOutcome.Open("id-card"), TrackerItemLinkOutcome.Open("id-9")), applied)
+    }
+
     /// `Ignore` is the host saying "I couldn't even try" (no session yet, a
     /// link to the item already on screen): the gate just applies it and
     /// the host does nothing.

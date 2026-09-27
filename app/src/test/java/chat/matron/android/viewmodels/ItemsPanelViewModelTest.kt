@@ -45,6 +45,10 @@ internal class FakeItemsStore : ItemsStoreReading {
     val item = MutableSharedFlow<TrackerItem?>(replay = 1)
     val comments = MutableSharedFlow<List<TrackerComment>>(replay = 1)
     val outbox = MutableSharedFlow<List<ItemOutboxEntity>>(replay = 1)
+    /// The scope-independent flow `awaitingYou` reads — separate from
+    /// [items] so a test can drive the two independently.
+    val awaiting = MutableSharedFlow<List<TrackerItem>>(replay = 1)
+    var awaitingSubscriptions = 0
     var storedComments: List<TrackerComment> = emptyList()
     var itemsSubscriptions = 0
     var commentsSubscriptions = 0
@@ -66,6 +70,10 @@ internal class FakeItemsStore : ItemsStoreReading {
         creates.resetReplayCache()
         return creates
     }
+    override fun needsUserFlow(): Flow<List<TrackerItem>> {
+        awaitingSubscriptions += 1
+        return awaiting
+    }
 }
 
 internal open class FakeItemsSync : ItemsSyncing {
@@ -75,8 +83,9 @@ internal open class FakeItemsSync : ItemsSyncing {
     val applied = mutableListOf<TrackerItem>()
     val comments = mutableListOf<Triple<String, String, List<TrackerAttachment>>>()
     var createSucceeds = true
+    var refreshOutcome: ItemsRefreshOutcome = ItemsRefreshOutcome.Succeeded
     override val isSupported = MutableStateFlow(true)
-    override suspend fun refresh(scope: ItemsScope): ItemsRefreshOutcome { refreshed += scope; return ItemsRefreshOutcome.Succeeded }
+    override suspend fun refresh(scope: ItemsScope): ItemsRefreshOutcome { refreshed += scope; return refreshOutcome }
     override suspend fun refreshItem(id: String) { refetched += id }
     override suspend fun applyItem(item: TrackerItem) { applied += item }
     override suspend fun enqueueComment(itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>) {
@@ -345,6 +354,93 @@ class ItemsPanelViewModelTest {
         vm.create(ItemKind.TASK, "Do X", "")
         assertTrue(sync.created.isEmpty())
         assertNotNull(vm.error.value)
+    }
+
+    // MARK: - App shell: all-conversations mode (spec §1)
+
+    @Test
+    fun awaitingYouIsCrossConversationNewestFirstRegardlessOfScope() = runBlocking {
+        val store = FakeItemsStore(); val sync = FakeItemsSync()
+        val vm = ItemsPanelViewModel("c1", store, FakeItemsApi(), sync, this)
+        vm.start()
+        waitUntil { store.awaitingSubscriptions == 1 }
+        assertEquals("the panel's own scope is untouched by the awaiting flow", ItemsScope.Convo("c1"), vm.itemsScope.value)
+        val mine = t("q", 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 1.0) // updatedAt = 1
+        val withAgent = t("a", 2, rank = 2.0) // awaiting agent → excluded
+        val foreign = TrackerItem(
+            id = "f", num = 9, kind = ItemKind.DECISION, awaiting = ItemAwaiting.USER, rank = 1.0, title = "F",
+            originConvoID = "c2", updatedAt = Instant.ofEpochSecond(9),
+        )
+        store.awaiting.emit(listOf(mine, withAgent, foreign))
+        waitUntil { vm.awaitingYouCount.value == 2 }
+        assertEquals("needsUser only, newest updatedAt first, every conversation", listOf("f", "q"), vm.awaitingYou.value.map { it.id })
+        assertEquals("the per-conversation badge only follows the scoped flow", 0, vm.needsYouCount.value)
+        vm.stop()
+    }
+
+    @Test
+    fun awaitingYouCountTracksStoreEmits() = runBlocking {
+        val store = FakeItemsStore(); val sync = FakeItemsSync()
+        val vm = ItemsPanelViewModel(null, store, FakeItemsApi(), sync, this)
+        vm.start()
+        waitUntil { store.awaitingSubscriptions == 1 }
+        store.awaiting.emit(listOf(t("q", 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 1.0)))
+        waitUntil { vm.awaitingYouCount.value == 1 }
+        store.awaiting.emit(emptyList())
+        waitUntil { vm.awaitingYouCount.value == 0 }
+        vm.stop()
+        store.awaiting.emit(listOf(t("q", 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 1.0)))
+        waitUntil(200) { vm.awaitingYouCount.value == 1 }
+        assertEquals("stop() cancels the awaiting subscription too", 0, vm.awaitingYouCount.value)
+    }
+
+    @Test
+    fun awaitingYouRuleIsPure() {
+        val items = listOf(
+            t("q", 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 1.0),
+            t("a", 2, rank = 2.0),
+            t("d", 3, kind = ItemKind.DECISION, awaiting = ItemAwaiting.USER, rank = 3.0, convo = "c2"),
+            t("x", 4, awaiting = ItemAwaiting.USER, state = ItemState.CLOSED, rank = 0.0, closedMs = 40),
+        )
+        assertEquals("open + awaiting user, newest first; a closed item never needs you", listOf("d", "q"), ItemsPanelViewModel.awaitingYou(items).map { it.id })
+    }
+
+    /// Bugbot (#75): a failed pull-to-refresh must say so — the inline
+    /// error row is the only explanation for a stale or empty list.
+    @Test
+    fun refreshSurfacesAFailedFetch_butTheOpeningRefreshStaysQuiet() = runBlocking {
+        val sync = FakeItemsSync().apply { refreshOutcome = ItemsRefreshOutcome.Failed("offline") }
+        val store = FakeItemsStore()
+        val vm = ItemsPanelViewModel(null, store, FakeItemsApi(), sync, this)
+        vm.start()
+        waitUntil { sync.refreshed.size == 1 }
+        assertNull("the opening refresh must not greet an offline open with an error row", vm.error.value)
+        vm.refresh()
+        assertEquals("offline", vm.error.value)
+        assertFalse(vm.isRefreshing.value)
+        vm.dismissError()
+        sync.refreshOutcome = ItemsRefreshOutcome.Unsupported
+        vm.refresh()
+        assertNull("unsupported is carried by isSupported, not the error row", vm.error.value)
+        vm.stop()
+    }
+
+    /// Bugbot (#75): after a failed pull, a successful retry must take the
+    /// error row down again — the list just updated.
+    @Test
+    fun refreshClearsAStaleErrorOnceARetrySucceeds() = runBlocking {
+        val sync = FakeItemsSync().apply { refreshOutcome = ItemsRefreshOutcome.Failed("offline") }
+        val vm = ItemsPanelViewModel(null, FakeItemsStore(), FakeItemsApi(), sync, this)
+        vm.refresh()
+        assertEquals("offline", vm.error.value)
+        sync.refreshOutcome = ItemsRefreshOutcome.Succeeded
+        vm.refresh()
+        assertNull("a successful retry clears the stale row", vm.error.value)
+        sync.refreshOutcome = ItemsRefreshOutcome.Failed("offline")
+        vm.refresh()
+        sync.refreshOutcome = ItemsRefreshOutcome.Unsupported
+        vm.refresh()
+        assertNull("so does an unsupported outcome (isSupported carries it)", vm.error.value)
     }
 
     @Test

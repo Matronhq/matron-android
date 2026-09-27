@@ -5,8 +5,10 @@ import chat.matron.android.journal.TrackerItemNumberReading
 import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemsScope
 import chat.matron.android.models.TrackerItem
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -148,6 +150,21 @@ class TrackerItemLinkResolverTest {
         // loop off the back of the first.
         resolver.resolve(65)
         assertEquals(2, refreshes)
+    }
+
+    /// A lookup cut short by cancellation (the tap was superseded, or the
+    /// host left the screen) aborts the resolve — it is never reported as
+    /// `Failed`, which the gate could still apply as a bogus alert.
+    @Test
+    fun cancellationAbortsTheResolveInsteadOfFailingIt() = runTest {
+        var refreshed = false
+        val resolver = TrackerItemLinkResolver(
+            lookup = { throw CancellationException("superseded") },
+            refreshAll = { refreshed = true; ItemsRefreshOutcome.Succeeded },
+        )
+        val thrown = runCatching { resolver.resolve(65) }.exceptionOrNull()
+        assertTrue("expected the cancellation to propagate, got $thrown", thrown is CancellationException)
+        assertFalse("a cancelled read must not go on to refresh", refreshed)
     }
 
     @Test

@@ -192,8 +192,8 @@ class TrackerItemLinkTapGate(private val scope: CoroutineScope) {
     /// both run to completion regardless, which is why the check is on the
     /// way out and not on the way in.
     fun begin(num: Int, resolve: suspend (Int) -> TrackerItemLinkOutcome, apply: (TrackerItemLinkOutcome) -> Unit) {
-        inFlight?.cancel()
-        val tap = ++currentTap
+        supersede()
+        val tap = currentTap
         inFlight = scope.launch {
             val outcome = resolve(num)
             if (currentTap != tap) return@launch
@@ -201,12 +201,34 @@ class TrackerItemLinkTapGate(private val scope: CoroutineScope) {
             apply(outcome)
         }
     }
+
+    /// A navigation that needs no resolving — an inline item card, which
+    /// already knows its item id — still counts as a tap: it supersedes any
+    /// link resolve still in flight and applies at once. Without this a
+    /// miss-path resolve still refreshing when the card was tapped could
+    /// finish afterwards and push the OLDER item on top of the one the user
+    /// just opened (Bugbot on matron-android #78).
+    fun openDirectly(itemID: String, apply: (TrackerItemLinkOutcome) -> Unit) {
+        supersede()
+        apply(TrackerItemLinkOutcome.Open(itemID))
+    }
+
+    /// Cancels whatever tap was still resolving and makes the next tap the
+    /// current one.
+    private fun supersede() {
+        inFlight?.cancel()
+        inFlight = null
+        currentTap++
+    }
 }
 
 /// Installs a surface as the host for `matron://item/<n>` links: the
 /// [LocalOpenTrackerItem] action every rendered body reads, the tap →
 /// [resolve] hop, the staleness gate, and the "Tracker" alert the resolver's
-/// miss paths surface. The alert is the whole point of the miss path: the
+/// miss paths surface. [content] receives the host's own item opener for
+/// navigations that need no resolving (an inline item card's tap): it goes
+/// through the same gate, so it supersedes a link resolve still in flight
+/// instead of racing it. The alert is the whole point of the miss path: the
 /// host stays exactly where it was, so without it an unknown number would be
 /// a dead tap.
 ///
@@ -219,7 +241,7 @@ class TrackerItemLinkTapGate(private val scope: CoroutineScope) {
 fun TrackerItemLinkHost(
     resolve: suspend (Int) -> TrackerItemLinkOutcome,
     open: (String) -> Unit,
-    content: @Composable () -> Unit,
+    content: @Composable (openItem: (String) -> Unit) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val gate = remember(scope) { TrackerItemLinkTapGate(scope) }
@@ -229,18 +251,18 @@ fun TrackerItemLinkHost(
     // One closure instance for the host's lifetime: every rendered body
     // reads this local, so a fresh lambda per recomposition would
     // invalidate the whole timeline.
-    val action: (Int) -> Unit = remember(gate) {
-        { num ->
-            gate.begin(num, { latestResolve(it) }) { outcome ->
-                when (outcome) {
-                    is TrackerItemLinkOutcome.Open -> latestOpen(outcome.itemID)
-                    is TrackerItemLinkOutcome.Explain -> alert = outcome.message
-                    TrackerItemLinkOutcome.Ignore -> Unit
-                }
+    val apply: (TrackerItemLinkOutcome) -> Unit = remember(gate) {
+        { outcome ->
+            when (outcome) {
+                is TrackerItemLinkOutcome.Open -> latestOpen(outcome.itemID)
+                is TrackerItemLinkOutcome.Explain -> alert = outcome.message
+                TrackerItemLinkOutcome.Ignore -> Unit
             }
         }
     }
-    CompositionLocalProvider(LocalOpenTrackerItem provides action) { content() }
+    val action: (Int) -> Unit = remember(gate) { { num -> gate.begin(num, { latestResolve(it) }, apply) } }
+    val openItem: (String) -> Unit = remember(gate) { { id -> gate.openDirectly(id, apply) } }
+    CompositionLocalProvider(LocalOpenTrackerItem provides action) { content(openItem) }
     alert?.let { message ->
         // Same chrome as every other tracker error (`ItemsPanelViewModel.error`).
         AlertDialog(
