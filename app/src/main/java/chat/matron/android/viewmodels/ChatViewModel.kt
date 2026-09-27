@@ -1206,8 +1206,13 @@ class ChatViewModel(
         focusTask = null
         // Leaving the room drops any parked jump, whoever owns it: a target
         // parked before this view's first snapshot must not fire on the
-        // room's next open, days later (apple #202).
+        // room's next open, days later (apple #202). The milestone park has
+        // its own slot and is dropped the same way — VM instances are cached
+        // across visits, so a tap that parked and was never consumed would
+        // otherwise yank the transcript to that old seq on the next start()
+        // (Bugbot, #79).
         pendingChatSearchFocusSeq = null
+        pendingMilestoneFocusSeq = null
         focusOwner = null
         // Drop any unconsumed TOC jump target. VM instances are cached across
         // visits and `pendingFocusID` is a StateFlow, so a new collector

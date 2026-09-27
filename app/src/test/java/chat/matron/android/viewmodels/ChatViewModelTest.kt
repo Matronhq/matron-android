@@ -1320,6 +1320,23 @@ class ChatViewModelTest {
         vm.stop()
     }
 
+    /// Bugbot (#79): `stop()` drops a parked milestone jump like every other
+    /// park. View models are cached across visits, so a tap that parked and
+    /// was never consumed — the user left before the first snapshot — must
+    /// not yank the transcript to that old seq on the room's next open.
+    @Test
+    fun jumpToMilestone_stopDropsAColdPark() = vmTest { scope ->
+        val fake = PagingFakeTimelineService(loaded = listOf(textItem("3"), textItem("7")), olderPages = mutableListOf())
+        val vm = makeVM(scope, timeline = fake)
+        vm.jumpToMilestone(7)
+        vm.stop()
+        vm.start()
+        waitUntil { vm.hasReceivedFirstSnapshot.value }
+        delay(100)
+        assertNull("a park dropped by stop() must not fire on the next open", vm.pendingFocusID.value)
+        vm.stop()
+    }
+
     /// Bugbot (#56): closing the bar while the query is still in flight must
     /// not let the late result resurrect it.
     @Test
