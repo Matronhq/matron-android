@@ -87,7 +87,23 @@ class MissionsApiTest {
         assertEquals("ms_a1", detail.mission.id)
         assertEquals(listOf("ml_b2"), detail.milestones.map { it.id })
         assertEquals(listOf("it_1"), detail.items.map { it.id })
+        assertEquals(listOf("it_1"), detail.openItemIDs)
         assertEquals(listOf("c1"), detail.conversations.map { it.id })
+    }
+
+    /// The journal's detail `items` are a projection without `created_at`
+    /// (`src/missions.js`: `id, num, kind, state, awaiting, title,
+    /// origin_convo_id, updated_at`), which the strict item decoder drops —
+    /// so the open-item id set has to be read leniently, or a mission detail
+    /// could never tell `MissionsSync` which cached rows the server no
+    /// longer lists (Bugbot, #79). A row without an id is skipped.
+    @Test
+    fun decodeMissionDetailKeepsOpenItemIDsFromTheServerProjection() {
+        val projection = """{"id":"it_9","num":9,"kind":"task","state":"open","awaiting":"user","title":"T",
+            "origin_convo_id":"c1","updated_at":1700000000000}"""
+        val detail = MissionsDecoding.detail(obj("""{"mission":$missionJSON,"milestones":[],"items":[$projection,{"num":10}],"conversations":[]}"""))
+        assertEquals("the projection has no created_at, so the strict decoder drops it", emptyList<String>(), detail.items.map { it.id })
+        assertEquals(listOf("it_9"), detail.openItemIDs)
     }
 
     @Test

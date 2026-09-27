@@ -38,6 +38,15 @@ data class MissionDetail(
     val milestones: List<Milestone>,
     val items: List<TrackerItem>,
     val conversations: List<MissionConversation>,
+    /// The id of every row in the response's `items` array — the server's
+    /// authoritative "still open under this mission" set at the moment of
+    /// the fetch. Kept apart from [items] because the journal's detail rows
+    /// are a projection (`id, num, kind, state, awaiting, title,
+    /// origin_convo_id, updated_at` — no `created_at`, no body), which the
+    /// strict [TrackerItem.fromJson] drops, so [items] is usually empty
+    /// while this set is complete. `MissionsSync` uses it to find cached
+    /// rows the server no longer lists (Bugbot, #79).
+    val openItemIDs: List<String> = items.map { it.id },
 )
 
 /// [MissionsDecoding.missions]' result: the rows that decoded, plus the ids
@@ -97,6 +106,7 @@ object MissionsDecoding {
         milestones = obj.arrayOrNull("milestones")?.objects()?.mapNotNull(Milestone::fromJson) ?: emptyList(),
         items = obj.arrayOrNull("items")?.objects()?.mapNotNull(TrackerItem::fromJson) ?: emptyList(),
         conversations = obj.arrayOrNull("conversations")?.objects()?.mapNotNull(MissionConversation::fromJson) ?: emptyList(),
+        openItemIDs = obj.arrayOrNull("items")?.objects()?.mapNotNull { it.stringOrNull("id") } ?: emptyList(),
     )
 
     fun milestones(obj: JsonObject): List<Milestone> =
