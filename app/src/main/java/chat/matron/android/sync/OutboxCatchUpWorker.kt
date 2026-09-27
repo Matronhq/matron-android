@@ -46,7 +46,7 @@ class OutboxCatchUpWorker(
         // their watermark, so abandoning the wait loses nothing.
         runCatching {
             withTimeoutOrNull(MAINTENANCE_BUDGET_MS) {
-                deps.journalMaintenance(session).runIfDue(ignoreLaunchHold = true)
+                deps.journalMaintenance(session)?.runIfDue(ignoreLaunchHold = true)
             }
         }.onFailure { MatronDebug.breadcrumb("OutboxCatchUpWorker: maintenance failed: $it") }
         return Result.success()

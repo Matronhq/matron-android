@@ -322,9 +322,16 @@ class AppDependencies(
 
     /**
      * The session's background sweeper — the foreground trigger and the
-     * periodic worker call `runIfDue()` on it.
+     * periodic worker call `runIfDue()` on it. Reads the EXISTING core only:
+     * housekeeping never builds a journal stack. A trigger that lands after
+     * [signOut] has cleared [cores] — the worker's post-catch-up run, or the
+     * foreground hook on the way out — would otherwise recreate an engine,
+     * sweeper and backfill against the very file teardown is about to wipe
+     * and close (Bugbot, #73). `null` then; the caller skips the pass, and a
+     * worker-started process sweeps once `backgroundCatchUp` has built the
+     * core it needs anyway.
      */
-    fun journalMaintenance(session: UserSession): JournalMaintenance = core(session).maintenance
+    fun journalMaintenance(session: UserSession): JournalMaintenance? = cores[session.userID]?.maintenance
 
     /**
      * Settings › Storage's numbers: on-disk size of the journal mirror and
