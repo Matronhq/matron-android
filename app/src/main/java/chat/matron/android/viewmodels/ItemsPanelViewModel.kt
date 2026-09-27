@@ -161,12 +161,23 @@ class ItemsPanelViewModel(
         refreshJob = scope.launch { refresh() }
     }
 
+    /// Identifies the refresh pass that currently owns [_isRefreshing]. Every
+    /// call to [refresh] claims it; only the claimant clears the flag on the
+    /// way out. Without that check the spinner races its own successor: a
+    /// scope switch (This chat / All) or a remount cancels [refreshJob] and
+    /// starts another straight away, and the cancelled pass — whose fetch is
+    /// a network call, so its cancellation only lands when that call returns
+    /// — would run its `finally` after the fresh pass had already raised the
+    /// flag, hiding the spinner mid-refresh.
+    private var refreshToken: Long = 0
+
     suspend fun refresh() {
+        val token = ++refreshToken
         _isRefreshing.value = true
         try {
             sync.refresh(_itemsScope.value)
         } finally {
-            _isRefreshing.value = false
+            if (refreshToken == token) _isRefreshing.value = false
         }
     }
 
