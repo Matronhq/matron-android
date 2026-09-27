@@ -7,6 +7,7 @@ import chat.matron.android.models.ItemsScope
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.TrackerAttachment
+import chat.matron.android.models.TrackerItem
 import java.time.Instant
 import kotlin.math.min
 import kotlin.math.pow
@@ -58,6 +59,15 @@ sealed interface ItemsRefreshOutcome {
 interface ItemsSyncing {
     suspend fun refresh(scope: ItemsScope): ItemsRefreshOutcome
     suspend fun refreshItem(id: String)
+
+    /// Writes an item the server has just handed back (a close, a reopen)
+    /// straight into the local cache. [refreshItem] is the only other way in
+    /// and it swallows every failure by design — so a mutation that succeeds
+    /// on the journal and is then followed by a refetch that doesn't would
+    /// leave the local copy stale, showing an item as open after it was
+    /// closed. Landing the returned item first makes the local state honest
+    /// whatever the refetch does.
+    suspend fun applyItem(item: TrackerItem)
     suspend fun enqueueComment(itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>)
 
     /// Returns whether the outbox insert itself succeeded — `false` when the
@@ -119,6 +129,18 @@ class ItemsSync(
     /// holds the server's thread"); the in-flight run repeats once more.
     private val inFlightRefetches = mutableMapOf<String, Job>()
     private val refetchAgain = mutableSetOf<String>()
+    /// Counts the local writes [applyItem] has made per item id — an item the
+    /// server handed straight back after a mutation, which is newer than
+    /// anything a GET issued before it can report. A refetch reads this
+    /// counter before its request and again when the response lands, and
+    /// drops the response if it moved: that response was produced before the
+    /// mutation, so writing it would put the pre-mutation snapshot back over
+    /// the newer local truth — the thread would read as open again right
+    /// after a close, and the retry that invites hits a conflict. Dropping is
+    /// safe because the mutation's own `refreshItem` is what set
+    /// [refetchAgain], so the run loops once more and fetches the real
+    /// post-mutation state.
+    private val localItemWrites = mutableMapOf<String, Int>()
     /// Per-SCOPE list-refresh coalescing: a reconnect and a panel open landing
     /// together must not each run their own full paginated GET over the same
     /// rows. Concurrent callers await the run already in flight for that
@@ -178,6 +200,8 @@ class ItemsSync(
             toJoin = listOfNotNull(markerJob, stateJob, retryJob) +
                 inFlightRefreshes.values + inFlightRefetches.values + drainJobs
             markerJob = null; stateJob = null; retryJob = null
+            // Sign-out wipes the store, so no local write survives to defend.
+            localItemWrites.clear()
         }
         toJoin.forEach { it.cancel() }
         toJoin.forEach { it.join() }
@@ -330,13 +354,33 @@ class ItemsSync(
         run.join()
     }
 
+    override suspend fun applyItem(item: TrackerItem) {
+        if (stopped) return
+        // Claimed BEFORE the write, so a refetch response that lands in
+        // between is already disqualified by the time it looks.
+        synchronized(lock) { localItemWrites[item.id] = (localItemWrites[item.id] ?: 0) + 1 }
+        try {
+            store.upsertItems(listOf(item))
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            MatronDebug.breadcrumb("ItemsSync: applying returned item ${item.id} failed: $error")
+        }
+    }
+
     private suspend fun refreshItemOnce(id: String) {
         try {
+            val writesBefore = synchronized(lock) { localItemWrites[id] ?: 0 }
             val detail = api.item(id)
             if (stopped) return
+            // The server answered, so the tracker is there whatever we do with
+            // the body — but if a mutation's own result landed while this
+            // request was open, the body predates it and neither the item nor
+            // its thread may overwrite what we already know.
+            _isSupported.value = true
+            if (synchronized(lock) { localItemWrites[id] ?: 0 } != writesBefore) return
             store.upsertItems(listOf(detail.item))
             store.replaceComments(id, detail.comments)
-            _isSupported.value = true
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
