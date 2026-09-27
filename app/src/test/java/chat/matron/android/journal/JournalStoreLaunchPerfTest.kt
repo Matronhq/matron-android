@@ -334,6 +334,28 @@ class JournalStoreLaunchPerfTest {
         assertEquals("$ make test", store.conversations(now = ms(2) + 25 * hour).first().snippet)
     }
 
+    /// Bugbot (#73, round two): paginating OLDER history under a row a
+    /// snapshot advanced past every local event must not put the previous
+    /// newest message's `$ command` stub back — the list would then hide
+    /// the newer preview behind it. The refill that lands the snapshot's own
+    /// event does repair the columns, the same way `applyJournal` would.
+    @Test
+    fun historyInsertKeepsUnknownColumnsUntilTheSnapshotsEventLands() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(liveLog(2), now = ms(2))
+        store.refreshSummaries(listOf(toolOutputSnapshot(seq = 3, snippet = "later text", lastTS = ms(3))))
+        assertNull(row().lastMessageType)
+
+        store.insertHistory(listOf(event(1, payload = buildJsonObject { put("body", "older") })), now = ms(3))
+        assertNull("older history must not restore the tool_output's columns", row().lastMessageType)
+        assertNull(row().expiredSnippet)
+        assertEquals("later text", store.conversations(now = ms(3) + 25 * hour).first().snippet)
+
+        store.insertHistory(listOf(event(3, payload = buildJsonObject { put("body", "later text") })), now = ms(3))
+        assertEquals("the snapshot's own event landed: columns known again", JournalEventType.TEXT, row().lastMessageType)
+        assertNull(row().expiredSnippet)
+    }
+
     // MARK: Watermarked sweeps
 
     private suspend fun watermark(key: String): Long? = db.metaDao().value(key)?.toLongOrNull()

@@ -340,10 +340,11 @@ class JournalStore(
             // Backfilled rows can also become a conversation's newest
             // message-type event without moving `last_seq`, so the two TTL
             // columns are recomputed in the same pass — one indexed lookup
-            // per touched conversation, exactly like the recount.
+            // per touched conversation, exactly like the recount (see
+            // [historyColumns] for the row whose columns are unknown).
             for (convoID in events.map { it.convoID }.toSet()) {
                 val convo = conversationDao.byId(convoID) ?: continue
-                val columns = newestMessageColumns(convoID)
+                val columns = historyColumns(convo)
                 conversationDao.upsert(
                     convo.copy(
                         unreadCount = eventDao.countUnread(
@@ -1214,6 +1215,25 @@ class JournalStore(
     private suspend fun newestMessageColumns(convoID: String): Pair<String?, String?> {
         val row = eventDao.newestMessageEvent(convoID, JournalEventType.MESSAGE_TYPES) ?: return null to null
         return row.type to expiredSnippet(row.type, parseJsonObjectOrNull(row.payload))
+    }
+
+    /// The TTL columns after a history insert touched [convo]. A row whose
+    /// columns are known re-derives them from the local newest message-type
+    /// event as usual. A row whose columns are UNKNOWN (NULL — a snapshot
+    /// advanced it past every event this mirror holds, see [upsertSummary])
+    /// stays unknown unless this insert landed the very event the wire
+    /// snippet describes, proven the same way [upsertSummary] proves it: the
+    /// local newest message's [snippet] equals the row's. Paginating OLDER
+    /// history under such a row must not put the previous newest message's
+    /// `$ command` stub back over the newer preview the list is showing —
+    /// the read path would then hide that preview behind the stub, the same
+    /// failure [refreshLastMessageColumns] already skips (Bugbot, #73).
+    private suspend fun historyColumns(convo: ConversationEntity): Pair<String?, String?> {
+        if (convo.lastMessageType != null) return newestMessageColumns(convo.id)
+        val newest = eventDao.newestMessageEvent(convo.id, JournalEventType.MESSAGE_TYPES)?.toJournalEvent()
+            ?: return null to null
+        if (snippet(newest) != convo.snippet) return null to null
+        return newest.type to expiredSnippet(newest.type, newest.payload)
     }
 
     /// Read-time mirror of the tool-output tombstone, applied WITHOUT a

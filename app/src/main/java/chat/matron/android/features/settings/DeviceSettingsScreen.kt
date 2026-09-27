@@ -26,6 +26,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -237,7 +238,13 @@ private fun AppLockSection(appLock: AppLockController) {
 @Composable
 private fun StorageSection(loadStorage: suspend () -> StorageSettingsRows.Model) {
     var storage by remember { mutableStateOf<StorageSettingsRows.Model?>(null) }
-    LaunchedEffect(loadStorage) { storage = loadStorage() }
+    // One read per entry to the screen, never per recomposition: the host
+    // hands over a fresh lambda every composition, so keying the effect on
+    // it re-ran the two file stats and two `COUNT(*)`s on every appearance,
+    // app-lock or coordinator change (Bugbot, #73). The newest lambda is
+    // still the one the effect calls.
+    val latestLoad by rememberUpdatedState(loadStorage)
+    LaunchedEffect(Unit) { storage = latestLoad() }
     SettingsSection("Storage") { StorageSettingsRows(storage) }
 }
 
