@@ -9,7 +9,23 @@ import chat.matron.android.journal.JournalEventType
 import chat.matron.android.journal.MatronJson
 import chat.matron.android.journal.parseJsonObjectOrNull
 import chat.matron.android.journal.stringOrNull
+import chat.matron.android.models.ItemAuthor
+import chat.matron.android.models.ItemAwaiting
+import chat.matron.android.models.ItemKind
+import chat.matron.android.models.ItemResolution
+import chat.matron.android.models.ItemState
+import chat.matron.android.models.MilestoneKind
+import chat.matron.android.models.Mission
+import chat.matron.android.models.MissionConversation
+import chat.matron.android.models.MissionLastMilestone
+import chat.matron.android.models.MissionState
+import chat.matron.android.models.Milestone
+import chat.matron.android.models.TrackerAttachment
+import chat.matron.android.models.TrackerComment
+import chat.matron.android.models.TrackerItem
+import chat.matron.android.models.TrackerLink
 import java.time.Instant
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonObject
@@ -50,7 +66,7 @@ data class ConversationEntity(
     /// (`JournalEventType.MESSAGE_TYPES`), or `null` when none has landed.
     /// Maintained on write (`applyJournal`, `insertHistory`, the sweeps) so
     /// the chat list's read-time tool-output TTL is pure column logic —
-    /// before v7 it ran a `MAX(seq)` sub-query plus a row fetch on `event`
+    /// before v9 it ran a `MAX(seq)` sub-query plus a row fetch on `event`
     /// per stale conversation (apple #212, GRDB v11).
     @ColumnInfo(name = "last_message_type") val lastMessageType: String? = null,
     /// What the list must show instead of [snippet] once that newest
@@ -195,5 +211,290 @@ data class OutboxEntity(
     companion object {
         const val STATE_QUEUED = "queued"
         const val STATE_FAILED = "failed"
+    }
+}
+
+// MARK: Task & decision tracker (matron-apple GRDB v9)
+
+/// Local mirror of one tracker item, filled from `GET /items` responses
+/// (`ItemsSync`) — never from the event log; the `item` marker event is only
+/// an invalidation signal. Column names match matron-apple's `ItemRecord`.
+/// JSON-list columns (labels, links, attachments) are stored as text so the
+/// schema stays flat and additive, exactly like `conversation.participants`.
+@Entity(tableName = "item", indices = [Index("origin_convo_id"), Index("mission_id", "state", "awaiting")])
+data class ItemEntity(
+    @PrimaryKey val id: String,
+    val num: Int,
+    val kind: String,
+    val state: String,
+    val resolution: String?,
+    val awaiting: String?,
+    val rank: Double,
+    val title: String,
+    val body: String,
+    @ColumnInfo(name = "labels_json") val labelsJson: String,
+    @ColumnInfo(name = "links_json") val linksJson: String,
+    @ColumnInfo(name = "attachments_json") val attachmentsJson: String,
+    val supersedes: String?,
+    @ColumnInfo(name = "origin_convo_id") val originConvoID: String,
+    @ColumnInfo(name = "created_by") val createdBy: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long,
+    @ColumnInfo(name = "closed_at") val closedAt: Long?,
+    @ColumnInfo(name = "comment_count") val commentCount: Int,
+    @ColumnInfo(name = "last_comment_at") val lastCommentAt: Long?,
+    @ColumnInfo(name = "has_image") val hasImage: Boolean,
+    @ColumnInfo(name = "mission_id") val missionID: String? = null,
+    @ColumnInfo(name = "mission_num") val missionNum: Int? = null,
+) {
+    fun toItem(): TrackerItem = TrackerItem(
+        id = id, num = num, kind = ItemKind.fromWire(kind) ?: ItemKind.TASK,
+        state = ItemState.fromWire(state) ?: ItemState.OPEN,
+        resolution = ItemResolution.fromWire(resolution), awaiting = ItemAwaiting.fromWire(awaiting),
+        rank = rank, title = title, body = body,
+        labels = decodeList(labelsJson, ListSerializer(String.serializer())),
+        links = decodeList(linksJson, ListSerializer(TrackerLink.serializer())),
+        attachments = decodeList(attachmentsJson, ListSerializer(TrackerAttachment.serializer())),
+        supersedes = supersedes, originConvoID = originConvoID,
+        createdBy = ItemAuthor.fromWire(createdBy) ?: ItemAuthor.AGENT,
+        createdAt = Instant.ofEpochMilli(createdAt), updatedAt = Instant.ofEpochMilli(updatedAt),
+        closedAt = closedAt?.let(Instant::ofEpochMilli), commentCount = commentCount,
+        lastCommentAt = lastCommentAt?.let(Instant::ofEpochMilli), hasImage = hasImage,
+        missionID = missionID, missionNum = missionNum,
+    )
+
+    companion object {
+        fun from(i: TrackerItem): ItemEntity = ItemEntity(
+            id = i.id, num = i.num, kind = i.kind.wire, state = i.state.wire, resolution = i.resolution?.wire,
+            awaiting = i.awaiting?.wire, rank = i.rank, title = i.title, body = i.body,
+            labelsJson = MatronJson.encodeToString(ListSerializer(String.serializer()), i.labels),
+            linksJson = MatronJson.encodeToString(ListSerializer(TrackerLink.serializer()), i.links),
+            attachmentsJson = MatronJson.encodeToString(ListSerializer(TrackerAttachment.serializer()), i.attachments),
+            supersedes = i.supersedes, originConvoID = i.originConvoID, createdBy = i.createdBy.wire,
+            createdAt = i.createdAt.toEpochMilli(), updatedAt = i.updatedAt.toEpochMilli(),
+            closedAt = i.closedAt?.toEpochMilli(), commentCount = i.commentCount,
+            lastCommentAt = i.lastCommentAt?.toEpochMilli(), hasImage = i.hasImage,
+            missionID = i.missionID, missionNum = i.missionNum,
+        )
+    }
+}
+
+/// One row of an item's thread. `meta_json` holds the `{from, to}` status
+/// snapshots of a synthetic `status` row, `null` for an ordinary comment.
+@Entity(tableName = "item_comment", indices = [Index("item_id")])
+data class ItemCommentEntity(
+    @PrimaryKey val id: String,
+    @ColumnInfo(name = "item_id") val itemID: String,
+    val author: String,
+    @ColumnInfo(name = "device_id") val deviceID: Long,
+    val kind: String,
+    val body: String,
+    @ColumnInfo(name = "attachments_json") val attachmentsJson: String,
+    @ColumnInfo(name = "meta_json") val metaJson: String?,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+) {
+    @Serializable
+    private data class Snap(val state: String? = null, val resolution: String? = null, val awaiting: String? = null)
+
+    @Serializable
+    private data class Meta(val from: Snap? = null, val to: Snap? = null)
+
+    fun toComment(): TrackerComment {
+        val meta = metaJson?.let { runCatching { MatronJson.decodeFromString(Meta.serializer(), it) }.getOrNull() }
+        fun snap(s: Snap?): TrackerItem.StatusSnapshot? = s?.let {
+            TrackerItem.StatusSnapshot(
+                state = ItemState.fromWire(it.state), resolution = ItemResolution.fromWire(it.resolution),
+                awaiting = ItemAwaiting.fromWire(it.awaiting),
+            )
+        }
+        return TrackerComment(
+            id = id, itemID = itemID, author = ItemAuthor.fromWire(author) ?: ItemAuthor.AGENT, deviceID = deviceID,
+            kind = TrackerComment.Kind.fromWire(kind) ?: TrackerComment.Kind.COMMENT, body = body,
+            attachments = decodeList(attachmentsJson, ListSerializer(TrackerAttachment.serializer())),
+            statusFrom = snap(meta?.from), statusTo = snap(meta?.to), createdAt = Instant.ofEpochMilli(createdAt),
+        )
+    }
+
+    companion object {
+        fun from(c: TrackerComment): ItemCommentEntity {
+            fun snap(s: TrackerItem.StatusSnapshot?): Snap? =
+                s?.let { Snap(it.state?.wire, it.resolution?.wire, it.awaiting?.wire) }
+            val meta = if (c.statusFrom != null || c.statusTo != null) {
+                MatronJson.encodeToString(Meta.serializer(), Meta(snap(c.statusFrom), snap(c.statusTo)))
+            } else {
+                null
+            }
+            return ItemCommentEntity(
+                id = c.id, itemID = c.itemID, author = c.author.wire, deviceID = c.deviceID, kind = c.kind.wire,
+                body = c.body,
+                attachmentsJson = MatronJson.encodeToString(ListSerializer(TrackerAttachment.serializer()), c.attachments),
+                metaJson = meta, createdAt = c.createdAt.toEpochMilli(),
+            )
+        }
+    }
+}
+
+/// One tracker write made offline (or still in flight): a comment on an
+/// existing item (`op = "comment"`, [itemID] set) or a brand-new item
+/// (`op = "create"`, [itemID] null). Drained by `ItemsSync` whenever the
+/// connection is running, with [localID] as the request's Idempotency-Key
+/// so at-least-once resends are dedup-safe. Like the text [OutboxEntity],
+/// rows survive the `snapshot_required` mirror wipe and are cleared only at
+/// sign-out.
+@Entity(tableName = "item_outbox")
+data class ItemOutboxEntity(
+    @PrimaryKey @ColumnInfo(name = "local_id") val localID: String,
+    @ColumnInfo(name = "item_id") val itemID: String?,
+    val op: String,
+    @ColumnInfo(name = "payload_json") val payloadJson: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    val attempts: Int,
+    @ColumnInfo(name = "last_error") val lastError: String?,
+) {
+    companion object {
+        const val OP_COMMENT = "comment"
+        const val OP_CREATE = "create"
+    }
+}
+
+/// A JSON-list text column, decoded leniently: a value that fails to decode
+/// reads as empty rather than poisoning the whole row.
+private fun <T> decodeList(raw: String, serializer: kotlinx.serialization.KSerializer<List<T>>): List<T> =
+    runCatching { MatronJson.decodeFromString(serializer, raw) }.getOrElse { emptyList() }
+
+// MARK: Missions & milestones (matron-apple GRDB v10)
+
+/// Local mirror of one mission row plus the `GET /missions` list counts,
+/// filled from `GET /missions` / `GET /missions/:id` by `MissionsSync` —
+/// never from the event log: the `mission`/`milestone` markers are
+/// invalidation signals, and the journal omits their titles when they cross
+/// the privacy boundary, so a marker is never a source of truth for a name.
+/// Column names match matron-apple's `MissionRecord`; `last_milestone_json`
+/// holds the wire-shaped `last_milestone` object as text, like the other
+/// JSON columns here.
+@Entity(
+    tableName = "mission",
+    indices = [Index("state", "last_milestone_at"), Index("origin_convo_id")],
+)
+data class MissionEntity(
+    @PrimaryKey val id: String,
+    val num: Int,
+    val state: String,
+    val title: String,
+    val body: String,
+    @ColumnInfo(name = "close_summary") val closeSummary: String?,
+    @ColumnInfo(name = "closed_by") val closedBy: String?,
+    @ColumnInfo(name = "closed_over_open_items") val closedOverOpenItems: Int,
+    @ColumnInfo(name = "origin_convo_id") val originConvoID: String,
+    @ColumnInfo(name = "origin_device_id") val originDeviceID: Long,
+    @ColumnInfo(name = "created_by") val createdBy: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long,
+    @ColumnInfo(name = "last_milestone_at") val lastMilestoneAt: Long?,
+    @ColumnInfo(name = "closed_at") val closedAt: Long?,
+    @ColumnInfo(name = "open_items") val openItems: Int,
+    @ColumnInfo(name = "needs_you") val needsYou: Int,
+    @ColumnInfo(name = "conversation_count") val conversationCount: Int,
+    @ColumnInfo(name = "milestone_count") val milestoneCount: Int,
+    @ColumnInfo(name = "last_milestone_json") val lastMilestoneJson: String?,
+) {
+    /// Serializable mirror of `MissionLastMilestone` with wire-shaped keys,
+    /// so the stored JSON reads the same as the payload it came from.
+    @Serializable
+    private data class LastMilestone(
+        val num: Int,
+        val title: String,
+        val kind: String,
+        @kotlinx.serialization.SerialName("created_at") val createdAt: Long,
+    )
+
+    fun toMission(): Mission {
+        val last = lastMilestoneJson
+            ?.let { runCatching { MatronJson.decodeFromString(LastMilestone.serializer(), it) }.getOrNull() }
+            ?.let { l ->
+                val kind = MilestoneKind.fromWire(l.kind) ?: return@let null
+                MissionLastMilestone(num = l.num, title = l.title, kind = kind, createdAt = Instant.ofEpochMilli(l.createdAt))
+            }
+        return Mission(
+            id = id, num = num, state = MissionState.fromWire(state) ?: MissionState.OPEN, title = title, body = body,
+            closeSummary = closeSummary, closedBy = ItemAuthor.fromWire(closedBy), closedOverOpenItems = closedOverOpenItems,
+            originConvoID = originConvoID, originDeviceID = originDeviceID,
+            createdBy = ItemAuthor.fromWire(createdBy) ?: ItemAuthor.AGENT,
+            createdAt = Instant.ofEpochMilli(createdAt), updatedAt = Instant.ofEpochMilli(updatedAt),
+            lastMilestoneAt = lastMilestoneAt?.let(Instant::ofEpochMilli), closedAt = closedAt?.let(Instant::ofEpochMilli),
+            openItems = openItems, needsYou = needsYou, conversationCount = conversationCount,
+            milestoneCount = milestoneCount, lastMilestone = last,
+        )
+    }
+
+    companion object {
+        fun from(m: Mission): MissionEntity = MissionEntity(
+            id = m.id, num = m.num, state = m.state.wire, title = m.title, body = m.body,
+            closeSummary = m.closeSummary, closedBy = m.closedBy?.wire, closedOverOpenItems = m.closedOverOpenItems,
+            originConvoID = m.originConvoID, originDeviceID = m.originDeviceID, createdBy = m.createdBy.wire,
+            createdAt = m.createdAt.toEpochMilli(), updatedAt = m.updatedAt.toEpochMilli(),
+            lastMilestoneAt = m.lastMilestoneAt?.toEpochMilli(), closedAt = m.closedAt?.toEpochMilli(),
+            openItems = m.openItems, needsYou = m.needsYou, conversationCount = m.conversationCount,
+            milestoneCount = m.milestoneCount,
+            lastMilestoneJson = m.lastMilestone?.let {
+                MatronJson.encodeToString(
+                    LastMilestone.serializer(),
+                    LastMilestone(it.num, it.title, it.kind.wire, it.createdAt.toEpochMilli()),
+                )
+            },
+        )
+    }
+}
+
+/// One milestone of a mission. `seq` is the anchor — the `milestone` marker
+/// event's own seq in `convo_id`.
+@Entity(
+    tableName = "milestone",
+    indices = [Index("mission_id", "created_at"), Index("convo_id", "seq")],
+)
+data class MilestoneEntity(
+    @PrimaryKey val id: String,
+    @ColumnInfo(name = "mission_id") val missionID: String,
+    val num: Int,
+    val kind: String,
+    val title: String,
+    val body: String,
+    @ColumnInfo(name = "convo_id") val convoID: String,
+    val seq: Long,
+    @ColumnInfo(name = "device_id") val deviceID: Long,
+    @ColumnInfo(name = "created_by") val createdBy: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+) {
+    fun toMilestone(): Milestone = Milestone(
+        id = id, missionID = missionID, num = num, kind = MilestoneKind.fromWire(kind) ?: MilestoneKind.PROGRESS,
+        title = title, body = body, convoID = convoID, seq = seq, deviceID = deviceID,
+        createdBy = ItemAuthor.fromWire(createdBy) ?: ItemAuthor.AGENT, createdAt = Instant.ofEpochMilli(createdAt),
+    )
+
+    companion object {
+        fun from(m: Milestone): MilestoneEntity = MilestoneEntity(
+            id = m.id, missionID = m.missionID, num = m.num, kind = m.kind.wire, title = m.title, body = m.body,
+            convoID = m.convoID, seq = m.seq, deviceID = m.deviceID, createdBy = m.createdBy.wire,
+            createdAt = m.createdAt.toEpochMilli(),
+        )
+    }
+}
+
+/// A conversation belonging to a mission, as `GET /missions/:id` lists it —
+/// the authoritative membership list (origin, joined, inherited), which the
+/// snapshot never carries.
+@Entity(tableName = "mission_conversation", primaryKeys = ["mission_id", "convo_id"])
+data class MissionConversationEntity(
+    @ColumnInfo(name = "mission_id") val missionID: String,
+    @ColumnInfo(name = "convo_id") val convoID: String,
+    val title: String,
+    val box: String?,
+    val state: String,
+) {
+    fun toConversation(): MissionConversation = MissionConversation(id = convoID, title = title, box = box, state = state)
+
+    companion object {
+        fun from(missionID: String, c: MissionConversation): MissionConversationEntity =
+            MissionConversationEntity(missionID = missionID, convoID = c.id, title = c.title, box = c.box, state = c.state)
     }
 }

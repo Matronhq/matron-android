@@ -10,6 +10,9 @@ import chat.matron.android.journal.JournalEvent
 import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.JournalSyncEngine
 import chat.matron.android.journal.db.MatronDatabase
+import chat.matron.android.models.ItemAwaiting
+import chat.matron.android.models.ItemKind
+import chat.matron.android.models.TrackerItem
 import java.time.Instant
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -304,6 +307,33 @@ class JournalChatServiceTest {
             listOf("dev-y", "dev-yellow"),
             labels,
         )
+        probe.cancel()
+    }
+
+    @Test fun summariesCarryNeedsUserCount() = runBlocking {
+        // `needsUserCount` is app-local (the journal has no such endpoint):
+        // it's sourced from `store.needsUserCountsFlow()`, its own input
+        // beside the conversations and roster flows. Per the design ruling
+        // the FIRST emission may land before the needs query's initial value
+        // (an empty map until then), so this loops to the converged state
+        // rather than asserting on the very first snapshot — same watchdog
+        // shape as `renamingABoxRelabelsAnOpenChatList` (apple #187).
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(ConvoSummaryDTO("c1", "Fix the parser", "running", 1, "", 1)),
+            headSeq = 1,
+        )
+        store.upsertItems(
+            listOf(
+                TrackerItem(id = "q", num = 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, title = "Q", originConvoID = "c1"),
+                TrackerItem(id = "t", num = 2, kind = ItemKind.TASK, awaiting = ItemAwaiting.AGENT, title = "T", originConvoID = "c1"),
+            ),
+        )
+        val service = makeService(store, coalesce = 10.milliseconds)
+        val probe = FlowProbe(this, service.chatSummaries())
+        var count = probe.next().first { it.id == "c1" }.needsUserCount
+        while (count == 0) count = probe.next().first { it.id == "c1" }.needsUserCount
+        assertEquals("one open item awaiting the user on c1 surfaces as needsUserCount", 1, count)
         probe.cancel()
     }
 

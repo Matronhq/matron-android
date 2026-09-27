@@ -66,6 +66,9 @@ fun DeviceSettingsScreen(
     /// two `COUNT(*)`s when the user opens this screen, never on the launch
     /// path. `null` in hosts without a store (previews) hides the section.
     loadStorage: (suspend () -> StorageSettingsRows.Model)? = null,
+    /// Settings → Coordinator (apple #197). `null` in hosts without the
+    /// app shell (previews); the section then doesn't render.
+    coordinator: CoordinatorSettingRowModel? = null,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -128,6 +131,8 @@ fun DeviceSettingsScreen(
                     }
                 }
             }
+
+            if (coordinator != null) CoordinatorSection(coordinator)
 
             SettingsSection("Appearance") {
                 AppearancePicker(selected = appearance, onSelect = onAppearanceChange)
@@ -234,6 +239,43 @@ private fun StorageSection(loadStorage: suspend () -> StorageSettingsRows.Model)
     var storage by remember { mutableStateOf<StorageSettingsRows.Model?>(null) }
     LaunchedEffect(loadStorage) { storage = loadStorage() }
     SettingsSection("Storage") { StorageSettingsRows(storage) }
+}
+
+/**
+ * Settings → Coordinator (app shell, spec §5b): the current coordinator
+ * chat's title with Change and Clear, or a Choose button when none is set.
+ * The shell supplies the model (it owns the setting, the chooser sheet and
+ * the live chat list the title comes from) so this stays a dumb renderer.
+ */
+data class CoordinatorSettingRowModel(
+    /// The chosen chat's title (its id when untitled), or `null` when unset.
+    val title: String?,
+    val onChoose: () -> Unit,
+    val onClear: () -> Unit,
+)
+
+@Composable
+private fun CoordinatorSection(model: CoordinatorSettingRowModel) {
+    SettingsSection("Coordinator") {
+        if (model.title != null) {
+            LabeledRow("Conversation", model.title)
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                TextButton(onClick = model.onChoose) { Text("Change…") }
+                TextButton(onClick = model.onClear) { Text("Clear", color = MaterialTheme.colorScheme.error) }
+            }
+        } else {
+            Text(
+                "No coordinator conversation yet.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(vertical = 8.dp),
+            )
+            TextButton(onClick = model.onChoose) { Text("Choose…") }
+        }
+    }
 }
 
 @Composable

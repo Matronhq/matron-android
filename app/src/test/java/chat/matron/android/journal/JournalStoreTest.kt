@@ -168,6 +168,45 @@ class JournalStoreTest {
     /// `spawn_outcome` joins MESSAGE_TYPES (matron-journal spec): a resolved
     /// spawn card must bump unread the same as any other message-type event,
     /// not stay silently absent from the badge.
+    /// Item #60 — "jump to my last message" (apple #202). The newest own
+    /// `text`/`image`/`file` row wins; agent rows, read markers and other
+    /// conversations don't count, and neither does the journal's
+    /// `fallback_for` text mirror of an item marker (own sender, never typed).
+    @Test
+    fun newestOwnMessageSeqSkipsAgentRowsMarkersAndFallbackMirrors() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(ev(1, sender = "user:dan"))
+        store.applyJournal(ev(2))
+        store.applyJournal(
+            ev(3, sender = "user:dan", type = "image", payload = buildJsonObject { put("blob_ref", "b"); put("name", "x.png") }),
+        )
+        store.applyJournal(ev(4))
+        store.applyJournal(
+            ev(5, sender = "user:dan", payload = buildJsonObject { put("body", "📌 #1 filed"); put("fallback_for", "item") }),
+        )
+        store.applyJournal(ev(6, sender = "user:dan", type = "read_marker", payload = buildJsonObject { put("up_to_seq", 5) }))
+        store.applyJournal(ev(7, convo = "c2", sender = "user:dan"))
+        assertEquals(3L, store.newestOwnMessageSeq("c1"))
+        assertEquals(7L, store.newestOwnMessageSeq("c2"))
+        assertNull("a conversation the user never wrote in has no target", store.newestOwnMessageSeq("c3"))
+    }
+
+    /// More fallback mirrors than one scan batch, all newer than the real
+    /// message: the scan keeps going instead of giving up (CodeRabbit,
+    /// apple #202).
+    @Test
+    fun newestOwnMessageSeqScansPastABatchOfFallbackMirrors() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(ev(1, sender = "user:dan", payload = body("real")))
+        val mirrors = JournalStore.OWN_MESSAGE_SCAN_BATCH + 10
+        for (seq in 2..(1 + mirrors)) {
+            store.applyJournal(
+                ev(seq.toLong(), sender = "user:dan", payload = buildJsonObject { put("body", "📌 #$seq"); put("fallback_for", "item") }),
+            )
+        }
+        assertEquals(1L, store.newestOwnMessageSeq("c1"))
+    }
+
     @Test
     fun spawnOutcomeBumpsUnreadLikeAnyOtherMessageType() = runBlocking {
         val store = makeStore()

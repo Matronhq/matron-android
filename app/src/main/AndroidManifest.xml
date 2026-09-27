@@ -5,6 +5,12 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- A voice note keeps recording while the app is backgrounded (switching
+         apps mid-note): VoiceRecordingService holds a microphone foreground
+         session for exactly the span of a recording (port of apple #180's
+         `audio` background mode). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
     <application
@@ -24,6 +30,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Microphone foreground session for a live voice note; started when
+             capture begins (app in foreground) and stopped on stop/cancel. -->
+        <service
+            android:name=".platform.VoiceRecordingService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
         <!-- Grants external viewers read access to downloaded attachments in
              cacheDir/matron-attachments (see AttachmentOpener.kt). -->

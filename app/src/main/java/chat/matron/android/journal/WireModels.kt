@@ -37,9 +37,41 @@ object JournalEventType {
     /// -authored, appended into the parent's own conversation (see
     /// `chat.matron.android.events.SpawnOutcome`).
     const val SPAWN_OUTCOME = "spawn_outcome"
+    /// Tracker marker, written by the journal itself on every mutating
+    /// `/items` route (protocol.md "Items"). An invalidation signal for the
+    /// local item cache, never a message: not in [MESSAGE_TYPES], and the
+    /// timeline renders nothing for it until the inline cards port.
+    const val ITEM = "item"
+    /// Mission lifecycle marker (`created` / `joined` / `updated` / `closed`),
+    /// written by the journal from the `/missions` routes (protocol.md
+    /// "Missions & milestones → Marker events"). An invalidation signal for
+    /// the local mission cache plus a one-line inline notice; never a
+    /// message — not in [MESSAGE_TYPES], no unread, no snippet, no push.
+    const val MISSION = "mission"
+    /// One milestone, appended to the conversation it was posted in. Its OWN
+    /// seq is the milestone's anchor — the inline card and the jump target.
+    /// Not in [MESSAGE_TYPES] either.
+    const val MILESTONE = "milestone"
+
+    /// Payload key on the plain `text` twin the journal appends after a
+    /// card-worthy `item` marker so pre-tracker clients still see the turn
+    /// (spec "Old-client fallback"). A client that renders `item` markers
+    /// hides these — one guard, kept until the journal stops emitting them.
+    const val FALLBACK_FOR_KEY = "fallback_for"
 
     /// Infix in a subagent child's convo id: `<parent>:sub:<agentId>`.
     const val CHILD_CONVO_INFIX = ":sub:"
+
+    /// Markers the bridge puts at the head of every agent-chat room title
+    /// (`↔️ [ab] mac ↔ dev-z`, matron-bridge#225/#228; `🔗 ` is the legacy
+    /// marker rooms minted before #228 still carry). A room is born by an
+    /// agent's `agent_chat_start`, not by the user, so it must never
+    /// auto-open — the title, carried by `convo_meta`, is the only frame
+    /// that tells a room apart from the session the user just started.
+    val AGENT_ROOM_TITLE_MARKERS: List<String> = listOf("↔️ ", "🔗 ")
+
+    /// Whether a title is an agent-chat room's (see [AGENT_ROOM_TITLE_MARKERS]).
+    fun isAgentRoomTitle(title: String): Boolean = AGENT_ROOM_TITLE_MARKERS.any { title.startsWith(it) }
 
     /// Types that bump unread counts and set the conversation snippet.
     /// `SPAWN_OUTCOME` joins the set for the same reason the card
@@ -87,6 +119,15 @@ data class JournalEvent(
 /// Payload-key accessors. The wire key names ("body"/"snippet"/"diff") live
 /// here so every reader agrees on them and precedence lives in one place.
 fun JournalEvent.body(): String? = payload.stringOrNull("body")
+
+/// True for the journal's old-client twin of an `item` marker (a `text`
+/// event flagged `fallback_for`). Hidden from the timeline (the marker card
+/// is what renders), never indexed for search, and skipped by outbox
+/// delivery confirmation — but it still bumps unread, activity and the
+/// snippet like any text, per the spec's "Old-client fallback": that is how
+/// a question filed while the chat was closed reaches the chat list.
+fun JournalEvent.isItemFallbackText(): Boolean =
+    type == JournalEventType.TEXT && payload.stringOrNull(JournalEventType.FALLBACK_FOR_KEY) != null
 fun JournalEvent.snippet(): String? = payload.stringOrNull("snippet")
 fun JournalEvent.diff(): String? = payload.stringOrNull("diff")
 
@@ -116,7 +157,10 @@ fun JournalEvent.previewText(now: Instant = Instant.now()): String? {
         JournalEventType.DIFF -> if (tsMs + EventTombstone.RETENTION_WINDOW_MS <= nowMs) return null
     }
     return when (type) {
-        JournalEventType.TEXT -> body()
+        // The item marker's `fallback_for` twin is hidden from the timeline, so
+        // a search hit on it would land on a row that never renders (the journal
+        // server's own indexer skips it the same way).
+        JournalEventType.TEXT -> if (isItemFallbackText()) null else body()
         JournalEventType.TOOL_OUTPUT -> snippet()
         JournalEventType.DIFF -> diff() ?: snippet()
         else -> null

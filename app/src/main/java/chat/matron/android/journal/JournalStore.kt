@@ -5,10 +5,27 @@ import chat.matron.android.journal.db.AgentEntity
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.journal.db.ConversationEntity
 import chat.matron.android.journal.db.EventEntity
+import chat.matron.android.journal.db.ItemCommentEntity
+import chat.matron.android.journal.db.ItemEntity
+import chat.matron.android.journal.db.ItemOutboxEntity
 import chat.matron.android.journal.db.MatronDatabase
 import chat.matron.android.journal.db.MetaEntity
+import chat.matron.android.journal.db.MilestoneEntity
+import chat.matron.android.journal.db.MissionConversationEntity
+import chat.matron.android.journal.db.MissionEntity
 import chat.matron.android.journal.db.OutboxEntity
 import chat.matron.android.journal.db.SummaryEntryEntity
+import chat.matron.android.chat.JournalChatService
+import chat.matron.android.chat.SessionTag
+import chat.matron.android.models.ItemsScope
+import chat.matron.android.models.Milestone
+import chat.matron.android.models.Mission
+import chat.matron.android.models.MissionConversation
+import chat.matron.android.models.MissionState
+import chat.matron.android.models.SessionTagInputs
+import chat.matron.android.models.TrackerComment
+import chat.matron.android.models.TrackerItem
+import java.time.Instant
 import kotlin.math.max
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
@@ -41,13 +58,19 @@ interface MediaBrowserStoreReading {
 class JournalStore(
     private val db: MatronDatabase,
     private val ownSender: String,
-) : MediaBrowserStoreReading, MaintenanceSweeping {
+) : MediaBrowserStoreReading, MaintenanceSweeping, ItemsStoreReading, TrackerItemNumberReading, MissionsStoreReading {
     private val conversationDao = db.conversationDao()
     private val eventDao = db.eventDao()
     private val metaDao = db.metaDao()
     private val outboxDao = db.outboxDao()
     private val agentDao = db.agentDao()
     private val summaryEntryDao = db.summaryEntryDao()
+    private val itemDao = db.itemDao()
+    private val itemCommentDao = db.itemCommentDao()
+    private val itemOutboxDao = db.itemOutboxDao()
+    private val missionDao = db.missionDao()
+    private val milestoneDao = db.milestoneDao()
+    private val missionConversationDao = db.missionConversationDao()
 
     /// Test-only failure injection, checked before the transaction opens so the
     /// cursor is left untouched on a simulated failure — the same shape a real
@@ -198,6 +221,12 @@ class JournalStore(
         // list's timestamp; bookkeeping frames (read_marker, session_status,
         // convo_meta) must not fake aliveness. lastSeq still tracks every
         // frame (mirrors the server's last_seq for snapshot ordering).
+        //
+        // The item marker's old-client `fallback_for` text twin deliberately
+        // counts here like any text (spec "Old-client fallback": unread and
+        // snippet follow the server; Apple's store does the same): it is the
+        // signal that an agent filed a question while the chat was closed,
+        // and the inline marker card (#72) is what the reader then sees.
         if (event.type in JournalEventType.MESSAGE_TYPES) {
             convo = convo.copy(lastActivityTS = event.ts.toEpochMilli())
         }
@@ -275,7 +304,9 @@ class JournalStore(
         // follow-up write means the confirming row and its outbox delete
         // commit or fail together, so a relaunch can never show a durable
         // duplicate echo beside the delivered message.
-        if (event.sender == ownSender && event.type == JournalEventType.TEXT) {
+        // An item marker's `fallback_for` text twin is journal-authored under
+        // the writer's sender, never a queued send — it must not confirm one.
+        if (event.sender == ownSender && event.type == JournalEventType.TEXT && !event.isItemFallbackText()) {
             event.body()?.let { deleteFirstMatchingInTransaction(event.convoID, it) }
         }
         return true
@@ -299,7 +330,7 @@ class JournalStore(
             // same confirmation-delete here, timestamp-guarded so genuinely
             // old history can't eat a fresh queued send.
             for (e in events) {
-                if (e.sender != ownSender || e.type != JournalEventType.TEXT) continue
+                if (e.sender != ownSender || e.type != JournalEventType.TEXT || e.isItemFallbackText()) continue
                 e.body()?.let { deleteFirstMatchingInTransaction(e.convoID, it, journaledAtMs = e.ts.toEpochMilli()) }
             }
             // Paginated rows can include unread messages (e.g. the refill after
@@ -391,6 +422,31 @@ class JournalStore(
 
     suspend fun maxSeq(convoID: String): Long? = eventDao.maxSeq(convoID)
 
+    /// Seq of the newest message the user themself sent in [convoID] — a
+    /// `text`, `image` or `file` row from [ownSender] — or null when they
+    /// never wrote there. The chat view's "jump to my last message" control
+    /// lands on it (apple #202, item #60). Skips the journal's `fallback_for`
+    /// text mirrors of item markers: those carry the user's sender but were
+    /// never typed. The mirror check reads the payload in Kotlin rather than
+    /// via `json_extract` (the Apple original's reason is a BLOB column; here
+    /// it keeps the query free of the JSON1 extension), so the scan walks own
+    /// rows newest-first in batches until it finds a real message or runs out
+    /// (CodeRabbit, apple #202: a fixed cut-off could be exhausted by mirrors
+    /// alone).
+    suspend fun newestOwnMessageSeq(convoID: String): Long? {
+        var before = Long.MAX_VALUE
+        while (true) {
+            val batch = eventDao.ownMessagesBeforeNewestFirst(
+                convoID, ownSender, OWN_MESSAGE_TYPES, before, OWN_MESSAGE_SCAN_BATCH,
+            )
+            batch.firstOrNull { row ->
+                (parseJsonObjectOrNull(row.payload) ?: JsonObject(emptyMap()))["fallback_for"] == null
+            }?.let { return it.seq }
+            if (batch.size < OWN_MESSAGE_SCAN_BATCH) return null
+            before = batch.last().seq
+        }
+    }
+
     suspend fun setMuted(muted: Boolean, convoID: String) = conversationDao.setMuted(muted, convoID)
 
     suspend fun setHidden(hidden: Boolean, convoID: String) = conversationDao.setHidden(hidden, convoID)
@@ -426,6 +482,15 @@ class JournalStore(
             // keep stale box names holding chips (and the ≥2-boxes gate) open
             // against an otherwise-empty mirror (Bugbot, #38).
             agentDao.deleteAll()
+            // The tracker cache goes with the mirror (the next refresh is a
+            // full fetch — `meta` above took the per-scope watermarks with
+            // it), but `item_outbox` stays: a replay-gap wipe must not eat a
+            // reply written offline any more than a queued text message.
+            itemCommentDao.deleteAll()
+            itemDao.deleteAll()
+            // Mission cache — same rule as the tracker cache above; one
+            // bootstrap later, `GET /missions` refills it.
+            wipeMissionTables()
         }
     }
 
@@ -500,8 +565,330 @@ class JournalStore(
     }
 
     /// Sign-out hygiene: the next account on this database file must not
-    /// inherit (or send) the previous user's queued messages.
-    suspend fun wipeOutbox() = outboxDao.deleteAll()
+    /// inherit (or send) the previous user's queued messages — tracker
+    /// comments and creates included.
+    suspend fun wipeOutbox() {
+        db.withTransaction {
+            outboxDao.deleteAll()
+            itemOutboxDao.deleteAll()
+        }
+    }
+
+    // MARK: Task & decision tracker
+    //
+    // Tracker cache (spec 2026-09-08-items-tracker-apps, task 4). Filled from
+    // GET /items responses (ItemsSync), never from the event log — the `item`
+    // marker event is only an invalidation signal. Ported from matron-apple's
+    // `JournalStore+Items.swift`.
+
+    suspend fun upsertItems(items: List<TrackerItem>) {
+        if (items.isEmpty()) return
+        itemDao.upsertAll(items.map(ItemEntity::from))
+    }
+
+    suspend fun replaceComments(itemID: String, comments: List<TrackerComment>) {
+        db.withTransaction {
+            itemCommentDao.deleteForItem(itemID)
+            itemCommentDao.upsertAll(comments.map(ItemCommentEntity::from))
+        }
+    }
+
+    /// Idempotent upsert for one or more comments — unlike [replaceComments],
+    /// this does NOT delete existing rows for the affected item(s) first. Used
+    /// by `ItemsSync`'s outbox drain to keep a just-posted reply visible
+    /// locally the instant the server accepts it, without waiting on (or being
+    /// erased by) the coalesced `refreshItem` GET that follows.
+    suspend fun insertComments(comments: List<TrackerComment>) {
+        if (comments.isEmpty()) return
+        itemCommentDao.upsertAll(comments.map(ItemCommentEntity::from))
+    }
+
+    suspend fun item(id: String): TrackerItem? = itemDao.byId(id)?.toItem()
+
+    /// Lookup by the human-facing item NUMBER (`#65`) rather than its id —
+    /// what a tapped `[#65](matron://item/65)` link has to resolve. `null`
+    /// when this device has never synced that item; `TrackerItemLinkResolver`
+    /// turns that into one refresh and then a "not on this device yet"
+    /// alert, never a navigation change.
+    override suspend fun item(num: Int): TrackerItem? = itemDao.byNum(num)?.toItem()
+
+    suspend fun items(scope: ItemsScope): List<TrackerItem> = when (scope) {
+        ItemsScope.All -> itemDao.all()
+        is ItemsScope.Convo -> itemDao.forConversation(scope.id)
+    }.map { it.toItem() }
+
+    override fun itemsFlow(scope: ItemsScope): Flow<List<TrackerItem>> = when (scope) {
+        ItemsScope.All -> itemDao.allFlow()
+        is ItemsScope.Convo -> itemDao.forConversationFlow(scope.id)
+    }.map { list -> list.map { it.toItem() } }.distinctUntilChanged()
+
+    override fun itemFlow(id: String): Flow<TrackerItem?> =
+        itemDao.byIdFlow(id).map { it?.toItem() }.distinctUntilChanged()
+
+    /// One-shot read of an item's thread, in the same order as [commentsFlow].
+    override suspend fun comments(itemID: String): List<TrackerComment> =
+        itemCommentDao.forItem(itemID).map { it.toComment() }
+
+    override fun commentsFlow(itemID: String): Flow<List<TrackerComment>> =
+        itemCommentDao.forItemFlow(itemID).map { list -> list.map { it.toComment() } }.distinctUntilChanged()
+
+    suspend fun itemsMaxUpdatedAt(): Instant? = itemDao.maxUpdatedAt()?.let(Instant::ofEpochMilli)
+
+    /// Origin-convo-id → count of open items awaiting the user, live. Feeds
+    /// `ChatSummary.needsUserCount` (apple #187): the journal has no such
+    /// endpoint, so the badge is app-local and derived from the tracker
+    /// cache. Conversations with nothing awaiting the user are absent.
+    fun needsUserCountsFlow(): Flow<Map<String, Int>> =
+        itemDao.needsUserCountsFlow().map { rows -> rows.associate { it.convoID to it.count } }.distinctUntilChanged()
+
+    /// `meta` key for the per-scope refresh watermark. A shared GLOBAL
+    /// `MAX(updated_at)` watermark was wrong on two counts — a `.convo`
+    /// refresh using it could skip older items of a convo that had never
+    /// been fetched before, and a mid-pagination failure would still leave
+    /// whatever partial rows DID land, so a "read MAX from the table"
+    /// watermark silently believed it was caught up past a gap it never
+    /// actually fetched. Each scope gets its own persisted key, advanced by
+    /// `ItemsSync.refresh` only after a full, successful pagination run.
+    private fun itemsWatermarkKey(scope: ItemsScope): String = when (scope) {
+        ItemsScope.All -> ITEMS_WATERMARK_ALL_KEY
+        is ItemsScope.Convo -> "$ITEMS_WATERMARK_CONVO_PREFIX${scope.id}"
+    }
+
+    /// The persisted refresh watermark for this scope, or `null` if it has
+    /// never completed a full pagination run (⇒ the next refresh is a full fetch).
+    suspend fun itemsWatermark(scope: ItemsScope): Instant? =
+        metaDao.value(itemsWatermarkKey(scope))?.toLongOrNull()?.let(Instant::ofEpochMilli)
+
+    suspend fun setItemsWatermark(value: Instant, scope: ItemsScope) =
+        metaDao.upsert(MetaEntity(itemsWatermarkKey(scope), value.toEpochMilli().toString()))
+
+    suspend fun itemOutboxInsert(row: ItemOutboxEntity) = itemOutboxDao.insertIgnore(row)
+
+    suspend fun itemOutboxPending(): List<ItemOutboxEntity> = itemOutboxDao.pending()
+
+    suspend fun itemOutboxRows(itemID: String): List<ItemOutboxEntity> = itemOutboxDao.forItem(itemID)
+
+    override fun itemOutboxFlow(itemID: String): Flow<List<ItemOutboxEntity>> = itemOutboxDao.forItemFlow(itemID)
+
+    override fun itemOutboxCreatesFlow(): Flow<List<ItemOutboxEntity>> = itemOutboxDao.createsFlow()
+
+    suspend fun itemOutboxMarkAttempt(localID: String, error: String?) = itemOutboxDao.markAttempt(localID, error)
+
+    suspend fun itemOutboxDelete(localID: String) = itemOutboxDao.delete(localID)
+
+    /// One transaction for a drained outbox row: the server's item (and
+    /// comment, for replies) lands in the same write that removes the pending
+    /// row, so the flows never show the item in the "Pending" section and its
+    /// real section for one tick.
+    suspend fun commitOutboxResult(item: TrackerItem, comment: TrackerComment? = null, deletingLocalID: String) {
+        db.withTransaction {
+            itemDao.upsertAll(listOf(ItemEntity.from(item)))
+            if (comment != null) itemCommentDao.upsertAll(listOf(ItemCommentEntity.from(comment)))
+            itemOutboxDao.delete(deletingLocalID)
+        }
+    }
+
+    /// Clears the whole tracker cache AND its outbox — the sign-out path
+    /// (`wipe()`, the replay-gap path, clears the cache but keeps the outbox).
+    suspend fun wipeItems() {
+        db.withTransaction {
+            itemCommentDao.deleteAll()
+            itemDao.deleteAll()
+            itemOutboxDao.deleteAll()
+            // The cache is gone, so any persisted refresh watermark is stale
+            // too — clearing it forces the next refresh to be a full fetch.
+            metaDao.deleteWithPrefix(ITEMS_WATERMARK_PREFIX)
+        }
+    }
+
+    /// `"<box name> · <title>"` when a conversation has a known, non-empty
+    /// agent box name, else the title alone. The one place this formatting
+    /// happens, so the list rows and the item-detail origin button can never
+    /// drift apart on separator or fallback rule.
+    private fun originLabel(title: String, agentName: String?): String =
+        if (agentName.isNullOrEmpty()) title else "$agentName \u00B7 $title"
+
+    /// Every conversation's origin label, keyed by id: feeds the "All" scope's
+    /// origin captions. Rows with an empty (not yet set) title are omitted so
+    /// a miss reads the same whether the conversation is unknown or just
+    /// untitled — the list's "Another chat" fallback covers both.
+    suspend fun conversationOriginLabels(): Map<String, String> =
+        conversationDao.originLabelRows()
+            .filter { it.title.isNotEmpty() }
+            .associate { it.id to originLabel(it.title, it.agentName) }
+
+    /// Same label as [conversationOriginLabels], for one conversation — feeds
+    /// the item-detail origin button. `null` when unknown or untitled.
+    suspend fun conversationOriginLabel(id: String): String? =
+        conversationDao.originLabelRow(id)?.takeIf { it.title.isNotEmpty() }?.let { originLabel(it.title, it.agentName) }
+
+    // MARK: Missions & milestones
+    //
+    // Mission cache (spec 2026-09-10 missions-milestones). Filled from
+    // GET /missions and GET /missions/:id by `MissionsSync` — never from the
+    // event log. Ported from matron-apple's `JournalStore+Missions.swift`.
+
+    /// Closed is terminal (protocol: no reopen route, `PATCH` / `join` /
+    /// `POST /milestones` all 409 on a closed mission), so an incoming OPEN
+    /// row never overwrites a cached CLOSED one: a detail `GET` issued
+    /// before a user close but answered after it would otherwise flip the
+    /// just-closed mission back to open until the next refresh (Bugbot,
+    /// #79 — a window Apple's actor has too). The cached row is kept as is;
+    /// the next list refresh carries the closed row with fresh counts.
+    suspend fun upsertMissions(missions: List<Mission>) {
+        if (missions.isEmpty()) return
+        db.withTransaction { upsertMissionsGuarded(missions) }
+    }
+
+    private suspend fun upsertMissionsGuarded(missions: List<Mission>) {
+        val reopening = missions.filter { it.state == MissionState.OPEN }.map { it.id }
+        val closed = if (reopening.isEmpty()) emptySet() else missionDao.closedAmong(reopening).toSet()
+        val rows = missions.filter { it.state == MissionState.CLOSED || it.id !in closed }
+        if (rows.isNotEmpty()) missionDao.upsertAll(rows.map(MissionEntity::from))
+    }
+
+    /// The full-list refresh's write (`MissionsSync.refreshOnce`) IS
+    /// authoritative — `GET /missions` always answers with the complete
+    /// set — so unlike [upsertMissions] (used by the detail/marker path,
+    /// which only ever touches one mission at a time) a mission cached
+    /// locally but absent from [missions] no longer exists for this device
+    /// and must not linger (CodeRabbit apple #209). One transaction: upsert
+    /// the given rows, then delete every cached `mission` row outside that
+    /// set along with its dependent cache rows — `milestone` /
+    /// `mission_conversation` have no `ON DELETE CASCADE`, so those two
+    /// tables are swept explicitly — and clear the mission off any tracker
+    /// row still pointing at it, or the item's `#num` badge and the mission
+    /// page's item lookup would resolve a dangling id.
+    ///
+    /// [protectedIDs]: a list `GET` can be in flight when a mission that
+    /// didn't exist yet at request time is created and a marker-driven
+    /// detail fetch for it completes FIRST — without an exclusion this call
+    /// would see that mission absent from [missions] (the response predates
+    /// it) and delete the row the detail fetch just wrote. Such an id is
+    /// neither deleted NOR upserted: the stale list row must not revert the
+    /// fields the detail fetch (or a user close) just wrote either.
+    suspend fun replaceMissions(missions: List<Mission>, protectedIDs: Set<String> = emptySet()) {
+        db.withTransaction {
+            val fresh = missions.filter { it.id !in protectedIDs }
+            if (fresh.isNotEmpty()) upsertMissionsGuarded(fresh)
+            val keep = missions.map { it.id }.toSet() + protectedIDs
+            val stale = missionDao.idsNotIn(keep.toList())
+            if (stale.isEmpty()) return@withTransaction
+            missionDao.deleteByIds(stale)
+            milestoneDao.deleteForMissions(stale)
+            missionConversationDao.deleteForMissions(stale)
+            itemDao.clearMission(stale)
+        }
+    }
+
+    suspend fun missions(state: MissionState?): List<Mission> = when (state) {
+        MissionState.OPEN -> missionDao.open()
+        MissionState.CLOSED -> missionDao.closed()
+        null -> missionDao.all()
+    }.map { it.toMission() }
+
+    override fun missionsFlow(state: MissionState?): Flow<List<Mission>> = when (state) {
+        MissionState.OPEN -> missionDao.openFlow()
+        MissionState.CLOSED -> missionDao.closedFlow()
+        null -> missionDao.allFlow()
+    }.map { list -> list.map { it.toMission() } }.distinctUntilChanged()
+
+    suspend fun mission(id: String): Mission? = missionDao.byId(id)?.toMission()
+
+    /// Lookup by the human-facing `#N`. Numbers are unique across items,
+    /// missions and milestones, so at most one row can match.
+    suspend fun mission(num: Int): Mission? = missionDao.byNum(num)?.toMission()
+
+    override fun missionFlow(id: String): Flow<Mission?> =
+        missionDao.byIdFlow(id).map { it?.toMission() }.distinctUntilChanged()
+
+    /// Wholesale replace for one mission, mirroring [replaceComments]: the
+    /// detail fetch is the authority, so a milestone the server no longer
+    /// returns (sieved, or the mission repointed) must not linger.
+    suspend fun replaceMilestones(missionID: String, milestones: List<Milestone>) {
+        db.withTransaction {
+            milestoneDao.deleteForMission(missionID)
+            milestoneDao.upsertAll(milestones.map(MilestoneEntity::from))
+        }
+    }
+
+    suspend fun milestones(missionID: String): List<Milestone> = milestoneDao.forMission(missionID).map { it.toMilestone() }
+
+    override fun milestonesFlow(missionID: String): Flow<List<Milestone>> =
+        milestoneDao.forMissionFlow(missionID).map { list -> list.map { it.toMilestone() } }.distinctUntilChanged()
+
+    /// The per-conversation view (`GET /milestones?convo=`), newest first.
+    suspend fun milestonesForConversation(convoID: String): List<Milestone> = milestoneDao.forConversation(convoID).map { it.toMilestone() }
+
+    suspend fun replaceMissionConversations(missionID: String, conversations: List<MissionConversation>) {
+        db.withTransaction {
+            missionConversationDao.deleteForMission(missionID)
+            missionConversationDao.upsertAll(conversations.map { MissionConversationEntity.from(missionID, it) })
+        }
+    }
+
+    suspend fun missionConversations(missionID: String): List<MissionConversation> =
+        missionConversationDao.forMission(missionID).map { it.toConversation() }
+
+    override fun missionConversationsFlow(missionID: String): Flow<List<MissionConversation>> =
+        missionConversationDao.forMissionFlow(missionID).map { list -> list.map { it.toConversation() } }.distinctUntilChanged()
+
+    /// The mission page's open items, awaiting-you first (see `ItemDao.forMission`).
+    suspend fun missionItems(missionID: String): List<TrackerItem> = itemDao.forMission(missionID).map { it.toItem() }
+
+    override fun missionItemsFlow(missionID: String): Flow<List<TrackerItem>> =
+        itemDao.forMissionFlow(missionID).map { list -> list.map { it.toItem() } }.distinctUntilChanged()
+
+    /// Which mission a conversation belongs to, derived locally — see
+    /// `MissionDao.missionIDForConversation`. `null` until the first
+    /// missions refresh lands, which is exactly when the title-tap
+    /// affordance should appear.
+    suspend fun missionID(convoID: String): String? = missionDao.missionIDForConversation(convoID)
+
+    fun missionIDFlow(convoID: String): Flow<String?> =
+        missionDao.missionIDForConversationFlow(convoID).distinctUntilChanged()
+
+    /// Derived from reads the store already has: the conversation row, the
+    /// box roster ([agentNames]) and the journal-held tag overrides
+    /// ([agentTags]) — the latter two hoisted out of the per-conversation
+    /// loop. This is the same derivation `JournalChatService.summary` runs
+    /// for a chat-list row, including its two gates: a box letter only means
+    /// something when the user has two or more boxes, and the session short
+    /// is peeled off the stored title by `SessionTag.splitTitle`. Room tags
+    /// come from the same `roomTags` rule the chat list uses, so a
+    /// multi-agent room renders `A↔B:bc` on the mission page too.
+    override suspend fun sessionTags(convoIDs: Set<String>): Map<String, SessionTagInputs> {
+        if (convoIDs.isEmpty()) return emptyMap()
+        val names = agentNames()
+        val letters = SessionTag.boxLetters(names, agentTags())
+        val tags = mutableMapOf<String, SessionTagInputs>()
+        for (convoID in convoIDs) {
+            val record = conversationDao.byId(convoID) ?: continue
+            val boxName = JournalChatService.boxName(record, names)
+            val boxLetter = if (boxName != null) record.agentDeviceID?.let(letters::get) else null
+            val sessionShort = SessionTag.splitTitle(record.title).first
+            val room = JournalChatService.roomTags(record, names, letters)
+            if (boxLetter == null && sessionShort == null && room.isEmpty()) continue
+            tags[convoID] = SessionTagInputs(
+                boxLetter = boxLetter, boxName = boxName, sessionShort = sessionShort,
+                roomBoxNames = room.map { it.first }, roomBoxShorts = room.map { it.second },
+            )
+        }
+        return tags
+    }
+
+    /// Sign-out clear for the mission cache alone. [wipe] clears the same
+    /// tables inline — both go through [wipeMissionTables], so "the mission
+    /// cache" is defined once.
+    suspend fun wipeMissions() {
+        db.withTransaction { wipeMissionTables() }
+    }
+
+    private suspend fun wipeMissionTables() {
+        missionDao.deleteAll()
+        milestoneDao.deleteAll()
+        missionConversationDao.deleteAll()
+    }
 
     // MARK: Agent roster
 
@@ -836,7 +1223,7 @@ class JournalStore(
     /// Retention) must stop surfacing an expired `live_log` snippet in the
     /// conversation list the next time it is read, exactly as
     /// `JournalTimelineMapper` already hides it in the open thread. Before
-    /// v7 that answer came from a `MAX(seq)` sub-query plus an event fetch
+    /// v9 that answer came from a `MAX(seq)` sub-query plus an event fetch
     /// per stale conversation — two `event` reads per stale row on every
     /// list read. Both facts now live on the conversation row, maintained on
     /// write ([applyJournal], [insertHistory], and the sweeps), so the list
@@ -910,12 +1297,24 @@ class JournalStore(
         /// sweep). A legacy/offloaded tool_output with a durable snippet and
         /// no `live_log` keeps showing that snippet forever, which is the
         /// behaviour `purgeLeavesYoungAndNonLiveLogRows` pins. Shared by the
-        /// v7 migration backfill and the write path.
+        /// v9 migration backfill and the write path.
         internal fun expiredSnippet(type: String, payload: JsonObject?): String? {
             if (type != JournalEventType.TOOL_OUTPUT || payload == null) return null
             if (payload.boolOrNull("live_log") != true && payload.boolOrNull("expired") != true) return null
             val command = payload.stringOrNull("command")?.takeIf { it.isNotEmpty() } ?: return null
             return "$ $command".take(120)
         }
+
+        private const val ITEMS_WATERMARK_PREFIX = "items_watermark_"
+        private const val ITEMS_WATERMARK_ALL_KEY = "items_watermark_all"
+        private const val ITEMS_WATERMARK_CONVO_PREFIX = "items_watermark_convo_"
+
+        /// The event types a person produces from the composer.
+        private val OWN_MESSAGE_TYPES = listOf(JournalEventType.TEXT, JournalEventType.IMAGE, JournalEventType.FILE)
+
+        /// Rows per batch in [newestOwnMessageSeq]'s scan. Mirrors are rare —
+        /// one per item marker at most — so the first batch almost always
+        /// answers; the loop exists for correctness, not throughput.
+        internal const val OWN_MESSAGE_SCAN_BATCH = 50
     }
 }

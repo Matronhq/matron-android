@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 
 /// Errors surfaced by the journal chat/timeline services. `data object`/
 /// `data class` cases give value-equality for `assertEquals`.
@@ -60,13 +61,21 @@ class JournalChatService(
         // The journal owns the tag letters now (apple #158): names and tags
         // arrive in lockstep from the roster flow, so a Settings edit lands
         // through its `device_meta` echo like any other device's would.
-        combine(store.conversationsFlow(), store.agentRosterFlow()) { records, roster ->
+        // App-local: counts of open items awaiting the user, grouped by
+        // origin conversation (apple #187). Its own input for the same
+        // reason as the roster — an items write touches the `item` table,
+        // which the conversations query never reads. Ruling: the FIRST
+        // summaries emission must not wait on it, so it opens with an empty
+        // map (⇒ needsUserCount 0 everywhere) until the query's first value
+        // lands.
+        val needsUser = store.needsUserCountsFlow().onStart { emit(emptyMap()) }
+        combine(store.conversationsFlow(), store.agentRosterFlow(), needsUser) { records, roster, needs ->
             val boxNames = roster.associate { it.id to it.name }
             val journalTags = roster.mapNotNull { row -> row.tagChar?.let { row.id to it } }.toMap()
             // Derived once per snapshot, not per row — the letters depend on
             // the whole name set (common-prefix strip).
             val boxLetters = SessionTag.boxLetters(boxNames, journalTags)
-            records.map { summary(it, boxNames, boxLetters) }
+            records.map { summary(it, boxNames, boxLetters, needsUser = needs[it.id] ?: 0) }
         }.conflate().collect { summaries ->
             emit(summaries)
             delay(coalesceInterval)
@@ -93,6 +102,7 @@ class JournalChatService(
             record: ConversationEntity,
             boxNames: Map<Long, String> = emptyMap(),
             boxLetters: Map<Long, String> = emptyMap(),
+            needsUser: Int = 0,
         ): ChatSummary {
             val activityMS = record.lastActivityTS ?: record.createdAt.takeIf { it > 0 }
             // The bridge bakes a `[bc] ` session short into earned titles —
@@ -116,6 +126,7 @@ class JournalChatService(
                 boxShort = if (boxName != null) record.agentDeviceID?.let(boxLetters::get) else null,
                 roomBoxNames = roomTags.map { it.first },
                 roomBoxShorts = roomTags.map { it.second },
+                needsUserCount = needsUser,
             )
         }
 

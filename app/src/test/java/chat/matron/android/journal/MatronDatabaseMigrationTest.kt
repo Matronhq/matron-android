@@ -3,7 +3,16 @@ package chat.matron.android.journal
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
+import chat.matron.android.journal.db.ItemOutboxEntity
 import chat.matron.android.journal.db.MatronDatabase
+import chat.matron.android.models.ItemAuthor
+import chat.matron.android.models.ItemKind
+import chat.matron.android.models.Milestone
+import chat.matron.android.models.MilestoneKind
+import chat.matron.android.models.Mission
+import chat.matron.android.models.MissionConversation
+import chat.matron.android.models.TrackerComment
+import chat.matron.android.models.TrackerItem
 import java.io.File
 import java.time.Instant
 import kotlinx.coroutines.runBlocking
@@ -338,6 +347,144 @@ class MatronDatabaseMigrationTest {
         }
     }
 
+    /// MIGRATION_6_7 (the task & decision tracker cache, port of
+    /// matron-apple's GRDB v9): a v6 file gains `item`, `item_comment` and
+    /// `item_outbox`, pre-existing rows survive, and all three tables are
+    /// fully usable after open — Room validates the hand-written CREATEs
+    /// against the entities here, so a drift fails this test rather than
+    /// every upgrading install.
+    @Test
+    fun migratesV6FileToV7AndTrackerTablesWork() = runBlocking {
+        val file = File.createTempFile("migration-test-v6", ".sqlite").also { it.delete() }
+        buildV6(file)
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:dan")
+            assertEquals("pre-migration rows survive", "mac ↔ dev-z", store.conversation("room")?.title)
+            store.upsertItems(
+                listOf(TrackerItem(id = "it_1", num = 1, kind = ItemKind.TASK, title = "T", originConvoID = "room")),
+            )
+            assertEquals("T", store.item("it_1")?.title)
+            store.replaceComments("it_1", listOf(TrackerComment("ic_1", "it_1", ItemAuthor.USER, body = "x")))
+            assertEquals(listOf("ic_1"), store.comments("it_1").map { it.id })
+            store.itemOutboxInsert(ItemOutboxEntity("L1", "it_1", ItemOutboxEntity.OP_COMMENT, "{}", 0, 0, null))
+            assertEquals(listOf("L1"), store.itemOutboxPending().map { it.localID })
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
+    /// The exact v7 schema (v6 + the tracker tables — MIGRATION_6_7's own
+    /// SQL), stamped user_version = 7, with one item row already cached.
+    private fun buildV7(file: File) {
+        buildV6(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `item` (" +
+                    "`id` TEXT NOT NULL, `num` INTEGER NOT NULL, `kind` TEXT NOT NULL, `state` TEXT NOT NULL, " +
+                    "`resolution` TEXT, `awaiting` TEXT, `rank` REAL NOT NULL, `title` TEXT NOT NULL, " +
+                    "`body` TEXT NOT NULL, `labels_json` TEXT NOT NULL, `links_json` TEXT NOT NULL, " +
+                    "`attachments_json` TEXT NOT NULL, `supersedes` TEXT, `origin_convo_id` TEXT NOT NULL, " +
+                    "`created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, " +
+                    "`closed_at` INTEGER, `comment_count` INTEGER NOT NULL, `last_comment_at` INTEGER, " +
+                    "`has_image` INTEGER NOT NULL, `mission_id` TEXT, `mission_num` INTEGER, " +
+                    "PRIMARY KEY(`id`))"
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_item_origin_convo_id` ON `item` (`origin_convo_id`)")
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `item_comment` (" +
+                    "`id` TEXT NOT NULL, `item_id` TEXT NOT NULL, `author` TEXT NOT NULL, " +
+                    "`device_id` INTEGER NOT NULL, `kind` TEXT NOT NULL, `body` TEXT NOT NULL, " +
+                    "`attachments_json` TEXT NOT NULL, `meta_json` TEXT, `created_at` INTEGER NOT NULL, " +
+                    "PRIMARY KEY(`id`))"
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_item_comment_item_id` ON `item_comment` (`item_id`)")
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `item_outbox` (" +
+                    "`local_id` TEXT NOT NULL, `item_id` TEXT, `op` TEXT NOT NULL, `payload_json` TEXT NOT NULL, " +
+                    "`created_at` INTEGER NOT NULL, `attempts` INTEGER NOT NULL, `last_error` TEXT, " +
+                    "PRIMARY KEY(`local_id`))"
+            )
+            db.execSQL(
+                "INSERT INTO `item` (`id`, `num`, `kind`, `state`, `rank`, `title`, `body`, `labels_json`, `links_json`, " +
+                    "`attachments_json`, `origin_convo_id`, `created_by`, `created_at`, `updated_at`, `comment_count`, `has_image`) " +
+                    "VALUES ('it_1', 5, 'task', 'open', 1024, 'Existing', '', '[]', '[]', '[]', 'room', 'agent', 1, 2, 0, 0)"
+            )
+            db.version = 7
+        }
+    }
+
+    /// MIGRATION_7_8 (the mission cache, port of matron-apple's GRDB v10):
+    /// a v7 file gains `mission`, `milestone` and `mission_conversation`
+    /// plus the `item(mission_id, state, awaiting)` index; pre-existing
+    /// rows survive, and every mission read works after open — Room
+    /// validates the hand-written CREATEs (index names included) against
+    /// the entities here, so a drift fails this test rather than every
+    /// upgrading install.
+    @Test
+    fun migratesV7FileToV8AndMissionTablesWork() = runBlocking {
+        val file = File.createTempFile("migration-test-v7", ".sqlite").also { it.delete() }
+        buildV7(file)
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:dan")
+            assertEquals("pre-migration rows survive", "mac ↔ dev-z", store.conversation("room")?.title)
+            assertEquals("Existing", store.item("it_1")?.title)
+            store.upsertMissions(listOf(Mission(id = "ms_1", num = 61, title = "M", originConvoID = "room")))
+            assertEquals("M", store.mission("ms_1")?.title)
+            store.replaceMilestones(
+                "ms_1",
+                listOf(Milestone(id = "ml_1", missionID = "ms_1", num = 62, kind = MilestoneKind.PROGRESS, title = "T", convoID = "room", seq = 9)),
+            )
+            assertEquals(listOf(9L), store.milestones("ms_1").map { it.seq })
+            store.replaceMissionConversations("ms_1", listOf(MissionConversation("room", "S", null, "running")))
+            assertEquals(listOf("room"), store.missionConversations("ms_1").map { it.id })
+            assertEquals("ms_1", store.missionID("room"))
+            assertEquals("the item index is in place: the mission page's query runs", emptyList<String>(), store.missionItems("ms_1").map { it.id })
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
+    /// The exact v8 schema (v7 + the mission tables — MIGRATION_7_8's own
+    /// SQL), stamped user_version = 8.
+    private fun buildV8(file: File) {
+        buildV7(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `mission` (" +
+                    "`id` TEXT NOT NULL, `num` INTEGER NOT NULL, `state` TEXT NOT NULL, `title` TEXT NOT NULL, " +
+                    "`body` TEXT NOT NULL, `close_summary` TEXT, `closed_by` TEXT, " +
+                    "`closed_over_open_items` INTEGER NOT NULL, `origin_convo_id` TEXT NOT NULL, " +
+                    "`origin_device_id` INTEGER NOT NULL, `created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, " +
+                    "`updated_at` INTEGER NOT NULL, `last_milestone_at` INTEGER, `closed_at` INTEGER, " +
+                    "`open_items` INTEGER NOT NULL, `needs_you` INTEGER NOT NULL, `conversation_count` INTEGER NOT NULL, " +
+                    "`milestone_count` INTEGER NOT NULL, `last_milestone_json` TEXT, " +
+                    "PRIMARY KEY(`id`))"
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_mission_state_last_milestone_at` ON `mission` (`state`, `last_milestone_at`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_mission_origin_convo_id` ON `mission` (`origin_convo_id`)")
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `milestone` (" +
+                    "`id` TEXT NOT NULL, `mission_id` TEXT NOT NULL, `num` INTEGER NOT NULL, `kind` TEXT NOT NULL, " +
+                    "`title` TEXT NOT NULL, `body` TEXT NOT NULL, `convo_id` TEXT NOT NULL, `seq` INTEGER NOT NULL, " +
+                    "`device_id` INTEGER NOT NULL, `created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, " +
+                    "PRIMARY KEY(`id`))"
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_milestone_mission_id_created_at` ON `milestone` (`mission_id`, `created_at`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_milestone_convo_id_seq` ON `milestone` (`convo_id`, `seq`)")
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `mission_conversation` (" +
+                    "`mission_id` TEXT NOT NULL, `convo_id` TEXT NOT NULL, `title` TEXT NOT NULL, `box` TEXT, " +
+                    "`state` TEXT NOT NULL, PRIMARY KEY(`mission_id`, `convo_id`))"
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_item_mission_id_state_awaiting` ON `item` (`mission_id`, `state`, `awaiting`)")
+            db.version = 8
+        }
+    }
+
     private fun indexNames(database: MatronDatabase, table: String): List<String> =
         database.openHelper.readableDatabase.query("PRAGMA index_list('$table')").use { cursor ->
             val nameColumn = cursor.getColumnIndexOrThrow("name")
@@ -350,13 +497,13 @@ class MatronDatabaseMigrationTest {
             buildList { while (cursor.moveToNext()) add(cursor.getString(nameColumn)) }
         }
 
-    /// MIGRATION_6_7 (launch performance, port of matron-apple's GRDB v11 /
+    /// MIGRATION_8_9 (launch performance, port of matron-apple's GRDB v11 /
     /// #212): the `event(type, ts)` index the sweeps range-scan exists with
     /// its columns in the order the range scan needs.
     @Test
-    fun migratesV6FileToV7AndCreatesTheTypeTsIndex() = runBlocking {
-        val file = File.createTempFile("migration-test-v6", ".sqlite").also { it.delete() }
-        buildV6(file)
+    fun migratesV8FileToV9AndCreatesTheTypeTsIndex() = runBlocking {
+        val file = File.createTempFile("migration-test-v8", ".sqlite").also { it.delete() }
+        buildV8(file)
         val database = MatronDatabase.open(context, file)
         try {
             val names = indexNames(database, "event")
@@ -371,15 +518,15 @@ class MatronDatabaseMigrationTest {
         }
     }
 
-    /// The v7 backfill: `last_message_type` / `expired_snippet` are derived
+    /// The v9 backfill: `last_message_type` / `expired_snippet` are derived
     /// from the NEWEST message-type event of each conversation already in
     /// the mirror — a bookkeeping frame after it must not win, a text
     /// newest gets no command stub, and a conversation with no message-type
     /// event at all stays NULL/NULL.
     @Test
     fun migrationBackfillsLastMessageTypeAndExpiredSnippetFromStoredEvents() = runBlocking {
-        val file = File.createTempFile("migration-test-v6", ".sqlite").also { it.delete() }
-        buildV6(file)
+        val file = File.createTempFile("migration-test-v8", ".sqlite").also { it.delete() }
+        buildV8(file)
         SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
             for (id in listOf("c1", "c2", "c3", "c4", "c5")) {
                 db.execSQL(
@@ -444,7 +591,7 @@ class MatronDatabaseMigrationTest {
         val database = MatronDatabase.open(context, file) { reported = it }
         try {
             JournalStore(database, ownSender = "user:dan").cursor() // forces the lazy open
-            assertNotNull("the v6 → v7 step ran on this open, so a duration is reported", reported)
+            assertNotNull("the v6 → v9 chain ran on this open, so a duration is reported", reported)
             assertTrue("a duration, not the sentinel", (reported ?: -1) >= 0)
         } finally {
             database.close()

@@ -1,5 +1,7 @@
 package chat.matron.android.chat
 
+import chat.matron.android.journal.JournalEventType
+
 /// The compact per-conversation tag rendered ahead of chat titles:
 /// `A:bc` — one colored letter for the box, two characters of the agent's
 /// session id. Replaces the trailing `BoxChip` in list rows, which put the
@@ -21,7 +23,7 @@ object SessionTag {
     /// title (`↔️ [ab] mac ↔ dev-z`, matron-bridge#225/#228). 🔗 is the
     /// legacy marker rooms minted before #228 still carry — titles are only
     /// rewritten on rename, so both must parse indefinitely.
-    internal val roomMarkers = listOf("↔️ ", "🔗 ")
+    internal val roomMarkers = JournalEventType.AGENT_ROOM_TITLE_MARKERS
 
     /// The bridge's markers that may lead a title ahead of the short:
     /// ↔️/🔗 = multi-agent room (#225), 🐣 = session another agent spawned

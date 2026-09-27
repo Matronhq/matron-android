@@ -4,7 +4,10 @@ import chat.matron.android.events.AgentChatRequest
 import chat.matron.android.events.AgentSpawnRequest
 import chat.matron.android.events.AskUserEvent
 import chat.matron.android.events.DiffEvent
+import chat.matron.android.events.ItemMarkerEvent
 import chat.matron.android.events.LiveOutputEvent
+import chat.matron.android.events.MilestoneMarkerEvent
+import chat.matron.android.events.MissionMarkerEvent
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.journal.ActivityUpdate
@@ -15,6 +18,7 @@ import chat.matron.android.journal.arrayOrNull
 import chat.matron.android.journal.body
 import chat.matron.android.journal.boolOrNull
 import chat.matron.android.journal.intOrNull
+import chat.matron.android.journal.isItemFallbackText
 import chat.matron.android.journal.longOrNull
 import chat.matron.android.journal.stringOrNull
 import chat.matron.android.models.TimelineSendState
@@ -57,13 +61,54 @@ object JournalTimelineMapper {
         val kind: TimelineItem.Kind = when (event.type) {
             JournalEventType.READ_MARKER, JournalEventType.EDIT,
             JournalEventType.SESSION_STATUS, JournalEventType.CONVO_META,
-            // Summary passes are TOC entries (the summaries sheet), never
-            // transcript rows — without this they'd render as
-            // "[unsupported event: summary]" noise.
+            // Summary passes are store-level TOC rows (`summary_entry`),
+            // never transcript rows — without this they'd render as
+            // "[unsupported event: summary]" noise. The summaries UI itself
+            // was retired for the mission page (apple #209 / #214).
             JournalEventType.SUMMARY -> return null
 
-            JournalEventType.TEXT ->
+            JournalEventType.TEXT -> {
+                // Old-client fallback (spec 2026-09-08, "Old-client
+                // fallback"): the journal mirrors a card-worthy item marker
+                // as a plain `text` event flagged `fallback_for: "item"` so
+                // pre-tracker clients still see the turn. This client knows
+                // the marker, so the twin is hidden — rendering both would
+                // show the same reply twice.
+                if (event.isItemFallbackText()) return null
                 TimelineItem.Kind.Text(event.body() ?: "", null)
+            }
+
+            JournalEventType.ITEM -> {
+                // Tracker marker event (spec 2026-09-08). `ItemsSync` is the
+                // side-channel consumer (it triggers a refetch of the item) —
+                // this is only about what the timeline SHOWS. A malformed
+                // payload, `reordered` and `updated` never reach the timeline:
+                // the latter two exist purely to invalidate the local cache
+                // (see `ItemMarkerEvent`'s doc comment) and carry nothing
+                // worth rendering inline (apple #186; before it the whole
+                // type was skipped).
+                val marker = ItemMarkerEvent.parse(payload) ?: return null
+                if (marker.action == ItemMarkerEvent.Action.REORDERED ||
+                    marker.action == ItemMarkerEvent.Action.UPDATED
+                ) return null
+                TimelineItem.Kind.ItemMarker(event.seq.toString(), marker)
+            }
+
+            JournalEventType.MILESTONE -> {
+                // The marker's own seq is the anchor (protocol, "Marker
+                // events"), and `TimelineItem.id` is that seq — so nothing
+                // extra is needed to make a milestone tap land here. A
+                // payload that won't parse is skipped rather than rendered
+                // as `Unknown`: a half-drawn navigation affordance is worse
+                // than no row.
+                val marker = MilestoneMarkerEvent.parse(payload) ?: return null
+                TimelineItem.Kind.MilestoneMarker(event.seq.toString(), marker)
+            }
+
+            JournalEventType.MISSION -> {
+                val marker = MissionMarkerEvent.parse(payload) ?: return null
+                TimelineItem.Kind.MissionMarker(event.seq.toString(), marker)
+            }
 
             JournalEventType.TOOL_OUTPUT -> {
                 // A tool_output carrying a viewer_url is a live command-output

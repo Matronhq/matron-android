@@ -40,7 +40,19 @@ import java.util.concurrent.atomic.AtomicLong
 /// that is not a room. Additive like v3: existing rows keep NULL and chip as
 /// before until the next snapshot / membership convo_meta fills them in.
 ///
-/// v7 is the launch-performance migration (matron-apple's v11, #212): the
+/// v7 adds the task & decision tracker cache (matron-apple's v9): `item` and
+/// `item_comment` mirror the journal's rows (filled from `GET /items`, never
+/// from the event log), and `item_outbox` queues comments/creates written
+/// offline. Additive; all three start empty and the first refresh fills them.
+///
+/// v8 adds the mission cache (matron-apple's v10): `mission`, `milestone`
+/// and `mission_conversation` mirror `GET /missions` / `GET /missions/:id`
+/// (never the event log), plus an index on `item(mission_id, state,
+/// awaiting)` for the mission page's open-items query. Additive. Unlike the
+/// Apple migration it adds no item columns — `mission_id` / `mission_num`
+/// already shipped in v7 — so no items-watermark reset is needed.
+///
+/// v9 is the launch-performance migration (matron-apple's v11, #212): the
 /// `event(type, ts)` index the background sweeps range-scan, plus two derived
 /// `conversation` columns (`last_message_type`, `expired_snippet`) backfilled
 /// from the stored events so the chat list's first paint reads only the
@@ -49,8 +61,10 @@ import java.util.concurrent.atomic.AtomicLong
     entities = [
         ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
         SummaryEntryEntity::class, AgentEntity::class,
+        ItemEntity::class, ItemCommentEntity::class, ItemOutboxEntity::class,
+        MissionEntity::class, MilestoneEntity::class, MissionConversationEntity::class,
     ],
-    version = 7,
+    version = 9,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -60,6 +74,12 @@ abstract class MatronDatabase : RoomDatabase() {
     abstract fun outboxDao(): OutboxDao
     abstract fun summaryEntryDao(): SummaryEntryDao
     abstract fun agentDao(): AgentDao
+    abstract fun itemDao(): ItemDao
+    abstract fun itemCommentDao(): ItemCommentDao
+    abstract fun itemOutboxDao(): ItemOutboxDao
+    abstract fun missionDao(): MissionDao
+    abstract fun milestoneDao(): MilestoneDao
+    abstract fun missionConversationDao(): MissionConversationDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -151,7 +171,75 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
-        /// v7 (matron-apple's v11, #212): the `event(type, ts)` index plus
+        /// v7 (matron-apple's v9, #185): the tracker cache and its outbox.
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `item` (" +
+                        "`id` TEXT NOT NULL, `num` INTEGER NOT NULL, `kind` TEXT NOT NULL, `state` TEXT NOT NULL, " +
+                        "`resolution` TEXT, `awaiting` TEXT, `rank` REAL NOT NULL, `title` TEXT NOT NULL, " +
+                        "`body` TEXT NOT NULL, `labels_json` TEXT NOT NULL, `links_json` TEXT NOT NULL, " +
+                        "`attachments_json` TEXT NOT NULL, `supersedes` TEXT, `origin_convo_id` TEXT NOT NULL, " +
+                        "`created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, " +
+                        "`closed_at` INTEGER, `comment_count` INTEGER NOT NULL, `last_comment_at` INTEGER, " +
+                        "`has_image` INTEGER NOT NULL, `mission_id` TEXT, `mission_num` INTEGER, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_item_origin_convo_id` ON `item` (`origin_convo_id`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `item_comment` (" +
+                        "`id` TEXT NOT NULL, `item_id` TEXT NOT NULL, `author` TEXT NOT NULL, " +
+                        "`device_id` INTEGER NOT NULL, `kind` TEXT NOT NULL, `body` TEXT NOT NULL, " +
+                        "`attachments_json` TEXT NOT NULL, `meta_json` TEXT, `created_at` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_item_comment_item_id` ON `item_comment` (`item_id`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `item_outbox` (" +
+                        "`local_id` TEXT NOT NULL, `item_id` TEXT, `op` TEXT NOT NULL, `payload_json` TEXT NOT NULL, " +
+                        "`created_at` INTEGER NOT NULL, `attempts` INTEGER NOT NULL, `last_error` TEXT, " +
+                        "PRIMARY KEY(`local_id`))"
+                )
+            }
+        }
+
+        /// v8 (matron-apple's v10, #209): the mission cache. Index names
+        /// follow Room's own `index_<table>_<columns>` convention because
+        /// Room validates them against the entities at open.
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `mission` (" +
+                        "`id` TEXT NOT NULL, `num` INTEGER NOT NULL, `state` TEXT NOT NULL, `title` TEXT NOT NULL, " +
+                        "`body` TEXT NOT NULL, `close_summary` TEXT, `closed_by` TEXT, " +
+                        "`closed_over_open_items` INTEGER NOT NULL, `origin_convo_id` TEXT NOT NULL, " +
+                        "`origin_device_id` INTEGER NOT NULL, `created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, " +
+                        "`updated_at` INTEGER NOT NULL, `last_milestone_at` INTEGER, `closed_at` INTEGER, " +
+                        "`open_items` INTEGER NOT NULL, `needs_you` INTEGER NOT NULL, `conversation_count` INTEGER NOT NULL, " +
+                        "`milestone_count` INTEGER NOT NULL, `last_milestone_json` TEXT, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_mission_state_last_milestone_at` ON `mission` (`state`, `last_milestone_at`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_mission_origin_convo_id` ON `mission` (`origin_convo_id`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `milestone` (" +
+                        "`id` TEXT NOT NULL, `mission_id` TEXT NOT NULL, `num` INTEGER NOT NULL, `kind` TEXT NOT NULL, " +
+                        "`title` TEXT NOT NULL, `body` TEXT NOT NULL, `convo_id` TEXT NOT NULL, `seq` INTEGER NOT NULL, " +
+                        "`device_id` INTEGER NOT NULL, `created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_milestone_mission_id_created_at` ON `milestone` (`mission_id`, `created_at`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_milestone_convo_id_seq` ON `milestone` (`convo_id`, `seq`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `mission_conversation` (" +
+                        "`mission_id` TEXT NOT NULL, `convo_id` TEXT NOT NULL, `title` TEXT NOT NULL, `box` TEXT, " +
+                        "`state` TEXT NOT NULL, PRIMARY KEY(`mission_id`, `convo_id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_item_mission_id_state_awaiting` ON `item` (`mission_id`, `state`, `awaiting`)")
+            }
+        }
+
+        /// v9 (matron-apple's v11, #212): the `event(type, ts)` index plus
         /// `conversation.last_message_type` / `expired_snippet`, backfilled
         /// one conversation at a time over the existing `convo_id` index —
         /// the newest message-type row decides both columns, exactly as the
@@ -161,7 +249,7 @@ abstract class MatronDatabase : RoomDatabase() {
         /// This is the one-off cost of the migration: an index build over
         /// the whole `event` table plus one indexed point lookup per
         /// conversation; `LaunchTimeline` records how long it took.
-        val MIGRATION_6_7 = object : Migration(6, 7) {
+        val MIGRATION_8_9 = object : Migration(8, 9) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `event_type_ts` ON `event` (`type`, `ts`)")
                 db.execSQL("ALTER TABLE `conversation` ADD COLUMN `last_message_type` TEXT")
@@ -191,6 +279,7 @@ abstract class MatronDatabase : RoomDatabase() {
 
         private val MIGRATIONS = listOf(
             MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
+            MIGRATION_7_8, MIGRATION_8_9,
         )
 
         /// Production, file-backed at the given path. [onOpened] fires from

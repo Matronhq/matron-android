@@ -24,7 +24,7 @@ import org.robolectric.annotation.Config
 /// Launch-performance work (apple #212): the write-path columns that replace
 /// the read path's event sub-queries, insert-time tombstoning, and the
 /// watermarked background sweeps. Ported from matron-apple's
-/// `JournalStoreLaunchPerfTests`; the v7 migration itself is covered in
+/// `JournalStoreLaunchPerfTests`; the v9 migration itself is covered in
 /// `MatronDatabaseMigrationTest`. Kept in its own file so the diff against
 /// `JournalStoreTest` stays readable.
 @RunWith(RobolectricTestRunner::class)

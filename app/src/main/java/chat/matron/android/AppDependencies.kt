@@ -15,6 +15,15 @@ import chat.matron.android.chat.JournalTimelineService
 import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineService
 import chat.matron.android.journal.AgentSpawnAnswering
+import chat.matron.android.journal.ItemsProviding
+import chat.matron.android.designsystem.TrackerItemLinkOutcome
+import chat.matron.android.journal.ItemsSync
+import chat.matron.android.journal.ItemsSyncing
+import chat.matron.android.journal.MissionsSync
+import chat.matron.android.journal.MissionsSyncing
+import chat.matron.android.viewmodels.MissionDetailViewModel
+import chat.matron.android.viewmodels.MissionsListViewModel
+import chat.matron.android.viewmodels.TrackerItemLinkResolver
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalMaintenance
 import chat.matron.android.journal.JournalStore
@@ -43,6 +52,7 @@ import chat.matron.android.viewmodels.DeviceLinking
 import chat.matron.android.viewmodels.AgentChatProviding
 import chat.matron.android.viewmodels.JournalAgentChatService
 import chat.matron.android.viewmodels.DevicesProviding
+import chat.matron.android.viewmodels.ItemsPanelViewModel
 import chat.matron.android.viewmodels.JournalAgentRPCService
 import chat.matron.android.viewmodels.JournalDeviceLinkService
 import chat.matron.android.viewmodels.JournalDevicesService
@@ -96,7 +106,7 @@ class AppDependencies(
         // Room opens on first access, off the main thread; the launch
         // timeline's store-open interval closes there, with the migration
         // (if one ran) recorded nested inside it — the one launch that runs
-        // v7 pays its index build and backfill here, and that contrast is
+        // v9 pays its index build and backfill here, and that contrast is
         // the headline number of apple #212.
         MatronDatabase.open(c, f) { migrationMillis ->
             LaunchTimeline.shared.endStoreOpen()
@@ -182,6 +192,17 @@ class AppDependencies(
          */
         val maintenance: JournalMaintenance,
         /**
+         * Keeps the tracker cache fresh off the engine's item markers and
+         * connection state; started with the core, stopped (and awaited)
+         * before the sign-out wipe so no in-flight fetch writes into it.
+         */
+        val itemsSync: ItemsSync,
+        /**
+         * Keeps the mission cache fresh off the engine's mission/milestone
+         * markers and connection state; same lifecycle as [itemsSync].
+         */
+        val missionsSync: MissionsSync,
+        /**
          * Background search-history backfill sweep for this session (see
          * [SearchBackfillCoordinator]). Cancelled on sign-out, and joined by
          * teardown before the search wipe so a straggler page can't re-insert
@@ -253,7 +274,19 @@ class AppDependencies(
             search = search,
         )
         val maintenance = JournalMaintenance(store = store, search = search)
-        val core = JournalCore(api, db, dbFile, store, engine, maintenance)
+        val itemsSync = ItemsSync(
+            api = api,
+            store = store,
+            markers = { engine.itemMarkers() },
+            connectionStates = { engine.stateStream },
+        )
+        val missionsSync = MissionsSync(
+            api = api,
+            store = store,
+            markers = { engine.missionMarkers() },
+            connectionStates = { engine.stateStream },
+        )
+        val core = JournalCore(api, db, dbFile, store, engine, maintenance, itemsSync, missionsSync)
         cores[session.userID] = core
         // Nothing proportional to store history runs on the launch path any
         // more (apple #212): the tool-output TTL sweep that used to be
@@ -274,6 +307,12 @@ class AppDependencies(
             appScope.launch { maintenance.runAfterCatchUp() }
         }
         maintenance.start()
+        // Subscribes to markers and connection state; the first `Running`
+        // runs the probe refresh (a 404 hides the tracker UI) and drains any
+        // outbox rows left from the previous run.
+        itemsSync.start()
+        // Same probe for `/missions`: a 404 hides the Missions tab.
+        missionsSync.start()
         core.backfillJob = startBackfill(search = search, api = api, store = store)
         return core
     }
@@ -393,6 +432,77 @@ class AppDependencies(
      * `journalStore(for:)`.
      */
     fun journalStore(session: UserSession): JournalStore = core(session).store
+
+    /** The tracker's sync for a session, for the panel and detail view models. */
+    fun itemsSync(session: UserSession): ItemsSyncing = core(session).itemsSync
+
+    fun missionsSync(session: UserSession): MissionsSyncing = core(session).missionsSync
+
+    /**
+     * The one Missions list instance per signed-in session (apple #209):
+     * feeds the Missions tab, its badge and the shell's support gate.
+     * Created and started by the shell, stopped when the shell leaves the
+     * composition on sign-out — like [makeDecisionsViewModel].
+     */
+    fun makeMissionsListViewModel(session: UserSession, scope: CoroutineScope): MissionsListViewModel {
+        val c = core(session)
+        return MissionsListViewModel(store = c.store, sync = c.missionsSync, scope = scope)
+    }
+
+    /** A fresh detail VM per mission page (not cached: one page, one mission). */
+    fun makeMissionDetailViewModel(session: UserSession, missionID: String, scope: CoroutineScope): MissionDetailViewModel {
+        val c = core(session)
+        return MissionDetailViewModel(missionID = missionID, store = c.store, sync = c.missionsSync, scope = scope)
+    }
+
+    /**
+     * Which mission a conversation belongs to, live (spec: Transcript and
+     * title). `null` until the first missions refresh lands — exactly when
+     * the title-tap affordance should appear.
+     */
+    fun missionIDFlow(session: UserSession, convoID: String): kotlinx.coroutines.flow.Flow<String?> =
+        core(session).store.missionIDFlow(convoID)
+
+    /** The tracker's network surface — the session's API client. */
+    fun itemsApi(session: UserSession): ItemsProviding = core(session).api
+
+    /**
+     * Per-chat / cross-chat items panel (spec: Apps → Panel content).
+     * `convoID = null` is the app-wide instance — see [makeDecisionsViewModel].
+     * [scope] is the host's lifecycle scope (the Swift original's implicit
+     * `@MainActor` tasks).
+     */
+    fun makeItemsPanelViewModel(session: UserSession, convoID: String?, scope: CoroutineScope): ItemsPanelViewModel {
+        val c = core(session)
+        return ItemsPanelViewModel(convoID = convoID, store = c.store, api = c.api, sync = c.itemsSync, scope = scope)
+    }
+
+    /**
+     * The one Decisions instance per signed-in session (app shell, spec §1):
+     * no home conversation, starts in `All`, feeds the Decisions list and the
+     * tab badge. Created and started by the shell, stopped when the shell
+     * leaves the composition on sign-out.
+     */
+    fun makeDecisionsViewModel(session: UserSession, scope: CoroutineScope): ItemsPanelViewModel =
+        makeItemsPanelViewModel(session, convoID = null, scope = scope)
+
+    /**
+     * Resolves a tapped `[#65](matron://item/65)` link to a local item id,
+     * with one `refresh(All)` retry on a miss, expressed in the design
+     * system's vocabulary so a link-hosting screen can hand it straight to
+     * `TrackerItemLinkHost` (tracker item #115, apple #208). Lives here
+     * because this is the one layer that sees both the resolver and the
+     * session's store + sync; mapping in each host instead is how the miss
+     * path drifts between surfaces. `alertMessage` is null only for `Open`,
+     * which the `when` has already taken.
+     */
+    suspend fun trackerItemLinkOutcome(num: Int, session: UserSession): TrackerItemLinkOutcome {
+        val c = core(session)
+        return when (val resolution = TrackerItemLinkResolver(c.store, c.itemsSync).resolve(num)) {
+            is TrackerItemLinkResolver.Resolution.Open -> TrackerItemLinkOutcome.Open(resolution.itemID)
+            else -> TrackerItemLinkOutcome.Explain(resolution.alertMessage(num) ?: "Item #$num couldn't be opened.")
+        }
+    }
 
     fun pushService(session: UserSession): PushService =
         JournalPushService(api = core(session).api, environment = pushEnvironment)
@@ -529,9 +639,24 @@ class AppDependencies(
                     pushResult.isFailure ->
                         MatronDebug.breadcrumb("signOut: unregisterPush failed: ${pushResult.exceptionOrNull()}")
                 }
+                // Stop the tracker sync BEFORE the engine: it awaits every
+                // in-flight refresh/refetch/drain, so nothing can resume after
+                // the wipe below and write the old account's items back.
+                runCatching { core.itemsSync.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: itemsSync.stop failed: $it") }
+                runCatching { core.missionsSync.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: missionsSync.stop failed: $it") }
                 core.engine.endSync()
                 runCatching { core.store.wipe() }
                     .onFailure { MatronDebug.breadcrumb("signOut: store.wipe failed: $it") }
+                // wipe() keeps the item outbox for the same reason it keeps
+                // the text outbox; sign-out clears the whole tracker cache.
+                runCatching { core.store.wipeItems() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: store.wipeItems failed: $it") }
+                // wipe() already cleared the mission tables; this is the
+                // belt for a wipe() that threw partway.
+                runCatching { core.store.wipeMissions() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: store.wipeMissions failed: $it") }
                 // wipe() deliberately preserves the offline outbox (a
                 // snapshot_required mirror wipe must not eat unsent messages);
                 // sign-out must clear it so the next account can't inherit —

@@ -21,7 +21,7 @@ import org.robolectric.annotation.Config
 /// first-paint query: `JournalStore.conversations()` / `conversationsFlow()`
 /// feed `JournalChatService.chatSummaries()`.
 ///
-/// Before the v7 columns (apple #212) the same read over 200 stale
+/// Before the v9 columns (apple #212) the same read over 200 stale
 /// conversations issued 401 queries, 400 of them on `event` (a `MAX(seq)`
 /// plus a row fetch per stale row). It is now exactly one query, on
 /// `conversation` alone, however stale the list is.

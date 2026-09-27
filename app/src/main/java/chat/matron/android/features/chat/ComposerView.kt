@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -42,6 +43,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,16 +59,25 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.AttachmentTray
+import chat.matron.android.designsystem.LocalAppLockActive
 import chat.matron.android.designsystem.UploadProgressBar
 import chat.matron.android.models.BotCommand
+import chat.matron.android.platform.AudioFocusInterruptions
+import chat.matron.android.platform.AudioInputDiagnostics
+import chat.matron.android.platform.VoiceRecordingService
 import chat.matron.android.viewmodels.ComposerDraftMemory
 import chat.matron.android.viewmodels.ComposerViewModel
 import chat.matron.android.viewmodels.MediaRecorderAudioRecording
 import chat.matron.android.viewmodels.PaletteSuggestion
 import chat.matron.android.viewmodels.VoiceRecorder
+import chat.matron.android.viewmodels.VoiceRecorderBindings
+import chat.matron.android.viewmodels.VoiceRecorderHandoff
+import chat.matron.android.viewmodels.VoiceRecorderHost
 import java.io.File
 import java.util.UUID
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -117,37 +129,54 @@ fun ComposerView(viewModel: ComposerViewModel) {
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> pendingPermission[0]?.complete(granted); pendingPermission[0] = null }
-    val recorder = remember {
-        VoiceRecorder(
-            requestPermission = {
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
-                    == PackageManager.PERMISSION_GRANTED
-                ) {
-                    true
+    // A note still recording when the app lock replaced this composition is
+    // picked up here rather than started over (see VoiceRecorderHandoff); the
+    // composition-bound wiring is rebound below either way. Only a read: a
+    // `remember` calculation can run in a composition Compose then discards,
+    // so the parked entry is released in the DisposableEffect below, once
+    // this composition has actually committed.
+    val host = remember {
+        VoiceRecorderHandoff.parkedFor(viewModel.roomID) ?: makeVoiceRecorderHost(context)
+    }
+    val recorder = host.recorder
+    val isAppLocked = LocalAppLockActive.current
+    SideEffect {
+        host.bindings.requestPermission = {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED
+            ) {
+                true
+            } else {
+                val deferred = CompletableDeferred<Boolean>()
+                pendingPermission[0] = deferred
+                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                deferred.await()
+            }
+        }
+        // Locking the screen suspends the app and cuts the capture short, so
+        // the window keeps the screen on for exactly the span of a live
+        // recording (port of apple #159).
+        host.bindings.setKeepScreenAwake = { keepAwake ->
+            context.findActivity()?.window?.let { window ->
+                if (keepAwake) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 } else {
-                    val deferred = CompletableDeferred<Boolean>()
-                    pendingPermission[0] = deferred
-                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                    deferred.await()
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 }
-            },
-            makeRecorder = { file -> MediaRecorderAudioRecording(file) },
-            tempDirectory = File(context.cacheDir, "voice").apply { mkdirs() },
-            // Locking the screen suspends the app and cuts the capture short,
-            // so the window keeps the screen on for exactly the span of a live
-            // recording (port of apple #159).
-            setKeepScreenAwake = { keepAwake ->
-                context.findActivity()?.window?.let { window ->
-                    if (keepAwake) {
-                        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    } else {
-                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    }
-                }
-            },
-        )
+            }
+        }
     }
     val recorderState by recorder.state.collectAsStateWithLifecycle()
+    // Peak-level breadcrumbs every few seconds while capture is live, so a
+    // note that comes back silent can be told from one that was never heard
+    // (port of apple #181). Keyed on the state so a pause stops the ticker.
+    LaunchedEffect(recorderState) {
+        if (recorderState !is VoiceRecorder.State.Recording) return@LaunchedEffect
+        while (true) {
+            delay(LEVEL_SAMPLE_INTERVAL)
+            recorder.sampleLevel()
+        }
+    }
 
     // Restore any per-room draft on first appearance; persist on disappear.
     DisposableEffect(viewModel.roomID) {
@@ -155,6 +184,8 @@ fun ComposerView(viewModel: ComposerViewModel) {
         // reused on revisit, so a `sendError` left undismissed from a prior
         // visit would otherwise resurface here as if it just happened.
         viewModel.dismissError()
+        // Committed: this composer owns the recorder it read from the handoff.
+        VoiceRecorderHandoff.confirmReclaim(viewModel.roomID, host)
         if (viewModel.input.isEmpty()) {
             ComposerDraftMemory.retrieve(viewModel.roomID)?.let { draft ->
                 viewModel.input = draft
@@ -163,7 +194,10 @@ fun ComposerView(viewModel: ComposerViewModel) {
         }
         onDispose {
             ComposerDraftMemory.store(viewModel.roomID, viewModel.input)
-            recorder.cancel()
+            // The lock shield replacing the composition is not the user
+            // leaving: a live note is parked for the composer that reopens
+            // this room after unlock. Any other teardown cancels, as before.
+            VoiceRecorderHandoff.onComposerDisposed(viewModel.roomID, host, appLocked = isAppLocked())
         }
     }
 
@@ -188,8 +222,9 @@ fun ComposerView(viewModel: ComposerViewModel) {
             UploadProgressBar(label = upload.label, fraction = upload.fraction)
         }
 
-        if (recorderState is VoiceRecorder.State.Recording) {
+        (recorderState as? VoiceRecorder.State.Recording)?.let { recording ->
             RecordingBar(
+                isPaused = recording.isPaused,
                 onCancel = { recorder.cancel() },
                 onSend = {
                     recorder.stop()?.let { note ->
@@ -197,7 +232,7 @@ fun ComposerView(viewModel: ComposerViewModel) {
                     }
                 },
             )
-        } else {
+        } ?: run {
             AttachmentTray(attachments = staged, onRemove = { id -> viewModel.removeAttachment(id) })
 
             Row(
@@ -287,8 +322,40 @@ private fun AttachMenu(onPickPhoto: () -> Unit, onPickFile: () -> Unit) {
     }
 }
 
+/// Interval between the recorder's peak-level diagnostics samples.
+private val LEVEL_SAMPLE_INTERVAL = 5.seconds
+
+/// The composer's recorder with its process-scoped wiring. The
+/// composition-bound halves (permission launcher, window flag) go through
+/// [VoiceRecorderBindings] and are rebound by whichever composer holds it.
+private fun makeVoiceRecorderHost(context: Context): VoiceRecorderHost {
+    val bindings = VoiceRecorderBindings()
+    val recorder = VoiceRecorder(
+        requestPermission = { bindings.requestPermission() },
+        makeRecorder = { file -> MediaRecorderAudioRecording(file) },
+        tempDirectory = File(context.cacheDir, "voice").apply { mkdirs() },
+        setKeepScreenAwake = { bindings.setKeepScreenAwake(it) },
+        // Switching apps mid-note used to kill the capture: a microphone
+        // foreground service holds mic access for exactly the span of a
+        // recording (port of apple #180's `audio` background mode).
+        holdRecordingSession = { hold ->
+            if (hold) VoiceRecordingService.start(context) else VoiceRecordingService.stop(context)
+        },
+        // A backgrounded recording is far more likely to be interrupted (a
+        // call, the assistant, another app taking the mic): audio-focus
+        // changes pause and resume the recorder (port of apple #180).
+        observeInterruptions = AudioFocusInterruptions(context)::observe,
+        describeInputRoute = AudioInputDiagnostics(context)::describe,
+    )
+    return VoiceRecorderHost(bindings, recorder)
+}
+
+/// The live-recording strip. While an interruption holds the capture
+/// ([isPaused]) it says so: the spinner and "Recording…" would claim to be
+/// capturing a call that the recorder is not hearing. Send still delivers
+/// what was captured up to the pause.
 @Composable
-private fun RecordingBar(onCancel: () -> Unit, onSend: () -> Unit) {
+private fun RecordingBar(isPaused: Boolean, onCancel: () -> Unit, onSend: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -296,8 +363,13 @@ private fun RecordingBar(onCancel: () -> Unit, onSend: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        CircularProgressIndicator(modifier = Modifier.padding(2.dp), strokeWidth = 2.dp)
-        Text("Recording…", modifier = Modifier.weight(1f))
+        if (isPaused) {
+            Icon(Icons.Default.Pause, contentDescription = "Recording paused", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(recordingBarLabel(isPaused = true), modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            CircularProgressIndicator(modifier = Modifier.padding(2.dp), strokeWidth = 2.dp)
+            Text(recordingBarLabel(isPaused = false), modifier = Modifier.weight(1f))
+        }
         TextButton(onClick = onCancel) { Text("Cancel") }
         IconButton(onClick = onSend) {
             Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send voice note", tint = MaterialTheme.colorScheme.primary)
@@ -325,6 +397,11 @@ private fun ComposerErrorBanner(message: String, onDismiss: () -> Unit) {
         }
     }
 }
+
+/// Copy for the recording strip: truthful about a capture an interruption
+/// has paused (a call, another app on the mic) versus one that is live.
+internal fun recordingBarLabel(isPaused: Boolean): String =
+    if (isPaused) "Recording paused" else "Recording…"
 
 /** User-facing copy for a [VoiceRecorder.RecorderError] thrown by [VoiceRecorder.start]. */
 private fun voiceRecorderErrorMessage(error: VoiceRecorder.RecorderError): String = when (error) {

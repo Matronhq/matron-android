@@ -35,6 +35,9 @@ import chat.matron.android.designsystem.AskUserCard
 import chat.matron.android.designsystem.AttachmentFile
 import chat.matron.android.designsystem.AttachmentImage
 import chat.matron.android.designsystem.DiffCard
+import chat.matron.android.designsystem.ItemInlineCard
+import chat.matron.android.designsystem.MilestoneCard
+import chat.matron.android.designsystem.MissionNotice
 import chat.matron.android.designsystem.LiveOutputCard
 import chat.matron.android.designsystem.LiveOutputSessionStore
 import chat.matron.android.designsystem.MarkdownText
@@ -104,6 +107,17 @@ fun TimelineItemView(
     /// (agent-spawn-card plan Task 3). Required, not defaulted: a caller that
     /// forgets to wire it should fail to compile, not fail silently.
     onOpenSpawnedRoom: (roomId: String) -> Unit,
+    /// Opens the tracker item a tapped [TimelineItem.Kind.ItemMarker] card
+    /// names (the `item/{itemID}` route) — same "fixed per screen, `null`
+    /// where there's nowhere to navigate" convention as [onOpenSpawnedRoom]
+    /// except defaulted: `null` (previews, tests, the sub-chat pane) leaves
+    /// the card drawn but tap-inert (apple #186).
+    onOpenItem: ((itemID: String) -> Unit)? = null,
+    /// Opens the mission page for a tapped [TimelineItem.Kind.MilestoneMarker]
+    /// / [TimelineItem.Kind.MissionMarker] — same "fixed per screen, `null`
+    /// where there is nowhere to navigate" convention as [onOpenItem]
+    /// (apple #209).
+    onOpenMission: ((missionID: String) -> Unit)? = null,
     /// `ChatViewModel.hasMultipleSenders` — whether this room has ≥2
     /// distinct non-own senders. Gates [timelineAvatarSender]: default
     /// `false` keeps every existing preview/test/1:1-chat call site
@@ -115,7 +129,7 @@ fun TimelineItemView(
             RenderedBody(
                 item, resolveImage, onTapImage, onTapFile, isDownloadingFile, isMediaUnavailable,
                 askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
-                agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, hasMultipleSenders,
+                agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, onOpenItem, onOpenMission, hasMultipleSenders,
             )
             SendStateIndicator(
                 state = sendStateGlyphFrom(item.sendState),
@@ -127,7 +141,7 @@ fun TimelineItemView(
         RenderedBody(
             item, resolveImage, onTapImage, onTapFile, isDownloadingFile, isMediaUnavailable,
             askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
-            agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, hasMultipleSenders,
+            agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, onOpenItem, onOpenMission, hasMultipleSenders,
         )
     }
 }
@@ -156,6 +170,8 @@ private fun RenderedBody(
         decision: AgentSpawnDecision,
     ) -> Unit)?,
     onOpenSpawnedRoom: (roomId: String) -> Unit,
+    onOpenItem: ((itemID: String) -> Unit)?,
+    onOpenMission: ((missionID: String) -> Unit)?,
     hasMultipleSenders: Boolean,
 ) {
     val style = if (item.isOwn) MessageAuthorStyle.Me else MessageAuthorStyle.Bot
@@ -268,6 +284,34 @@ private fun RenderedBody(
             outcome = kind.outcome,
             onOpen = onOpenSpawnedRoom,
         )
+
+        // Tracker marker (apple #186 / #210): a compact card or a one-line
+        // note, capped like the ask-user card. Deliberately no bubble and no
+        // images — the row costs no more than a text row.
+        is TimelineItem.Kind.ItemMarker ->
+            CappedCard(maxWidth = 360.dp) {
+                ItemInlineCard(
+                    marker = kind.marker,
+                    onOpen = onOpenItem?.let { open -> { open(kind.marker.itemID) } },
+                )
+            }
+
+        // Mission markers (apple #209): a milestone card, capped like the
+        // item card, and a one-line mission notice. Both open the mission.
+        is TimelineItem.Kind.MilestoneMarker ->
+            CappedCard(maxWidth = 360.dp) {
+                MilestoneCard(
+                    marker = kind.marker,
+                    onOpen = onOpenMission?.let { open -> { open(kind.marker.missionID) } },
+                )
+            }
+
+        is TimelineItem.Kind.MissionMarker ->
+            MissionNotice(
+                marker = kind.marker,
+                onOpen = onOpenMission?.let { open -> { open(kind.marker.missionID) } },
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
 
         is TimelineItem.Kind.ActivityIndicator -> ActivityIndicatorRow(label = kind.label)
 

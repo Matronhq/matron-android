@@ -658,19 +658,9 @@ class JournalTimelineService(
 
     override fun sessionState(): Flow<String> = store.sessionStateFlow(convoID)
 
-    override fun summaryEntriesStream(): Flow<List<ConversationSummaryEntry>> =
-        store.summaryEntriesFlow(convoID).map { records ->
-            records.map {
-                // SummaryEntryEntity.createdAt is milliseconds since epoch (the
-                // store's Long-timestamp convention).
-                ConversationSummaryEntry(
-                    seq = it.seq, toc = it.toc, detail = it.detail,
-                    date = Instant.ofEpochMilli(it.createdAt),
-                )
-            }
-        }
-
     override fun connectionState(): Flow<SyncConnectionState> = engine.stateStream
+
+    override suspend fun newestOwnMessageSeq(): Long? = store.newestOwnMessageSeq(convoID)
 
     override suspend fun markAsRead() {
         val maxSeq = store.maxSeq(convoID) ?: return
