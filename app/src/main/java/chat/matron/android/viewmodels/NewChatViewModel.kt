@@ -296,6 +296,13 @@ class NewChatViewModel(
     /// the fetch answers with.
     private val reports = mutableMapOf<Long, BoxStatus>()
 
+    /// When each live (uncaptioned) entry in [capacities] was read (epoch ms)
+    /// — a fan-out reply's arrival, or a frame's `reported_at`. A reload keeps
+    /// last visit's live numbers until the fan-out answers, and this is what
+    /// lets a report that is newer than them (a frame held while the folder
+    /// step was showing) take the row instead.
+    private val liveCapturedAt = mutableMapOf<Long, Long>()
+
     /// How much a row's capacity numbers can be trusted: live for a box this
     /// visit asked (or that is reporting right now), aged by `reported_at` for
     /// an offline box, aged without the "offline" for a connected box that
@@ -338,6 +345,7 @@ class NewChatViewModel(
         val agent = roster.firstOrNull { it.id == agentID } ?: return
         val report = usableReport(agentID) ?: return
         _capacityStaleness.value = if (agent.connected) {
+            liveCapturedAt[agentID] = report.reportedAtMs
             _capacityStaleness.value - agentID
         } else {
             _capacityStaleness.value + (agentID to AgentCapacityFreshness.Offline(report.reportedAtMs))
@@ -664,6 +672,7 @@ class NewChatViewModel(
                 // an offline-captioned frame left on this box earlier.
                 _capacityStaleness.value = _capacityStaleness.value - agentID
                 _capacities.value = _capacities.value + (agentID to capacity)
+                liveCapturedAt[agentID] = now()
                 // The fallback for a journal that holds no report: what the row
                 // will show once the host puts this box to sleep.
                 capacityCache.save(capacity, agentID, now())
@@ -735,8 +744,13 @@ class NewChatViewModel(
         val seeded = mutableMapOf<Long, BoxCapacity>()
         val stale = mutableMapOf<Long, AgentCapacityFreshness>()
         for (id in connected) {
-            if (id in _capacities.value) continue
-            usableReport(id)?.let { seeded[id] = it.capacity }
+            val report = usableReport(id) ?: continue
+            // Last visit's live numbers stand only while they are the newer
+            // word; otherwise the report takes the row.
+            val capturedAt = liveCapturedAt[id]
+            if (id in _capacities.value && capturedAt != null && capturedAt >= report.reportedAtMs) continue
+            seeded[id] = report.capacity
+            liveCapturedAt[id] = report.reportedAtMs
         }
         for (id in offline) {
             val report = usableReport(id)

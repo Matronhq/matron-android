@@ -315,4 +315,68 @@ class NewChatViewModelBoxStatusTest {
             watcher.cancel()
         }
     }
+
+    // MARK: Reload after the folder step
+
+    private val replied25 = RPCReply.Ok(Json.parseToJsonElement(
+        """{"folders":[],"limits":{"lines":[{"id":"session","label":"Current session","percent":25}]}}""",
+    ))
+
+    /// A frame that lands while the folder step is showing is only held. Back
+    /// on the roster, the previous visit's live numbers for that connected box
+    /// survive the reload (stale-while-revalidate) — but they are older than
+    /// the held report, so the report has to win the seed.
+    @Test
+    fun reload_seedsANewerHeldReportOverLastVisitsLiveNumbers() = runBlocking {
+        var clock = now
+        val fake = Fake()
+        fake.devicesResult = Result.success(listOf(agent(1, true), agent(2, false)))
+        fake.repliesByDevice[1] = replied25
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache(), now = { clock })
+        val watcher = launch { vm.watchBoxStatus() }
+        try {
+            vm.load()
+            assertEquals(25, vm.percent(1))
+
+            vm.select(agent(1, true))
+            clock += 60_000
+            fake.sendBoxStatus(1, BoxStatus(clock - 5_000, capacity(90)))
+            waitUntil { vm.hasReportForTesting(1) }
+
+            val gate = CompletableDeferred<Unit>()
+            val arrival = CompletableDeferred<Unit>()
+            fake.gates[1] = gate
+            fake.arrivals[1] = arrival
+            val reloading = launch { vm.backToAgents() }
+            arrival.await()
+            assertEquals("the held report is newer than last visit's reply", 90, vm.percent(1))
+            gate.complete(Unit)
+            reloading.join()
+        } finally {
+            watcher.cancel()
+        }
+    }
+
+    /// The other way round: a reply newer than the journal's report keeps its
+    /// row across the reload rather than stepping back to older numbers.
+    @Test
+    fun reload_keepsLastVisitsLiveNumbersWhenTheReportIsOlder() = runBlocking {
+        var clock = now
+        val fake = Fake()
+        fake.devicesResult = Result.success(listOf(agent(1, true, report(10, agoMs = 600_000)), agent(2, false)))
+        fake.repliesByDevice[1] = replied25
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache(), now = { clock })
+        vm.load()
+
+        val gate = CompletableDeferred<Unit>()
+        val arrival = CompletableDeferred<Unit>()
+        fake.gates[1] = gate
+        fake.arrivals[1] = arrival
+        clock += 30_000
+        val reloading = launch { vm.backToAgents() }
+        arrival.await()
+        assertEquals(25, vm.percent(1))
+        gate.complete(Unit)
+        reloading.join()
+    }
 }
