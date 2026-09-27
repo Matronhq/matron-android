@@ -6,6 +6,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
+import chat.matron.android.models.Milestone
+import chat.matron.android.models.Mission
 import chat.matron.android.models.TrackerItem
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -235,7 +237,7 @@ class JournalApi(
     private val baseUrl: HttpUrl,
     private val client: OkHttpClient = OkHttpClient(),
     token: String? = null,
-) : SnapshotSource, AgentSpawnAnswering, ItemsProviding {
+) : SnapshotSource, AgentSpawnAnswering, ItemsProviding, MissionsProviding {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -719,6 +721,36 @@ class JournalApi(
 
     override suspend fun rankItem(id: String, change: ItemRankChange): TrackerItem =
         decodeItem(request(path = "/items/${pathSegment(id)}/rank", method = "POST", jsonBody = change.toJson()))
+
+    // MARK: Missions & milestones
+    //
+    // protocol.md "Missions & milestones → Routes". Ported from matron-apple's
+    // `JournalAPI+Missions.swift`. A journal predating missions 404s on every
+    // one of these; `MissionsSync` turns the `GET /missions` 404 into
+    // "unsupported" and hides the Missions tab.
+
+    override suspend fun listMissions(query: MissionsListQuery): MissionsListDecode =
+        MissionsDecoding.missions(request(path = "/missions", query = query.queryItems))
+
+    /// [id] is `ms_…` or `#num`; the `#` is percent-encoded by [pathSegment].
+    override suspend fun mission(id: String): MissionDetail =
+        MissionsDecoding.detail(request(path = "/missions/${pathSegment(id)}"))
+
+    /// `GET /milestones?convo=` — the spec's per-conversation read surface,
+    /// kept even though no screen consumes it yet: the transcript renders
+    /// milestones from timeline events and the mission page from the detail
+    /// fetch.
+    override suspend fun milestones(convoID: String): List<Milestone> =
+        MissionsDecoding.milestones(request(path = "/milestones", query = listOf("convo" to convoID)))
+
+    /// A device close always succeeds server-side, even over open items —
+    /// the journal records `closed_over_open_items` and names the numbers in
+    /// the close marker. The protocol's *Closing* 409s apply to AGENT
+    /// callers, so this method never has to render one.
+    override suspend fun closeMission(id: String, summary: String): Mission =
+        MissionsDecoding.mission(
+            request(path = "/missions/${pathSegment(id)}/close", method = "POST", jsonBody = buildJsonObject { put("summary", summary) }),
+        )
 
     // MARK: Internals
 

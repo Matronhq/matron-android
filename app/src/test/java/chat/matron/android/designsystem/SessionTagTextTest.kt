@@ -90,4 +90,37 @@ class SessionTagTextTest {
         val roomShort = room.text.indexOf("ab")
         assertTrue(room.spanStyles.none { it.start <= roomShort && it.end > roomShort })
     }
+
+    // MARK: plainLabel — the TalkBack mirror of the visual tag (apple #216)
+
+    @Test
+    fun plainLabelJoinsRoomNamesWithCommas() {
+        assertEquals("dev-1, dev-2", SessionTagText.plainLabel("solo", null, listOf("dev-1", "dev-2")))
+        assertEquals("dev-1, dev-2, dev-3, bc", SessionTagText.plainLabel("solo", "bc", listOf("dev-1", "dev-2", "dev-3")))
+    }
+
+    @Test
+    fun plainLabelUsesTheBoxNameNotTheLetter() {
+        assertEquals("dev-2", SessionTagText.plainLabel("dev-2", null))
+        assertEquals("dev-2, bc", SessionTagText.plainLabel("dev-2", "bc"))
+    }
+
+    /// `roomBoxNames` with exactly ONE entry must fall through to the
+    /// single-box branch — the visual `room` run requires at least 2 names
+    /// and falls back to `run` (i.e. `boxName`) below that, so this must
+    /// agree or TalkBack speaks a "room" the eye never sees.
+    @Test
+    fun plainLabelSingleRoomNameFallsThroughToBoxName() {
+        assertEquals("dev-2, bc", SessionTagText.plainLabel("dev-2", "bc", listOf("dev-2")))
+    }
+
+    @Test
+    fun plainLabelSessionShortOnly() {
+        assertEquals("bc", SessionTagText.plainLabel(null, "bc"))
+    }
+
+    @Test
+    fun plainLabelNothingToShowIsNull() {
+        assertNull(SessionTagText.plainLabel(null, null))
+    }
 }

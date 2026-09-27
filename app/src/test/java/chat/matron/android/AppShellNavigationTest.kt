@@ -18,6 +18,9 @@ class AppShellNavigationTest {
         override fun pushChat(tab: AppTab, roomID: String) { commands += "pushChat:${tab.name}:$roomID" }
         override fun replaceTopChat(tab: AppTab, current: String, sibling: String) { commands += "replaceTop:${tab.name}:$current>$sibling" }
         override fun pushDecision(itemID: String) { commands += "pushDecision:$itemID" }
+        override fun pushMission(tab: AppTab, missionID: String) { commands += "pushMission:${tab.name}:$missionID" }
+        override fun replaceMissions(missionID: String) { commands += "replaceMissions:$missionID" }
+        override fun pushMissionItem(itemID: String) { commands += "pushMissionItem:$itemID" }
         override fun popToRoot(tab: AppTab) { commands += "popToRoot:${tab.name}" }
         override fun popChats(count: Int) { commands += "popChats:$count" }
     }
@@ -32,6 +35,11 @@ class AppShellNavigationTest {
         assertEquals("item/it_1", AppShellNavigation.pathValue("item/{itemID}") { args[it] })
         assertEquals("item detail mirrors alike on every tab", "item/it_1", AppShellNavigation.pathValue("decisions/item/{itemID}") { args[it] })
         assertEquals("item/it_1", AppShellNavigation.pathValue("coordinator/item/{itemID}") { args[it] })
+        assertEquals("mission/ms_1", AppShellNavigation.missionRoute("ms_1"))
+        assertEquals("a mission page mirrors alike on every tab", "mission/ms_1", AppShellNavigation.pathValue("mission/{missionID}") { mapOf("missionID" to "ms_1")[it] })
+        assertEquals("mission/ms_1", AppShellNavigation.pathValue("missions/mission/{missionID}") { mapOf("missionID" to "ms_1")[it] })
+        assertEquals("item/it_1", AppShellNavigation.pathValue("missions/item/{itemID}") { args[it] })
+        assertNull(AppShellNavigation.pathValue("missions/list") { args[it] })
         assertNull(AppShellNavigation.pathValue("coordinator/root") { args[it] })
         assertEquals("the Coordinator tab's own chat route mirrors as the bare room id", "!r:s", AppShellNavigation.pathValue("coordinator/chat/{convoID}") { args[it] })
         assertEquals("items/!r:s", AppShellNavigation.pathValue("items/{convoID}") { args[it] })
@@ -133,20 +141,25 @@ class AppShellNavigationTest {
     // decisions list — a horizontal swipe at a tab's ROOT moves one tab in
     // bar order; deeper in a stack the chat / item detail own horizontal
     // drags, so a non-empty path ignores it.
+    /// Bar order since apple #209: Coordinator · Missions · Decisions ·
+    /// Conversations, with Missions present until a 404 proves it
+    /// unsupported (the default, like iOS, is shown).
     @Test
     fun rootSwipeLeftGoesToTheNextTabAndRightComesBack() {
         val host = RecordingHost()
         val nav = AppShellNavigation(host)
-        assertTrue(nav.swipeRoot(dx = -120f, dy = 10f))
-        assertEquals(AppTab.DECISIONS, nav.tab.value)
         assertFalse("nothing to the right of the last tab", nav.swipeRoot(dx = -120f, dy = 10f))
+        assertEquals(AppTab.CONVERSATIONS, nav.tab.value)
+        assertTrue(nav.swipeRoot(dx = 120f, dy = 10f))
         assertEquals(AppTab.DECISIONS, nav.tab.value)
         assertTrue(nav.swipeRoot(dx = 120f, dy = 10f))
-        assertEquals(AppTab.CONVERSATIONS, nav.tab.value)
-        assertTrue("Coordinator sits to the left of Conversations", nav.swipeRoot(dx = 120f, dy = 10f))
+        assertEquals(AppTab.MISSIONS, nav.tab.value)
+        assertTrue("Coordinator sits to the left of Missions", nav.swipeRoot(dx = 120f, dy = 10f))
         assertEquals(AppTab.COORDINATOR, nav.tab.value)
         assertFalse("nothing to the left of the first tab", nav.swipeRoot(dx = 120f, dy = 10f))
-        assertEquals(listOf("switch:DECISIONS", "switch:CONVERSATIONS", "switch:COORDINATOR"), host.commands)
+        assertTrue(nav.swipeRoot(dx = -120f, dy = 10f))
+        assertEquals(AppTab.MISSIONS, nav.tab.value)
+        assertEquals(listOf("switch:DECISIONS", "switch:MISSIONS", "switch:COORDINATOR", "switch:MISSIONS"), host.commands)
     }
 
     // MARK: - Coordinator tab (apple #197)
@@ -318,6 +331,13 @@ class AppShellNavigationTest {
             push(tab, sibling)
         }
         override fun pushDecision(itemID: String) { commands += "pushDecision:$itemID"; push(AppTab.DECISIONS, "item/$itemID") }
+        override fun pushMission(tab: AppTab, missionID: String) { commands += "pushMission:${tab.name}:$missionID"; push(tab, "mission/$missionID") }
+        override fun replaceMissions(missionID: String) {
+            commands += "replaceMissions:$missionID"
+            val s = stacks.getValue(AppTab.MISSIONS); while (s.size > 1) s.removeAt(s.size - 1)
+            push(AppTab.MISSIONS, "mission/$missionID")
+        }
+        override fun pushMissionItem(itemID: String) { commands += "pushMissionItem:$itemID"; push(AppTab.MISSIONS, "item/$itemID") }
         override fun popToRoot(tab: AppTab) {
             commands += "popToRoot:${tab.name}"
             if (current != tab) return // a saved stack is not on the controller's back stack
@@ -524,5 +544,22 @@ class AppShellNavigationTest {
         nav.noteDestination(AppTab.CONVERSATIONS, "root", null)
         assertEquals(AppTab.CONVERSATIONS, nav.tab.value)
         assertTrue(nav.isAtRoot)
+    }
+
+    /// The same once-only mirror for a mission page pushed by a title tap
+    /// on a chat: the controller's report binds to the entry the rule
+    /// added, and a repeat tap for the page already on top is a no-op.
+    @Test
+    fun pushedMissionIsMirroredOnce_andARepeatTapIsANoOp() {
+        val host = SimulatedControllerHost()
+        val nav = AppShellNavigation(host).also { host.nav = it }
+        nav.noteDestination(AppTab.CONVERSATIONS, "root", null)
+        nav.openChat("!r:s")
+        nav.pushMission("ms_1")
+        assertEquals(listOf("!r:s", "mission/ms_1"), nav.chatPath)
+        host.commands.clear()
+        nav.pushMission("ms_1")
+        assertTrue("a double title tap must not stack two identical pages", host.commands.isEmpty())
+        assertEquals(listOf("!r:s", "mission/ms_1"), nav.chatPath)
     }
 }

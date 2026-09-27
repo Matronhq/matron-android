@@ -39,13 +39,21 @@ import java.io.File
 /// `item_comment` mirror the journal's rows (filled from `GET /items`, never
 /// from the event log), and `item_outbox` queues comments/creates written
 /// offline. Additive; all three start empty and the first refresh fills them.
+///
+/// v8 adds the mission cache (matron-apple's v10): `mission`, `milestone`
+/// and `mission_conversation` mirror `GET /missions` / `GET /missions/:id`
+/// (never the event log), plus an index on `item(mission_id, state,
+/// awaiting)` for the mission page's open-items query. Additive. Unlike the
+/// Apple migration it adds no item columns — `mission_id` / `mission_num`
+/// already shipped in v7 — so no items-watermark reset is needed.
 @Database(
     entities = [
         ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
         SummaryEntryEntity::class, AgentEntity::class,
         ItemEntity::class, ItemCommentEntity::class, ItemOutboxEntity::class,
+        MissionEntity::class, MilestoneEntity::class, MissionConversationEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -58,6 +66,9 @@ abstract class MatronDatabase : RoomDatabase() {
     abstract fun itemDao(): ItemDao
     abstract fun itemCommentDao(): ItemCommentDao
     abstract fun itemOutboxDao(): ItemOutboxDao
+    abstract fun missionDao(): MissionDao
+    abstract fun milestoneDao(): MilestoneDao
+    abstract fun missionConversationDao(): MissionConversationDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -181,10 +192,46 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
+        /// v8 (matron-apple's v10, #209): the mission cache. Index names
+        /// follow Room's own `index_<table>_<columns>` convention because
+        /// Room validates them against the entities at open.
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `mission` (" +
+                        "`id` TEXT NOT NULL, `num` INTEGER NOT NULL, `state` TEXT NOT NULL, `title` TEXT NOT NULL, " +
+                        "`body` TEXT NOT NULL, `close_summary` TEXT, `closed_by` TEXT, " +
+                        "`closed_over_open_items` INTEGER NOT NULL, `origin_convo_id` TEXT NOT NULL, " +
+                        "`origin_device_id` INTEGER NOT NULL, `created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, " +
+                        "`updated_at` INTEGER NOT NULL, `last_milestone_at` INTEGER, `closed_at` INTEGER, " +
+                        "`open_items` INTEGER NOT NULL, `needs_you` INTEGER NOT NULL, `conversation_count` INTEGER NOT NULL, " +
+                        "`milestone_count` INTEGER NOT NULL, `last_milestone_json` TEXT, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_mission_state_last_milestone_at` ON `mission` (`state`, `last_milestone_at`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_mission_origin_convo_id` ON `mission` (`origin_convo_id`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `milestone` (" +
+                        "`id` TEXT NOT NULL, `mission_id` TEXT NOT NULL, `num` INTEGER NOT NULL, `kind` TEXT NOT NULL, " +
+                        "`title` TEXT NOT NULL, `body` TEXT NOT NULL, `convo_id` TEXT NOT NULL, `seq` INTEGER NOT NULL, " +
+                        "`device_id` INTEGER NOT NULL, `created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_milestone_mission_id_created_at` ON `milestone` (`mission_id`, `created_at`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_milestone_convo_id_seq` ON `milestone` (`convo_id`, `seq`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `mission_conversation` (" +
+                        "`mission_id` TEXT NOT NULL, `convo_id` TEXT NOT NULL, `title` TEXT NOT NULL, `box` TEXT, " +
+                        "`state` TEXT NOT NULL, PRIMARY KEY(`mission_id`, `convo_id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_item_mission_id_state_awaiting` ON `item` (`mission_id`, `state`, `awaiting`)")
+            }
+        }
+
         /// Production, file-backed at the given path.
         fun open(context: Context, file: File): MatronDatabase =
             Room.databaseBuilder(context.applicationContext, MatronDatabase::class.java, file.absolutePath)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 .build()
 
         /// Test/ephemeral, memory-backed. Cleared when the last connection closes.

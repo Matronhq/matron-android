@@ -7,6 +7,7 @@ import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.ComposerViewModel
 import chat.matron.android.viewmodels.ItemDetailViewModel
 import chat.matron.android.viewmodels.ItemsPanelViewModel
+import chat.matron.android.viewmodels.MissionDetailViewModel
 import chat.matron.android.viewmodels.SubChatStripViewModel
 import kotlinx.coroutines.CoroutineScope
 
@@ -105,6 +106,10 @@ class ChatVMCache(
         sync = deps.itemsSync(session),
         scope = scope,
     )
+
+    /** A fresh detail VM per mission page (not cached: one page, one mission). */
+    fun missionDetailViewModel(missionID: String): MissionDetailViewModel =
+        deps.makeMissionDetailViewModel(session, missionID, scope)
 
     /** The (read-only timeline VM, switcher strip VM) pair for a subagent child. */
     fun subChatViewModels(childID: String, parentConvoID: String): Pair<ChatViewModel, SubChatStripViewModel> =

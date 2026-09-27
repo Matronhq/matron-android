@@ -162,6 +162,41 @@ class JournalSyncEngineTest {
         engine.endSync()
     }
 
+    /// The same fan-out for `mission` and `milestone` frames on one stream
+    /// (`missionMarkers()`, the feed `MissionsSync` refetches on): replayed
+    /// and live alike, malformed payloads dropped.
+    @Test
+    fun missionMarkerFanOut() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(1))
+        socket.serve(
+            """{"kind":"journal","seq":1,"convo_id":"c1","ts":1000,"sender":"agent:a","type":"mission",""" +
+                """"payload":{"mission_id":"ms_r","num":61,"title":"M","action":"created","by":"agent"}}""",
+        )
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        val probe = FlowProbe(this, engine.missionMarkers())
+        delay(50)
+        engine.beginSync()
+        engine.waitUntilReady()
+        val replayed = probe.next()
+        assertEquals("c1", replayed.first); assertEquals("ms_r", replayed.second.missionID)
+        assertTrue(replayed.second is chat.matron.android.events.MissionMarker.Mission)
+        socket.serve(
+            """{"kind":"journal","seq":2,"convo_id":"c1","ts":2000,"sender":"agent:a","type":"milestone",""" +
+                """"payload":{"milestone_id":"ml_1","num":63,"kind":"progress","title":"step","mission_id":"ms_r","mission_num":61,"by":"agent"}}""",
+        )
+        socket.serve("""{"kind":"journal","seq":3,"convo_id":"c1","ts":3000,"sender":"agent:a","type":"milestone","payload":{"garbage":true}}""")
+        socket.serve(journalLine(4))
+        val live = probe.next()
+        assertTrue(live.second is chat.matron.android.events.MissionMarker.Milestone)
+        assertEquals("ms_r", live.second.missionID)
+        waitUntil { store.cursor() >= 4 }
+        assertEquals("the malformed marker was applied to the mirror but not published", 4L, store.cursor())
+        probe.cancel()
+        engine.endSync()
+    }
+
     @Test
     fun ephemeralFanOut() = runBlocking {
         val socket = FakeWebSocketConnection()

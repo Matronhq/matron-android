@@ -42,6 +42,16 @@ object JournalEventType {
     /// local item cache, never a message: not in [MESSAGE_TYPES], and the
     /// timeline renders nothing for it until the inline cards port.
     const val ITEM = "item"
+    /// Mission lifecycle marker (`created` / `joined` / `updated` / `closed`),
+    /// written by the journal from the `/missions` routes (protocol.md
+    /// "Missions & milestones → Marker events"). An invalidation signal for
+    /// the local mission cache plus a one-line inline notice; never a
+    /// message — not in [MESSAGE_TYPES], no unread, no snippet, no push.
+    const val MISSION = "mission"
+    /// One milestone, appended to the conversation it was posted in. Its OWN
+    /// seq is the milestone's anchor — the inline card and the jump target.
+    /// Not in [MESSAGE_TYPES] either.
+    const val MILESTONE = "milestone"
 
     /// Payload key on the plain `text` twin the journal appends after a
     /// card-worthy `item` marker so pre-tracker clients still see the turn
