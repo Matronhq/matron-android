@@ -7,6 +7,7 @@ import chat.matron.android.events.MissionMarker
 import chat.matron.android.journal.db.MatronDatabase
 import chat.matron.android.models.ItemAuthor
 import chat.matron.android.models.ItemKind
+import chat.matron.android.models.ItemState
 import chat.matron.android.models.Milestone
 import chat.matron.android.models.MilestoneKind
 import chat.matron.android.models.Mission
@@ -519,5 +520,41 @@ class MissionsSyncTest {
         api.releaseCloseGate()
         assertEquals(MissionState.CLOSED, late.await().state)
         assertNull(rig.store.mission("ms_1"))
+    }
+
+    /// Bugbot (#79): the page's "Open items" come from the tracker cache,
+    /// and a detail refresh used to leave a row the server no longer lists
+    /// as open exactly as it was — a pull-to-refresh after an item was
+    /// closed or moved kept showing it under Open items while the mission's
+    /// counts already read lower. The detail's item ids are the authoritative
+    /// open set, so every cached open row missing from it is re-fetched
+    /// through the tracker sync (which learns closed vs moved from the item
+    /// itself); rows the server still lists, closed rows and other missions'
+    /// rows are left alone.
+    @Test
+    fun aDetailRefreshRefetchesCachedOpenItemsTheServerNoLongerLists() = runBlocking {
+        val api = FakeMissions()
+        val refreshed = mutableListOf<String>()
+        val store = JournalStore(MatronDatabase.inMemory(context), ownSender = "user:dan")
+        val markers = MutableSharedFlow<Pair<String, MissionMarker>>(extraBufferCapacity = 64)
+        val states = MutableStateFlow<SyncConnectionState>(SyncConnectionState.Connecting)
+        val sync = MissionsSync(api, store, markers = { markers }, connectionStates = { states }, refreshItem = { synchronized(refreshed) { refreshed.add(it) } })
+        fun item(id: String, num: Int, mission: String?, state: ItemState = ItemState.OPEN) = TrackerItem(
+            id = id, num = num, kind = ItemKind.TASK, state = state, title = "T$num", originConvoID = "c1",
+            missionID = mission, missionNum = if (mission == null) null else 61,
+        )
+        store.upsertItems(
+            listOf(
+                item("it_1", 1, "ms_1"),                          // still open on the server
+                item("it_2", 2, "ms_1"),                          // closed or moved since — stale
+                item("it_3", 3, "ms_1", state = ItemState.CLOSED), // already closed locally: not an open row
+                item("it_4", 4, "ms_2"),                          // another mission's row
+            ),
+        )
+        api.detail("ms_1", MissionDetail(mission("ms_1", 61), emptyList(), emptyList(), emptyList(), openItemIDs = listOf("it_1")))
+
+        assertEquals(MissionsRefreshOutcome.Succeeded, sync.refreshMission("ms_1"))
+        assertEquals(listOf("it_2"), synchronized(refreshed) { refreshed.toList() })
+        sync.stop()
     }
 }

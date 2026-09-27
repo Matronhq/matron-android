@@ -63,6 +63,14 @@ class MissionsSync(
     private val store: JournalStore,
     private val markers: () -> Flow<Pair<String, MissionMarker>>,
     private val connectionStates: () -> Flow<SyncConnectionState>,
+    /// `ItemsSync.refreshItem`: re-fetches one tracker row from `GET
+    /// /items/:id`. A mission detail refresh hands it every cached row still
+    /// open under that mission which the server no longer lists as open —
+    /// the row was closed or moved since the tracker cache last heard about
+    /// it, and only the item itself says which (Bugbot, #79). `null` in
+    /// hosts without a tracker sync (tests): the stale rows are then left to
+    /// the next item marker or `since` refresh, as before.
+    private val refreshItem: (suspend (String) -> Unit)? = null,
     dispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : MissionsSyncing {
     private val scope = CoroutineScope(dispatcher + SupervisorJob())
@@ -294,6 +302,7 @@ class MissionsSync(
                 if (detail.items.isNotEmpty()) store.upsertItems(detail.items)
             }
             _isSupported.value = true
+            reconcileOpenItems(detail)
             MissionsRefreshOutcome.Succeeded
         } catch (cancel: CancellationException) {
             throw cancel
@@ -306,6 +315,29 @@ class MissionsSync(
         } catch (error: Throwable) {
             MatronDebug.breadcrumb("MissionsSync: mission refetch $id failed: $error")
             MissionsRefreshOutcome.Failed(error.message ?: error.toString())
+        }
+    }
+
+    /// The mission page's "Open items" are the tracker cache's rows with
+    /// this `mission_id` and `state = open`. The detail's `items` array is
+    /// the server's authoritative version of that same set, so a cached row
+    /// it no longer lists is stale: closed, or moved to another mission,
+    /// since the cache last heard about it — a pull-to-refresh or a page
+    /// open would otherwise keep showing it under "Open items" while the
+    /// mission's own `open_items` count already reads lower (Bugbot, #79).
+    /// The row's new state is not in the detail (it only carries open rows),
+    /// so rather than guess between closed and moved, ask the tracker sync
+    /// for the truth, one `GET /items/:id` per stale row — the same path an
+    /// item marker takes. Runs after this refresh's own write, outside the
+    /// write lock; a stopped sync has already cancelled the refetch this
+    /// runs in, so nothing here lands after the sign-out wipe.
+    private suspend fun reconcileOpenItems(detail: MissionDetail) {
+        val refresh = refreshItem ?: return
+        val listed = detail.openItemIDs.toHashSet()
+        val stale = store.missionItems(detail.mission.id).map { it.id }.filterNot { it in listed }
+        for (id in stale) {
+            if (stopped) return
+            refresh(id)
         }
     }
 

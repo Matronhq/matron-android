@@ -285,6 +285,9 @@ class AppDependencies(
             store = store,
             markers = { engine.missionMarkers() },
             connectionStates = { engine.stateStream },
+            // A mission detail refresh re-fetches the cached open items the
+            // server no longer lists under that mission (closed or moved).
+            refreshItem = itemsSync::refreshItem,
         )
         val core = JournalCore(api, db, dbFile, store, engine, maintenance, itemsSync, missionsSync)
         cores[session.userID] = core
