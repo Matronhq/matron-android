@@ -2,6 +2,7 @@ package chat.matron.android.viewmodels
 
 import chat.matron.android.journal.arrayOrNull
 import chat.matron.android.journal.intOrNull
+import chat.matron.android.journal.longOrNull
 import chat.matron.android.journal.objectOrNull
 import chat.matron.android.journal.objects
 import chat.matron.android.journal.stringOrNull
@@ -15,6 +16,28 @@ import java.util.Locale
 /// One usage-limit meter from a bridge's `limits.lines`
 /// (spec: 2026-08-11-chooser-capacity-design.md).
 data class LimitLine(val id: String, val label: String, val percent: Int, val resetsAt: Long?)
+
+/// A box's own capacity report as the journal stores it (journal PR #82):
+/// the bridge sends `box_status` on every hello, after each usage-limits
+/// refresh and at shutdown, and the journal serves the latest one as
+/// `status` on `GET /devices` and fans it live as a `box_status` frame. Same
+/// blocks as a `recent_folders` reply, plus when the box reported them
+/// ([reportedAtMs], epoch ms) — the journal's clock, so a sleeping box's
+/// numbers carry an honest age. Port of matron-apple's `BoxStatus`.
+data class BoxStatus(val reportedAtMs: Long, val capacity: BoxCapacity) {
+    companion object {
+        /// Parses a `status` object or a `box_status` frame (both carry
+        /// `reported_at` in epoch ms beside the blocks). Null without a usable
+        /// `reported_at` (absent, null, a string, a boolean): an unaged report
+        /// can't be captioned honestly, so it is treated as no report at all.
+        /// The blocks degrade as in [BoxCapacity.parse].
+        fun parse(element: JsonElement): BoxStatus? {
+            val obj = element as? JsonObject ?: return null
+            val millis = obj.longOrNull("reported_at") ?: return null
+            return BoxStatus(millis, BoxCapacity.parse(obj))
+        }
+    }
+}
 
 /// The capacity blocks a bridge attaches to its `recent_folders` reply.
 /// Every block is optional wire-side, so parsing degrades per-block and can

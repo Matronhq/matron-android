@@ -7,6 +7,7 @@ import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
+import chat.matron.android.viewmodels.BoxStatus
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -103,6 +104,10 @@ data class DeviceDTO(
     /// User-chosen roster tag character (agent boxes; journal-held). null =
     /// automatic, and always null from a server predating the field.
     val tagChar: String? = null,
+    /// An agent box's last capacity report (journal PR #82) — usage,
+    /// allowances and account, with when the box sent them. null until the
+    /// box has ever reported, and always null from a journal predating it.
+    val status: BoxStatus? = null,
 )
 
 /// The user's answer to an agent-chat consent card. Mirrors the `decision`
@@ -399,6 +404,7 @@ class JournalApi(
                 isSelf = d.boolOrNull("is_self") ?: false,
                 connected = d.boolOrNull("connected") ?: false,
                 tagChar = d.stringOrNull("tag_char"),
+                status = d.objectOrNull("status")?.let(BoxStatus::parse),
             )
         }
     }

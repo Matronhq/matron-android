@@ -461,4 +461,25 @@ class WireModelsTest {
         val cleared = ServerFrame.decode("""{"kind":"device_meta","device_id":7,"name":"dev-y","tag_char":null}""")
         assertEquals(ServerFrame.DeviceMeta(7, "dev-y", tagChar = null, tagCharKnown = true), cleared)
     }
+
+    /// Journal PR #82: a bridge's own capacity report, fanned to client
+    /// sockets. Not a conversation event — no seq, no convo.
+    @Test
+    fun decodesBoxStatusFrame() {
+        val frame = ServerFrame.decode(
+            """{"kind":"box_status","device_id":9,"reported_at":1754900000000,
+                "limits":{"lines":[{"id":"session","label":"Current session","percent":12}]},
+                "account":{"email":"pat@yearbook.com"}}""",
+        )
+        assertTrue("expected a box_status frame, got $frame", frame is ServerFrame.BoxStatusFrame)
+        frame as ServerFrame.BoxStatusFrame
+        assertEquals(9L, frame.deviceID)
+        assertEquals(1_754_900_000_000L, frame.status.reportedAtMs)
+        assertEquals(listOf(12), frame.status.capacity.limitLines.map { it.percent })
+        assertEquals("pat@yearbook.com", frame.status.capacity.accountEmail)
+        // Malformed frames are skipped, not crashed on.
+        assertNull(ServerFrame.decode("""{"kind":"box_status","reported_at":1}"""))
+        assertNull(ServerFrame.decode("""{"kind":"box_status","device_id":9}"""))
+        assertNull(ServerFrame.decode("""{"kind":"box_status","device_id":9,"reported_at":true}"""))
+    }
 }

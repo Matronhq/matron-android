@@ -80,6 +80,7 @@ fun NewChatSheet(
     val isStarting by viewModel.isStarting.collectAsStateWithLifecycle()
     val capacities by viewModel.capacities.collectAsStateWithLifecycle()
     val capacityPending by viewModel.capacityPending.collectAsStateWithLifecycle()
+    val capacityStaleness by viewModel.capacityStaleness.collectAsStateWithLifecycle()
     val isWakingBox by viewModel.isWakingBox.collectAsStateWithLifecycle()
     val wakeStartedAt by viewModel.wakeStartedAt.collectAsStateWithLifecycle()
     val wakeGaveUp by viewModel.wakeGaveUp.collectAsStateWithLifecycle()
@@ -92,6 +93,9 @@ fun NewChatSheet(
     var navigated by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { viewModel.load() }
+    // Live `box_status` frames repaint rows while the sheet is up; the effect
+    // (and its subscription) ends when the sheet leaves the composition.
+    LaunchedEffect(Unit) { viewModel.watchBoxStatus() }
     // Anything that removes the sheet counts as abandoning the flow —
     // including the wake loops, which would otherwise keep re-asking a box
     // (and a retried start could silently spawn a session) for two minutes.
@@ -135,9 +139,9 @@ fun NewChatSheet(
                         agent = agent,
                         capacity = capacities[agent.id],
                         capacityPending = agent.id in capacityPending,
-                        // Read after `capacities` so a reload's seed and its
-                        // freshness recompose together.
-                        freshness = capacities.let { viewModel.capacityFreshness(agent.id) },
+                        // Its own flow: a live frame can change a row's
+                        // freshness without changing its numbers.
+                        freshness = capacityStaleness[agent.id] ?: AgentCapacityFreshness.Live,
                         onClick = { scope.launch { viewModel.select(agent) } },
                     )
                 }

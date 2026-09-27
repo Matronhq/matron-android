@@ -4,6 +4,8 @@ import chat.matron.android.journal.DeviceDTO
 import chat.matron.android.journal.RPCReply
 import chat.matron.android.journal.RPCRequestError
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -53,6 +55,7 @@ class NewChatViewModelWakeTest {
         data class Request(val method: String, val agentDeviceID: Long)
         val requests = mutableListOf<Request>()
         override suspend fun devices(): List<DeviceDTO> = devicesResult.getOrThrow()
+        override fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = emptyFlow()
         override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply {
             requests.add(Request(method, agentDeviceID))
             sequences[method]?.removeFirstOrNull()?.let { return it.getOrThrow() }
