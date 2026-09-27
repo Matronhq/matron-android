@@ -73,7 +73,17 @@ fun DiffCard(
     ) {
         DiffHeader(event, expanded) { expanded = !expanded }
 
-        if (visible.isNotEmpty()) {
+        if (event.expired) {
+            // Local retention (apple #212, spec §3.4) or a server tombstone:
+            // the header still names the file and its counts, so the row
+            // stays useful — only the body is gone. Same treatment
+            // ToolCallCard already gives an expired tool output.
+            Text(
+                "Diff no longer stored on this device",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else if (visible.isNotEmpty()) {
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -91,7 +101,7 @@ fun DiffCard(
             }
         }
 
-        if (hidden > 0) {
+        if (hidden > 0 && !event.expired) {
             Text(
                 "+$hidden more line${if (hidden == 1) "" else "s"}",
                 style = MaterialTheme.typography.labelSmall,
@@ -99,7 +109,9 @@ fun DiffCard(
                 modifier = Modifier.clickable { expanded = true },
             )
         } else {
-            AnimatedVisibility(visible = expanded && event.truncated) {
+            // Retention keeps `truncated` while stripping the body, so an
+            // expired diff must not imply hidden content it no longer has.
+            AnimatedVisibility(visible = expanded && event.truncated && !event.expired) {
                 Text(
                     "… diff truncated",
                     style = MaterialTheme.typography.labelSmall,
@@ -183,7 +195,7 @@ private fun DiffHeader(event: DiffEvent, expanded: Boolean, onToggle: () -> Unit
         event.removed?.let {
             Text("−$it", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MatronRed)
         }
-        if (event.truncated) {
+        if (event.truncated && !event.expired) {
             Text("…", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }

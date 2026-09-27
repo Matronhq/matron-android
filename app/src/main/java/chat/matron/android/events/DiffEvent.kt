@@ -21,6 +21,11 @@ data class DiffEvent(
     val removed: Int? = null,
     val truncated: Boolean = false,
     val newFile: Boolean = false,
+    /// The body is gone from this device: either the server tombstoned the
+    /// event or local retention did (30 days, `EventTombstone`). Every other
+    /// field is still present, so the card renders its header and says the
+    /// diff is no longer stored rather than showing an empty body.
+    val expired: Boolean = false,
 ) {
     /// Header filename: last component of the display path (falling back to the
     /// absolute path); null when the payload carried no path at all.
@@ -43,6 +48,7 @@ data class DiffEvent(
             removed = payload.intOrNull("removed"),
             truncated = payload.boolOrNull("truncated") ?: false,
             newFile = payload.boolOrNull("new_file") ?: false,
+            expired = payload.boolOrNull("expired") ?: false,
         )
     }
 }

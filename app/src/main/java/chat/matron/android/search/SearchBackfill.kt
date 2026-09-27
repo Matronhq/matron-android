@@ -3,6 +3,7 @@ package chat.matron.android.search
 import chat.matron.android.journal.JournalEvent
 import chat.matron.android.journal.previewText
 import chat.matron.android.models.MatronDebug
+import java.time.Instant
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -40,6 +41,10 @@ class SearchBackfillCoordinator(
     private val search: SearchService,
     private val pageSize: Int = 200,
     private val throttleMillis: Long = 100,
+    /// Wall clock for the retention guard in [previewText]. Injectable so a
+    /// test can walk fixture events without their epoch-era timestamps
+    /// tripping the 30-day window.
+    private val now: () -> Instant = { Instant.now() },
     /// Page fetcher, `JournalApi.messages(convoID, beforeSeq, limit)`-shaped.
     /// A lambda rather than the concrete API client so tests script pages
     /// without a network stack.
@@ -108,8 +113,9 @@ class SearchBackfillCoordinator(
             // (2,179 rooms, ~200K messages) tripped the OS disk-writes
             // resource limit (8.6 GB dirtied in 12 minutes). Batching a
             // 200-event page into one commit amortises the tree churn.
+            val indexedAt = now()
             val entries = older.mapNotNull { event ->
-                val body = event.previewText()
+                val body = event.previewText(indexedAt)
                 if (body.isNullOrEmpty()) return@mapNotNull null
                 SearchIndexEntry(
                     roomID = event.convoID, eventID = event.seq.toString(),

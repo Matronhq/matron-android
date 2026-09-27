@@ -19,6 +19,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -441,6 +444,165 @@ class MatronDatabaseMigrationTest {
             assertEquals("the item index is in place: the mission page's query runs", emptyList<String>(), store.missionItems("ms_1").map { it.id })
         } finally {
             database.close()
+            file.delete()
+        }
+    }
+
+    /// The exact v8 schema (v7 + the mission tables — MIGRATION_7_8's own
+    /// SQL), stamped user_version = 8.
+    private fun buildV8(file: File) {
+        buildV7(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `mission` (" +
+                    "`id` TEXT NOT NULL, `num` INTEGER NOT NULL, `state` TEXT NOT NULL, `title` TEXT NOT NULL, " +
+                    "`body` TEXT NOT NULL, `close_summary` TEXT, `closed_by` TEXT, " +
+                    "`closed_over_open_items` INTEGER NOT NULL, `origin_convo_id` TEXT NOT NULL, " +
+                    "`origin_device_id` INTEGER NOT NULL, `created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, " +
+                    "`updated_at` INTEGER NOT NULL, `last_milestone_at` INTEGER, `closed_at` INTEGER, " +
+                    "`open_items` INTEGER NOT NULL, `needs_you` INTEGER NOT NULL, `conversation_count` INTEGER NOT NULL, " +
+                    "`milestone_count` INTEGER NOT NULL, `last_milestone_json` TEXT, " +
+                    "PRIMARY KEY(`id`))"
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_mission_state_last_milestone_at` ON `mission` (`state`, `last_milestone_at`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_mission_origin_convo_id` ON `mission` (`origin_convo_id`)")
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `milestone` (" +
+                    "`id` TEXT NOT NULL, `mission_id` TEXT NOT NULL, `num` INTEGER NOT NULL, `kind` TEXT NOT NULL, " +
+                    "`title` TEXT NOT NULL, `body` TEXT NOT NULL, `convo_id` TEXT NOT NULL, `seq` INTEGER NOT NULL, " +
+                    "`device_id` INTEGER NOT NULL, `created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, " +
+                    "PRIMARY KEY(`id`))"
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_milestone_mission_id_created_at` ON `milestone` (`mission_id`, `created_at`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_milestone_convo_id_seq` ON `milestone` (`convo_id`, `seq`)")
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `mission_conversation` (" +
+                    "`mission_id` TEXT NOT NULL, `convo_id` TEXT NOT NULL, `title` TEXT NOT NULL, `box` TEXT, " +
+                    "`state` TEXT NOT NULL, PRIMARY KEY(`mission_id`, `convo_id`))"
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_item_mission_id_state_awaiting` ON `item` (`mission_id`, `state`, `awaiting`)")
+            db.version = 8
+        }
+    }
+
+    private fun indexNames(database: MatronDatabase, table: String): List<String> =
+        database.openHelper.readableDatabase.query("PRAGMA index_list('$table')").use { cursor ->
+            val nameColumn = cursor.getColumnIndexOrThrow("name")
+            buildList { while (cursor.moveToNext()) add(cursor.getString(nameColumn)) }
+        }
+
+    private fun indexColumns(database: MatronDatabase, index: String): List<String> =
+        database.openHelper.readableDatabase.query("PRAGMA index_info('$index')").use { cursor ->
+            val nameColumn = cursor.getColumnIndexOrThrow("name")
+            buildList { while (cursor.moveToNext()) add(cursor.getString(nameColumn)) }
+        }
+
+    /// MIGRATION_8_9 (launch performance, port of matron-apple's GRDB v11 /
+    /// #212): the `event(type, ts)` index the sweeps range-scan exists with
+    /// its columns in the order the range scan needs.
+    @Test
+    fun migratesV8FileToV9AndCreatesTheTypeTsIndex() = runBlocking {
+        val file = File.createTempFile("migration-test-v8", ".sqlite").also { it.delete() }
+        buildV8(file)
+        val database = MatronDatabase.open(context, file)
+        try {
+            val names = indexNames(database, "event")
+            assertTrue("the sweep's covering index is missing: $names", "event_type_ts" in names)
+            assertEquals(
+                "column order decides whether the range scan works",
+                listOf("type", "ts"), indexColumns(database, "event_type_ts"),
+            )
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
+    /// The v9 backfill: `last_message_type` / `expired_snippet` are derived
+    /// from the NEWEST message-type event of each conversation already in
+    /// the mirror — a bookkeeping frame after it must not win, a text
+    /// newest gets no command stub, and a conversation with no message-type
+    /// event at all stays NULL/NULL.
+    @Test
+    fun migrationBackfillsLastMessageTypeAndExpiredSnippetFromStoredEvents() = runBlocking {
+        val file = File.createTempFile("migration-test-v8", ".sqlite").also { it.delete() }
+        buildV8(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            for (id in listOf("c1", "c2", "c3", "c4", "c5")) {
+                db.execSQL(
+                    "INSERT INTO conversation VALUES ('$id', 'T-$id', 'running', 0, '', 0, NULL, 0, 0, 0, 0, NULL, NULL, NULL)"
+                )
+            }
+            // c1: newest message-type row is a live-log tool_output; the
+            // read_marker after it is not a message.
+            db.execSQL("INSERT INTO event VALUES (1, 'c1', 1000, 'agent:a', 'text', '{\"body\": \"hi\"}')")
+            db.execSQL(
+                "INSERT INTO event VALUES (2, 'c1', 2000, 'agent:a', 'tool_output', " +
+                    "'{\"command\": \"make test\", \"live_log\": true, \"snippet\": \"out\"}')"
+            )
+            db.execSQL("INSERT INTO event VALUES (3, 'c1', 3000, 'user:dan', 'read_marker', '{\"up_to_seq\": 2}')")
+            // c2: newest message-type row is plain text.
+            db.execSQL(
+                "INSERT INTO event VALUES (4, 'c2', 4000, 'agent:a', 'tool_output', " +
+                    "'{\"command\": \"ls\", \"live_log\": true}')"
+            )
+            db.execSQL("INSERT INTO event VALUES (5, 'c2', 5000, 'agent:a', 'text', '{\"body\": \"after\"}')")
+            // c3: no message-type event at all.
+            db.execSQL("INSERT INTO event VALUES (6, 'c3', 6000, 'agent:a', 'session_status', '{\"state\": \"idle\"}')")
+            // c4: a legacy tool_output (no live_log, not expired) keeps its
+            // durable snippet — no stub, or the read path would hide it.
+            db.execSQL(
+                "INSERT INTO event VALUES (7, 'c4', 7000, 'agent:a', 'tool_output', " +
+                    "'{\"command\": \"legacy\", \"snippet\": \"kept\"}')"
+            )
+            // c5: a server-tombstoned row — the list has only the command to show.
+            db.execSQL(
+                "INSERT INTO event VALUES (8, 'c5', 8000, 'agent:a', 'tool_output', " +
+                    "'{\"command\": \"make build\", \"expired\": true}')"
+            )
+        }
+
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:dan")
+            assertEquals("tool_output", store.conversation("c1")?.lastMessageType)
+            assertEquals("$ make test", store.conversation("c1")?.expiredSnippet)
+            assertEquals("text", store.conversation("c2")?.lastMessageType)
+            assertNull("only tool_output gets a command stub", store.conversation("c2")?.expiredSnippet)
+            assertNull("no message-type event means no last message type", store.conversation("c3")?.lastMessageType)
+            assertNull(store.conversation("c3")?.expiredSnippet)
+            assertEquals("tool_output", store.conversation("c4")?.lastMessageType)
+            assertNull("a legacy payload keeps its real snippet", store.conversation("c4")?.expiredSnippet)
+            assertEquals("$ make build", store.conversation("c5")?.expiredSnippet)
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
+    /// `open(onOpened:)` reports how long the migration chain took on the
+    /// open that ran it (the launch timeline's nested `migration` interval)
+    /// and `null` on a later open of the same, now up-to-date file.
+    @Test
+    fun openReportsMigrationDurationOnceAndNullOnReopen() = runBlocking {
+        val file = File.createTempFile("migration-test-timing", ".sqlite").also { it.delete() }
+        buildV6(file)
+        var reported: Long? = -1
+        val database = MatronDatabase.open(context, file) { reported = it }
+        try {
+            JournalStore(database, ownSender = "user:dan").cursor() // forces the lazy open
+            assertNotNull("the v6 → v9 chain ran on this open, so a duration is reported", reported)
+            assertTrue("a duration, not the sentinel", (reported ?: -1) >= 0)
+        } finally {
+            database.close()
+        }
+        reported = -1
+        val reopened = MatronDatabase.open(context, file) { reported = it }
+        try {
+            JournalStore(reopened, ownSender = "user:dan").cursor()
+            assertNull("reopening an up-to-date store runs no migrations", reported)
+        } finally {
+            reopened.close()
             file.delete()
         }
     }

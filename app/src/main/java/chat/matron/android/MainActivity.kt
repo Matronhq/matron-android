@@ -59,6 +59,7 @@ import chat.matron.android.designsystem.AppLockShield
 import chat.matron.android.designsystem.LocalAppLockActive
 import chat.matron.android.designsystem.MatronAppearance
 import chat.matron.android.designsystem.MatronTheme
+import chat.matron.android.designsystem.StorageSettingsRows
 import chat.matron.android.designsystem.TrackerItemLinkHost
 import chat.matron.android.designsystem.TrackerItemLinkOutcome
 import chat.matron.android.designsystem.SyncBannerState
@@ -91,6 +92,8 @@ import chat.matron.android.features.settings.DeviceSettingsScreen
 import chat.matron.android.features.settings.AgentChatScreen
 import chat.matron.android.features.settings.DevicesScreen
 import chat.matron.android.journal.RelayApi
+import chat.matron.android.journal.StoreDiagnostics
+import chat.matron.android.models.LaunchTimeline
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.sync.OutboxCatchUpWorker
 import chat.matron.android.models.SyncConnectionState
@@ -297,6 +300,25 @@ fun openConversationCallback(
         prepareConversation(roomId)
         navigate(roomId)
     }
+}
+
+/**
+ * Settings › Storage's model (apple #212): store sizes and counts from the
+ * composition root, "This launch" from the persisted launch record (the one
+ * describing the launch the user is in — it is written on every mark, not
+ * at exit), and the last maintenance pass as a relative time.
+ */
+private suspend fun storageSettingsModel(deps: AppDependencies, session: UserSession): StorageSettingsRows.Model {
+    val sizes = deps.storeSizes(session)
+    val launch = LaunchTimeline.currentLaunch(deps.preferences) ?: LaunchTimeline.shared.record
+    return StorageSettingsRows.Model(
+        journalBytes = sizes.journalBytes,
+        searchBytes = sizes.searchBytes,
+        events = sizes.eventCount,
+        conversations = sizes.conversationCount,
+        launchText = LaunchTimeline.summary(launch),
+        maintenanceText = StoreDiagnostics.lastMaintenanceText(sizes.lastMaintenance, System.currentTimeMillis()),
+    )
 }
 
 /// Whether item [itemID]'s detail is already the top destination of the tab
@@ -555,6 +577,12 @@ private fun SignedInApp(
         // start() is a no-op on an already-running engine.
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
             runCatching { sync.start() }
+            // Foreground sweep (apple #212, spec §3.4): a process that has
+            // been backgrounded past the hour sweeps now rather than waiting
+            // out the in-process timer, which does not tick while the
+            // process is frozen. Watermark-gated, so a fresh foreground costs
+            // one `meta` read; the launch hold keeps it off a cold start.
+            launch { deps.journalMaintenance(session)?.runIfDue() }
             sync.stateStream.collect { state ->
                 connectionState = syncBannerStateFrom(state)
                 if (state is SyncConnectionState.Running) hasEverConnected = true
@@ -802,6 +830,7 @@ private fun SignedInApp(
                         onLinkDevice = { nav.navigate("link-device") },
                         onAgentChats = { nav.navigate("agent-chats") },
                         appLock = appLock,
+                        loadStorage = { storageSettingsModel(deps, session) },
                         coordinator = CoordinatorSettingRowModel(
                             title = coordinatorTitle,
                             onChoose = { showCoordinatorChooser = true },

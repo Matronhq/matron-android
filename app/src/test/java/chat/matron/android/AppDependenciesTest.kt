@@ -18,6 +18,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -147,6 +148,30 @@ class AppDependenciesTest {
         assertEquals("timeline cache must be cleared on sign-out", 0, deps.timelineCacheCount)
         // A fresh core builds cleanly against a new in-memory database.
         assertNotNull(deps.timelineService(session, "!room:s"))
+        Unit
+    }
+
+    /**
+     * Bugbot (#73) "Sign-out recreates a doomed core": the maintenance
+     * accessor must never build a journal stack. A worker run that is past
+     * `restoreSession()` when the user signs out reaches its post-catch-up
+     * `runIfDue` with a session whose core `signOut()` has already dropped —
+     * going through `core()` there would start a new engine, sweeper and
+     * backfill against the database teardown is wiping and closing.
+     */
+    @Test
+    fun journalMaintenance_neverBuildsACore() = runBlocking {
+        val deps = deps()
+        val session = session()
+
+        assertNull("no core yet, so nothing to sweep", deps.journalMaintenance(session))
+        deps.chatService(session) // builds the core
+        assertNotNull("an existing core's sweeper is handed out", deps.journalMaintenance(session))
+
+        deps.signOut()
+        assertNull("after sign-out the accessor must not recreate the stack", deps.journalMaintenance(session))
+        deps.awaitPendingTeardown()
+        assertNull(deps.journalMaintenance(session))
         Unit
     }
 
