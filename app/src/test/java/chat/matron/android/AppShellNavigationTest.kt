@@ -341,7 +341,7 @@ class AppShellNavigationTest {
         }
         override fun pushMissionItem(itemID: String) { commands += "pushMissionItem:$itemID"; push(AppTab.MISSIONS, "item/$itemID") }
         override fun pushMemories() { commands += "pushMemories"; push(AppTab.MISSIONS, "memories") }
-        override fun pushMemory(name: String?) { commands += "pushMemory:${name ?: "new"}"; push(AppTab.MISSIONS, "memory/${name ?: "new"}") }
+        override fun pushMemory(name: String?) { commands += "pushMemory:${name ?: "new"}"; push(AppTab.MISSIONS, AppShellNavigation.memoryRoute(name)) }
         override fun popToRoot(tab: AppTab) {
             commands += "popToRoot:${tab.name}"
             if (current != tab) return // a saved stack is not on the controller's back stack

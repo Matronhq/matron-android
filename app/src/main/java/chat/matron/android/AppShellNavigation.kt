@@ -485,13 +485,11 @@ class AppShellNavigation(var host: Host? = null) {
         fun missionRoute(missionID: String): String = "mission/$missionID"
 
         /// The Memories list's path value on the Missions stack, and the
-        /// editor's (`memory/<name>`, `memory/new` for a new memory — a
-        /// kebab-case name can never be `new`? It can; the editor route
-        /// reads [NEW_MEMORY_SEGMENT] first, so a memory literally named
-        /// `new` is opened as a new-memory form. Accepted: the apps' own
-        /// copy never suggests that name).
+        /// editor's (`memory/<name>`, or `memory/__new` for a new memory:
+        /// the sentinel carries an underscore, which a memory name can
+        /// never hold, so no real memory is ever mistaken for the form).
         const val MEMORIES_ROUTE = "memories"
-        const val NEW_MEMORY_SEGMENT = "new"
+        const val NEW_MEMORY_SEGMENT = "__new"
         fun memoryRoute(name: String?): String = "memory/${name ?: NEW_MEMORY_SEGMENT}"
 
         /// Apple's `missionsVM.isSupported != false`: the tri-state support

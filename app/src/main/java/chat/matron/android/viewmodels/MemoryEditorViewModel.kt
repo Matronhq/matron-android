@@ -55,9 +55,17 @@ class MemoryEditorViewModel(
         listJob = scope.launch {
             sync.memories.collect { list -> _existing.value = name?.let { n -> list.firstOrNull { it.name == n } } }
         }
+        load()
+    }
+
+    /// (Re)fetch the list. A failed first load leaves [isLoaded] false and
+    /// the reason in [error]; the screen offers this as "Try again" so the
+    /// editor is never stuck with Save off and no way out (Bugbot, #81).
+    fun load() {
+        loadJob?.cancel()
         loadJob = scope.launch {
             when (val outcome = sync.refresh()) {
-                MemoriesRefreshOutcome.Succeeded -> _isLoaded.value = true
+                MemoriesRefreshOutcome.Succeeded -> { _isLoaded.value = true; _error.value = null }
                 is MemoriesRefreshOutcome.Failed -> _error.value = outcome.message
                 MemoriesRefreshOutcome.Unsupported -> _error.value = "Memories are not available on this journal."
                 MemoriesRefreshOutcome.Stopped -> Unit

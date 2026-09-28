@@ -149,7 +149,12 @@ fun MemoryEditorScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 error?.let { message ->
-                    Text(message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                        if (!isLoaded) {
+                            TextButton(enabled = !isBusy, onClick = { viewModel.load() }) { Text("Try again") }
+                        }
+                    }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(

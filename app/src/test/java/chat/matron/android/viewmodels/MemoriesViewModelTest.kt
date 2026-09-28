@@ -117,6 +117,11 @@ class MemoriesViewModelTest {
         waitUntil { vm.error.value != null }
         assertFalse(vm.isLoaded.value)
         assertTrue(vm.error.value!!.contains("not available"))
+        // A retry that succeeds unlocks the editor and clears the reason.
+        sync.refreshOutcome = MemoriesRefreshOutcome.Succeeded
+        vm.load()
+        waitUntil { vm.isLoaded.value }
+        assertNull(vm.error.value)
         vm.stop(); scope.cancel()
     }
 

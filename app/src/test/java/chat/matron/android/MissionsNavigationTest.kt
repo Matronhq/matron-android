@@ -237,7 +237,7 @@ class MissionsNavigationTest {
         nav.pushMemory("avoid-eric")
         nav.pushMemory("avoid-eric")
         nav.pushMemory(null)
-        assertEquals(listOf("memories", "memory/avoid-eric", "memory/new"), nav.missionsPath)
+        assertEquals(listOf("memories", "memory/avoid-eric", "memory/__new"), nav.missionsPath)
         assertEquals(listOf("pushMemories", "pushMemory:avoid-eric", "pushMemory:new"), host.commands)
     }
 
@@ -245,6 +245,9 @@ class MissionsNavigationTest {
     fun memoryRoutesMirrorTheirPathValues() {
         assertEquals("memories", AppShellNavigation.pathValue("missions/memories") { null })
         assertEquals("memory/avoid-eric", AppShellNavigation.pathValue("missions/memory/{name}") { if (it == "name") "avoid-eric" else null })
-        assertEquals("memory/new", AppShellNavigation.memoryRoute(null))
+        assertEquals("memory/__new", AppShellNavigation.memoryRoute(null))
+        // The sentinel can never be a memory name, so a memory called "new" opens as itself.
+        assertFalse(chat.matron.android.models.Memory.isValidName(AppShellNavigation.NEW_MEMORY_SEGMENT))
+        assertEquals("memory/new", AppShellNavigation.memoryRoute("new"))
     }
 }
