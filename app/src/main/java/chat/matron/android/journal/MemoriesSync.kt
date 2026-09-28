@@ -78,6 +78,8 @@ class MemoriesSync(
     /// may predate the change: one follow-up fetch runs when it completes.
     /// One flag, not a queue — a burst of markers costs one more GET.
     private var rerunPending = false
+    /// Test seam: whether a joiner has flagged the follow-up fetch.
+    internal val rerunQueued: Boolean get() = synchronized(lock) { rerunPending }
     private var stopped = false
     /// Set by the first refresh anyone asked for: markers and reconnects
     /// refetch only a list someone is (or was) looking at.

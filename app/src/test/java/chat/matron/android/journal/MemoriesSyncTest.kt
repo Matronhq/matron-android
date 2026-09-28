@@ -118,6 +118,9 @@ class MemoriesSyncTest {
         val api = FakeMemories()
         val rig = make(api)
         rig.sync.start()
+        // The marker flow has no replay: emit only once the sync's collector
+        // is subscribed, as the engine's callbackFlow guarantees in the app.
+        waitUntil { rig.markers.subscriptionCount.value > 0 }
         rig.states.value = SyncConnectionState.Running
         rig.markers.emit(marker())
         delay(100)
@@ -149,9 +152,13 @@ class MemoriesSyncTest {
         // Four markers (the journal writes one per conversation) while the
         // fetch is open join it rather than queueing four more …
         rig.sync.start()
+        waitUntil { rig.markers.subscriptionCount.value > 0 }
         rig.markers.emit(marker()); rig.markers.emit(marker())
         rig.markers.emit(marker()); rig.markers.emit(marker())
-        delay(100)
+        // Wait for the joiners to park on the open fetch (no fixed delay:
+        // under a loaded suite the launched refreshes can lag).
+        waitUntil { rig.sync.rerunQueued }
+        delay(50)
         assertEquals(2, api.listCalls)
         // … but the joined fetch may predate them, so exactly one follow-up
         // runs once it completes and its answer is what the list shows.
