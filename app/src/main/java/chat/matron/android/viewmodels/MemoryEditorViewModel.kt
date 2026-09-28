@@ -1,5 +1,6 @@
 package chat.matron.android.viewmodels
 
+import chat.matron.android.journal.MemoriesRefreshOutcome
 import chat.matron.android.journal.MemoriesSyncing
 import chat.matron.android.journal.MemoryWrite
 import chat.matron.android.models.Memory
@@ -38,17 +39,35 @@ class MemoryEditorViewModel(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    private val _isLoaded = MutableStateFlow(false)
+    /// `true` once `GET /memories` has answered since this editor opened:
+    /// only then is the stored row known (an existing memory) and the
+    /// duplicate check meaningful (a new one). The screen keeps Save off
+    /// until then — after process death only this destination is restored
+    /// and the list starts empty (Bugbot, #81).
+    val isLoaded: StateFlow<Boolean> = _isLoaded.asStateFlow()
+
     private var listJob: Job? = null
+    private var loadJob: Job? = null
 
     fun start() {
         stop()
         listJob = scope.launch {
             sync.memories.collect { list -> _existing.value = name?.let { n -> list.firstOrNull { it.name == n } } }
         }
+        loadJob = scope.launch {
+            when (val outcome = sync.refresh()) {
+                MemoriesRefreshOutcome.Succeeded -> _isLoaded.value = true
+                is MemoriesRefreshOutcome.Failed -> _error.value = outcome.message
+                MemoriesRefreshOutcome.Unsupported -> _error.value = "Memories are not available on this journal."
+                MemoriesRefreshOutcome.Stopped -> Unit
+            }
+        }
     }
 
     fun stop() {
         listJob?.cancel(); listJob = null
+        loadJob?.cancel(); loadJob = null
     }
 
     /// `true` when the save landed. The whole memory is sent (notes
@@ -56,6 +75,14 @@ class MemoryEditorViewModel(
     suspend fun save(name: String, description: String, body: String, type: MemoryType): Boolean {
         val trimmedName = name.trim()
         Memory.formError(trimmedName, description, body)?.let { _error.value = it; return false }
+        if (!_isLoaded.value) {
+            _error.value = "Still loading memories — try again in a moment."
+            return false
+        }
+        if (!isNew && _existing.value == null) {
+            _error.value = "This memory is no longer there — it was deleted elsewhere."
+            return false
+        }
         if (isNew && sync.memories.value.any { it.name == trimmedName }) {
             _error.value = "A memory named \"$trimmedName\" already exists — open it from the list to change it."
             return false

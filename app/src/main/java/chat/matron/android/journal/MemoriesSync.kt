@@ -74,6 +74,10 @@ class MemoriesSync(
     private var markerJob: Job? = null
     private var stateJob: Job? = null
     private var inFlightRefresh: Deferred<MemoriesRefreshOutcome>? = null
+    /// A trigger joined a fetch that was already on the wire, so its answer
+    /// may predate the change: one follow-up fetch runs when it completes.
+    /// One flag, not a queue — a burst of markers costs one more GET.
+    private var rerunPending = false
     private var stopped = false
     /// Set by the first refresh anyone asked for: markers and reconnects
     /// refetch only a list someone is (or was) looking at.
@@ -84,7 +88,10 @@ class MemoriesSync(
             stopped = false
             if (markerJob != null) return
             markerJob = scope.launch {
-                markers().collect { if (synchronized(lock) { loaded }) refresh() }
+                // Launched, not awaited: a burst of markers (the journal writes
+                // one per conversation) then all join the one fetch on the
+                // wire instead of replaying serially, one GET each.
+                markers().collect { if (synchronized(lock) { loaded }) launch { refresh() } }
             }
             stateJob = scope.launch {
                 connectionStates().collect { state ->
@@ -107,17 +114,25 @@ class MemoriesSync(
         toJoin.forEach { it.join() }
     }
 
-    /// Full `GET /memories`. Joiners of a coalesced run get the SAME outcome.
+    /// Full `GET /memories`. Joiners of a coalesced run get the SAME
+    /// outcome, and the run is re-done once afterwards so a change that
+    /// landed mid-fetch is never missed (CodeRabbit, #81).
     override suspend fun refresh(): MemoriesRefreshOutcome {
         val run: Deferred<MemoriesRefreshOutcome> = synchronized(lock) {
             loaded = true
-            inFlightRefresh ?: run {
+            inFlightRefresh?.also { rerunPending = true } ?: run {
                 lateinit var self: Deferred<MemoriesRefreshOutcome>
                 self = scope.async(start = CoroutineStart.LAZY) {
                     try {
                         refreshOnce()
                     } finally {
-                        synchronized(lock) { if (inFlightRefresh === self) inFlightRefresh = null }
+                        val rerun = synchronized(lock) {
+                            if (inFlightRefresh === self) inFlightRefresh = null
+                            val r = rerunPending && !stopped
+                            rerunPending = false
+                            r
+                        }
+                        if (rerun) scope.launch { refresh() }
                     }
                 }
                 inFlightRefresh = self

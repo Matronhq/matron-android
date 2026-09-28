@@ -80,23 +80,66 @@ class MemoriesViewModelTest {
         assertFalse(vm.isRefreshing.value)
     }
 
+    private suspend fun startedEditor(sync: FakeMemoriesSync, name: String?, scope: CoroutineScope): MemoryEditorViewModel {
+        val vm = MemoryEditorViewModel(name = name, sync = sync, scope = scope)
+        vm.start()
+        waitUntil { vm.isLoaded.value }
+        return vm
+    }
+
+    @Test
+    fun editorLoadsTheListItselfAndRefusesToWriteBeforeItIsKnown() = runBlocking {
+        val sync = FakeMemoriesSync()
+        sync.memories.value = listOf(memory("taken"))
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val vm = MemoryEditorViewModel(name = null, sync = sync, scope = scope)
+        assertFalse(vm.isLoaded.value)
+        // Before the load: nothing is written, even a name the (unloaded)
+        // list would not have flagged as taken (Bugbot, #81).
+        assertFalse(vm.save("taken", "d", "", MemoryType.FEEDBACK))
+        assertTrue(vm.error.value!!.contains("Still loading"))
+        assertTrue(sync.saves.isEmpty())
+        vm.start()
+        waitUntil { sync.refreshes == 1 && vm.isLoaded.value }
+        assertFalse(vm.save("taken", "d", "", MemoryType.FEEDBACK))
+        assertTrue(vm.error.value!!.contains("already exists"))
+        assertTrue(sync.saves.isEmpty())
+        vm.stop(); scope.cancel()
+    }
+
+    @Test
+    fun editorStaysUnloadedWhenTheJournalCannotAnswer() = runBlocking {
+        val sync = FakeMemoriesSync()
+        sync.refreshOutcome = MemoriesRefreshOutcome.Unsupported
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val vm = MemoryEditorViewModel(name = null, sync = sync, scope = scope)
+        vm.start()
+        waitUntil { vm.error.value != null }
+        assertFalse(vm.isLoaded.value)
+        assertTrue(vm.error.value!!.contains("not available"))
+        vm.stop(); scope.cancel()
+    }
+
     @Test
     fun editorRefusesBadFieldsAndDuplicateNamesWithoutWriting() = runBlocking {
         val sync = FakeMemoriesSync()
         sync.memories.value = listOf(memory("taken"))
-        val vm = MemoryEditorViewModel(name = null, sync = sync, scope = CoroutineScope(Dispatchers.Default + SupervisorJob()))
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val vm = startedEditor(sync, null, scope)
         assertTrue(vm.isNew)
         assertFalse(vm.save("Bad Name", "d", "", MemoryType.FEEDBACK))
         assertTrue(vm.error.value!!.contains("lowercase"))
         assertFalse(vm.save("taken", "d", "", MemoryType.FEEDBACK))
         assertTrue(vm.error.value!!.contains("already exists"))
         assertTrue(sync.saves.isEmpty())
+        vm.stop(); scope.cancel()
     }
 
     @Test
     fun editorSavesTheWholeMemoryTrimmedAndReportsAJournalError() = runBlocking {
         val sync = FakeMemoriesSync()
-        val vm = MemoryEditorViewModel(name = null, sync = sync, scope = CoroutineScope(Dispatchers.Default + SupervisorJob()))
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val vm = startedEditor(sync, null, scope)
         assertTrue(vm.save(" new-rule ", "  Do it.  ", "**Why:** x", MemoryType.USER))
         assertEquals(listOf("new-rule" to MemoryWrite("Do it.", body = "**Why:** x", type = MemoryType.USER)), sync.saves)
         assertNull(vm.error.value)
@@ -104,6 +147,7 @@ class MemoriesViewModelTest {
         assertFalse(vm.save("another", "d", "", MemoryType.FEEDBACK))
         assertEquals(JournalApiError.Conflict.message, vm.error.value)
         assertFalse(vm.isBusy.value)
+        vm.stop(); scope.cancel()
     }
 
     @Test
@@ -111,8 +155,7 @@ class MemoriesViewModelTest {
         val sync = FakeMemoriesSync()
         sync.memories.value = listOf(memory("keep"), memory("gone"))
         val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-        val vm = MemoryEditorViewModel(name = "gone", sync = sync, scope = scope)
-        vm.start()
+        val vm = startedEditor(sync, "gone", scope)
         waitUntil { vm.existing.value?.name == "gone" }
         // An existing memory's save is an update: a name already in the
         // list is expected, not a duplicate.
@@ -121,6 +164,10 @@ class MemoriesViewModelTest {
         assertEquals(listOf("gone"), sync.deletes)
         sync.memories.value = listOf(memory("keep"))
         waitUntil { vm.existing.value == null }
+        // Deleted elsewhere while the editor was open: a save must not
+        // recreate it under the user's feet.
+        assertFalse(vm.save("gone", "again", "", MemoryType.PROJECT))
+        assertTrue(vm.error.value!!.contains("no longer there"))
         vm.stop(); scope.cancel()
     }
 }

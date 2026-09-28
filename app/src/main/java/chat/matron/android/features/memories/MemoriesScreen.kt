@@ -63,7 +63,10 @@ fun MemoriesScreen(
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
                 },
                 actions = {
-                    if (isSupported != false) {
+                    // Only once `GET /memories` has answered: the duplicate
+                    // check in the editor needs the list, and a journal
+                    // without the route has nothing to add to.
+                    if (isSupported == true) {
                         IconButton(onClick = onNew) { Icon(Icons.Filled.Add, contentDescription = "New memory") }
                     }
                 },

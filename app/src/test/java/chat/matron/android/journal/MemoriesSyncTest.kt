@@ -139,22 +139,29 @@ class MemoriesSyncTest {
     }
 
     @Test
-    fun aBurstOfMarkersCoalescesOntoOneInFlightFetch() = runBlocking {
+    fun aBurstOfMarkersDuringAFetchJoinsItAndCostsOneFollowUp() = runBlocking {
         val api = FakeMemories()
         val rig = make(api)
         rig.sync.refresh()
         api.blockNextList = true
         val first = async { rig.sync.refresh() }
         waitUntil { api.listCalls == 2 }
-        // Two markers (the journal writes one per conversation) while the
-        // fetch is open join it rather than queueing two more.
-        rig.markers.emit(marker()); rig.markers.emit(marker())
+        // Four markers (the journal writes one per conversation) while the
+        // fetch is open join it rather than queueing four more …
         rig.sync.start()
+        rig.markers.emit(marker()); rig.markers.emit(marker())
         rig.markers.emit(marker()); rig.markers.emit(marker())
         delay(100)
         assertEquals(2, api.listCalls)
+        // … but the joined fetch may predate them, so exactly one follow-up
+        // runs once it completes and its answer is what the list shows.
+        api.list = listOf(memory("landed-mid-fetch"))
         api.releaseListGate()
         assertEquals(MemoriesRefreshOutcome.Succeeded, first.await())
+        waitUntil { rig.sync.memories.value.map { it.name } == listOf("landed-mid-fetch") }
+        waitUntil { api.listCalls == 3 }
+        delay(100)
+        assertEquals(3, api.listCalls)
         rig.sync.stop()
     }
 

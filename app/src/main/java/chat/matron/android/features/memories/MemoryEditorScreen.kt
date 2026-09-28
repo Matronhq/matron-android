@@ -59,6 +59,7 @@ fun MemoryEditorScreen(
 ) {
     val existing by viewModel.existing.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
+    val isLoaded by viewModel.isLoaded.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
     val isNew = viewModel.isNew
@@ -152,14 +153,14 @@ fun MemoryEditorScreen(
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(
-                        enabled = !isBusy,
+                        enabled = !isBusy && isLoaded,
                         onClick = {
                             coroutineScope.launch {
                                 if (viewModel.save(name, description, body, type)) onBack()
                             }
                         },
                     ) { Text(if (isBusy) "Saving…" else "Save") }
-                    if (isBusy) CircularProgressIndicator(Modifier.padding(4.dp))
+                    if (isBusy || !isLoaded) CircularProgressIndicator(Modifier.padding(4.dp))
                     if (!isNew) {
                         TextButton(enabled = !isBusy, onClick = { confirmingDelete = true }) {
                             Text("Delete memory", color = MaterialTheme.colorScheme.error)
