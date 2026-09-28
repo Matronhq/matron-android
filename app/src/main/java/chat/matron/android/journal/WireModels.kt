@@ -3,6 +3,7 @@ package chat.matron.android.journal
 import chat.matron.android.models.AttachmentBatchTag
 import chat.matron.android.models.SessionStatus
 import chat.matron.android.models.SessionStatusUpdate
+import chat.matron.android.viewmodels.BoxStatus
 import java.time.Instant
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -288,6 +289,12 @@ sealed interface ServerFrame {
         val tagCharKnown: Boolean = true,
     ) : ServerFrame
 
+    /// A box's own capacity report, fanned live to client sockets (journal
+    /// PR #82) — the same shape `GET /devices` serves as `status`. Transient
+    /// like [DeviceMeta]: no seq, never replayed; a client that misses one
+    /// reads the stored report off the next `GET /devices`.
+    data class BoxStatusFrame(val deviceID: Long, val status: BoxStatus) : ServerFrame
+
     companion object {
         /// Bridge timestamps are `Date.toISOString()` output (fractional), but
         /// plain ISO is accepted too for robustness.
@@ -307,6 +314,11 @@ sealed interface ServerFrame {
                     val name = obj.stringOrNull("name") ?: return null
                     // Key-presence, not value: only an explicit null clears a tag.
                     DeviceMeta(id, name, tagChar = obj.stringOrNull("tag_char"), tagCharKnown = obj.containsKey("tag_char"))
+                }
+                "box_status" -> {
+                    val id = obj.longOrNull("device_id") ?: return null
+                    val status = BoxStatus.parse(obj) ?: return null
+                    BoxStatusFrame(id, status)
                 }
                 "control" -> decodeControl(obj)
                 else -> null

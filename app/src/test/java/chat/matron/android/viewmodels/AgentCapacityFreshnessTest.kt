@@ -32,4 +32,20 @@ class AgentCapacityFreshnessTest {
         assertEquals("offline · as of just now", AgentCapacityFreshness.Offline(now).ageText(now))
         assertEquals("offline · as of just now", AgentCapacityFreshness.Offline(now + 3 * 3_600_000).ageText(now))
     }
+
+    // MARK: Reported (a connected box that did not answer this visit)
+
+    @Test
+    fun reported_isStale() {
+        assertTrue(AgentCapacityFreshness.Reported(now).isStale)
+    }
+
+    /// The box is connected, so "offline" would be false — the caption only
+    /// says how old the box's own last report is.
+    @Test
+    fun reported_captionsTheReportAgeWithoutClaimingOffline() {
+        assertEquals("as of 45m ago", AgentCapacityFreshness.Reported(now - 45 * 60_000).ageText(now))
+        assertEquals("as of just now", AgentCapacityFreshness.Reported(now + 60_000).ageText(now))
+        assertEquals("as of just now", AgentCapacityFreshness.Reported(now).ageText(now))
+    }
 }

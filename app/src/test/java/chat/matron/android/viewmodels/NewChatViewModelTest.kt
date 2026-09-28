@@ -6,6 +6,8 @@ import chat.matron.android.journal.RPCRequestError
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
@@ -46,6 +48,7 @@ private class FakeAgentRPCProvider : AgentRPCProviding {
     val requests = mutableListOf<Request>()
 
     override suspend fun devices(): List<DeviceDTO> = devicesResult.getOrThrow()
+    override fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = emptyFlow()
 
     override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply {
         val params = runCatching { Json.parseToJsonElement(paramsJson).jsonObject }

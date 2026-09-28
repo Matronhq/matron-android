@@ -17,21 +17,35 @@ sealed interface AgentCapacityFreshness {
     /// their quota is visible at all.
     data class Offline(val capturedAtMs: Long) : AgentCapacityFreshness
 
+    /// The journal's last report (epoch ms) for a box that is connected but
+    /// did not answer this visit (journal PR #82): de-emphasised like
+    /// [Offline], but the caption can't say "offline" — the box is up, just
+    /// not vouching for these numbers right now.
+    data class Reported(val reportedAtMs: Long) : AgentCapacityFreshness
+
     /// True when the numbers predate this visit: every percent renders
     /// de-emphasised rather than in the usual green/orange/red, which would
     /// vouch for them as current.
-    val isStale: Boolean get() = this is Offline
+    val isStale: Boolean get() = when (this) {
+        Live -> false
+        is Offline, is Reported -> true
+    }
 
-    /// Block-level age caption ("offline · as of 2h ago"), or null for live
-    /// numbers. Abbreviated units, the same style as the other relative
-    /// captions in the chooser — this sits under a name line, not on its own.
+    /// Block-level age caption ("offline · as of 2h ago", "as of 45m ago"),
+    /// or null for live numbers. Abbreviated units, the same style as the
+    /// other relative captions in the chooser — this sits under a name line,
+    /// not on its own.
     fun ageText(nowMs: Long = System.currentTimeMillis()): String? {
-        val capturedAt = (this as? Offline)?.capturedAtMs ?: return null
+        val (capturedAt, prefix) = when (this) {
+            Live -> return null
+            is Offline -> capturedAtMs to "offline · as of"
+            is Reported -> reportedAtMs to "as of"
+        }
         // Clock skew between the box's journal and this device can stamp a
         // capture at or ahead of now. Spelled out rather than "in 3h": that
         // reads as a promise about the future, and this caption exists only
         // to disclaim the past.
-        if (capturedAt >= nowMs) return "offline · as of just now"
+        if (capturedAt >= nowMs) return "$prefix just now"
         val seconds = (nowMs - capturedAt) / 1000
         val age = when {
             seconds < 60 -> "${seconds}s ago"
@@ -39,6 +53,6 @@ sealed interface AgentCapacityFreshness {
             seconds < 86_400 -> "${seconds / 3_600}h ago"
             else -> "${seconds / 86_400}d ago"
         }
-        return "offline · as of $age"
+        return "$prefix $age"
     }
 }

@@ -162,6 +162,29 @@ class JournalSyncEngineTest {
         engine.endSync()
     }
 
+    /// Journal PR #82: a box's own capacity report reaches every
+    /// subscriber as it lands — it is not a journal event, so nothing is
+    /// appended to the store for it.
+    @Test
+    fun boxStatusFanOut() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(0))
+        val store = seededStore()
+        val engine = makeEngine(store, FakeConnector(listOf(socket)))
+        engine.beginSync()
+        engine.waitUntilReady()
+        val probe = FlowProbe(this, engine.boxStatusUpdates())
+        delay(50) // let the collector register before the frame
+        socket.serve("""{"kind":"box_status","device_id":9,"reported_at":1754900000000,"activity":{"live_sessions":3}}""")
+        val (deviceID, status) = probe.next()
+        assertEquals(9L, deviceID)
+        assertEquals(1_754_900_000_000L, status.reportedAtMs)
+        assertEquals(3, status.capacity.liveSessions)
+        assertEquals(0L, store.cursor())
+        probe.cancel()
+        engine.endSync()
+    }
+
     /// The same fan-out for `mission` and `milestone` frames on one stream
     /// (`missionMarkers()`, the feed `MissionsSync` refetches on): replayed
     /// and live alike, malformed payloads dropped.

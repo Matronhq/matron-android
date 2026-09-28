@@ -9,6 +9,7 @@ import chat.matron.android.events.MissionMarker
 import chat.matron.android.events.MissionMarkerEvent
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.sync.SyncService
+import chat.matron.android.viewmodels.BoxStatus
 import java.time.Instant
 import java.util.UUID
 import kotlin.coroutines.cancellation.CancellationException
@@ -158,6 +159,8 @@ class JournalSyncEngine(
     /// Tracker markers (`item` events) as they are applied — the invalidation
     /// feed for `ItemsSync`. Keyed like the other listener maps.
     private val itemMarkerListeners = mutableMapOf<UUID, (Pair<String, ItemMarkerEvent>) -> Unit>()
+    /// Live `box_status` frames as `(deviceID, report)` — New Chat's feed.
+    private val boxStatusListeners = mutableMapOf<UUID, (Pair<Long, BoxStatus>) -> Unit>()
     /// Mission markers (`mission` and `milestone` events) — the invalidation
     /// feed for `MissionsSync`. One map for both types.
     private val missionMarkerListeners = mutableMapOf<UUID, (Pair<String, MissionMarker>) -> Unit>()
@@ -619,6 +622,16 @@ class JournalSyncEngine(
         val id = UUID.randomUUID()
         synchronized(lock) { itemMarkerListeners[id] = { m -> trySend(m) } }
         awaitClose { synchronized(lock) { itemMarkerListeners.remove(id) } }
+    }
+
+    /// Live `box_status` frames (journal PR #82): a box's own capacity
+    /// report as it lands — New Chat collects while its chooser is open. No
+    /// replay: a subscriber seeds from `GET /devices` and this only carries
+    /// what changes after that. Mirrors [itemMarkers].
+    fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = callbackFlow {
+        val id = UUID.randomUUID()
+        synchronized(lock) { boxStatusListeners[id] = { u -> trySend(u) } }
+        awaitClose { synchronized(lock) { boxStatusListeners.remove(id) } }
     }
 
     /// Mission markers (`mission` and `milestone` events) as they are
@@ -1116,6 +1129,9 @@ class JournalSyncEngine(
                 // open chat lists relabel their chips without waiting for the
                 // next snapshot.
                 runCatching { store.applyDeviceMeta(frame.id, frame.name, frame.tagChar, frame.tagCharKnown) }
+            }
+            is ServerFrame.BoxStatusFrame -> synchronized(lock) {
+                boxStatusListeners.values.forEach { it(frame.deviceID to frame.status) }
             }
             is ServerFrame.HelloOK, is ServerFrame.UnknownControl -> Unit // post-hello control frames are advisory
         }

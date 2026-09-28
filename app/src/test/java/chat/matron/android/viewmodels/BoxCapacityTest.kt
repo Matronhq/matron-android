@@ -102,4 +102,43 @@ class BoxCapacityTest {
             BoxCapacity.hasReset(null, now),
         )
     }
+
+    // MARK: BoxStatus (the journal's stored report, journal PR #82)
+
+    private fun status(json: String) = BoxStatus.parse(Json.parseToJsonElement(json))
+
+    @Test
+    fun boxStatus_parsesReportedAtAndTheSameBlocks() {
+        val s = status(
+            """{"reported_at":1754900000000,
+                "activity":{"live_sessions":1,"last_hour":[]},
+                "limits":{"as_of":"2026-08-11T08:00:00.000Z",
+                          "lines":[{"id":"session","label":"Current session","percent":39}]},
+                "disk":{"free_bytes":1,"total_bytes":2},
+                "account":{"email":"pat@yearbook.com"}}""",
+        )
+        assertEquals(1_754_900_000_000L, s?.reportedAtMs)
+        assertEquals(1, s?.capacity?.liveSessions)
+        assertEquals(listOf(39), s?.capacity?.limitLines?.map { it.percent })
+        assertEquals("pat@yearbook.com", s?.capacity?.accountEmail)
+    }
+
+    /// `reported_at` is what makes a report a report: without it the numbers
+    /// have no age, and an unaged number can't be captioned honestly.
+    @Test
+    fun boxStatus_withoutAUsableReportedAtIsNoReport() {
+        assertNull(status("""{"limits":{"lines":[]}}"""))
+        assertNull(status("""{"reported_at":"yesterday"}"""))
+        assertNull(status("""{"reported_at":true}"""))
+        assertNull(status("""{"reported_at":null}"""))
+        assertNull(status("""[1754900000000]"""))
+    }
+
+    @Test
+    fun boxStatus_blocksDegradeIndependently() {
+        val s = status("""{"reported_at":1000,"activity":{"live_sessions":"many"}}""")
+        assertEquals(1_000L, s?.reportedAtMs)
+        assertNull(s?.capacity?.liveSessions)
+        assertEquals(emptyList<LimitLine>(), s?.capacity?.limitLines)
+    }
 }

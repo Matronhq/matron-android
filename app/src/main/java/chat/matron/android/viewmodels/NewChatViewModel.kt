@@ -12,6 +12,7 @@ import chat.matron.android.journal.stringOrNull
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -27,10 +28,13 @@ import kotlinx.serialization.json.put
 interface AgentRPCProviding {
     suspend fun devices(): List<DeviceDTO>
     suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply
+    /// Boxes' own capacity reports as the journal fans them (journal PR #82),
+    /// as `(deviceID, report)`.
+    fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>>
 }
 
 /// Production adapter: the session's [JournalApi] (roster) + [JournalSyncEngine]
-/// (RPC send/correlate, engine-default timeout).
+/// (RPC send/correlate, engine-default timeout, and the live `box_status` feed).
 class JournalAgentRPCService(
     private val api: JournalApi,
     private val engine: JournalSyncEngine,
@@ -38,6 +42,7 @@ class JournalAgentRPCService(
     override suspend fun devices(): List<DeviceDTO> = api.devices()
     override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply =
         engine.agentRequest(agentDeviceID, method, paramsJson)
+    override fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = engine.boxStatusUpdates()
 }
 
 /// One model a bridge offers on its `recent_folders` reply (`model_options`):
@@ -256,9 +261,13 @@ class NewChatViewModel(
     private var wakeAgentID: Long? = null
     private var isAbandoned = false
 
-    /// Capacity per connected agent device id, filled by the roster fan-out.
-    /// A box with no entry simply has no capacity to show (never asked, or its
-    /// `recent_folders` failed) — the row still renders and stays pickable.
+    /// Capacity per agent device id. The journal is the source (journal PR
+    /// #82): every box is seeded from its last `status` report on `GET
+    /// /devices` and kept current by live `box_status` frames; connected
+    /// boxes are also fanned out to, for their folders and to-the-second
+    /// numbers. The capacity cache only fills in for a box the journal has no
+    /// report for. A box with no entry simply has no capacity to show — the
+    /// row still renders and stays pickable.
     private val _capacities = MutableStateFlow<Map<Long, BoxCapacity>>(emptyMap())
     val capacities: StateFlow<Map<Long, BoxCapacity>> = _capacities.asStateFlow()
 
@@ -271,18 +280,86 @@ class NewChatViewModel(
     /// answered skips a second `recent_folders` round trip.
     private val folderCache = mutableMapOf<Long, List<RecentFolder>>()
 
-    /// Capture times for the entries in [capacities] that came out of the
-    /// cache rather than off the wire this visit. Only offline boxes are ever
-    /// seeded, so a key here means exactly "this row is showing last-known
-    /// numbers" — see [capacityFreshness].
-    private val capacityCapturedAt = mutableMapOf<Long, Long>()
+    /// Freshness for the entries in [capacities] that are not vouched for
+    /// this visit: an offline box's report (or cache entry), or a connected
+    /// box's report after its fan-out failed. A key here means exactly "this
+    /// row is showing last-known numbers" — absent reads
+    /// [AgentCapacityFreshness.Live]; see [capacityFreshness]. A flow of its
+    /// own, not a side table: a frame can change a row's freshness without
+    /// changing its numbers, and the sheet has to recompose on that too.
+    private val _capacityStaleness = MutableStateFlow<Map<Long, AgentCapacityFreshness>>(emptyMap())
+    val capacityStaleness: StateFlow<Map<Long, AgentCapacityFreshness>> = _capacityStaleness.asStateFlow()
+
+    /// The journal's latest report per box, from `GET /devices` and live
+    /// `box_status` frames — whichever `reported_at` is newer wins, so a frame
+    /// that beat the roster fetch is never replaced by the older stored row
+    /// the fetch answers with.
+    private val reports = mutableMapOf<Long, BoxStatus>()
+
+    /// When each live (uncaptioned) entry in [capacities] was read (epoch ms)
+    /// — a fan-out reply's arrival, or a frame's `reported_at`. A reload keeps
+    /// last visit's live numbers until the fan-out answers, and this is what
+    /// lets a report that is newer than them (a frame held while the folder
+    /// step was showing) take the row instead.
+    private val liveCapturedAt = mutableMapOf<Long, Long>()
 
     /// How much a row's capacity numbers can be trusted: live for a box this
-    /// visit asked, cached-with-an-age for an offline box seeded from the
-    /// store. A box with no entry at all reads [AgentCapacityFreshness.Live] —
-    /// it has nothing to disclaim, and its row shows nothing either way.
+    /// visit asked (or that is reporting right now), aged by `reported_at` for
+    /// an offline box, aged without the "offline" for a connected box that
+    /// didn't answer. A box with no entry at all reads
+    /// [AgentCapacityFreshness.Live] — it has nothing to disclaim, and its row
+    /// shows nothing either way.
     fun capacityFreshness(agentID: Long): AgentCapacityFreshness =
-        capacityCapturedAt[agentID]?.let { AgentCapacityFreshness.Offline(it) } ?: AgentCapacityFreshness.Live
+        _capacityStaleness.value[agentID] ?: AgentCapacityFreshness.Live
+
+    /// Applies live `box_status` frames for as long as the caller's coroutine
+    /// runs — the sheet holds it in a `LaunchedEffect`, so it ends with the
+    /// sheet.
+    suspend fun watchBoxStatus() {
+        api.boxStatusUpdates().collect { (agentID, status) -> apply(status, agentID) }
+    }
+
+    internal fun hasReportForTesting(agentID: Long): Boolean = agentID in reports
+    internal fun cachedFoldersForTesting(agentID: Long): List<RecentFolder>? = folderCache[agentID]
+
+    /// Records a report unless an equal-or-newer one is already held.
+    /// Returns whether it was taken.
+    private fun adoptReport(status: BoxStatus, agentID: Long): Boolean {
+        val held = reports[agentID]
+        if (held != null && held.reportedAtMs >= status.reportedAtMs) return false
+        reports[agentID] = status
+        return true
+    }
+
+    /// A report worth showing: held, and young enough to mean something.
+    private fun usableReport(agentID: Long): BoxStatus? =
+        reports[agentID]?.takeIf { now() - it.reportedAtMs <= MAX_CACHED_CAPACITY_AGE_MS }
+
+    /// A live frame repaints its row in place while the roster is showing. A
+    /// connected box is reporting as we watch, so its numbers read live; an
+    /// offline one (by the roster's snapshot) keeps the aged caption, now
+    /// dated by this report. Off the roster, the report is only held — the
+    /// next [load] seeds from it.
+    ///
+    /// A frame can also arrive late, or in a backlog after a reconnect. For a
+    /// connected box whose row already shows live numbers read after the
+    /// frame was reported (its fan-out reply), the frame is older than the
+    /// row: it stays held, but must not repaint (CodeRabbit, #80) — the same
+    /// rule [seedCapacities] applies on a reload.
+    private fun apply(status: BoxStatus, agentID: Long) {
+        if (!adoptReport(status, agentID)) return
+        val roster = (_phase.value as? Phase.Agents)?.agents ?: return
+        val agent = roster.firstOrNull { it.id == agentID } ?: return
+        val report = usableReport(agentID) ?: return
+        if (agent.connected && showsNewerLiveNumbers(agentID, report)) return
+        _capacityStaleness.value = if (agent.connected) {
+            liveCapturedAt[agentID] = report.reportedAtMs
+            _capacityStaleness.value - agentID
+        } else {
+            _capacityStaleness.value + (agentID to AgentCapacityFreshness.Offline(report.reportedAtMs))
+        }
+        _capacities.value = _capacities.value + (agentID to report.capacity)
+    }
 
     var customPath: String = ""
     var browserEnabled: Boolean = false
@@ -290,6 +367,7 @@ class NewChatViewModel(
     suspend fun load() {
         try {
             val agents = api.devices().filter { it.kind == "agent" }
+            for (agent in agents) agent.status?.let { adoptReport(it, agent.id) }
             val connected = agents.filter { it.connected }
             // The roster is the authority on which boxes exist: prune the
             // capacity cache here, on EVERY path — the single-box auto-skip
@@ -311,19 +389,20 @@ class NewChatViewModel(
                 _capacityPending.value = connectedIDs.toSet()
                 // Two entries never survive a reload: a box this fan-out won't
                 // ask at all (nothing would ever revalidate it — it is
-                // re-seeded from the cache below instead, captioned with its
-                // age), and a cache seed for a box that has since come online
-                // (never confirmed against the running box, so keeping it
-                // would launder disk data into an uncaptioned, live-looking
+                // re-seeded below instead, captioned with its age), and any
+                // aged seed for a box that has since come online (never
+                // confirmed against the running box, so keeping it would
+                // launder last-known numbers into an uncaptioned, live-looking
                 // row).
                 modelOptionsCache.clear()
                 defaultModelCache.clear()
                 agentOptionsCache.clear()
                 defaultAgentCache.clear()
                 val refreshing = connectedIDs.toSet()
-                _capacities.value = _capacities.value.filterKeys { it in refreshing && capacityCapturedAt[it] == null }
-                capacityCapturedAt.clear()
-                seedOfflineCapacities(offline = offlineIDs)
+                val stale = _capacityStaleness.value
+                _capacities.value = _capacities.value.filterKeys { it in refreshing && stale[it] == null }
+                _capacityStaleness.value = emptyMap()
+                seedCapacities(connected = connectedIDs, offline = offlineIDs)
                 coroutineScope {
                     for (id in connectedIDs) launch { fetchCapacity(id) }
                 }
@@ -582,20 +661,38 @@ class NewChatViewModel(
     suspend fun backToAgents() = load()
 
     /// One box's slice of the roster fan-out. The reply carries both the
-    /// capacity blocks and the folder list, so a success warms both caches; a
-    /// failure leaves no capacity entry and the folder step falls back to its
-    /// own live RPC.
+    /// capacity blocks and the folder list, so a success warms both caches. A
+    /// failure never presents numbers as live — a box that just failed to
+    /// answer is exactly the one whose old numbers shouldn't vouch for
+    /// themselves: the row falls back to the journal's report, aged and
+    /// de-emphasised ([AgentCapacityFreshness.Reported]), or to name +
+    /// "Connected" when there is none. The folder step falls back to its own
+    /// live RPC either way.
     private suspend fun fetchCapacity(agentID: Long) {
+        // The request suspends on the wire, and a `box_status` frame can land
+        // meanwhile. The reply was computed before that frame, so it must not
+        // put older numbers back over it, nor downgrade it on failure
+        // (CodeRabbit, #80). What the row showed when we asked is the mark.
+        val reportAtRequest = reports[agentID]?.reportedAtMs
+        val liveCapturedAtRequest = liveCapturedAt[agentID]
         try {
             val reply = api.agentRequest(agentID, "recent_folders", "{}")
-            if (reply is RPCReply.Ok) {
+            if (reply !is RPCReply.Ok) {
+                fanOutFailed(agentID, liveCapturedAtRequest)
+            } else {
                 val capacity = BoxCapacity.parse(reply.result)
-                _capacities.value = _capacities.value + (agentID to capacity)
                 // These numbers came off the wire, so the row must not carry an
-                // age caption for them; and they are what the row will show
-                // once the host puts this box to sleep.
-                capacityCapturedAt.remove(agentID)
-                capacityCache.save(capacity, agentID, now())
+                // age caption for them — including one a `Reported` fallback or
+                // an offline-captioned frame left on this box earlier. Unless
+                // the box reported again while we waited: that word is newer.
+                if (reports[agentID]?.reportedAtMs == reportAtRequest) {
+                    _capacityStaleness.value = _capacityStaleness.value - agentID
+                    _capacities.value = _capacities.value + (agentID to capacity)
+                    liveCapturedAt[agentID] = now()
+                    // The fallback for a journal that holds no report: what the
+                    // row will show once the host puts this box to sleep.
+                    capacityCache.save(capacity, agentID, now())
+                }
                 val folders = parseFolders(reply.result)
                 folderCache[agentID] = folders
                 val offered = parseModelOptions(reply.result)
@@ -626,26 +723,82 @@ class NewChatViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            // Capacity is a convenience — the row just stays plain.
+            // Capacity is a convenience, never a gate.
+            fanOutFailed(agentID, liveCapturedAtRequest)
         } finally {
             _capacityPending.value = _capacityPending.value - agentID
         }
     }
 
-    /// Fills the rows of boxes the host has put to sleep with what they last
-    /// reported. Nothing here is ever asked for over the wire — that is the
-    /// whole point: the user picks which box to wake by its remaining quota.
-    private fun seedOfflineCapacities(offline: List<Long>) {
+    /// See [fetchCapacity]. The *persisted* cache entry is left alone: it is
+    /// the fallback for a journal that holds no report. A frame that painted
+    /// the row live during the request ([liveCapturedAt] moved on from
+    /// [liveCapturedAtRequest]) is the box's own newer word; the failed
+    /// request has nothing to say about it.
+    private fun fanOutFailed(agentID: Long, liveCapturedAtRequest: Long?) {
+        if (liveCapturedAt[agentID] != liveCapturedAtRequest) return
+        val report = usableReport(agentID)
+        if (report != null) {
+            _capacityStaleness.value =
+                _capacityStaleness.value + (agentID to AgentCapacityFreshness.Reported(report.reportedAtMs))
+            _capacities.value = _capacities.value + (agentID to report.capacity)
+        } else {
+            _capacityStaleness.value = _capacityStaleness.value - agentID
+            _capacities.value = _capacities.value - agentID
+        }
+    }
+
+    /// Fills rows from what each box last reported to the journal, before
+    /// anything is asked over the wire. For a box the host has put to sleep
+    /// that is the whole point — the user picks which box to wake by its
+    /// remaining quota — and it is aged by the box's own `reported_at`. A
+    /// connected box's report fills its row while the fan-out is in flight,
+    /// uncaptioned: the box is up and reports on every limits refresh, and its
+    /// own answer replaces the seed within seconds (or demotes it to an aged
+    /// `Reported` row if it never comes — see [fetchCapacity]).
+    ///
+    /// The capacity cache is only the fallback, for an offline box the
+    /// journal has no report for (a journal or bridge predating PR #82).
+    private fun seedCapacities(connected: List<Long>, offline: List<Long>) {
         val cached = capacityCache.loadAll()
         val moment = now()
         val seeded = mutableMapOf<Long, BoxCapacity>()
+        val stale = mutableMapOf<Long, AgentCapacityFreshness>()
+        for (id in connected) {
+            val report = usableReport(id) ?: continue
+            // Last visit's live numbers stand only while they are the newer
+            // word; otherwise the report takes the row.
+            if (showsNewerLiveNumbers(id, report)) continue
+            seeded[id] = report.capacity
+            liveCapturedAt[id] = report.reportedAtMs
+        }
         for (id in offline) {
+            val report = usableReport(id)
+            if (report != null) {
+                seeded[id] = report.capacity
+                stale[id] = AgentCapacityFreshness.Offline(report.reportedAtMs)
+                continue
+            }
+            // A box the journal holds a report for is the journal's to answer
+            // for, even when that report is too old to show — the cache only
+            // stands in for a journal with nothing to say about the box.
+            if (id in reports) continue
             val entry = cached[id] ?: continue
             if (moment - entry.capturedAtMs > MAX_CACHED_CAPACITY_AGE_MS) continue
             seeded[id] = entry.capacity
-            capacityCapturedAt[id] = entry.capturedAtMs
+            stale[id] = AgentCapacityFreshness.Offline(entry.capturedAtMs)
         }
+        if (stale.isNotEmpty()) _capacityStaleness.value = _capacityStaleness.value + stale
         if (seeded.isNotEmpty()) _capacities.value = _capacities.value + seeded
+    }
+
+    /// Whether the row already shows live (uncaptioned) numbers read at or
+    /// after [report] was made — in which case the report is the older word
+    /// and must not take the row.
+    private fun showsNewerLiveNumbers(agentID: Long, report: BoxStatus): Boolean {
+        if (agentID !in _capacities.value || agentID in _capacityStaleness.value) return false
+        val capturedAt = liveCapturedAt[agentID] ?: return false
+        return capturedAt >= report.reportedAtMs
     }
 
     private fun sameFolderAgent(agent: DeviceDTO): Boolean {
@@ -665,9 +818,12 @@ class NewChatViewModel(
         const val WAKE_GAVE_UP_MESSAGE = "The box didn't wake — try again."
         const val FOLDERS_ERROR_COPY = "Couldn't fetch recent folders — you can still type a path."
 
-        /// How stale a cached capacity may be before it stops being worth
-        /// showing: past this, every limit window it describes has rolled over
-        /// several times, so the percentages say nothing about the box today.
+        /// How old a box's numbers may be before they stop being worth
+        /// showing: past this, every limit window they describe has rolled
+        /// over several times, so the percentages say nothing about the box
+        /// today. Measured from the box's own `reported_at` for a journal
+        /// report, and from the capture on this device for a fallback cache
+        /// entry.
         const val MAX_CACHED_CAPACITY_AGE_MS: Long = 7L * 86_400_000
 
         fun sorted(agents: List<DeviceDTO>): List<DeviceDTO> =
