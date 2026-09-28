@@ -6,6 +6,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
+import chat.matron.android.models.Memory
 import chat.matron.android.models.Milestone
 import chat.matron.android.models.Mission
 import chat.matron.android.models.TrackerItem
@@ -242,7 +243,7 @@ class JournalApi(
     private val baseUrl: HttpUrl,
     private val client: OkHttpClient = OkHttpClient(),
     token: String? = null,
-) : SnapshotSource, AgentSpawnAnswering, ItemsProviding, MissionsProviding {
+) : SnapshotSource, AgentSpawnAnswering, ItemsProviding, MissionsProviding, MemoriesProviding {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -727,6 +728,32 @@ class JournalApi(
 
     override suspend fun rankItem(id: String, change: ItemRankChange): TrackerItem =
         decodeItem(request(path = "/items/${pathSegment(id)}/rank", method = "POST", jsonBody = change.toJson()))
+
+    // MARK: Memories
+    //
+    // protocol.md "Memories" (spec 2026-09-27). User-global routes; a
+    // journal predating them 404s `GET /memories`, which `MemoriesSync`
+    // reads as "unsupported".
+
+    override suspend fun listMemories(): List<Memory> =
+        MemoriesDecoding.memories(request(path = "/memories"))
+
+    /// PUT is an upsert by name: 201 when created, 200 when updated.
+    override suspend fun saveMemory(name: String, write: MemoryWrite): MemorySave {
+        val body = buildJsonObject {
+            put("description", write.description)
+            write.body?.let { put("body", it) }
+            write.type?.let { put("type", it.wire) }
+        }
+        val (status, data) = raw("/memories/${pathSegment(name)}", "PUT", jsonBody = body)
+        if (status != 200 && status != 201) throw error(status, data)
+        val obj = parseJsonObjectOrNull(String(data, Charsets.UTF_8))
+            ?: throw JournalApiError.Transport("non-JSON response for /memories/$name")
+        return MemorySave(MemoriesDecoding.memory(obj), created = status == 201)
+    }
+
+    override suspend fun deleteMemory(name: String): Memory =
+        MemoriesDecoding.memory(request(path = "/memories/${pathSegment(name)}", method = "DELETE"))
 
     // MARK: Missions & milestones
     //

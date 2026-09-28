@@ -64,6 +64,11 @@ class AppShellNavigation(var host: Host? = null) {
         fun replaceMissions(missionID: String)
         /// Push item [itemID]'s detail on the Missions stack.
         fun pushMissionItem(itemID: String)
+        /// Push the Memories list on the Missions stack (spec 2026-09-27).
+        fun pushMemories()
+        /// Push the editor for memory [name] — `null` = a new memory — on
+        /// the Missions stack.
+        fun pushMemory(name: String?)
         /// Pop [tab]'s stack back to its root.
         fun popToRoot(tab: AppTab)
         /// Pop the top [count] entries off the Conversations stack (a
@@ -234,6 +239,23 @@ class AppShellNavigation(var host: Host? = null) {
         if (path(current).lastOrNull() == value) return
         setPath(current, path(current) + value)
         navigateExpecting(current, value) { host?.pushMission(current, missionID) }
+    }
+
+    /// Push the Memories list on the Missions stack (the tab's toolbar
+    /// entry, spec 2026-09-27 memories). Idempotent for a list already on
+    /// top. Never changes the tab.
+    fun openMemories() {
+        if (missionsPath.lastOrNull() == MEMORIES_ROUTE) return
+        missionsPath = missionsPath + MEMORIES_ROUTE
+        navigateExpecting(AppTab.MISSIONS, MEMORIES_ROUTE) { host?.pushMemories() }
+    }
+
+    /// Push the editor for one memory (`null` = new) on the Missions stack.
+    fun pushMemory(name: String?) {
+        val value = memoryRoute(name)
+        if (missionsPath.lastOrNull() == value) return
+        missionsPath = missionsPath + value
+        navigateExpecting(AppTab.MISSIONS, value) { host?.pushMemory(name) }
     }
 
     /// Push an item's detail on the Missions stack (a mission page's open
@@ -461,6 +483,14 @@ class AppShellNavigation(var host: Host? = null) {
 
         /// Apple's `MissionRoute.pathValue`.
         fun missionRoute(missionID: String): String = "mission/$missionID"
+
+        /// The Memories list's path value on the Missions stack, and the
+        /// editor's (`memory/<name>`, or `memory/__new` for a new memory:
+        /// the sentinel carries an underscore, which a memory name can
+        /// never hold, so no real memory is ever mistaken for the form).
+        const val MEMORIES_ROUTE = "memories"
+        const val NEW_MEMORY_SEGMENT = "__new"
+        fun memoryRoute(name: String?): String = "memory/${name ?: NEW_MEMORY_SEGMENT}"
 
         /// Apple's `missionsVM.isSupported != false`: the tri-state support
         /// flag as the bar reads it — unknown (`null`) and confirmed (`true`)

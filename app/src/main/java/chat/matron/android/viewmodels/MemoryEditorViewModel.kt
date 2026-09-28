@@ -1,0 +1,133 @@
+package chat.matron.android.viewmodels
+
+import chat.matron.android.journal.MemoriesRefreshOutcome
+import chat.matron.android.journal.MemoriesSyncing
+import chat.matron.android.journal.MemoryWrite
+import chat.matron.android.models.Memory
+import chat.matron.android.models.MemoryType
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+/// Backs the memory editor (spec 2026-09-27 memories, "Apps"): one memory
+/// by [name], or the new-memory form when [name] is `null`. The form's
+/// draft lives in the screen (`remember`); this holds the stored row, the
+/// busy flag and the last error, and does the two writes. Validation is the
+/// journal's own rules ([Memory.formError]) so a bad value is refused with a
+/// reason before a request goes out; a NEW memory whose name is already
+/// taken is refused too — `PUT` is an upsert and would silently replace an
+/// agent's memory otherwise.
+class MemoryEditorViewModel(
+    val name: String?,
+    private val sync: MemoriesSyncing,
+    private val scope: CoroutineScope,
+) {
+    val isNew: Boolean get() = name == null
+
+    private val _existing = MutableStateFlow<Memory?>(null)
+    /// The stored row for [name], live from the list; `null` for a new
+    /// memory or one deleted elsewhere while the editor was open.
+    val existing: StateFlow<Memory?> = _existing.asStateFlow()
+
+    private val _isBusy = MutableStateFlow(false)
+    val isBusy: StateFlow<Boolean> = _isBusy.asStateFlow()
+
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
+    private val _isLoaded = MutableStateFlow(false)
+    /// `true` once `GET /memories` has answered since this editor opened:
+    /// only then is the stored row known (an existing memory) and the
+    /// duplicate check meaningful (a new one). The screen keeps Save off
+    /// until then — after process death only this destination is restored
+    /// and the list starts empty (Bugbot, #81).
+    val isLoaded: StateFlow<Boolean> = _isLoaded.asStateFlow()
+
+    private var listJob: Job? = null
+    private var loadJob: Job? = null
+
+    fun start() {
+        stop()
+        listJob = scope.launch {
+            sync.memories.collect { list -> _existing.value = name?.let { n -> list.firstOrNull { it.name == n } } }
+        }
+        load()
+    }
+
+    /// (Re)fetch the list. A failed first load leaves [isLoaded] false and
+    /// the reason in [error]; the screen offers this as "Try again" so the
+    /// editor is never stuck with Save off and no way out (Bugbot, #81).
+    fun load() {
+        loadJob?.cancel()
+        loadJob = scope.launch {
+            when (val outcome = sync.refresh()) {
+                MemoriesRefreshOutcome.Succeeded -> { _isLoaded.value = true; _error.value = null }
+                is MemoriesRefreshOutcome.Failed -> _error.value = outcome.message
+                MemoriesRefreshOutcome.Unsupported -> _error.value = "Memories are not available on this journal."
+                MemoriesRefreshOutcome.Stopped -> Unit
+            }
+        }
+    }
+
+    fun stop() {
+        listJob?.cancel(); listJob = null
+        loadJob?.cancel(); loadJob = null
+    }
+
+    /// `true` when the save landed. The whole memory is sent (notes
+    /// included), since an omitted body would clear the stored one.
+    suspend fun save(name: String, description: String, body: String, type: MemoryType): Boolean {
+        val trimmedName = name.trim()
+        Memory.formError(trimmedName, description, body)?.let { _error.value = it; return false }
+        if (!_isLoaded.value) {
+            _error.value = "Still loading memories — try again in a moment."
+            return false
+        }
+        if (!isNew && _existing.value == null) {
+            _error.value = "This memory is no longer there — it was deleted elsewhere."
+            return false
+        }
+        if (isNew && sync.memories.value.any { it.name == trimmedName }) {
+            _error.value = "A memory named \"$trimmedName\" already exists — open it from the list to change it."
+            return false
+        }
+        _isBusy.value = true
+        return try {
+            sync.save(trimmedName, MemoryWrite(description = description.trim(), body = body, type = type))
+            _error.value = null
+            true
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            _error.value = error.message ?: error.toString()
+            false
+        } finally {
+            _isBusy.value = false
+        }
+    }
+
+    suspend fun delete(): Boolean {
+        val target = name ?: return false
+        _isBusy.value = true
+        return try {
+            sync.delete(target)
+            _error.value = null
+            true
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            _error.value = error.message ?: error.toString()
+            false
+        } finally {
+            _isBusy.value = false
+        }
+    }
+
+    fun dismissError() {
+        _error.value = null
+    }
+}

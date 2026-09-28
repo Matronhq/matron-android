@@ -19,8 +19,11 @@ import chat.matron.android.journal.ItemsProviding
 import chat.matron.android.designsystem.TrackerItemLinkOutcome
 import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.ItemsSyncing
+import chat.matron.android.journal.MemoriesSync
 import chat.matron.android.journal.MissionsSync
 import chat.matron.android.journal.MissionsSyncing
+import chat.matron.android.viewmodels.MemoriesListViewModel
+import chat.matron.android.viewmodels.MemoryEditorViewModel
 import chat.matron.android.viewmodels.MissionDetailViewModel
 import chat.matron.android.viewmodels.MissionsListViewModel
 import chat.matron.android.viewmodels.TrackerItemLinkResolver
@@ -202,6 +205,8 @@ class AppDependencies(
          * markers and connection state; same lifecycle as [itemsSync].
          */
         val missionsSync: MissionsSync,
+        /** Memories (spec 2026-09-27): in-memory list + writes, per session. */
+        val memoriesSync: MemoriesSync,
         /**
          * Background search-history backfill sweep for this session (see
          * [SearchBackfillCoordinator]). Cancelled on sign-out, and joined by
@@ -289,7 +294,14 @@ class AppDependencies(
             // server no longer lists under that mission (closed or moved).
             refreshItem = itemsSync::refreshItem,
         )
-        val core = JournalCore(api, db, dbFile, store, engine, maintenance, itemsSync, missionsSync)
+        // Memories (spec 2026-09-27): in-memory, fetched when the screen
+        // shows; markers and reconnects refetch a list that was loaded.
+        val memoriesSync = MemoriesSync(
+            api = api,
+            markers = { engine.memoryMarkers() },
+            connectionStates = { engine.stateStream },
+        )
+        val core = JournalCore(api, db, dbFile, store, engine, maintenance, itemsSync, missionsSync, memoriesSync)
         cores[session.userID] = core
         // Nothing proportional to store history runs on the launch path any
         // more (apple #212): the tool-output TTL sweep that used to be
@@ -316,6 +328,7 @@ class AppDependencies(
         itemsSync.start()
         // Same probe for `/missions`: a 404 hides the Missions tab.
         missionsSync.start()
+        memoriesSync.start()
         core.backfillJob = startBackfill(search = search, api = api, store = store)
         return core
     }
@@ -458,6 +471,14 @@ class AppDependencies(
         val c = core(session)
         return MissionsListViewModel(store = c.store, sync = c.missionsSync, scope = scope)
     }
+
+    /** The Memories list VM, per screen showing (spec 2026-09-27 memories). */
+    fun makeMemoriesListViewModel(session: UserSession, scope: CoroutineScope): MemoriesListViewModel =
+        MemoriesListViewModel(sync = core(session).memoriesSync, scope = scope)
+
+    /** The editor VM for one memory by name, or a new one when [name] is null. */
+    fun makeMemoryEditorViewModel(session: UserSession, name: String?, scope: CoroutineScope): MemoryEditorViewModel =
+        MemoryEditorViewModel(name = name, sync = core(session).memoriesSync, scope = scope)
 
     /** A fresh detail VM per mission page (not cached: one page, one mission). */
     fun makeMissionDetailViewModel(session: UserSession, missionID: String, scope: CoroutineScope): MissionDetailViewModel {
@@ -656,6 +677,8 @@ class AppDependencies(
                     .onFailure { MatronDebug.breadcrumb("signOut: itemsSync.stop failed: $it") }
                 runCatching { core.missionsSync.stop() }
                     .onFailure { MatronDebug.breadcrumb("signOut: missionsSync.stop failed: $it") }
+                runCatching { core.memoriesSync.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: memoriesSync.stop failed: $it") }
                 core.engine.endSync()
                 runCatching { core.store.wipe() }
                     .onFailure { MatronDebug.breadcrumb("signOut: store.wipe failed: $it") }
