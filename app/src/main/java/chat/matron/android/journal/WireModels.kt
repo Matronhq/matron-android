@@ -53,6 +53,11 @@ object JournalEventType {
     /// seq is the milestone's anchor — the inline card and the jump target.
     /// Not in [MESSAGE_TYPES] either.
     const val MILESTONE = "milestone"
+    /// The user's memories changed (`saved` / `deleted`), written by the
+    /// journal from the `/memories` routes (protocol.md "Memories → Marker
+    /// event"). An invalidation signal for `MemoriesSync`; quiet in the
+    /// transcript — not in [MESSAGE_TYPES], no unread, no snippet, no push.
+    const val MEMORY = "memory"
 
     /// Payload key on the plain `text` twin the journal appends after a
     /// card-worthy `item` marker so pre-tracker clients still see the turn

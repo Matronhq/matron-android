@@ -93,4 +93,18 @@ class JournalTimelineMapperMissionsTest {
             ),
         )
     }
+
+    /// A `memory` marker (spec 2026-09-27) is quiet bookkeeping: the
+    /// Memories screen refetches from it; the transcript shows no row, and
+    /// never an "[unsupported event]" placeholder.
+    @Test
+    fun memoryEventRendersNothing() {
+        val item = map(
+            ev(
+                JournalEventType.MEMORY,
+                buildJsonObject { put("memory_id", "me_1"); put("name", "avoid-eric"); put("action", "saved"); put("created", true); put("by", "agent") },
+            ),
+        )
+        assertNull(item)
+    }
 }

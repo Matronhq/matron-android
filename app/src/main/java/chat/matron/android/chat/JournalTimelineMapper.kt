@@ -110,6 +110,11 @@ object JournalTimelineMapper {
                 TimelineItem.Kind.MissionMarker(event.seq.toString(), marker)
             }
 
+            // A memory marker (spec 2026-09-27) is quiet bookkeeping: the
+            // Memories screen refetches from it (`MemoriesSync`); the
+            // transcript shows nothing, never "[unsupported event: memory]".
+            JournalEventType.MEMORY -> return null
+
             JournalEventType.TOOL_OUTPUT -> {
                 // A tool_output carrying a viewer_url is a live command-output
                 // announcement — render the streaming tile. Everything else

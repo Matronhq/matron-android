@@ -20,6 +20,8 @@ class MissionsNavigationTest {
         override fun pushMission(tab: AppTab, missionID: String) { commands += "pushMission:${tab.name}:$missionID" }
         override fun replaceMissions(missionID: String) { commands += "replaceMissions:$missionID" }
         override fun pushMissionItem(itemID: String) { commands += "pushMissionItem:$itemID" }
+        override fun pushMemories() { commands += "pushMemories" }
+        override fun pushMemory(name: String?) { commands += "pushMemory:${name ?: "new"}" }
         override fun popToRoot(tab: AppTab) { commands += "popToRoot:${tab.name}" }
         override fun popChats(count: Int) { commands += "popChats:$count" }
     }
@@ -212,5 +214,37 @@ class MissionsNavigationTest {
         // destination is appended, not bound to the top.
         nav.noteDestination(AppTab.MISSIONS, "e3", "item/it_2")
         assertEquals(listOf("mission/ms_1", "item/it_1", "item/it_2"), nav.missionsPath)
+    }
+
+    // --- Memories (spec 2026-09-27) ---------------------------------------
+
+    @Test
+    fun openMemoriesPushesTheListOnTheMissionsStackOnce() {
+        val (nav, host) = nav()
+        nav.noteDestination(AppTab.MISSIONS, "e0", null)
+        nav.openMemories()
+        nav.openMemories()
+        assertEquals(listOf("memories"), nav.missionsPath)
+        assertEquals(listOf("pushMemories"), host.commands)
+        assertEquals(AppTab.MISSIONS, nav.tab.value)
+    }
+
+    @Test
+    fun pushMemoryPushesTheEditorAndIsIdempotentForTheSameName() {
+        val (nav, host) = nav()
+        nav.noteDestination(AppTab.MISSIONS, "e0", null)
+        nav.openMemories()
+        nav.pushMemory("avoid-eric")
+        nav.pushMemory("avoid-eric")
+        nav.pushMemory(null)
+        assertEquals(listOf("memories", "memory/avoid-eric", "memory/new"), nav.missionsPath)
+        assertEquals(listOf("pushMemories", "pushMemory:avoid-eric", "pushMemory:new"), host.commands)
+    }
+
+    @Test
+    fun memoryRoutesMirrorTheirPathValues() {
+        assertEquals("memories", AppShellNavigation.pathValue("missions/memories") { null })
+        assertEquals("memory/avoid-eric", AppShellNavigation.pathValue("missions/memory/{name}") { if (it == "name") "avoid-eric" else null })
+        assertEquals("memory/new", AppShellNavigation.memoryRoute(null))
     }
 }

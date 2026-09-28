@@ -73,6 +73,8 @@ import chat.matron.android.features.coordinator.coordinatorRoot
 import chat.matron.android.features.decisions.DecisionsScreen
 import chat.matron.android.features.missions.MissionDetailScreen
 import chat.matron.android.features.missions.MissionOpenConversationOutcome
+import chat.matron.android.features.memories.MemoriesScreen
+import chat.matron.android.features.memories.MemoryEditorScreen
 import chat.matron.android.features.missions.MissionsScreen
 import chat.matron.android.features.missions.missionOpenConversationOutcome
 import chat.matron.android.features.chat.ChatScreen
@@ -393,6 +395,14 @@ private class NavControllerShellHost(private val nav: NavHostController) : AppSh
 
     override fun pushMissionItem(itemID: String) {
         nav.pushItem(AppTab.MISSIONS.routePrefix, itemID)
+    }
+
+    override fun pushMemories() {
+        nav.navigate("${AppTab.MISSIONS.routePrefix}${AppShellNavigation.MEMORIES_ROUTE}")
+    }
+
+    override fun pushMemory(name: String?) {
+        nav.navigate("${AppTab.MISSIONS.routePrefix}${AppShellNavigation.memoryRoute(name)}")
     }
 
     /// A tab that is saved away (another tab showing) is not on the
@@ -877,8 +887,29 @@ private fun SignedInApp(
                     MissionsScreen(
                         viewModel = missionsVM,
                         onSelect = { shell.pushMission(it) },
+                        onOpenMemories = { shell.openMemories() },
                         rootGesture = rootSwipe,
                     )
+                }
+                // Memories (spec 2026-09-27): the list and the editor, pushed
+                // within the Missions tab from its toolbar entry.
+                composable("${AppTab.MISSIONS.routePrefix}${AppShellNavigation.MEMORIES_ROUTE}") {
+                    val memoriesVM = remember(session.userID) { deps.makeMemoriesListViewModel(session, sessionScope) }
+                    MemoriesScreen(
+                        viewModel = memoriesVM,
+                        onSelect = { shell.pushMemory(it) },
+                        onNew = { shell.pushMemory(null) },
+                        onBack = { nav.popBackStack() },
+                    )
+                }
+                composable(
+                    route = "${AppTab.MISSIONS.routePrefix}memory/{name}",
+                    arguments = listOf(navArgument("name") { type = NavType.StringType }),
+                ) { entry ->
+                    val raw = entry.arguments?.getString("name") ?: return@composable
+                    val name = raw.takeUnless { it == AppShellNavigation.NEW_MEMORY_SEGMENT }
+                    val editorVM = remember(raw) { deps.makeMemoryEditorViewModel(session, name, sessionScope) }
+                    MemoryEditorScreen(viewModel = editorVM, onBack = { nav.popBackStack() })
                 }
                 composable(
                     route = "${AppTab.MISSIONS.routePrefix}mission/{missionID}",
