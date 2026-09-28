@@ -320,6 +320,7 @@ class NewChatViewModel(
     }
 
     internal fun hasReportForTesting(agentID: Long): Boolean = agentID in reports
+    internal fun cachedFoldersForTesting(agentID: Long): List<RecentFolder>? = folderCache[agentID]
 
     /// Records a report unless an equal-or-newer one is already held.
     /// Returns whether it was taken.
@@ -339,11 +340,18 @@ class NewChatViewModel(
     /// offline one (by the roster's snapshot) keeps the aged caption, now
     /// dated by this report. Off the roster, the report is only held — the
     /// next [load] seeds from it.
+    ///
+    /// A frame can also arrive late, or in a backlog after a reconnect. For a
+    /// connected box whose row already shows live numbers read after the
+    /// frame was reported (its fan-out reply), the frame is older than the
+    /// row: it stays held, but must not repaint (CodeRabbit, #80) — the same
+    /// rule [seedCapacities] applies on a reload.
     private fun apply(status: BoxStatus, agentID: Long) {
         if (!adoptReport(status, agentID)) return
         val roster = (_phase.value as? Phase.Agents)?.agents ?: return
         val agent = roster.firstOrNull { it.id == agentID } ?: return
         val report = usableReport(agentID) ?: return
+        if (agent.connected && showsNewerLiveNumbers(agentID, report)) return
         _capacityStaleness.value = if (agent.connected) {
             liveCapturedAt[agentID] = report.reportedAtMs
             _capacityStaleness.value - agentID
@@ -661,21 +669,30 @@ class NewChatViewModel(
     /// "Connected" when there is none. The folder step falls back to its own
     /// live RPC either way.
     private suspend fun fetchCapacity(agentID: Long) {
+        // The request suspends on the wire, and a `box_status` frame can land
+        // meanwhile. The reply was computed before that frame, so it must not
+        // put older numbers back over it, nor downgrade it on failure
+        // (CodeRabbit, #80). What the row showed when we asked is the mark.
+        val reportAtRequest = reports[agentID]?.reportedAtMs
+        val liveCapturedAtRequest = liveCapturedAt[agentID]
         try {
             val reply = api.agentRequest(agentID, "recent_folders", "{}")
             if (reply !is RPCReply.Ok) {
-                fanOutFailed(agentID)
+                fanOutFailed(agentID, liveCapturedAtRequest)
             } else {
                 val capacity = BoxCapacity.parse(reply.result)
                 // These numbers came off the wire, so the row must not carry an
                 // age caption for them — including one a `Reported` fallback or
-                // an offline-captioned frame left on this box earlier.
-                _capacityStaleness.value = _capacityStaleness.value - agentID
-                _capacities.value = _capacities.value + (agentID to capacity)
-                liveCapturedAt[agentID] = now()
-                // The fallback for a journal that holds no report: what the row
-                // will show once the host puts this box to sleep.
-                capacityCache.save(capacity, agentID, now())
+                // an offline-captioned frame left on this box earlier. Unless
+                // the box reported again while we waited: that word is newer.
+                if (reports[agentID]?.reportedAtMs == reportAtRequest) {
+                    _capacityStaleness.value = _capacityStaleness.value - agentID
+                    _capacities.value = _capacities.value + (agentID to capacity)
+                    liveCapturedAt[agentID] = now()
+                    // The fallback for a journal that holds no report: what the
+                    // row will show once the host puts this box to sleep.
+                    capacityCache.save(capacity, agentID, now())
+                }
                 val folders = parseFolders(reply.result)
                 folderCache[agentID] = folders
                 val offered = parseModelOptions(reply.result)
@@ -707,15 +724,19 @@ class NewChatViewModel(
             throw cancel
         } catch (error: Throwable) {
             // Capacity is a convenience, never a gate.
-            fanOutFailed(agentID)
+            fanOutFailed(agentID, liveCapturedAtRequest)
         } finally {
             _capacityPending.value = _capacityPending.value - agentID
         }
     }
 
     /// See [fetchCapacity]. The *persisted* cache entry is left alone: it is
-    /// the fallback for a journal that holds no report.
-    private fun fanOutFailed(agentID: Long) {
+    /// the fallback for a journal that holds no report. A frame that painted
+    /// the row live during the request ([liveCapturedAt] moved on from
+    /// [liveCapturedAtRequest]) is the box's own newer word; the failed
+    /// request has nothing to say about it.
+    private fun fanOutFailed(agentID: Long, liveCapturedAtRequest: Long?) {
+        if (liveCapturedAt[agentID] != liveCapturedAtRequest) return
         val report = usableReport(agentID)
         if (report != null) {
             _capacityStaleness.value =
@@ -747,8 +768,7 @@ class NewChatViewModel(
             val report = usableReport(id) ?: continue
             // Last visit's live numbers stand only while they are the newer
             // word; otherwise the report takes the row.
-            val capturedAt = liveCapturedAt[id]
-            if (id in _capacities.value && capturedAt != null && capturedAt >= report.reportedAtMs) continue
+            if (showsNewerLiveNumbers(id, report)) continue
             seeded[id] = report.capacity
             liveCapturedAt[id] = report.reportedAtMs
         }
@@ -770,6 +790,15 @@ class NewChatViewModel(
         }
         if (stale.isNotEmpty()) _capacityStaleness.value = _capacityStaleness.value + stale
         if (seeded.isNotEmpty()) _capacities.value = _capacities.value + seeded
+    }
+
+    /// Whether the row already shows live (uncaptioned) numbers read at or
+    /// after [report] was made — in which case the report is the older word
+    /// and must not take the row.
+    private fun showsNewerLiveNumbers(agentID: Long, report: BoxStatus): Boolean {
+        if (agentID !in _capacities.value || agentID in _capacityStaleness.value) return false
+        val capturedAt = liveCapturedAt[agentID] ?: return false
+        return capturedAt >= report.reportedAtMs
     }
 
     private fun sameFolderAgent(agent: DeviceDTO): Boolean {

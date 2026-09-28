@@ -69,6 +69,10 @@ class NewChatViewModelBoxStatusTest {
 
     private val emptyFolders = RPCReply.Ok(Json.parseToJsonElement("""{"folders":[]}"""))
 
+    private val replied25 = RPCReply.Ok(Json.parseToJsonElement(
+        """{"folders":[],"limits":{"lines":[{"id":"session","label":"Current session","percent":25}]}}""",
+    ))
+
     private fun NewChatViewModel.percent(id: Long) = capacities.value[id]?.limitLines?.firstOrNull()?.percent
 
     /// Waits for the view model to apply a frame the fake has just sent: the
@@ -275,7 +279,9 @@ class NewChatViewModelBoxStatusTest {
     @Test
     fun anOlderReportNeverReplacesANewerOne() = runBlocking {
         val fake = Fake()
-        fake.devicesResult = Result.success(listOf(agent(1, true), agent(2, false, report(10, agoMs = 3_600_000))))
+        fake.devicesResult = Result.success(listOf(
+            agent(1, true), agent(2, false, report(10, agoMs = 3_600_000)), agent(3, false),
+        ))
         fake.repliesByDevice[1] = emptyFolders
         val vm = makeVM(fake)
         val watcher = launch { vm.watchBoxStatus() }
@@ -285,11 +291,12 @@ class NewChatViewModelBoxStatusTest {
             vm.load()
             assertEquals(90, vm.percent(2))
 
-            // A late, older frame is dropped too; box 1's frame behind it marks
-            // the point where the stale one has certainly been processed.
+            // A late, older frame is dropped too; box 3's frame behind it marks
+            // the point where the stale one has certainly been processed (an
+            // offline box, so nothing newer can outrank the marker).
             fake.sendBoxStatus(2, report(5, agoMs = 7_200_000))
-            fake.sendBoxStatus(1, report(61, agoMs = 1_000))
-            waitUntil { vm.percent(1) == 61 }
+            fake.sendBoxStatus(3, report(61, agoMs = 1_000))
+            waitUntil { vm.percent(3) == 61 }
             assertEquals(90, vm.percent(2))
         } finally {
             watcher.cancel()
@@ -316,11 +323,116 @@ class NewChatViewModelBoxStatusTest {
         }
     }
 
-    // MARK: Reload after the folder step
+    /// A frame can arrive late, or in a backlog the socket delivers after a
+    /// reconnect. For a connected box whose fan-out has already answered,
+    /// a frame reported before that reply carries older numbers than the
+    /// row shows — it must not repaint the row (CodeRabbit, #80).
+    @Test
+    fun boxStatusFrame_olderThanTheFanOutReplyLeavesAConnectedRowAlone() = runBlocking {
+        var clock = now
+        val fake = Fake()
+        fake.devicesResult = Result.success(listOf(agent(1, true), agent(2, false)))
+        fake.repliesByDevice[1] = replied25
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache(), now = { clock })
+        val watcher = launch { vm.watchBoxStatus() }
+        try {
+            vm.load()
+            assertEquals(25, vm.percent(1))
 
-    private val replied25 = RPCReply.Ok(Json.parseToJsonElement(
-        """{"folders":[],"limits":{"lines":[{"id":"session","label":"Current session","percent":25}]}}""",
-    ))
+            // Reported before the reply landed: stale by the time it arrives.
+            // Box 2's frame behind it marks the point where it has certainly
+            // been processed.
+            fake.sendBoxStatus(1, BoxStatus(clock - 30_000, capacity(61)))
+            fake.sendBoxStatus(2, BoxStatus(clock - 1_000, capacity(7)))
+            waitUntil { vm.percent(2) == 7 }
+            assertEquals("older numbers never replace the live reply", 25, vm.percent(1))
+            assertEquals(AgentCapacityFreshness.Live, vm.capacityFreshness(1))
+
+            // A frame the box reported after the reply is its newer word.
+            clock += 60_000
+            fake.sendBoxStatus(1, BoxStatus(clock - 5_000, capacity(90)))
+            waitUntil { vm.percent(1) == 90 }
+            assertEquals(AgentCapacityFreshness.Live, vm.capacityFreshness(1))
+        } finally {
+            watcher.cancel()
+        }
+    }
+
+    /// The fan-out suspends on the wire. A frame that lands meanwhile is the
+    /// box's newer word, so the reply — computed before it — must not put
+    /// older numbers back over it (CodeRabbit, #80). The reply's folders
+    /// are still taken: they are not what the frame carries.
+    @Test
+    fun fanOutReply_doesNotOverwriteANewerFrameThatLandedDuringTheRequest() = runBlocking {
+        var clock = now
+        val fake = Fake()
+        fake.devicesResult = Result.success(listOf(agent(1, true, report(10, agoMs = 600_000)), agent(2, false)))
+        fake.repliesByDevice[1] = RPCReply.Ok(Json.parseToJsonElement(
+            """{"folders":[{"path":"/home/pat/app","last_used":1754899200000}],""" +
+                """"limits":{"lines":[{"id":"session","label":"Current session","percent":25}]}}""",
+        ))
+        val gate = CompletableDeferred<Unit>()
+        val arrival = CompletableDeferred<Unit>()
+        fake.gates[1] = gate
+        fake.arrivals[1] = arrival
+        val cache = InMemoryBoxCapacityCache()
+        val vm = NewChatViewModel(fake, cache, now = { clock })
+        val watcher = launch { vm.watchBoxStatus() }
+        try {
+            val loading = launch { vm.load() }
+            arrival.await()
+            assertEquals("the seed, while the fan-out is in flight", 10, vm.percent(1))
+
+            clock += 10_000
+            fake.sendBoxStatus(1, BoxStatus(clock - 1_000, capacity(90)))
+            waitUntil { vm.percent(1) == 90 }
+
+            gate.complete(Unit)
+            loading.join()
+            assertEquals("the frame is the newer word", 90, vm.percent(1))
+            assertEquals(AgentCapacityFreshness.Live, vm.capacityFreshness(1))
+            assertNull("the reply's numbers are not cached over the frame either", cache.loadAll()[1L])
+            assertEquals("the reply still warms the folder cache", 1, vm.cachedFoldersForTesting(1)?.size)
+        } finally {
+            watcher.cancel()
+        }
+    }
+
+    /// The same race on the failure path: a frame that lands during the
+    /// request has already painted the row live. The failed request has
+    /// nothing to say about those numbers, so it must not demote them to
+    /// `Reported` (CodeRabbit, #80).
+    @Test
+    fun fanOutFailure_keepsAFrameThatLandedDuringTheRequestLive() = runBlocking {
+        var clock = now
+        val fake = Fake()
+        fake.devicesResult = Result.success(listOf(agent(1, true, report(10, agoMs = 600_000)), agent(2, false)))
+        fake.repliesByDevice[1] = RPCReply.Failure("internal", null)
+        val gate = CompletableDeferred<Unit>()
+        val arrival = CompletableDeferred<Unit>()
+        fake.gates[1] = gate
+        fake.arrivals[1] = arrival
+        val vm = NewChatViewModel(fake, InMemoryBoxCapacityCache(), now = { clock })
+        val watcher = launch { vm.watchBoxStatus() }
+        try {
+            val loading = launch { vm.load() }
+            arrival.await()
+
+            clock += 10_000
+            val fresh = BoxStatus(clock - 1_000, capacity(90))
+            fake.sendBoxStatus(1, fresh)
+            waitUntil { vm.percent(1) == 90 }
+
+            gate.complete(Unit)
+            loading.join()
+            assertEquals(90, vm.percent(1))
+            assertEquals("the box reported while we waited; that word is live", AgentCapacityFreshness.Live, vm.capacityFreshness(1))
+        } finally {
+            watcher.cancel()
+        }
+    }
+
+    // MARK: Reload after the folder step
 
     /// A frame that lands while the folder step is showing is only held. Back
     /// on the roster, the previous visit's live numbers for that connected box
