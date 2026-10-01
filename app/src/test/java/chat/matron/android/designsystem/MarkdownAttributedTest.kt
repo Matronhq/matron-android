@@ -449,4 +449,84 @@ class MarkdownAttributedTest {
         val source = "A cached body with `code` and **bold**."
         assertTrue(parse(source) === parse(source))
     }
+
+    // MARK: - Bare matron://item links
+
+    /// Every URL annotation in the parsed source, as (covered text, url).
+    private fun links(source: String): List<Pair<String, String>> =
+        parse(source).blocks.flatMap { block ->
+            block.text.getStringAnnotations("URL", 0, block.text.length)
+                .map { block.text.text.substring(it.start, it.end) to it.item }
+        }
+
+    @Test
+    fun bareItemUrl_inProse_becomesATappableLink() {
+        val source = "the steps are on #5685 (matron://item/5685)"
+        assertEquals(listOf("matron://item/5685" to "matron://item/5685"), links(source))
+        val text = parse(source).blocks.first().text
+        assertEquals(colors.link, text.styleAt("matron://item/5685").color)
+        assertEquals(TextDecoration.Underline, text.styleAt("matron://item/5685").textDecoration)
+    }
+
+    @Test
+    fun bareItemUrl_linkedInEveryProseBlock() {
+        assertEquals(1, links("matron://item/7").size)
+        assertEquals(1, links("See matron://item/7.").size)
+        assertEquals(2, links("See matron://item/7, then matron://item/8!").size)
+        assertEquals(1, links("- a list item with matron://item/7").size)
+        assertEquals(1, links("> quoted matron://item/7 here").size)
+        assertEquals(1, links("## Heading matron://item/7").size)
+        assertEquals(1, links("**bold matron://item/7**").size)
+        assertEquals(1, links("wrapped\nmatron://item/7 onto a second line").size)
+    }
+
+    @Test
+    fun bareItemUrl_onlyTheCanonicalForm() {
+        assertEquals(emptyList<Pair<String, String>>(), links("MATRON://ITEM/7"))
+        assertEquals(emptyList<Pair<String, String>>(), links("Matron://item/7"))
+        assertEquals(emptyList<Pair<String, String>>(), links("matron://item/0"))
+        assertEquals(emptyList<Pair<String, String>>(), links("matron://item/007"))
+        assertEquals(emptyList<Pair<String, String>>(), links("matron://item/"))
+        assertEquals(emptyList<Pair<String, String>>(), links("matron://item/abc"))
+        assertEquals(emptyList<Pair<String, String>>(), links("matron://item/-7"))
+        assertEquals(emptyList<Pair<String, String>>(), links("matron://item/7/comments"))
+        assertEquals(emptyList<Pair<String, String>>(), links("matron://item/7?x=1"))
+        assertEquals(emptyList<Pair<String, String>>(), links("matron://item/7#c"))
+        assertEquals(emptyList<Pair<String, String>>(), links("matron://item/7.5"))
+        assertEquals(emptyList<Pair<String, String>>(), links("matron://item/7abc"))
+    }
+
+    @Test
+    fun bareItemUrl_leftAloneInsideCode() {
+        assertEquals(emptyList<Pair<String, String>>(), links("run `open matron://item/7` now"))
+        assertEquals(emptyList<Pair<String, String>>(), links("```\nmatron://item/7\n```"))
+        // A code span that a soft wrap splits over two source lines.
+        assertEquals(emptyList<Pair<String, String>>(), links("run `open\nmatron://item/7` now"))
+    }
+
+    @Test
+    fun bareItemUrl_leftAloneInsideLinksAndOtherUrls() {
+        // An existing link keeps its own single annotation.
+        assertEquals(listOf("#7" to "matron://item/7"), links("see [#7](matron://item/7)"))
+        assertEquals(listOf("matron://item/7" to "https://x.test"), links("see [matron://item/7](https://x.test)"))
+        assertEquals(listOf("next" to "https://x.test/?next=matron://item/7"), links("[next](https://x.test/?next=matron://item/7)"))
+        // Part of another URL token.
+        assertEquals(emptyList<Pair<String, String>>(), links("https://x.test/?next=matron://item/5"))
+        assertEquals(emptyList<Pair<String, String>>(), links("https://x.test/matron://item/5"))
+        assertEquals(emptyList<Pair<String, String>>(), links("xmatron://item/5"))
+        // An autolink or HTML attribute.
+        assertEquals(emptyList<Pair<String, String>>(), links("<matron://item/5>"))
+        assertEquals(emptyList<Pair<String, String>>(), links("<a href=\"matron://item/5\">five</a>"))
+        assertEquals(emptyList<Pair<String, String>>(), links("<a href='matron://item/5'>five</a>"))
+        assertEquals(emptyList<Pair<String, String>>(), links("<a href=matron://item/5>five</a>"))
+        assertEquals(emptyList<Pair<String, String>>(), links("<a title=x matron://item/5>five</a>"))
+        // Mid-attribute, space-delimited: only the open-`<` guard catches it.
+        assertEquals(emptyList<Pair<String, String>>(), links("<span title=\"see matron://item/5 now\">five</span>"))
+        assertEquals(1, links("<b>bold</b> then matron://item/5").size)
+    }
+
+    @Test
+    fun bareConvoUrl_staysUnlinked() {
+        assertEquals(emptyList<Pair<String, String>>(), links("see matron://convo/abc123 for context"))
+    }
 }

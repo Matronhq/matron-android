@@ -486,6 +486,20 @@ object MarkdownAttributed {
                     continue
                 }
             }
+            // Bare `matron://item/<n>` in prose — reached only outside
+            // inline code, fenced code and `[label](url)` links, which the
+            // branches above consume first.
+            val bare = bareItemLinkLength(text, i)
+            if (bare > 0) {
+                flushPlain()
+                val url = text.substring(i, i + bare)
+                val start = length
+                pushStyle(base.merge(SpanStyle(color = colors.link, textDecoration = TextDecoration.Underline)))
+                append(url); pop()
+                addStringAnnotation("URL", url, start, length)
+                i += bare
+                continue
+            }
             plain.append(text[i])
             i++
         }
@@ -493,4 +507,34 @@ object MarkdownAttributed {
     }
 
     private val linkRegex = Regex("^\\[([^\\]]*)\\]\\(([^)]*)\\)")
+
+    private const val bareItemPrefix = "matron://item/"
+
+    /// Length of a bare canonical `matron://item/<n>` starting at [i] in
+    /// [text], or 0. Agents write these in prose ("the steps are on #5685
+    /// (matron://item/5685)"); the link then routes through the same click
+    /// path as `[#5685](matron://item/5685)`. Deliberately conservative:
+    /// - canonical form only: lowercase, a positive integer with no leading
+    ///   zero, and NOT followed by more URL characters (`/`, `?x`, `#`,
+    ///   `.5`, letters) — a sentence's closing `.`/`,`/`?` still counts;
+    /// - must start a token (text start, whitespace or `(`), so one embedded
+    ///   in another URL (`?next=matron://item/5`, `…/matron://item/5`) or
+    ///   an HTML attribute (`href="…"`, `href=…`) is left alone;
+    /// - never inside an unclosed `<` (an autolink or an HTML tag).
+    /// Bare `matron://convo/…` is NOT linked — the conversation pills ignore
+    /// bare convo URLs on purpose. Mirrors apple #289's bare-item rewrite.
+    internal fun bareItemLinkLength(text: String, i: Int): Int {
+        if (!text.startsWith(bareItemPrefix, i)) return 0
+        if (i > 0 && !(text[i - 1].isWhitespace() || text[i - 1] == '(')) return 0
+        if (text.lastIndexOf('<', i - 1) > text.lastIndexOf('>', i - 1)) return 0
+        val digitsStart = i + bareItemPrefix.length
+        if (digitsStart >= text.length || text[digitsStart] !in '1'..'9') return 0
+        var end = digitsStart + 1
+        while (end < text.length && text[end] in '0'..'9') end++
+        if (end == text.length) return end - i
+        val next = text[end]
+        val tokenEnds = next.isWhitespace() || next == ')' ||
+            (next in ".,;:!?" && (end + 1 == text.length || text[end + 1].isWhitespace() || text[end + 1] == ')'))
+        return if (tokenEnds) end - i else 0
+    }
 }
