@@ -315,6 +315,10 @@ private fun RenderedBody(
 
         is TimelineItem.Kind.RoutineMarker -> AmbientNotice(kind.marker.text)
 
+        is TimelineItem.Kind.CoordinatorMarker -> AmbientNotice(kind.marker.text)
+
+        is TimelineItem.Kind.ConsentDecision -> AmbientNotice(kind.decision.text)
+
         is TimelineItem.Kind.ActivityIndicator -> ActivityIndicatorRow(label = kind.label)
 
         is TimelineItem.Kind.Unknown -> AmbientNotice(
