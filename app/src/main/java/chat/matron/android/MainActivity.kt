@@ -853,6 +853,7 @@ private fun SignedInApp(
                 composable("devices") {
                     DevicesScreen(
                         api = deps.devicesService(session),
+                        accountServerURL = session.homeserverURL,
                         onSelfRevoked = onSignOut,
                         onBack = { nav.popBackStack() },
                     )

@@ -1,6 +1,7 @@
 package chat.matron.android.viewmodels
 
 import chat.matron.android.journal.JournalApiError
+import chat.matron.android.journal.PairURI
 import chat.matron.android.journal.PairingCode
 import java.time.Instant
 import kotlin.time.Duration
@@ -19,9 +20,17 @@ import kotlinx.coroutines.launch
 /// preview → name + approve → wait-for-claim. Ported from matron-apple's
 /// `PairingViewModel`. [scope] replaces the Swift original's `@MainActor Task`s;
 /// [now] and the intervals are injected for deterministic tests.
+///
+/// The code arrives typed, or as a [PairURI] payload (`matron://pair?…`) —
+/// scanned via [handleScanned] or pasted into [codeInput]. A payload naming a
+/// different journal than [accountServerURL] is refused before any preview: the
+/// code would be looked up on the wrong server.
 class PairingViewModel(
     private val api: DevicesProviding,
     private val existingNames: List<String>,
+    /// The signed-in account's journal base URL, compared (by origin) against
+    /// the server a scanned pairing payload names.
+    private val accountServerURL: String,
     private val scope: CoroutineScope,
     private val now: () -> Instant = { Instant.now() },
     private val pollInterval: Duration = 2500.milliseconds,
@@ -40,10 +49,15 @@ class PairingViewModel(
     private val _codeInput = MutableStateFlow("")
 
     /// Auto-formatted as `XXXX-XXXX` while typing; sloppy input is accepted and
-    /// normalized on use.
+    /// normalized on use. A pasted `matron:` payload is handled exactly like a
+    /// scan ([handleScanned]).
     var codeInput: String
         get() = _codeInput.value
         set(value) {
+            if (value.trim().startsWith("matron:", ignoreCase = true)) {
+                handleScanned(value)
+                return
+            }
             val formatted = PairingCode.display(value)
             val old = _codeInput.value
             _codeInput.value = formatted
@@ -94,7 +108,55 @@ class PairingViewModel(
     private var previewTask: Job? = null
     private var claimTask: Job? = null
 
-    private fun codeChanged() {
+    /// A scanned (or pasted) QR payload. A valid [PairURI] for the signed-in
+    /// journal fills the code and previews at once (no typing debounce);
+    /// anything else clears the code and explains why.
+    fun handleScanned(payload: String) {
+        if (!inCodeEntryStage) return
+        val raw = payload.trim()
+        val parsed = try {
+            PairURI.parse(raw)
+        } catch (e: PairURI.ParseError.UnsupportedVersion) {
+            rejectScan("This pairing code needs a newer version of Matron.")
+            return
+        } catch (e: PairURI.ParseError.Malformed) {
+            rejectScan("That pairing code is incomplete. Get a fresh code from the box and try again.")
+            return
+        } catch (e: PairURI.ParseError.NotAPairURI) {
+            rejectScan(
+                if (raw.startsWith("matron://link?", ignoreCase = true)) {
+                    "That's a sign-in code, not an agent pairing code. Scan the QR the box shows when pairing."
+                } else {
+                    "Not a Matron agent pairing code. Scan the QR the box shows when pairing."
+                },
+            )
+            return
+        }
+        if (PairURI.sameOrigin(parsed.serverURL, accountServerURL) != true) {
+            val codeHost = PairURI.displayHost(parsed.serverURL)
+            val accountHost = PairURI.displayHost(accountServerURL)
+            rejectScan(
+                "This code is for $codeHost, but you're signed in to $accountHost. " +
+                    "Pair the box from an account on $codeHost, or point the box at $accountHost.",
+            )
+            return
+        }
+        _codeInput.value = parsed.code
+        codeChanged(debounce = Duration.ZERO)
+    }
+
+    /// A refused scan never previews: drop any pending preview and the code
+    /// it would have checked, then show [message].
+    private fun rejectScan(message: String) {
+        previewTask?.cancel()
+        previewTask = null
+        _codeInput.value = ""
+        _phase.value = Phase.EnterCode
+        _expiresAt.value = null
+        _errorMessage.value = message
+    }
+
+    private fun codeChanged(debounce: Duration = previewDebounce) {
         previewTask?.cancel()
         _errorMessage.value = null
         if (_phase.value is Phase.Success) return // done — edits are a fresh modal's job
@@ -103,7 +165,7 @@ class PairingViewModel(
         val code = PairingCode.normalize(codeInput)
         if (code.length != PairingCode.LENGTH) return
         previewTask = scope.launch {
-            delay(previewDebounce)
+            delay(debounce)
             if (!isActive) return@launch
             preview(code)
         }

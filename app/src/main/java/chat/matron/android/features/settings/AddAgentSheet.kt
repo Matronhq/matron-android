@@ -9,6 +9,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -21,6 +22,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -28,13 +30,17 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.viewmodels.DevicesProviding
 import chat.matron.android.viewmodels.PairingViewModel
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import java.time.Instant
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
  * The "Add agent" pairing sheet. Ports Features/Settings/AddAgentSheet.swift:
- * enter the 8-char code → see WHO is asking (requester IP, anti-phish) → name
+ * enter the 8-char code (typed, or scanned from the box's `matron://pair` QR)
+ * → see WHO is asking (requester IP, anti-phish) → name
  * it → approve → wait for the box to claim its token.
  *
  * [PairingViewModel.codeInput] / [PairingViewModel.agentName] are custom get/set
@@ -44,13 +50,23 @@ import kotlinx.coroutines.launch
 @Composable
 fun AddAgentSheet(
     api: DevicesProviding,
+    /// The signed-in account's journal base URL; a scanned pairing QR for any
+    /// other server is refused.
+    accountServerURL: String,
     existingNames: List<String>,
     /// Tag characters already in use across the roster (apple #158).
     existingTags: List<String> = emptyList(),
     onDone: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val viewModel = remember { PairingViewModel(api = api, existingNames = existingNames, scope = scope, existingTags = existingTags) }
+    val context = LocalContext.current
+    val viewModel = remember { PairingViewModel(
+            api = api,
+            existingNames = existingNames,
+            accountServerURL = accountServerURL,
+            scope = scope,
+            existingTags = existingTags,
+        ) }
     val phase by viewModel.phase.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val duplicateWarning by viewModel.duplicateNameWarning.collectAsStateWithLifecycle()
@@ -61,6 +77,7 @@ fun AddAgentSheet(
     var name by remember { mutableStateOf(viewModel.agentName) }
     var tag by remember { mutableStateOf(viewModel.tagChar) }
     val duplicateTagWarning by viewModel.duplicateTagWarning.collectAsStateWithLifecycle()
+    var scannerUnavailable by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) { onDispose { viewModel.cancelWaiting() } }
 
@@ -88,6 +105,31 @@ fun AddAgentSheet(
                     ),
                     modifier = Modifier.fillMaxWidth(),
                 )
+                OutlinedButton(
+                    onClick = {
+                        scannerUnavailable = false
+                        val options = GmsBarcodeScannerOptions.Builder()
+                            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                            .build()
+                        GmsBarcodeScanning.getClient(context, options).startScan()
+                            .addOnSuccessListener { barcode ->
+                                barcode.rawValue?.let { payload ->
+                                    viewModel.handleScanned(payload)
+                                    code = viewModel.codeInput // reflect the scanned code (or the cleared field)
+                                }
+                            }
+                            .addOnFailureListener { scannerUnavailable = true }
+                        // A cancelled scan calls neither listener path we care
+                        // about — the user is simply back on this sheet.
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Scan QR") }
+                if (scannerUnavailable) {
+                    Text(
+                        "Scanner unavailable — type the code instead.",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
                 if (errorMessage != null) {
                     Text(errorMessage!!, color = MaterialTheme.colorScheme.error)
                 } else {

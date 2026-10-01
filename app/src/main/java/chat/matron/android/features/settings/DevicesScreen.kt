@@ -54,6 +54,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun DevicesScreen(
     api: DevicesProviding,
+    /// The signed-in account's journal base URL, for Add Agent's QR check.
+    accountServerURL: String,
     onSelfRevoked: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -235,6 +237,7 @@ fun DevicesScreen(
         ) {
             AddAgentSheet(
                 api = api,
+                accountServerURL = accountServerURL,
                 existingNames = devices.map { it.name },
                 existingTags = devices.mapNotNull { it.tagChar },
                 onDone = {
