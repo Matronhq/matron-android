@@ -8,6 +8,7 @@ import chat.matron.android.events.ItemMarkerEvent
 import chat.matron.android.events.LiveOutputEvent
 import chat.matron.android.events.MilestoneMarkerEvent
 import chat.matron.android.events.MissionMarkerEvent
+import chat.matron.android.events.RoutineMarkerEvent
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.models.TimelineSendState
@@ -148,6 +149,10 @@ data class TimelineItem(
         /// Mission lifecycle marker — a one-line inline notice. Apps use it
         /// only as an invalidation signal beyond that.
         data class MissionMarker(val eventID: String, val marker: MissionMarkerEvent) : Kind
+        /// A Coordinator routine was created, edited, deleted or fired
+        /// (journal `routine` marker) — a one-line row. `eventID` is the
+        /// journal seq.
+        data class RoutineMarker(val eventID: String, val marker: RoutineMarkerEvent) : Kind
         /// Transient typing / tool-use indicator. Not persisted; appended as a
         /// trailing overlay row while the agent is thinking or running a tool.
         data class ActivityIndicator(val label: String) : Kind

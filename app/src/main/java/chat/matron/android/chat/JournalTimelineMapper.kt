@@ -8,6 +8,7 @@ import chat.matron.android.events.ItemMarkerEvent
 import chat.matron.android.events.LiveOutputEvent
 import chat.matron.android.events.MilestoneMarkerEvent
 import chat.matron.android.events.MissionMarkerEvent
+import chat.matron.android.events.RoutineMarkerEvent
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.journal.ActivityUpdate
@@ -114,6 +115,15 @@ object JournalTimelineMapper {
             // Memories screen refetches from it (`MemoriesSync`); the
             // transcript shows nothing, never "[unsupported event: memory]".
             JournalEventType.MEMORY -> return null
+
+            // A Coordinator routine created/updated/deleted/fired: a quiet
+            // one-line row, never "[unsupported event: routine]". Its own kind,
+            // not `StateChange`, which the timeline hides. Unparseable
+            // payload: skipped, like a mission marker.
+            JournalEventType.ROUTINE -> {
+                val marker = RoutineMarkerEvent.parse(payload) ?: return null
+                TimelineItem.Kind.RoutineMarker(event.seq.toString(), marker)
+            }
 
             JournalEventType.TOOL_OUTPUT -> {
                 // A tool_output carrying a viewer_url is a live command-output
