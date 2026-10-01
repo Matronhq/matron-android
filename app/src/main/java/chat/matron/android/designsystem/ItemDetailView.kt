@@ -183,6 +183,16 @@ fun itemStatusLine(comment: TrackerComment): String? {
     return null
 }
 
+/// What a `status` comment renders: the small centred transition [line]
+/// (null when nothing renderable changed) and, beneath it, the closing or
+/// reopening [note] the journal stores as the comment's body — rendered as
+/// an ordinary comment card so it reads at full size with tappable links.
+/// A blank body has no card.
+data class ItemStatusRow(val line: String?, val note: String?)
+
+fun itemStatusRow(comment: TrackerComment): ItemStatusRow =
+    ItemStatusRow(itemStatusLine(comment), comment.body.takeIf { it.isNotBlank() })
+
 /// Maps outbox progress to the shared send glyph: a fresh comment that hasn't
 /// attempted a send yet reads as "Sending…"; once at least one attempt has
 /// been made without an error it's genuinely waiting on connectivity
@@ -480,12 +490,22 @@ private fun Attachments(list: List<TrackerAttachment>, image: (TrackerAttachment
 @Composable
 private fun CommentView(c: TrackerComment, now: Instant, image: (TrackerAttachment) -> Any?, onOpen: (TrackerAttachment) -> Unit, onOpenLink: (String) -> Unit) {
     if (c.kind == TrackerComment.Kind.STATUS) {
-        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            itemStatusLine(c)?.let { line ->
-                Text(line, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+        val row = itemStatusRow(c)
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            row.line?.let { line ->
+                Text(
+                    line,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
-            if (c.body.isNotEmpty()) {
-                Text(c.body, style = MaterialTheme.typography.labelMedium, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+            row.note?.let { note ->
+                ItemCard(mine = c.author == ItemAuthor.USER) {
+                    AuthorCaption(c.author, c.createdAt, now)
+                    ItemBody(note, onOpenLink)
+                }
             }
         }
     } else {

@@ -94,6 +94,24 @@ class ItemsViewsTest {
     }
 
     @Test
+    fun statusRowWithANoteShowsTheLineAndANoteCard() {
+        val open = TrackerItem.StatusSnapshot(ItemState.OPEN, null, ItemAwaiting.USER)
+        val closed = TrackerItem.StatusSnapshot(ItemState.CLOSED, ItemResolution.CANCELLED, null)
+        val note = "Superseded — the steps are on #5685 (matron://item/5685)"
+        val row = itemStatusRow(status(open, closed).copy(body = note))
+        assertEquals("Agent closed this as cancelled", row.line)
+        assertEquals("the note renders whole, as a card body", note, row.note)
+    }
+
+    @Test
+    fun statusRowWithoutANoteShowsOnlyTheLine() {
+        val open = TrackerItem.StatusSnapshot(ItemState.OPEN, null, ItemAwaiting.USER)
+        val closed = TrackerItem.StatusSnapshot(ItemState.CLOSED, null, null)
+        assertEquals(ItemStatusRow("You reopened this", null), itemStatusRow(status(closed, open, ItemAuthor.USER)))
+        assertEquals("whitespace is not a note", ItemStatusRow("Agent closed this", null), itemStatusRow(status(open, closed).copy(body = " \n ")))
+    }
+
+    @Test
     fun pendingSendStatePrecedence() {
         assertEquals(SendStateGlyph.Sending, pendingCommentSendState(0, null))
         assertEquals(SendStateGlyph.Queued, pendingCommentSendState(2, null))
