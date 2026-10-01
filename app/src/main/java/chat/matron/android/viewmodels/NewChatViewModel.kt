@@ -9,6 +9,8 @@ import chat.matron.android.journal.arrayOrNull
 import chat.matron.android.journal.longOrNull
 import chat.matron.android.journal.objects
 import chat.matron.android.journal.stringOrNull
+import chat.matron.android.models.MatronDebug
+import chat.matron.android.models.SyncConnectionState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -16,6 +18,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -31,6 +37,10 @@ interface AgentRPCProviding {
     /// Boxes' own capacity reports as the journal fans them (journal PR #82),
     /// as `(deviceID, report)`.
     fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>>
+    /// The socket's state, so the chooser can tell a reconnect: a report made
+    /// while the socket was down is never fanned or replayed (see
+    /// [NewChatViewModel.watchBoxStatus]).
+    fun connectionState(): StateFlow<SyncConnectionState>
 }
 
 /// Production adapter: the session's [JournalApi] (roster) + [JournalSyncEngine]
@@ -43,6 +53,7 @@ class JournalAgentRPCService(
     override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply =
         engine.agentRequest(agentDeviceID, method, paramsJson)
     override fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = engine.boxStatusUpdates()
+    override fun connectionState(): StateFlow<SyncConnectionState> = engine.stateStream
 }
 
 /// One model a bridge offers on its `recent_folders` reply (`model_options`):
@@ -315,8 +326,51 @@ class NewChatViewModel(
     /// Applies live `box_status` frames for as long as the caller's coroutine
     /// runs — the sheet holds it in a `LaunchedEffect`, so it ends with the
     /// sheet.
+    ///
+    /// Frames only carry what lands while the socket is up. A box that
+    /// reports during an outage is stored by the journal but never fanned
+    /// to this client, and `box_status` is not a conversation event, so the
+    /// reconnect replay does not carry it either (journal PR #82). Without
+    /// this, an open roster would keep the older numbers until the box's
+    /// next report — so each reconnect re-reads the stored reports from
+    /// `GET /devices` (CodeRabbit, #80).
     suspend fun watchBoxStatus() {
-        api.boxStatusUpdates().collect { (agentID, status) -> apply(status, agentID) }
+        coroutineScope {
+            launch { api.boxStatusUpdates().collect { (agentID, status) -> apply(status, agentID) } }
+            launch { reconnects().collect { refreshReports() } }
+        }
+    }
+
+    /// Each time the socket comes back up after the watcher started. The
+    /// state in place at subscribe is the baseline, not a transition: a
+    /// sheet opened on a running socket does not repeat the fetch [load]
+    /// just made. A sheet opened while the socket is down does re-seed once
+    /// it connects — reports made between the roster fetch and the
+    /// connection are not replayed either.
+    private fun reconnects(): Flow<Unit> = api.connectionState()
+        .map { it is SyncConnectionState.Running }
+        .distinctUntilChanged()
+        .drop(1)
+        .filter { it }
+        .map { }
+
+    /// Re-seeds the held reports from `GET /devices`: a newer stored report
+    /// takes its row by the rules a frame follows ([apply]), an older one is
+    /// dropped the same way. Best effort — a failed fetch is logged and the
+    /// watcher goes on, so the next frame or reconnect still applies.
+    private suspend fun refreshReports() {
+        val agents = try {
+            api.devices()
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            MatronDebug.breadcrumb("NewChat: box report re-seed after reconnect failed: $error")
+            return
+        }
+        for (agent in agents) {
+            if (agent.kind != "agent") continue
+            agent.status?.let { apply(it, agent.id) }
+        }
     }
 
     internal fun hasReportForTesting(agentID: Long): Boolean = agentID in reports
