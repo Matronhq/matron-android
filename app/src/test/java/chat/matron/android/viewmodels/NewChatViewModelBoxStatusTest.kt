@@ -2,9 +2,12 @@ package chat.matron.android.viewmodels
 
 import chat.matron.android.journal.DeviceDTO
 import chat.matron.android.journal.RPCReply
+import chat.matron.android.models.SyncConnectionState
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -27,6 +30,9 @@ class NewChatViewModelBoxStatusTest {
 
     private class Fake : AgentRPCProviding {
         var devicesResult: Result<List<DeviceDTO>> = Result.success(emptyList())
+        /// How often `GET /devices` was asked — the roster load, plus one
+        /// re-seed per reconnect.
+        var devicesCalls = 0
         val repliesByDevice = mutableMapOf<Long, RPCReply>()
         /// A box's `recent_folders` call completes [arrivals] on landing, then
         /// parks on its gate until the test opens it (a reply on the wire).
@@ -39,7 +45,14 @@ class NewChatViewModelBoxStatusTest {
         /// watcher's first collect still lands, as on the engine's socket.
         private val boxStatusFeed = Channel<Pair<Long, BoxStatus>>(Channel.UNLIMITED)
 
-        override suspend fun devices(): List<DeviceDTO> = devicesResult.getOrThrow()
+        /// The socket's state as the engine reports it: up, by default, long
+        /// before the sheet opens.
+        val connection = MutableStateFlow<SyncConnectionState>(SyncConnectionState.Running)
+
+        override suspend fun devices(): List<DeviceDTO> {
+            devicesCalls += 1
+            return devicesResult.getOrThrow()
+        }
         override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply {
             requests.add(Request(method, agentDeviceID))
             arrivals[agentDeviceID]?.complete(Unit)
@@ -47,9 +60,18 @@ class NewChatViewModelBoxStatusTest {
             return repliesByDevice[agentDeviceID] ?: RPCReply.Failure("unknown_method", null)
         }
         override fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = boxStatusFeed.receiveAsFlow()
+        override fun connectionState(): StateFlow<SyncConnectionState> = connection
 
         fun sendBoxStatus(deviceID: Long, status: BoxStatus) {
             boxStatusFeed.trySend(deviceID to status)
+        }
+
+        /// The socket drops and comes back. A state flow conflates, so the
+        /// watcher must get to see the drop before the recovery lands.
+        suspend fun reconnect() {
+            connection.value = SyncConnectionState.Offline(null)
+            repeat(10) { yield() }
+            connection.value = SyncConnectionState.Running
         }
     }
 
@@ -490,5 +512,134 @@ class NewChatViewModelBoxStatusTest {
         assertEquals(25, vm.percent(1))
         gate.complete(Unit)
         reloading.join()
+    }
+
+    // MARK: Re-seeding after a reconnect
+
+    /// A box that reports while this client's socket is down is only in the
+    /// journal's stored row: `box_status` is not a conversation event, so the
+    /// reconnect replay never carries it. The open roster re-reads
+    /// `GET /devices` when the socket comes back, and the newer stored
+    /// report takes its row as a frame would (CodeRabbit, #80).
+    @Test
+    fun reconnect_reSeedsFromDevicesAndRepaintsANewerStoredReport() = runBlocking {
+        val fake = Fake()
+        fake.devicesResult = Result.success(listOf(agent(1, true), agent(2, false, report(39, agoMs = 3_600_000))))
+        fake.repliesByDevice[1] = emptyFolders
+        val vm = makeVM(fake)
+        val watcher = launch { vm.watchBoxStatus() }
+        try {
+            vm.load()
+            assertEquals(39, vm.percent(2))
+
+            // Reported during the outage; the journal stored it, nothing fanned.
+            val missed = report(44, agoMs = 5_000)
+            fake.devicesResult = Result.success(listOf(agent(1, true), agent(2, false, missed)))
+            fake.reconnect()
+            waitUntil { vm.percent(2) == 44 }
+            assertEquals(2, fake.devicesCalls)
+            assertEquals(
+                "an offline box keeps the aged caption, dated by the stored report",
+                AgentCapacityFreshness.Offline(missed.reportedAtMs), vm.capacityFreshness(2),
+            )
+        } finally {
+            watcher.cancel()
+        }
+    }
+
+    /// The stored report can be older than what the row shows: a connected
+    /// box answered the fan-out after it last reported. The re-seed holds
+    /// the report but leaves the live numbers alone — the rule a late frame
+    /// follows.
+    @Test
+    fun reconnect_doesNotRepaintARowWhoseLiveNumbersAreNewer() = runBlocking {
+        val fake = Fake()
+        fake.devicesResult = Result.success(listOf(agent(1, true), agent(2, false)))
+        fake.repliesByDevice[1] = replied25
+        val vm = makeVM(fake)
+        val watcher = launch { vm.watchBoxStatus() }
+        try {
+            vm.load()
+            assertEquals(25, vm.percent(1))
+
+            fake.devicesResult = Result.success(listOf(agent(1, true, report(61, agoMs = 30_000)), agent(2, false)))
+            fake.reconnect()
+            waitUntil { fake.devicesCalls == 2 }
+            waitUntil { vm.hasReportForTesting(1) }
+            assertEquals("the reply is the newer word", 25, vm.percent(1))
+            assertEquals(AgentCapacityFreshness.Live, vm.capacityFreshness(1))
+        } finally {
+            watcher.cancel()
+        }
+    }
+
+    /// The socket is normally up long before the sheet opens: the state in
+    /// place when the watcher starts is not a reconnect, so `load()`'s
+    /// fetch is not repeated.
+    @Test
+    fun reconnect_theStateInPlaceWhenTheSheetOpensIsNotAReconnect() = runBlocking {
+        val fake = Fake()
+        fake.devicesResult = Result.success(listOf(agent(1, true), agent(2, false)))
+        fake.repliesByDevice[1] = emptyFolders
+        val vm = makeVM(fake)
+        val watcher = launch { vm.watchBoxStatus() }
+        try {
+            vm.load()
+            repeat(20) { yield() }
+            assertEquals("one fetch: the roster load", 1, fake.devicesCalls)
+        } finally {
+            watcher.cancel()
+        }
+    }
+
+    /// A sheet opened while the socket is down still loads the roster over
+    /// HTTP; the socket coming up afterwards is a transition the watcher saw,
+    /// and reports made between that fetch and the connection are not
+    /// replayed either — so it re-seeds once.
+    @Test
+    fun reconnect_aSocketThatComesUpAfterTheSheetOpenedReSeeds() = runBlocking {
+        val fake = Fake()
+        fake.connection.value = SyncConnectionState.Offline(null)
+        fake.devicesResult = Result.success(listOf(agent(1, true), agent(2, false)))
+        fake.repliesByDevice[1] = emptyFolders
+        val vm = makeVM(fake)
+        val watcher = launch { vm.watchBoxStatus() }
+        try {
+            vm.load()
+            assertEquals(1, fake.devicesCalls)
+            fake.connection.value = SyncConnectionState.Running
+            waitUntil { fake.devicesCalls == 2 }
+        } finally {
+            watcher.cancel()
+        }
+    }
+
+    /// The re-seed is best effort: a failed `GET /devices` changes nothing
+    /// and must not take the watcher down with it — the next frame still
+    /// applies.
+    @Test
+    fun reconnect_aFailedRefreshLeavesTheRowsAndTheWatcherAlone() = runBlocking {
+        val fake = Fake()
+        val reported = report(39, agoMs = 3_600_000)
+        fake.devicesResult = Result.success(listOf(agent(1, true), agent(2, false, reported)))
+        fake.repliesByDevice[1] = emptyFolders
+        val vm = makeVM(fake)
+        val watcher = launch { vm.watchBoxStatus() }
+        try {
+            vm.load()
+            fake.devicesResult = Result.failure(IllegalStateException("502"))
+            fake.reconnect()
+            waitUntil { fake.devicesCalls == 2 }
+            repeat(20) { yield() }
+            assertEquals(39, vm.percent(2))
+            assertEquals(AgentCapacityFreshness.Offline(reported.reportedAtMs), vm.capacityFreshness(2))
+            assertTrue("the watcher is still collecting", watcher.isActive)
+
+            val fresh = report(44, agoMs = 5_000)
+            fake.sendBoxStatus(2, fresh)
+            waitUntil { vm.percent(2) == 44 }
+        } finally {
+            watcher.cancel()
+        }
     }
 }

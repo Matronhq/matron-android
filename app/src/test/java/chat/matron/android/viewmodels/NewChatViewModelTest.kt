@@ -3,10 +3,13 @@ package chat.matron.android.viewmodels
 import chat.matron.android.journal.DeviceDTO
 import chat.matron.android.journal.RPCReply
 import chat.matron.android.journal.RPCRequestError
+import chat.matron.android.models.SyncConnectionState
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
@@ -49,6 +52,7 @@ private class FakeAgentRPCProvider : AgentRPCProviding {
 
     override suspend fun devices(): List<DeviceDTO> = devicesResult.getOrThrow()
     override fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = emptyFlow()
+    override fun connectionState(): StateFlow<SyncConnectionState> = MutableStateFlow(SyncConnectionState.Running)
 
     override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply {
         val params = runCatching { Json.parseToJsonElement(paramsJson).jsonObject }

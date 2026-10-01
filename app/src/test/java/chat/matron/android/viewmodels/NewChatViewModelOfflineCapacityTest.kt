@@ -2,7 +2,10 @@ package chat.matron.android.viewmodels
 
 import chat.matron.android.journal.DeviceDTO
 import chat.matron.android.journal.RPCReply
+import chat.matron.android.models.SyncConnectionState
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -29,6 +32,7 @@ class NewChatViewModelOfflineCapacityTest {
         val requests = mutableListOf<Request>()
         override suspend fun devices(): List<DeviceDTO> = devicesResult.getOrThrow()
         override fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = emptyFlow()
+        override fun connectionState(): StateFlow<SyncConnectionState> = MutableStateFlow(SyncConnectionState.Running)
         override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply {
             requests.add(Request(method, agentDeviceID))
             if (method == "recent_folders") repliesByDevice[agentDeviceID]?.let { return it }
@@ -175,6 +179,7 @@ class NewChatViewModelOfflineCapacityTest {
             val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
             override suspend fun devices() = listOf(agent(9, "only", true))
             override fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = emptyFlow()
+            override fun connectionState(): StateFlow<SyncConnectionState> = MutableStateFlow(SyncConnectionState.Running)
             override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply {
                 if (method == "recent_folders") { gate.await(); return ok("""{"folders":[],"activity":{"live_sessions":3}}""") }
                 return ok("""{"convo_id":"c-new"}""")
