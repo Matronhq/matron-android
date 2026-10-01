@@ -62,6 +62,13 @@ object JournalEventType {
     /// "Coordinator routines → Marker event"). Like [MEMORY], not in
     /// [MESSAGE_TYPES]: no unread, no snippet, no push — a timeline row only.
     const val ROUTINE = "routine"
+    /// The conversation gained or lost the Coordinator role (`assigned` /
+    /// `released`). A marker, not in [MESSAGE_TYPES].
+    const val COORDINATOR = "coordinator"
+    /// The Coordinator answered a consent card (matron-journal
+    /// `src/consent-answer.js`). Client-only and outside [MESSAGE_TYPES]: no
+    /// unread, no snippet, no push — a timeline row only.
+    const val CONSENT_DECISION = "consent_decision"
 
     /// Payload key on the plain `text` twin the journal appends after a
     /// card-worthy `item` marker so pre-tracker clients still see the turn

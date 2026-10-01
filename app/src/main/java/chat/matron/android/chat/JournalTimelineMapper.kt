@@ -9,6 +9,8 @@ import chat.matron.android.events.LiveOutputEvent
 import chat.matron.android.events.MilestoneMarkerEvent
 import chat.matron.android.events.MissionMarkerEvent
 import chat.matron.android.events.RoutineMarkerEvent
+import chat.matron.android.events.ConsentDecisionEvent
+import chat.matron.android.events.CoordinatorMarkerEvent
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.journal.ActivityUpdate
@@ -120,6 +122,19 @@ object JournalTimelineMapper {
             // one-line row, never "[unsupported event: routine]". Its own kind,
             // not `StateChange`, which the timeline hides. Unparseable
             // payload: skipped, like a mission marker.
+            // The conversation gained or lost the Coordinator role, and the
+            // Coordinator's answer to a consent card: one-line rows, never
+            // "[unsupported event: …]". Unparseable payload: skipped.
+            JournalEventType.COORDINATOR -> {
+                val marker = CoordinatorMarkerEvent.parse(payload) ?: return null
+                TimelineItem.Kind.CoordinatorMarker(event.seq.toString(), marker)
+            }
+
+            JournalEventType.CONSENT_DECISION -> {
+                val decision = ConsentDecisionEvent.parse(payload) ?: return null
+                TimelineItem.Kind.ConsentDecision(event.seq.toString(), decision)
+            }
+
             JournalEventType.ROUTINE -> {
                 val marker = RoutineMarkerEvent.parse(payload) ?: return null
                 TimelineItem.Kind.RoutineMarker(event.seq.toString(), marker)

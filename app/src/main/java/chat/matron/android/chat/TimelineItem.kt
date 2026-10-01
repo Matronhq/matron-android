@@ -9,6 +9,8 @@ import chat.matron.android.events.LiveOutputEvent
 import chat.matron.android.events.MilestoneMarkerEvent
 import chat.matron.android.events.MissionMarkerEvent
 import chat.matron.android.events.RoutineMarkerEvent
+import chat.matron.android.events.ConsentDecisionEvent
+import chat.matron.android.events.CoordinatorMarkerEvent
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.models.TimelineSendState
@@ -153,6 +155,12 @@ data class TimelineItem(
         /// (journal `routine` marker) — a one-line row. `eventID` is the
         /// journal seq.
         data class RoutineMarker(val eventID: String, val marker: RoutineMarkerEvent) : Kind
+        /// The conversation gained or lost the Coordinator role — a one-line
+        /// marker. `eventID` is the journal seq.
+        data class CoordinatorMarker(val eventID: String, val marker: CoordinatorMarkerEvent) : Kind
+        /// The Coordinator approved or declined a consent card on the user's
+        /// behalf (journal `consent_decision`) — a one-line row.
+        data class ConsentDecision(val eventID: String, val decision: ConsentDecisionEvent) : Kind
         /// Transient typing / tool-use indicator. Not persisted; appended as a
         /// trailing overlay row while the agent is thinking or running a tool.
         data class ActivityIndicator(val label: String) : Kind
