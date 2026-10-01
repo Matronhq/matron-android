@@ -1,8 +1,6 @@
 package chat.matron.android.journal
 
-import java.net.URLDecoder
 import java.net.URLEncoder
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /// The QR sign-in payload — the single place the format is known:
 /// `matron://link?v=1&server=<URL-encoded base server URL>&code=XXXX-XXXX`.
@@ -38,34 +36,18 @@ object LinkURI {
     }
 
     fun parse(raw: String): Parsed {
-        if (!raw.startsWith(PREFIX, ignoreCase = true)) throw ParseError.NotALink()
-        val params = raw.substring(PREFIX.length).split("&").mapNotNull { pair ->
-            val idx = pair.indexOf('=')
-            if (idx <= 0) null
-            else pair.substring(0, idx) to runCatching {
-                URLDecoder.decode(pair.substring(idx + 1), "UTF-8")
-            }.getOrNull()
-        }.toMap()
+        if (!MatronQueryURI.hasPrefix(raw, PREFIX)) throw ParseError.NotALink()
+        val params = MatronQueryURI.params(raw, PREFIX)
         val version = params["v"] ?: throw ParseError.Malformed()
         if (version != "1") throw ParseError.UnsupportedVersion()
         val server = params["server"] ?: throw ParseError.Malformed()
-        val url = server.toHttpUrlOrNull() ?: throw ParseError.Malformed()
-        // toHttpUrlOrNull() only ever returns http/https URLs, so this check
-        // is belt-and-braces — keep it; it documents the constraint and
-        // survives a parser swap.
-        if (url.scheme != "http" && url.scheme != "https") throw ParseError.Malformed()
         // Plan-owner amendment (mirrors matron-apple's LinkURI parser): https
         // is accepted from any host, but http is only ever accepted to
-        // localhost-ish dev hosts — the same carve-out ServerURLValidator
-        // applies to typed server entry. Any other http host is a malformed
-        // link, not a silently-accepted plaintext one. Keep this condition in
-        // sync with the localhost check in auth/ServerURLValidator.kt.
-        if (url.scheme == "http" && !isLocalhostHost(url.host)) throw ParseError.Malformed()
+        // localhost-ish dev hosts. Any other http host is a malformed link,
+        // not a silently-accepted plaintext one.
+        if (!MatronQueryURI.isAcceptableServer(server)) throw ParseError.Malformed()
         val code = params["code"] ?: throw ParseError.Malformed()
         if (!PairingCode.isPlausible(code)) throw ParseError.Malformed()
         return Parsed(serverURL = server, code = PairingCode.display(code))
     }
-
-    private fun isLocalhostHost(host: String): Boolean =
-        host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
 }
