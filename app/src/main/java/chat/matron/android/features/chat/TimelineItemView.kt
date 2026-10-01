@@ -313,6 +313,8 @@ private fun RenderedBody(
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
 
+        is TimelineItem.Kind.RoutineMarker -> AmbientNotice(kind.marker.text)
+
         is TimelineItem.Kind.ActivityIndicator -> ActivityIndicatorRow(label = kind.label)
 
         is TimelineItem.Kind.Unknown -> AmbientNotice(

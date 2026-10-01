@@ -1,6 +1,8 @@
 package chat.matron.android.chat
 
 import chat.matron.android.events.MissionMarkerEvent
+import chat.matron.android.events.RoutineMarkerEvent
+import chat.matron.android.features.chat.timelineItemShouldRender
 import chat.matron.android.journal.JournalEvent
 import chat.matron.android.journal.JournalEventType
 import java.time.Instant
@@ -106,5 +108,65 @@ class JournalTimelineMapperMissionsTest {
             ),
         )
         assertNull(item)
+    }
+
+    private fun routine(payload: JsonObject): RoutineMarkerEvent {
+        val item = map(ev(JournalEventType.ROUTINE, payload, seq = 12))!!
+        val kind = item.kind as TimelineItem.Kind.RoutineMarker
+        assertEquals("12", kind.eventID)
+        return kind.marker
+    }
+
+    /// A `routine` marker is its own visible row — never "[unsupported event:
+    /// routine]", and never `StateChange`, which the timeline hides.
+    @Test
+    fun routineFireBecomesAVisibleRow() {
+        val marker = routine(buildJsonObject {
+            put("routine_id", "rt_1"); put("name", "daily-sweep"); put("action", "fired"); put("outcome", "applied now")
+        })
+        assertEquals("⏰ Routine fired · daily-sweep", marker.text)
+        assertTrue(timelineItemShouldRender(map(ev(JournalEventType.ROUTINE, buildJsonObject {
+            put("routine_id", "rt_1"); put("name", "daily-sweep"); put("action", "fired"); put("outcome", "applied now")
+        }))!!))
+        assertEquals(
+            "⏰ Routine fired · context-over — queued for the next idle point",
+            routine(buildJsonObject {
+                put("routine_id", "rt_1"); put("name", "context-over"); put("action", "fired"); put("outcome", "applied deferred")
+            }).text,
+        )
+    }
+
+    /// An undelivered fire leaves no other trace in the transcript — the
+    /// reason must be on the row.
+    @Test
+    fun undeliveredRoutineFireSaysWhy() {
+        fun fired(outcome: String) = routine(buildJsonObject {
+            put("routine_id", "rt_1"); put("name", "daily-sweep"); put("action", "fired"); put("outcome", outcome)
+        })
+        assertEquals("⚠️ Routine not delivered · daily-sweep — agent_unreachable", fired("failed agent_unreachable").text)
+        assertEquals("⚠️ Routine not delivered · daily-sweep — no Coordinator box", fired("no_coordinator").text)
+        assertEquals("⚠️ Routine missed · daily-sweep", fired("missed").text)
+    }
+
+    @Test
+    fun savedAndDeletedRoutines() {
+        assertEquals("⏰ You created a routine · deploy-window", routine(buildJsonObject {
+            put("routine_id", "rt_2"); put("name", "deploy-window"); put("action", "saved"); put("by", "user"); put("created", true)
+        }).text)
+        assertEquals("⏰ Coordinator updated a routine · deploy-window", routine(buildJsonObject {
+            put("routine_id", "rt_2"); put("name", "deploy-window"); put("action", "saved"); put("by", "agent"); put("created", false)
+        }).text)
+        assertEquals("⏰ You deleted a routine · deploy-window", routine(buildJsonObject {
+            put("routine_id", "rt_2"); put("name", "deploy-window"); put("action", "deleted"); put("by", "user")
+        }).text)
+    }
+
+    @Test
+    fun malformedRoutineEventIsSkipped() {
+        listOf(
+            buildJsonObject { put("action", "fired"); put("name", "x") },
+            buildJsonObject { put("routine_id", "rt_1"); put("name", "x"); put("action", "exploded") },
+            buildJsonObject { put("routine_id", "rt_1"); put("action", "fired") },
+        ).forEach { assertNull(map(ev(JournalEventType.ROUTINE, it))) }
     }
 }
