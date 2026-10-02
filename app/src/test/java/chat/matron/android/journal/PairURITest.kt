@@ -92,6 +92,13 @@ class PairURITest {
     }
 
     @Test
+    fun parse_ignoresSurroundingWhitespace_likeIsPairURI() {
+        val raw = "  matron://pair?v=1&server=https%3A%2F%2Fchat.example.com&code=KTNM-3VQ8\n"
+        assertTrue(PairURI.isPairURI(raw))
+        assertEquals("KTNM-3VQ8", PairURI.parse(raw).code)
+    }
+
+    @Test
     fun parse_httpLocalhost_isAccepted() {
         val parsed = PairURI.parse("matron://pair?v=1&server=http%3A%2F%2F127.0.0.1%3A8787&code=KTNM-3VQ8")
         assertEquals("http://127.0.0.1:8787", parsed.serverURL)
@@ -106,18 +113,25 @@ class PairURITest {
     }
 
     @Test
-    fun sameOrigin_normalisesCaseDefaultPortsAndPath() {
-        assertEquals(true, PairURI.sameOrigin("https://Chat.Example.com", "https://chat.example.com/"))
-        assertEquals(true, PairURI.sameOrigin("https://chat.example.com:443/journal", "https://chat.example.com"))
-        assertEquals(false, PairURI.sameOrigin("https://chat.example.com", "https://other.example.com"))
-        assertEquals(false, PairURI.sameOrigin("https://chat.example.com", "https://chat.example.com:8443"))
-        assertEquals(false, PairURI.sameOrigin("http://localhost:8787", "https://localhost:8787"))
-        assertNull(PairURI.sameOrigin("not a url", "https://chat.example.com"))
+    fun sameJournal_normalisesCaseDefaultPortsAndTrailingSlash() {
+        assertEquals(true, PairURI.sameJournal("https://Chat.Example.com", "https://chat.example.com/"))
+        assertEquals(true, PairURI.sameJournal("https://chat.example.com:443/journal/", "https://chat.example.com/journal"))
+        assertEquals(false, PairURI.sameJournal("https://chat.example.com", "https://other.example.com"))
+        assertEquals(false, PairURI.sameJournal("https://chat.example.com", "https://chat.example.com:8443"))
+        assertEquals(false, PairURI.sameJournal("http://localhost:8787", "https://localhost:8787"))
+        assertNull(PairURI.sameJournal("not a url", "https://chat.example.com"))
     }
 
     @Test
-    fun displayHost_showsPortOnlyWhenNonDefault() {
-        assertEquals("chat.example.com", PairURI.displayHost("https://chat.example.com/"))
-        assertEquals("127.0.0.1:8787", PairURI.displayHost("http://127.0.0.1:8787"))
+    fun sameJournal_distinguishesBasePathsOnOneHost() {
+        assertEquals(false, PairURI.sameJournal("https://chat.example.com/alice/", "https://chat.example.com/bob/"))
+        assertEquals(false, PairURI.sameJournal("https://chat.example.com/alice", "https://chat.example.com"))
+    }
+
+    @Test
+    fun displayJournal_showsNonDefaultPortAndBasePath() {
+        assertEquals("chat.example.com", PairURI.displayJournal("https://chat.example.com/"))
+        assertEquals("127.0.0.1:8787", PairURI.displayJournal("http://127.0.0.1:8787"))
+        assertEquals("chat.example.com/alice", PairURI.displayJournal("https://chat.example.com/alice/"))
     }
 }

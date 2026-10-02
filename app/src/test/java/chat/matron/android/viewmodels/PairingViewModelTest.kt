@@ -403,6 +403,22 @@ class PairingViewModelTest {
     }
 
     @Test
+    fun scannedPairURI_forAnotherJournalOnTheSameHost_isRefused() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDevicesProvider()
+            val vm = makeVM(fake, scope)
+            vm.handleScanned(PairURI.format("https://chat.example.com/bob/", "BCDF-2345"))
+            delay(20)
+            assertTrue(fake.previewedCodes.isEmpty())
+            assertTrue(vm.errorMessage.value!!.contains("chat.example.com/bob"))
+        } finally {
+            scope.cancel()
+        }
+        Unit
+    }
+
+    @Test
     fun scannedNonPairPayloads_showFriendlyErrors() = runBlocking {
         val scope = CoroutineScope(coroutineContext + Job())
         try {

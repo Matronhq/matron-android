@@ -28,7 +28,7 @@ import kotlinx.coroutines.launch
 class PairingViewModel(
     private val api: DevicesProviding,
     private val existingNames: List<String>,
-    /// The signed-in account's journal base URL, compared (by origin) against
+    /// The signed-in account's journal base URL, compared (origin + base path) against
     /// the server a scanned pairing payload names.
     private val accountServerURL: String,
     private val scope: CoroutineScope,
@@ -132,9 +132,9 @@ class PairingViewModel(
             )
             return
         }
-        if (PairURI.sameOrigin(parsed.serverURL, accountServerURL) != true) {
-            val codeHost = PairURI.displayHost(parsed.serverURL)
-            val accountHost = PairURI.displayHost(accountServerURL)
+        if (PairURI.sameJournal(parsed.serverURL, accountServerURL) != true) {
+            val codeHost = PairURI.displayJournal(parsed.serverURL)
+            val accountHost = PairURI.displayJournal(accountServerURL)
             rejectScan(
                 "This code is for $codeHost, but you're signed in to $accountHost. " +
                     "Pair the box from an account on $codeHost, or point the box at $accountHost.",

@@ -41,9 +41,12 @@ object PairURI {
         return "${PREFIX}v=1&server=$server&code=$encodedCode"
     }
 
+    /// Surrounding whitespace is ignored, matching [isPairURI] — a payload
+    /// one scanner recognises must parse wherever it is pasted.
     fun parse(raw: String): Parsed {
-        if (!MatronQueryURI.hasPrefix(raw, PREFIX)) throw ParseError.NotAPairURI()
-        val params = MatronQueryURI.params(raw, PREFIX)
+        val payload = raw.trim()
+        if (!MatronQueryURI.hasPrefix(payload, PREFIX)) throw ParseError.NotAPairURI()
+        val params = MatronQueryURI.params(payload, PREFIX)
         val version = params["v"] ?: throw ParseError.Malformed()
         if (version != "1") throw ParseError.UnsupportedVersion()
         val server = params["server"] ?: throw ParseError.Malformed()
@@ -53,20 +56,24 @@ object PairURI {
         return Parsed(serverURL = server, code = PairingCode.display(code))
     }
 
-    /// Whether two server URLs share an origin: scheme, host (case-folded) and
-    /// effective port (default ports filled in). Paths are ignored — a journal
-    /// is identified by where it lives, not by a trailing slash. Null when
-    /// either side isn't an http(s) URL.
-    fun sameOrigin(a: String, b: String): Boolean? {
+    /// Whether two server URLs address the same journal: same origin (scheme,
+    /// case-folded host, effective port) AND the same base path, trailing
+    /// slashes ignored. The path counts because JournalApi keeps it when
+    /// building every endpoint, so two journals can share a host under
+    /// different paths. Null when either side isn't an http(s) URL.
+    fun sameJournal(a: String, b: String): Boolean? {
         val left = a.trim().toHttpUrlOrNull() ?: return null
         val right = b.trim().toHttpUrlOrNull() ?: return null
-        return left.scheme == right.scheme && left.host == right.host && left.port == right.port
+        return left.scheme == right.scheme && left.host == right.host && left.port == right.port &&
+            left.encodedPath.trimEnd('/') == right.encodedPath.trimEnd('/')
     }
 
-    /// `host` or `host:port` (port only when non-default) for user-facing
-    /// copy; the raw string when it isn't an http(s) URL.
-    fun displayHost(server: String): String {
+    /// `host[:port][/path]` for user-facing copy: port only when non-default,
+    /// base path without its trailing slash. The raw string when it isn't an
+    /// http(s) URL.
+    fun displayJournal(server: String): String {
         val url = server.trim().toHttpUrlOrNull() ?: return server
-        return if (url.port == HttpUrl.defaultPort(url.scheme)) url.host else "${url.host}:${url.port}"
+        val port = if (url.port == HttpUrl.defaultPort(url.scheme)) "" else ":${url.port}"
+        return "${url.host}$port${url.encodedPath.trimEnd('/')}"
     }
 }
