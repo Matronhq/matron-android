@@ -27,6 +27,9 @@ object PairURI {
 
     private const val PREFIX = "matron://pair?"
 
+    /// Where pairing QRs belong, for scanners that catch one by mistake.
+    const val ADD_AGENT_PATH = "Settings → Manage Devices → Add Agent (+)"
+
     /// Whether [raw] claims to be a pairing payload (prefix only, no
     /// validation) — for other scanners to recognise a pairing QR scanned in
     /// the wrong place and point the user at Add Agent.

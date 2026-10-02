@@ -475,6 +475,11 @@ class DeviceLinkViewModelTest {
             assertEquals("Not a Matron link code.", vm.noticeMessage.value)
             vm.offerScanned("matron://rlink?v=2&rid=$RLINK_RID") // missing k → Malformed
             assertEquals("Not a Matron link code.", vm.noticeMessage.value)
+            vm.offerScanned("matron://pair?v=1&server=https%3A%2F%2Fchat.example.com&code=BCDF-2345")
+            assertEquals(
+                "This is an agent pairing code — open Settings → Manage Devices → Add Agent (+).",
+                vm.noticeMessage.value,
+            )
             assertTrue(relay.offers.isEmpty())
         } finally { scope.cancel() }
         Unit
