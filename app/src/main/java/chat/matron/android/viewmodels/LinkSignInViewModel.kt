@@ -7,6 +7,7 @@ import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.LinkClaim
 import chat.matron.android.journal.LinkPollResult
 import chat.matron.android.journal.LinkURI
+import chat.matron.android.journal.PairURI
 import chat.matron.android.journal.PairingCode
 import chat.matron.android.models.UserSession
 import chat.matron.android.platform.Haptics
@@ -128,7 +129,7 @@ class LinkSignInViewModel(
             fail("This QR code needs a newer version of Matron.")
             return
         } catch (e: LinkURI.ParseError) {
-            fail("Not a Matron sign-in code.")
+            fail(if (PairURI.isPairURI(payload)) PAIR_CODE_HINT else "Not a Matron sign-in code.")
             return
         }
         claim(server = parsed.serverURL, code = parsed.code)
@@ -142,7 +143,7 @@ class LinkSignInViewModel(
                 fail("This link needs a newer version of Matron.")
                 return
             } catch (e: LinkURI.ParseError) {
-                fail("That doesn't look like a Matron sign-in link.")
+                fail(if (PairURI.isPairURI(_codeInput)) PAIR_CODE_HINT else "That doesn't look like a Matron sign-in link.")
                 return
             }
             claim(server = parsed.serverURL, code = parsed.code)
@@ -269,3 +270,8 @@ class LinkSignInViewModel(
         }
     }
 }
+
+/// A pairing QR scanned (or pasted) at sign-in: agents are added from a
+/// signed-in account, so say where to go once signed in.
+private val PAIR_CODE_HINT =
+    "This is an agent pairing code — sign in first, then open ${PairURI.ADD_AGENT_PATH}."

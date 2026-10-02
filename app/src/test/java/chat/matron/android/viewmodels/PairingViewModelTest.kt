@@ -2,7 +2,10 @@ package chat.matron.android.viewmodels
 
 import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.PairPreview
+import chat.matron.android.journal.PairURI
 import java.time.Instant
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -28,13 +31,15 @@ class PairingViewModelTest {
         scope: CoroutineScope,
         existingNames: List<String> = emptyList(),
         now: () -> Instant = { Instant.now() },
+        previewDebounce: Duration = 1.milliseconds,
     ) = PairingViewModel(
         api = fake,
         existingNames = existingNames,
+        accountServerURL = ACCOUNT_SERVER,
         scope = scope,
         now = now,
         pollInterval = 1.milliseconds,
-        previewDebounce = 1.milliseconds,
+        previewDebounce = previewDebounce,
     )
 
     private fun preview(ip: String, expiresIn: Int) = Result.success(PairPreview(ip, expiresIn))
@@ -311,7 +316,7 @@ class PairingViewModelTest {
     fun tagChar_warnsOnADuplicateAcrossTheRoster() = runBlocking {
         val scope = CoroutineScope(coroutineContext + Job())
         try {
-            val vm = PairingViewModel(api = FakeDevicesProvider(), existingNames = emptyList(), scope = scope, existingTags = listOf("Q"))
+            val vm = PairingViewModel(api = FakeDevicesProvider(), existingNames = emptyList(), accountServerURL = ACCOUNT_SERVER, scope = scope, existingTags = listOf("Q"))
             vm.tagChar = "q"
             assertNotNull(vm.duplicateTagWarning.value)
             vm.tagChar = "Z"
@@ -320,5 +325,155 @@ class PairingViewModelTest {
             scope.cancel()
         }
         Unit
+    }
+
+    // --- Scanned / pasted matron://pair payloads ---
+
+    @Test
+    fun scannedPairURI_fillsCodeAndPreviewsWithoutDebounce() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDevicesProvider()
+            fake.previewResult = preview("65.108.10.252", 412)
+            // A debounce no test could outwait: only an immediate preview passes.
+            val vm = makeVM(fake, scope, previewDebounce = 10.minutes)
+            vm.handleScanned(PairURI.format("https://Chat.Example.com/", "bcdf2345"))
+            assertEquals("BCDF-2345", vm.codeInput)
+            waitUntil { vm.phase.value == PairingViewModel.Phase.Preview("65.108.10.252") }
+            assertEquals(listOf("BCDF2345"), fake.previewedCodes)
+            assertNull(vm.errorMessage.value)
+        } finally {
+            scope.cancel()
+        }
+        Unit
+    }
+
+    @Test
+    fun pastedPairURI_inCodeField_isHandledLikeAScan() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDevicesProvider()
+            fake.previewResult = preview("65.108.10.252", 412)
+            val vm = makeVM(fake, scope, previewDebounce = 10.minutes)
+            vm.codeInput = "  matron://pair?v=1&server=https%3A%2F%2Fchat.example.com&code=BCDF-2345 "
+            assertEquals("BCDF-2345", vm.codeInput)
+            waitUntil { vm.phase.value is PairingViewModel.Phase.Preview }
+            assertEquals(listOf("BCDF2345"), fake.previewedCodes)
+        } finally {
+            scope.cancel()
+        }
+        Unit
+    }
+
+    @Test
+    fun scannedPairURI_forAnotherServer_namesBothHostsAndNeverPreviews() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDevicesProvider()
+            fake.previewResult = preview("65.108.10.252", 412)
+            val vm = makeVM(fake, scope)
+            vm.handleScanned(PairURI.format("https://other.example.org", "BCDF-2345"))
+            delay(20)
+            assertEquals("", vm.codeInput)
+            assertEquals(PairingViewModel.Phase.EnterCode, vm.phase.value)
+            assertTrue(fake.previewedCodes.isEmpty())
+            val message = vm.errorMessage.value!!
+            assertTrue(message, message.contains("other.example.org"))
+            assertTrue(message, message.contains("chat.example.com"))
+        } finally {
+            scope.cancel()
+        }
+        Unit
+    }
+
+    @Test
+    fun scannedPairURI_onANonDefaultPort_isAnotherServer() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDevicesProvider()
+            val vm = makeVM(fake, scope)
+            vm.handleScanned(PairURI.format("https://chat.example.com:8443", "BCDF-2345"))
+            delay(20)
+            assertTrue(fake.previewedCodes.isEmpty())
+            assertTrue(vm.errorMessage.value!!.contains("chat.example.com:8443"))
+        } finally {
+            scope.cancel()
+        }
+        Unit
+    }
+
+    @Test
+    fun scannedPairURI_forAnotherJournalOnTheSameHost_isRefused() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDevicesProvider()
+            val vm = makeVM(fake, scope)
+            vm.handleScanned(PairURI.format("https://chat.example.com/bob/", "BCDF-2345"))
+            delay(20)
+            assertTrue(fake.previewedCodes.isEmpty())
+            assertTrue(vm.errorMessage.value!!.contains("chat.example.com/bob"))
+        } finally {
+            scope.cancel()
+        }
+        Unit
+    }
+
+    @Test
+    fun scannedNonPairPayloads_showFriendlyErrors() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDevicesProvider()
+            val vm = makeVM(fake, scope)
+            vm.handleScanned("matron://link?v=1&server=https%3A%2F%2Fchat.example.com&code=BCDF-2345")
+            assertTrue(vm.errorMessage.value!!.startsWith("That's a sign-in code"))
+            vm.handleScanned("https://example.com/menu")
+            assertTrue(vm.errorMessage.value!!.startsWith("Not a Matron agent pairing code"))
+            vm.handleScanned("matron://pair?v=2&server=https%3A%2F%2Fchat.example.com&code=BCDF-2345")
+            assertTrue(vm.errorMessage.value!!.contains("newer version"))
+            vm.handleScanned("matron://pair?v=1&server=https%3A%2F%2Fchat.example.com&code=BCD")
+            assertTrue(vm.errorMessage.value!!.contains("incomplete"))
+            delay(20)
+            assertTrue(fake.previewedCodes.isEmpty())
+        } finally {
+            scope.cancel()
+        }
+        Unit
+    }
+
+    @Test
+    fun rejectedScan_dropsAPendingPreviewOfTheTypedCode() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val fake = FakeDevicesProvider()
+            fake.previewResult = preview("65.108.10.252", 412)
+            val vm = makeVM(fake, scope, previewDebounce = 50.milliseconds)
+            vm.codeInput = "KTNM3VQ8" // queues a debounced preview
+            vm.handleScanned("not a matron code")
+            delay(120)
+            assertTrue(fake.previewedCodes.isEmpty())
+            assertEquals(PairingViewModel.Phase.EnterCode, vm.phase.value)
+        } finally {
+            scope.cancel()
+        }
+        Unit
+    }
+
+    @Test
+    fun typedCodeClearsAScanError() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + Job())
+        try {
+            val vm = makeVM(FakeDevicesProvider(), scope)
+            vm.handleScanned("not a matron code")
+            assertNotNull(vm.errorMessage.value)
+            vm.codeInput = "K"
+            assertNull(vm.errorMessage.value)
+        } finally {
+            scope.cancel()
+        }
+        Unit
+    }
+
+    private companion object {
+        const val ACCOUNT_SERVER = "https://chat.example.com"
     }
 }

@@ -162,6 +162,9 @@ class LinkSignInViewModelTest {
                 LinkSignInViewModel.State.Error("This QR code needs a newer version of Matron."),
                 vm.state.value,
             )
+            // An agent-pairing QR scanned here points at Add Agent instead.
+            vm.handleScanned("matron://pair?v=1&server=https%3A%2F%2Fchat.example.com&code=BCDF-2345")
+            assertEquals(LinkSignInViewModel.State.Error("This is an agent pairing code — sign in first, then open Settings → Manage Devices → Add Agent (+)."), vm.state.value)
         } finally { scope.cancel() }
         Unit
     }
@@ -246,6 +249,9 @@ class LinkSignInViewModelTest {
                 LinkSignInViewModel.State.Error("That doesn't look like a Matron sign-in link."),
                 vm.state.value,
             )
+            vm.codeInput = "matron://pair?v=1&server=https%3A%2F%2Fchat.example.com&code=BCDF-2345"
+            vm.submitManual()
+            assertEquals(LinkSignInViewModel.State.Error("This is an agent pairing code — sign in first, then open Settings → Manage Devices → Add Agent (+)."), vm.state.value)
         } finally { scope.cancel() }
         Unit
     }

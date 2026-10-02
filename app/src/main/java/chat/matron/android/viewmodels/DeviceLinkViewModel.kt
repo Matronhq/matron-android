@@ -6,6 +6,7 @@ import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.LinkStart
 import chat.matron.android.journal.LinkStatus
 import chat.matron.android.journal.LinkURI
+import chat.matron.android.journal.PairURI
 import chat.matron.android.journal.RelayError
 import chat.matron.android.journal.RelayRendezvousing
 import chat.matron.android.journal.RendezvousCrypto
@@ -199,7 +200,11 @@ class DeviceLinkViewModel(
             _noticeMessage.value = "This QR code needs a newer version of Matron."
             return
         } catch (e: RendezvousURI.ParseError) {
-            _noticeMessage.value = "Not a Matron link code."
+            _noticeMessage.value = if (PairURI.isPairURI(payload)) {
+                "This is an agent pairing code — open ${PairURI.ADD_AGENT_PATH}."
+            } else {
+                "Not a Matron link code."
+            }
             return
         }
         val showing = _phase.value as? Phase.Showing
