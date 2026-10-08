@@ -1,0 +1,630 @@
+package chat.matron.android.viewmodels
+
+import chat.matron.android.chat.TimelineService
+import chat.matron.android.models.AttachmentBatchTag
+import chat.matron.android.models.ArgSuggestion
+import chat.matron.android.models.BotCommand
+import chat.matron.android.models.BotCommandCatalog
+import chat.matron.android.models.SessionStatus
+import chat.matron.android.models.StagedAttachment
+import java.io.File
+import java.util.UUID
+import kotlin.time.Duration
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
+
+/// One row of the palette's argument-completion mode — a static argument
+/// suggestion (flag or enumerated value) or a recent folder. Ordered
+/// arguments-first by [ComposerViewModel.paletteSuggestions]; the palette
+/// view renders each case with its own row style (apple #161).
+sealed interface PaletteSuggestion {
+    data class Argument(val suggestion: ArgSuggestion) : PaletteSuggestion
+    data class Folder(val path: String) : PaletteSuggestion
+}
+
+/// Drives the message composer: text input, slash-command palette, recent-folder
+/// completion, sent-message recall, and the send / attach actions. Ported from
+/// matron-apple's `ComposerViewModel`.
+///
+/// Platform adaptation: the Swift `attachFiles([URL])` / `StagedAttachment.stage(
+/// copying:)` become [attachFiles] over `File`s staged into an injected
+/// [stagingDirectory]; [recentFolders] is injected (the UI stage supplies the
+/// SharedPreferences-backed store, tests an in-memory one).
+class ComposerViewModel(
+    val roomID: String,
+    private val timeline: TimelineService,
+    private val commands: List<BotCommand>,
+    private val recentFolders: RecentStartFolders,
+    private val stagingDirectory: File,
+    /// The conversation's last-known session status, read on demand from the
+    /// `ChatViewModel` that owns it. A closure rather than a stored copy: the
+    /// two view models are built as a pair by the chat list's VM cache but
+    /// are otherwise independent, and reading through means the palette sees
+    /// the newest lists with nothing having to push them across. Defaults to
+    /// "no status", which is what a composer with no chat half (tests, any
+    /// future non-conversation surface) should offer: nothing (apple #163).
+    private val sessionStatus: () -> SessionStatus? = { null },
+) {
+    /// User-editable input text.
+    var input: String = ""
+
+    /// Mac slash palette is also openable via a shortcut; typing `/`/`!` opens it.
+    var palettePinnedOpen: Boolean = false
+
+    private val _isSending = MutableStateFlow(false)
+    val isSending: StateFlow<Boolean> = _isSending.asStateFlow()
+
+    private val _sendError = MutableStateFlow<String?>(null)
+    val sendError: StateFlow<String?> = _sendError.asStateFlow()
+
+    /// Live state of an in-flight attachment upload, or null when none. On a
+    /// slow uplink a multi-MB screenshot takes long enough that a bare spinner
+    /// reads as "frozen" — the composer renders this as a labelled progress
+    /// bar ("Uploading photo 1 of 2…") above the input.
+    data class UploadProgress(
+        val filename: String,
+        /// 1-based position within this send's batch.
+        val index: Int,
+        val count: Int,
+        /// Uploaded fraction of the current attachment (0…1).
+        val fraction: Double,
+    ) {
+        /// Display label — batch position when sending several, filename when
+        /// sending one.
+        val label: String
+            get() = if (count > 1) "Uploading $index of $count…" else "Uploading $filename…"
+    }
+
+    private val _uploadProgress = MutableStateFlow<UploadProgress?>(null)
+    val uploadProgress: StateFlow<UploadProgress?> = _uploadProgress.asStateFlow()
+
+    /// Attachments picked/pasted/dropped but not yet sent, in add order. Order is
+    /// load-bearing: the caption rides on the first one.
+    private val _stagedAttachments = MutableStateFlow<List<StagedAttachment>>(emptyList())
+    val stagedAttachments: StateFlow<List<StagedAttachment>> = _stagedAttachments.asStateFlow()
+
+    /// True while the user is walking sent-message history via Up/Down.
+    private val _isNavigatingHistory = MutableStateFlow(false)
+    val isNavigatingHistory: StateFlow<Boolean> = _isNavigatingHistory.asStateFlow()
+
+    /// Index of the keyboard-highlighted palette row, or `null` when none.
+    private val _paletteSelection = MutableStateFlow<Int?>(null)
+    val paletteSelection: StateFlow<Int?> = _paletteSelection.asStateFlow()
+
+    /// Terminal-style recall of previously-sent messages, keyed by room. Owned
+    /// here (not injected) so its lifetime tracks the view model.
+    private val history = SentMessageHistory()
+
+    /// The last value a recall write put into [input] — so [handleInputChange]
+    /// can tell a programmatic recall from a user keystroke.
+    private var lastRecalledValue: String? = null
+
+    /// Input string for which folder suggestions are suppressed (set by
+    /// [selectFolder] so the palette closes on pick).
+    private var folderSuggestionsSuppressedFor: String? = null
+
+    /// Whether [send] would do anything — an attachment alone is a valid message.
+    val canSend: Boolean
+        get() = input.trim().isNotEmpty() || _stagedAttachments.value.isNotEmpty()
+
+    /// Whether the slash palette should be visible. Trailing whitespace is NOT
+    /// trimmed: `selectCommand` leaves `"/start "` to position the caret for
+    /// arguments, which means "command chosen" → palette closed.
+    val showPalette: Boolean
+        get() {
+            if (palettePinnedOpen) return true
+            // Suggestion mode: a fully-typed command followed by a partial
+            // argument, with at least one argument or folder row to offer.
+            // Takes priority over the command list (which only shows for
+            // single-token input, so the two never both qualify).
+            if (paletteSuggestions.isNotEmpty()) return true
+            val leading = input.dropWhile { it == ' ' || it == '\t' }
+            if (!(leading.startsWith("/") || leading.startsWith("!"))) return false
+            return leading.split(" ").size == 1
+        }
+
+    /// Filtered command list for the current input (leading whitespace stripped
+    /// so `showPalette` and the filter agree).
+    val filteredCommands: List<BotCommand>
+        get() = BotCommandCatalog.filter(commands, input.dropWhile { it == ' ' || it == '\t' })
+
+    /// Replaces the input with the chosen command's trigger plus a trailing
+    /// space, ready for arguments. Closes the pinned palette.
+    fun selectCommand(command: BotCommand) {
+        input = command.trigger + " "
+        palettePinnedOpen = false
+    }
+
+    /// Rows the palette shows: the unified suggestion list in argument/folder-
+    /// completion mode, filtered commands otherwise. Must mirror the palette
+    /// view's "suggestions win" display rule so the keyboard highlight and the
+    /// rendered rows agree.
+    val paletteItemCount: Int
+        get() {
+            val suggestions = paletteSuggestions
+            return if (suggestions.isEmpty()) filteredCommands.size else suggestions.size
+        }
+
+    /// Down-arrow: highlight the first row, or step down, clamping at the last.
+    /// No-op during a history walk (the arrows keep walking history).
+    fun paletteMoveDown() {
+        val count = paletteItemCount
+        if (!showPalette || _isNavigatingHistory.value || count == 0) return
+        val current = _paletteSelection.value
+        _paletteSelection.value = minOf(current?.plus(1) ?: 0, count - 1)
+    }
+
+    /// Up-arrow: step up, clamping at the first row; with no highlight, start at
+    /// the last. No-op during a history walk.
+    fun paletteMoveUp() {
+        val count = paletteItemCount
+        if (!showPalette || _isNavigatingHistory.value || count == 0) return
+        val current = _paletteSelection.value
+        _paletteSelection.value = maxOf(current?.minus(1) ?: (count - 1), 0)
+    }
+
+    /// Return-key: picks the highlighted palette row. Returns `true` when a row
+    /// was picked (caller must not send), `false` when nothing is highlighted.
+    fun confirmPaletteSelection(): Boolean {
+        if (!showPalette) return false
+        val index = _paletteSelection.value ?: return false
+        _paletteSelection.value = null
+        val suggestions = paletteSuggestions
+        if (suggestions.isNotEmpty()) {
+            if (index !in suggestions.indices) return false
+            selectSuggestion(suggestions[index])
+            return true
+        }
+        val cmds = filteredCommands
+        if (index !in cmds.indices) return false
+        selectCommand(cmds[index])
+        return true
+    }
+
+    /// The palette's second mode: the matched command's static argument
+    /// suggestions, then any recent-folder matches. Arguments first — they're
+    /// few and short, and the folder list can run to eight rows (apple #161).
+    val paletteSuggestions: List<PaletteSuggestion>
+        get() = BotCommandCatalog.argSuggestions(input, commands, sessionStatus).map { PaletteSuggestion.Argument(it) } +
+            folderSuggestions.map { PaletteSuggestion.Folder(it) }
+
+    /// Row-tap / Return dispatch for the unified suggestion list.
+    fun selectSuggestion(suggestion: PaletteSuggestion) {
+        when (suggestion) {
+            is PaletteSuggestion.Argument -> selectArgument(suggestion.suggestion)
+            is PaletteSuggestion.Folder -> selectFolder(suggestion.path)
+        }
+    }
+
+    /// Replaces the trailing partial token with the chosen argument plus a
+    /// trailing space — mirroring [selectCommand] — so the palette immediately
+    /// offers whatever the command still accepts (`/restart --force ` goes on
+    /// to offer `--browser`), and dismisses itself once nothing is left.
+    fun selectArgument(argument: ArgSuggestion) {
+        val partialStart = input.indexOfLast { it.isWhitespace() } + 1
+        input = input.substring(0, partialStart) + argument.value + " "
+        palettePinnedOpen = false
+    }
+
+    /// Recent-folder suggestions for the current input (palette-friendly count).
+    /// Non-empty only in folder-completion mode; a suggestion identical to what's
+    /// typed is filtered out.
+    val folderSuggestions: List<String>
+        get() {
+            if (input == folderSuggestionsSuppressedFor) return emptyList()
+            val partial = folderCompletionPartial ?: return emptyList()
+            return recentFolders.matches(partial)
+                .filter { !it.equals(partial, ignoreCase = true) }
+                .take(8)
+        }
+
+    /// Rewrites the input so the trailing partial path token is replaced by the
+    /// chosen folder, keeping the command and any flags. No trailing space.
+    fun selectFolder(path: String) {
+        val lastWhitespace = input.indexOfLast { it.isWhitespace() }
+        input = input.substring(0, lastWhitespace + 1) + path
+        folderSuggestionsSuppressedFor = input
+        palettePinnedOpen = false
+    }
+
+    /// The partial path token when the input is in folder-completion mode: a
+    /// `/start`/`/workdir` command (`/` or `!` prefix) followed by whitespace,
+    /// optional `--flag` tokens, and a trailing (possibly empty) partial
+    /// token. `null` when the input isn't such a command line. The bridge's
+    /// grammar is `[flags] [path]`, so flags ahead of the partial are fine,
+    /// but a completed non-flag token means the path slot is already taken.
+    private val folderCompletionPartial: String?
+        get() {
+            val leading = input.dropWhile { it == ' ' || it == '\t' }
+            val first = leading.firstOrNull() ?: return null
+            if (first != '/' && first != '!') return null
+            val body = leading.drop(1)
+            val commandEnd = body.indexOfFirst { it.isWhitespace() }
+            if (commandEnd < 0) return null
+            // Case-insensitive, matching the command palette's filter and the
+            // argument resolver — one input, one case rule.
+            val command = body.substring(0, commandEnd).lowercase()
+            if (command != "start" && command != "workdir") return null
+            // The trailing token (after the last whitespace) is the partial;
+            // every completed token between it and the command must be a flag
+            // (smart-dashed forms included — the bridge normalizes them).
+            val args = body.substring(commandEnd)
+            val partialStart = args.indexOfLast { it.isWhitespace() } + 1
+            val earlier = args.substring(0, partialStart).split(Regex("\\s+")).filter { it.isNotEmpty() }
+            if (!earlier.all { BotCommandCatalog.normalizeLeadingDashes(it).startsWith("--") }) return null
+            return args.substring(partialStart)
+        }
+
+    /// Sends the composer's contents: staged attachments (carrying the text as
+    /// their caption) or, with nothing attached, the text on its own. No-op when
+    /// there's neither. On failure records [sendError] and preserves whatever
+    /// didn't go out.
+    suspend fun send() {
+        if (input.trim().isEmpty() && _stagedAttachments.value.isEmpty()) return
+        sendComposer(leading = null)
+    }
+
+    /// Sends the composer's text and tray, with [leading] (a voice note) as the
+    /// first attachment when given — it carries the text as its caption, and
+    /// the tray's attachments follow it in the same batch, so the agent gets
+    /// the whole message as one turn.
+    private suspend fun sendComposer(leading: StagedAttachment?) {
+        val trimmed = input.trim()
+        val attachments = listOfNotNull(leading) + _stagedAttachments.value
+        _isSending.value = true
+        try {
+            // Clear in the SAME tick as the tap, before the round-trip — a late
+            // clear leaves a window where a focused field writes its cached value
+            // back over it (the message sent, but the text stayed in the field).
+            val pending = input
+            input = ""
+            _stagedAttachments.value = emptyList()
+            lastRecalledValue = null
+            _isNavigatingHistory.value = false
+            folderSuggestionsSuppressedFor = null
+            ComposerDraftMemory.forget(roomID)
+
+            try {
+                if (attachments.isEmpty()) {
+                    timeline.sendText(trimmed)
+                } else {
+                    sendAttachments(attachments, trimmed)
+                }
+                if (trimmed.isNotEmpty()) history.record(trimmed, roomID)
+                recentFolderArgument(trimmed)?.let { recentFolders.record(it) }
+                _sendError.value = null
+            } catch (cancelled: AttachmentSendCancelled) {
+                // The composer left composition mid-upload (its scope was
+                // cancelled): what didn't go out — a voice note included — goes
+                // back in the tray, with the text unless it already went, so
+                // nothing the user made is lost. Still a cancellation.
+                _stagedAttachments.value = cancelled.unsent + _stagedAttachments.value
+                if (!cancelled.captionDelivered) restoreInput(pending)
+                throw cancelled
+            } catch (failure: AttachmentSendFailure) {
+                _sendError.value = failure.underlying.message ?: failure.underlying.toString()
+                // Whatever didn't go out goes back in the tray, ahead of anything
+                // attached while the send was in flight.
+                _stagedAttachments.value = failure.unsent + _stagedAttachments.value
+                // If the caption's attachment made it, the text HAS been
+                // delivered — restoring it would show already-sent words.
+                if (failure.captionDelivered) return
+                restoreInput(pending)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (error: Throwable) {
+                _sendError.value = error.message ?: error.toString()
+                restoreInput(pending)
+            }
+        } finally {
+            _isSending.value = false
+        }
+    }
+
+    private var commandInFlight = false
+
+    /// Sends [text] as a plain message through the same timeline path as [send],
+    /// bypassing the composer input and attachment tray. Used by one-tap
+    /// affordances such as the compact-context header. Records [sendError] only
+    /// on its own failure — a success does NOT clear a pre-existing composer
+    /// error, which belongs to the [send] path. A repeated tap while a command
+    /// is already in flight is ignored, so an impatient double-tap can't queue a
+    /// second bare send. Never mutates [input] or the staged attachments.
+    suspend fun sendCommand(text: String) {
+        if (commandInFlight) return
+        commandInFlight = true
+        try {
+            timeline.sendText(text)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            _sendError.value = error.message ?: error.toString()
+        } finally {
+            commandInFlight = false
+        }
+    }
+
+    /// Puts the user's text back after a failed send — unless they've moved on
+    /// (a late failure must not overwrite a message typed in the meantime).
+    private fun restoreInput(pending: String) {
+        if (input.isNotEmpty()) return
+        input = pending
+        ComposerDraftMemory.store(roomID, pending)
+    }
+
+    /// Uploads staged attachments in order, hanging the caption on the first.
+    ///
+    /// The caption goes on ONE attachment because the bridge injects each
+    /// media event as its own prompt (or, when the frames carry a batch tag,
+    /// folds them into one prompt — either way a repeated caption would make
+    /// claude read the same sentence once per photo). First rather than last
+    /// matches every other chat client, and means claude has the context
+    /// before it sees the pictures.
+    ///
+    /// Stops at the first failure instead of pressing on.
+    private suspend fun sendAttachments(attachments: List<StagedAttachment>, caption: String) {
+        var captionDelivered = false
+        // One batch id for the whole send, but only when there IS a batch: a
+        // single attachment goes untagged, so its journal frame is
+        // byte-identical to what an older bridge already understands. The
+        // bridge uses the tag to gather these sequential uploads back into
+        // the one message the user wrote, instead of starting a turn on the
+        // first image and busy-queueing the rest.
+        //
+        // An attachment that failed out of an earlier send arrives here
+        // already carrying its tag (stamped in the catch below) and keeps it
+        // verbatim. Fresh tags are minted only across the untagged
+        // attachments — a fresh id only when there are ≥2 of them, with
+        // index/total computed over the untagged subset — so a retry neither
+        // re-brands the members of the old batch nor takes a place in a new
+        // one. Mirrors matron-apple#157.
+        val untaggedCount = attachments.count { it.batchTag == null }
+        val freshBatchID = if (untaggedCount > 1) UUID.randomUUID().toString() else null
+        var freshIndex = 0
+        val planned = attachments.map { attachment ->
+            when {
+                attachment.batchTag != null -> attachment
+                freshBatchID == null -> attachment
+                else -> {
+                    freshIndex += 1
+                    attachment.carrying(AttachmentBatchTag(id = freshBatchID, index = freshIndex, total = untaggedCount))
+                }
+            }
+        }
+        try {
+            planned.forEachIndexed { index, attachment ->
+                val itemCaption = if (index == 0 && caption.isNotEmpty()) caption else null
+                val sendIndex = index + 1
+                val batch = attachment.batchTag
+                _uploadProgress.value = UploadProgress(
+                    filename = attachment.filename, index = sendIndex,
+                    count = attachments.size, fraction = 0.0,
+                )
+                // Fraction updates arrive on an OkHttp writer thread; drop
+                // stale ones that land after this attachment (or the whole
+                // batch) has moved on.
+                val onProgress: (Double) -> Unit = { fraction ->
+                    _uploadProgress.value = _uploadProgress.value
+                        ?.takeIf { it.index == sendIndex }
+                        ?.copy(fraction = fraction)
+                        ?: _uploadProgress.value
+                }
+                try {
+                    // Off-main file read: a multi-MB staged screenshot loaded
+                    // synchronously on the main dispatcher froze the composer
+                    // for visible fractions of a second.
+                    val data = withContext(Dispatchers.IO) { attachment.file.readBytes() }
+                    if (attachment.isImage) {
+                        timeline.sendImage(
+                            data, attachment.filename, attachment.mimeType, itemCaption, batch, onProgress,
+                        )
+                    } else {
+                        timeline.sendFile(
+                            data, attachment.filename, attachment.mimeType, itemCaption, batch, onProgress,
+                        )
+                    }
+                } catch (cancel: CancellationException) {
+                    throw AttachmentSendCancelled(
+                        unsent = planned.subList(index, planned.size).toList(),
+                        captionDelivered = captionDelivered,
+                    ).apply { initCause(cancel) }
+                } catch (error: Throwable) {
+                    // Each unsent attachment goes back to the tray stamped
+                    // with the tag its frame was about to carry (`planned`
+                    // holds the stamped copies), so the retry re-emits it
+                    // under the ORIGINAL batch_id/index/total. The bridge
+                    // (lib/journal-media.js) gathers frames by batch id:
+                    // under the original id a retried frame either deposits
+                    // into the still-open gather — completing the batch — or,
+                    // if the batch already finalized without it, the
+                    // `finalized` map routes it down the immediate per-frame
+                    // path. A freshly minted id could do neither: the frame
+                    // would wait forever for siblings that already went out,
+                    // and the user's one message would arrive fractured.
+                    throw AttachmentSendFailure(
+                        underlying = error,
+                        unsent = planned.subList(index, planned.size).toList(),
+                        captionDelivered = captionDelivered,
+                    )
+                }
+                attachment.deleteStagedCopy()
+                if (itemCaption != null) captionDelivered = true
+            }
+        } finally {
+            _uploadProgress.value = null
+        }
+    }
+
+    /// Carries context out of [sendAttachments] for [send] to restore exactly
+    /// what didn't go out.
+    private class AttachmentSendFailure(
+        val underlying: Throwable,
+        val unsent: List<StagedAttachment>,
+        val captionDelivered: Boolean,
+    ) : Exception()
+
+    /// The cancellation counterpart of [AttachmentSendFailure]: still a
+    /// [CancellationException], so it propagates as one, but carrying what
+    /// [send] needs to put back.
+    private class AttachmentSendCancelled(
+        val unsent: List<StagedAttachment>,
+        val captionDelivered: Boolean,
+    ) : CancellationException("attachment send cancelled")
+
+    /// Up-arrow: recalls an older sent message into [input], terminal-style.
+    /// No-op when there's no older entry. Enters navigation mode on success.
+    fun recallOlder() {
+        val text = history.recallOlder(roomID, input) ?: return
+        applyRecalled(text)
+        _isNavigatingHistory.value = true
+    }
+
+    /// Down-arrow: walks forward toward newer messages, finally restoring the
+    /// stashed draft (exiting navigation) past the newest. No-op unless walking.
+    fun recallNewer() {
+        if (!_isNavigatingHistory.value) return
+        val text = history.recallNewer(roomID) ?: return
+        applyRecalled(text)
+        _isNavigatingHistory.value = history.isNavigating
+    }
+
+    /// Called on every input mutation. A user edit exits history navigation and
+    /// clears the palette highlight + folder suppression.
+    fun handleInputChange() {
+        _paletteSelection.value = null
+        folderSuggestionsSuppressedFor?.let { if (input != it) folderSuggestionsSuppressedFor = null }
+        if (input == lastRecalledValue) return
+        lastRecalledValue = null
+        if (_isNavigatingHistory.value) {
+            _isNavigatingHistory.value = false
+            history.endRecall()
+        }
+    }
+
+    /// Exits an active history walk, restoring the stashed in-progress draft.
+    /// Called on disappear BEFORE persisting the draft. No-op outside navigation.
+    fun exitHistoryNavigation() {
+        if (!_isNavigatingHistory.value) return
+        _isNavigatingHistory.value = false
+        val draft = history.cancelRecall() ?: return
+        applyRecalled(draft)
+    }
+
+    private fun applyRecalled(text: String) {
+        lastRecalledValue = text
+        input = text
+    }
+
+    /// Extracts the folder-path argument from a sent `/start`/`/workdir` command
+    /// line (`/` or `!` prefix), skipping leading `--flag` tokens. `null` when the
+    /// line isn't such a command or carries no path.
+    fun recentFolderArgument(text: String): String? = Companion.recentFolderArgument(text)
+
+    /// Stages each file into the tray rather than sending it. Unreadable files
+    /// are reported via [sendError] and staged nothing.
+    suspend fun attachFiles(files: List<File>) {
+        for (file in files) {
+            try {
+                _stagedAttachments.value = _stagedAttachments.value + StagedAttachment.stage(file, stagingDirectory)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (error: Throwable) {
+                _sendError.value = error.message ?: error.toString()
+            }
+        }
+    }
+
+    /// Drops one attachment from the tray (the tray's per-item ✕).
+    fun removeAttachment(id: String) {
+        val attachment = _stagedAttachments.value.firstOrNull { it.id == id } ?: return
+        _stagedAttachments.value = _stagedAttachments.value.filterNot { it.id == id }
+        attachment.deleteStagedCopy()
+    }
+
+    /// Drops every staged attachment and deletes their copies.
+    fun discardAttachments() {
+        _stagedAttachments.value.forEach { it.deleteStagedCopy() }
+        _stagedAttachments.value = emptyList()
+    }
+
+    /// Sends a recorded voice note (a temp `.m4a`) as a `file` attachment with an
+    /// `audio/*` content type, together with whatever the composer holds: the
+    /// typed text rides as the voice note's caption and the tray's attachments
+    /// follow it in one batch, so the agent gets the text, the transcript and
+    /// the attachments as one turn. [duration] is informational.
+    ///
+    /// The recording is staged like any attachment, so a failed send puts it
+    /// back in the tray (with the text restored, as for the send button) for
+    /// the user to send again. Only once it is staged is the temp file deleted.
+    /// If staging itself fails (a full disk), the recording goes out on its
+    /// own straight from the temp file, leaving the draft and tray alone.
+    suspend fun sendVoiceNote(file: File, duration: Duration) {
+        val voiceNote = try {
+            StagedAttachment.stage(file, stagingDirectory, filename = "voice-note.m4a", mimeType = "audio/mp4")
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            sendUnstagedVoiceNote(file)
+            return
+        }
+        runCatching { file.delete() }
+        sendComposer(leading = voiceNote)
+    }
+
+    /// The pre-staging voice-note send. On failure the file is deliberately
+    /// left in place — deleting a recording nobody could recover is permanent
+    /// data loss with nothing to show for it.
+    private suspend fun sendUnstagedVoiceNote(file: File) {
+        try {
+            timeline.sendFile(file.readBytes(), "voice-note.m4a", "audio/mp4", null)
+            _sendError.value = null
+            runCatching { file.delete() }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            _sendError.value = error.message ?: error.toString()
+        }
+    }
+
+    /// Surfaces a composer-level error that occurs outside [send]/[attachFiles]
+    /// — attachment-staging failures (picker read errors), and mic/voice-note
+    /// failures (permission denied, recorder start failure) reported by the UI.
+    fun reportAttachmentError(message: String) {
+        _sendError.value = message
+    }
+
+    /// Clears a shown [sendError] — the composer's dismissible error banner's
+    /// close action.
+    fun dismissError() {
+        _sendError.value = null
+    }
+
+    companion object {
+        /// Whether the attachment/voice-note controls are available (server
+        /// whitelists `file`/`image` sends backed by `POST /media`).
+        const val MEDIA_AVAILABLE = true
+
+        /// Pure helper: the folder-path argument to record from a sent
+        /// `/start`/`/workdir` command line, or `null`.
+        fun recentFolderArgument(text: String): String? {
+            val trimmed = text.trim()
+            val first = trimmed.firstOrNull() ?: return null
+            if (first != '/' && first != '!') return null
+            val tokens = trimmed.drop(1).split(Regex("\\s+")).filter { it.isNotEmpty() }
+            // Case-insensitive, agreeing with folderCompletionPartial and the
+            // palette — one input, one case rule.
+            val command = tokens.firstOrNull()?.lowercase() ?: return null
+            if (command != "start" && command != "workdir") return null
+            // Smart-dashed flags ("—browser") are flags, not folders — the
+            // bridge normalizes them, and recording one would poison recents.
+            for (token in tokens.drop(1)) {
+                if (!BotCommandCatalog.normalizeLeadingDashes(token).startsWith("--")) return token
+            }
+            return null
+        }
+    }
+}

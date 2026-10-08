@@ -1,0 +1,529 @@
+package chat.matron.android.journal
+
+import chat.matron.android.models.AttachmentBatchTag
+import chat.matron.android.models.SessionStatus
+import chat.matron.android.models.SessionStatusUpdate
+import java.time.Instant
+import kotlinx.serialization.json.JsonObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class WireModelsTest {
+    private fun encodedObject(op: ClientOp): JsonObject =
+        parseJsonObjectOrNull(op.encoded())!!
+
+    @Test
+    fun decodeJournalFrame() {
+        val text = """{"kind":"journal","seq":43,"convo_id":"c-abc","ts":1752200000000,"sender":"user:alice","type":"text","payload":{"body":"hi"}}"""
+        val frame = ServerFrame.decode(text)
+        assertTrue(frame is ServerFrame.Journal)
+        val event = (frame as ServerFrame.Journal).event
+        assertEquals(43L, event.seq)
+        assertEquals("c-abc", event.convoID)
+        assertEquals("user:alice", event.sender)
+        assertEquals("text", event.type)
+        assertEquals(Instant.ofEpochMilli(1_752_200_000_000), event.ts)
+        assertEquals("hi", event.payload.stringOrNull("body"))
+    }
+
+    @Test
+    fun decodeControlAndEphemeralFrames() {
+        val hello = ServerFrame.decode("""{"kind":"control","op":"hello_ok","seq":42}""")
+        assertEquals(ServerFrame.HelloOK(42), hello)
+
+        val error = ServerFrame.decode("""{"kind":"control","op":"error","code":"forbidden","ref":"send"}""")
+        assertTrue(error is ServerFrame.Error)
+        error as ServerFrame.Error
+        assertEquals("forbidden", error.code)
+        assertEquals("send", error.ref)
+
+        assertEquals(ServerFrame.SnapshotRequired, ServerFrame.decode("""{"kind":"control","op":"snapshot_required"}"""))
+
+        val ephemeral = ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","message_ref":"m7","replace_text":"progress 3"}""")
+        assertTrue(ephemeral is ServerFrame.Ephemeral)
+        val update = (ephemeral as ServerFrame.Ephemeral).update
+        assertEquals("m7", update.messageRef)
+        assertEquals(EphemeralUpdate.Change.Replace("progress 3"), update.change)
+    }
+
+    @Test
+    fun decodeActivityEphemeralFrames() {
+        val thinking = ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","activity":{"state":"thinking"}}""")
+        assertTrue(thinking is ServerFrame.Activity)
+        (thinking as ServerFrame.Activity).update.let {
+            assertEquals("c1", it.convoID)
+            assertEquals(ActivityUpdate.State.THINKING, it.state)
+            assertNull(it.detail)
+        }
+
+        val tool = ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","activity":{"state":"tool","detail":"Bash"}}""")
+        (tool as ServerFrame.Activity).update.let {
+            assertEquals(ActivityUpdate.State.TOOL, it.state)
+            assertEquals("Bash", it.detail)
+        }
+
+        val idle = ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","activity":{"state":"idle"}}""")
+        assertEquals(ActivityUpdate.State.IDLE, (idle as ServerFrame.Activity).update.state)
+
+        assertNull(ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","activity":{"state":"dancing"}}"""))
+    }
+
+    @Test
+    fun decodeToolStreamAppendFrame() {
+        val frame = ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","message_ref":"tu1","tool_stream":{"event":"append","offset":7,"chunk":"hello\n"}}""")
+        assertEquals(
+            ServerFrame.ToolStream(ToolStreamUpdate("c1", "tu1", ToolStreamUpdate.Event.Append(7, "hello\n"))),
+            frame,
+        )
+    }
+
+    @Test
+    fun decodeToolStreamSyncFrame() {
+        val frame = ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","message_ref":"tu1","tool_stream":{"event":"sync","meta":{"tool":"Bash","command":"make"},"offset":0,"content":"$ make\n","head_truncated":false}}""")
+        assertEquals(
+            ServerFrame.ToolStream(ToolStreamUpdate("c1", "tu1",
+                ToolStreamUpdate.Event.Sync("Bash", "make", 0, "$ make\n", false))),
+            frame,
+        )
+    }
+
+    @Test
+    fun decodeToolStreamSyncWithoutMetaAndTruncatedHead() {
+        val frame = ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","message_ref":"tu1","tool_stream":{"event":"sync","offset":512,"content":"tail","head_truncated":true}}""")
+        assertEquals(
+            ServerFrame.ToolStream(ToolStreamUpdate("c1", "tu1",
+                ToolStreamUpdate.Event.Sync(null, null, 512, "tail", true))),
+            frame,
+        )
+    }
+
+    @Test
+    fun decodeToolStreamEndFrame() {
+        val frame = ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","message_ref":"tu1","tool_stream":{"event":"end","reason":"stale"}}""")
+        assertEquals(
+            ServerFrame.ToolStream(ToolStreamUpdate("c1", "tu1", ToolStreamUpdate.Event.End("stale"))),
+            frame,
+        )
+    }
+
+    @Test
+    fun decodeToolStreamUnknownEventSkipsFrame() {
+        assertNull(ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","message_ref":"tu1","tool_stream":{"event":"wat"}}"""))
+    }
+
+    @Test
+    fun toolStreamFrameDoesNotDecodeAsEmptyTextEphemeral() {
+        val frame = ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","message_ref":"tu1","tool_stream":{"event":"append","offset":0,"chunk":"x"}}""")
+        assertFalse(frame is ServerFrame.Ephemeral)
+    }
+
+    @Test
+    fun streamEphemeralStillRequiresMessageRef() {
+        assertNull(ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","text":"hi"}"""))
+    }
+
+    @Test
+    fun decodeGarbageReturnsNull() {
+        assertNull(ServerFrame.decode("not json"))
+        assertNull(ServerFrame.decode("""{"kind":"journal","seq":"nope"}"""))
+    }
+
+    @Test
+    fun encodeClientOps() {
+        val hello = encodedObject(ClientOp.Hello("t", 5))
+        assertEquals("hello", hello.stringOrNull("op"))
+        assertEquals(5L, hello.longOrNull("cursor"))
+
+        val send = encodedObject(ClientOp.Send("c1", "hi", "L1"))
+        assertEquals("send", send.stringOrNull("op"))
+        assertEquals("text", send.stringOrNull("type"))
+        assertEquals("hi", send.objectOrNull("payload")?.stringOrNull("body"))
+        assertEquals("L1", send.stringOrNull("local_id"))
+
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42, null,
+            null, "L2"))
+        assertEquals("send", media.stringOrNull("op"))
+        assertEquals("image", media.stringOrNull("type"))
+        assertEquals("b9", media.stringOrNull("blob_ref"))
+        assertEquals("L2", media.stringOrNull("local_id"))
+        val mediaPayload = media.objectOrNull("payload")
+        assertEquals("b9", mediaPayload?.stringOrNull("blob_ref"))
+        assertEquals("cat.png", mediaPayload?.stringOrNull("name"))
+        assertEquals("image/png", mediaPayload?.stringOrNull("content_type"))
+        assertEquals(42, mediaPayload?.intOrNull("size"))
+        assertNull(mediaPayload?.stringOrNull("caption"))
+
+        val reply = encodedObject(ClientOp.PromptReply("c1", 40, "yes", null))
+        assertEquals(40L, reply.longOrNull("target_seq"))
+        assertEquals("yes", reply.stringOrNull("choice"))
+        assertTrue(reply["text"] is kotlinx.serialization.json.JsonNull)
+
+        val viewingNil = encodedObject(ClientOp.Viewing(null))
+        assertTrue(viewingNil["convo_id"] is kotlinx.serialization.json.JsonNull)
+
+        val ack = encodedObject(ClientOp.Ack(42))
+        assertEquals(42L, ack.longOrNull("cursor"))
+
+        val marker = encodedObject(ClientOp.ReadMarker("c1", 40))
+        assertEquals("read_marker", marker.stringOrNull("op"))
+        assertEquals(40L, marker.longOrNull("up_to_seq"))
+    }
+
+    @Test
+    fun encodeSendMediaCarriesCaptionInsideThePayload() {
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42,
+            "what breed is this?", null, "L2"))
+        assertEquals("what breed is this?", media.objectOrNull("payload")?.stringOrNull("caption"))
+    }
+
+    @Test
+    fun encodeSendMediaTreatsEmptyCaptionAsAbsent() {
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42, "",
+            null, "L2"))
+        assertNull(media.objectOrNull("payload")?.stringOrNull("caption"))
+    }
+
+    /// Ported from matron-apple's `WireModelsTests.
+    /// testEncodeSendMediaCarriesTheBatchTagInsideThePayload`. The batch tag
+    /// rides inside `payload` for the same reason the caption does — that's
+    /// the only part of a media send the server stores verbatim and replays
+    /// to the bridge, which gathers frames sharing a `batch_id` into one
+    /// prompt.
+    @Test
+    fun encodeSendMediaCarriesTheBatchTagInsideThePayload() {
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42,
+            null, AttachmentBatchTag(id = "B7", index = 2, total = 3), "L2"))
+        val payload = media.objectOrNull("payload")
+        assertEquals("B7", payload?.stringOrNull("batch_id"))
+        assertEquals(2, payload?.intOrNull("batch_index"))
+        assertEquals(3, payload?.intOrNull("batch_total"))
+    }
+
+    /// Ported from matron-apple's `WireModelsTests.
+    /// testEncodeSendMediaOmitsBatchKeysWhenUntagged`. An untagged send omits
+    /// the batch keys entirely — a lone attachment's frame stays
+    /// byte-identical to what an older bridge understands.
+    @Test
+    fun encodeSendMediaOmitsBatchKeysWhenUntagged() {
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.IMAGE, "b9", "cat.png", "image/png", 42,
+            null, null, "L2"))
+        val payload = media.objectOrNull("payload")
+        assertNotNull(payload)
+        // containsKey rather than xOrNull: the *OrNull helpers can't tell an
+        // absent key from an explicit JSON null, and "byte-identical to an
+        // untagged frame" means the keys must not appear at all.
+        assertFalse(payload!!.containsKey("batch_id"))
+        assertFalse(payload.containsKey("batch_index"))
+        assertFalse(payload.containsKey("batch_total"))
+    }
+
+    @Test
+    fun decodeSessionStatusEphemeralFrame() {
+        val text = """{"kind":"ephemeral","convo_id":"c1","status":{"model":"claude-fable-5","email":"alice@example.com","context":{"tokens":265000,"window":1000000,"pct":27},"limits":[{"label":"Week (Fable)","percent":80,"resets":"Jul 12, 6:59pm (UTC)","resets_at":"2026-07-12T18:59:00.000Z"}]}}"""
+        val frame = ServerFrame.decode(text)
+        assertTrue(frame is ServerFrame.SessionStatusFrame)
+        val update = (frame as ServerFrame.SessionStatusFrame).update
+        assertEquals("c1", update.convoID)
+        assertEquals("claude-fable-5", update.model)
+        assertEquals("alice@example.com", update.email)
+        assertEquals(SessionStatus.Context(265_000, 1_000_000, 27), update.context)
+        assertEquals(
+            listOf(SessionStatus.Limit("Week (Fable)", 80, "Jul 12, 6:59pm (UTC)",
+                Instant.parse("2026-07-12T18:59:00.000Z"))),
+            update.limits,
+        )
+        assertNull(update.taskRef)
+    }
+
+    @Test
+    fun decodeSessionStatusCarriesTaskRefForChild() {
+        val text = """{"kind":"ephemeral","convo_id":"p1:sub:a1","status":{"model":"claude-fable-5","task_ref":"toolu_abc123"}}"""
+        val frame = ServerFrame.decode(text) as ServerFrame.SessionStatusFrame
+        assertEquals("p1:sub:a1", frame.update.convoID)
+        assertEquals("claude-fable-5", frame.update.model)
+        assertEquals("toolu_abc123", frame.update.taskRef)
+    }
+
+    @Test
+    fun decodeSessionStatusPartialAndMalformed() {
+        val partial = ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","status":{"context":{"tokens":5000,"window":200000,"pct":3}}}""")
+                as ServerFrame.SessionStatusFrame
+        assertNull(partial.update.model)
+        assertNull(partial.update.limits)
+        assertNull(partial.update.email)
+        assertEquals(5000, partial.update.context?.tokens)
+
+        val badDate = ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","status":{"limits":[{"label":"Session","percent":39,"resets":"soon","resets_at":"not-a-date"}]}}""")
+                as ServerFrame.SessionStatusFrame
+        assertEquals("soon", badDate.update.limits?.first()?.resets)
+        assertNull(badDate.update.limits?.first()?.resetsAt)
+
+        val noPct = ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","status":{"model":"m","context":{"tokens":5000}}}""")
+                as ServerFrame.SessionStatusFrame
+        assertNull(noPct.update.context)
+        assertEquals("m", noPct.update.model)
+
+        val mixed = ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","status":{"limits":[{"percent":5},{"label":"Session","percent":39}]}}""")
+                as ServerFrame.SessionStatusFrame
+        assertEquals(listOf("Session"), mixed.update.limits?.map { it.label })
+
+        assertTrue(ServerFrame.decode("""{"kind":"ephemeral","convo_id":"c1","message_ref":"m7","text":"hi"}""")
+                is ServerFrame.Ephemeral)
+    }
+
+    @Test
+    fun decodeRPCResponseFrames() {
+        val ok = ServerFrame.decode("""{"kind":"rpc","response":{"request_id":"r1","agent_device_id":9,"ok":true,"result":{"convo_id":"c-new"}}}""")
+                as ServerFrame.RpcResponse
+        assertEquals("r1", ok.response.requestID)
+        assertEquals(9L, ok.response.agentDeviceID)
+        val okOutcome = ok.response.outcome as RPCResponse.Outcome.Success
+        assertEquals("c-new", (okOutcome.result as JsonObject).stringOrNull("convo_id"))
+
+        val fail = ServerFrame.decode("""{"kind":"rpc","response":{"request_id":"r2","agent_device_id":9,"ok":false,"error":{"code":"bad_workdir","detail":"/nope"}}}""")
+                as ServerFrame.RpcResponse
+        val failOutcome = fail.response.outcome as RPCResponse.Outcome.Failure
+        assertEquals("bad_workdir", failOutcome.code)
+        assertEquals("/nope", failOutcome.detail)
+
+        val bare = ServerFrame.decode("""{"kind":"rpc","response":{"request_id":"r3","agent_device_id":9,"ok":false}}""")
+                as ServerFrame.RpcResponse
+        val bareOutcome = bare.response.outcome as RPCResponse.Outcome.Failure
+        assertNull(bareOutcome.code)
+
+        assertNull(ServerFrame.decode("""{"kind":"rpc","request":{"request_id":"r1","from_device_id":7,"method":"start","params":null}}"""))
+        assertNull(ServerFrame.decode("""{"kind":"rpc","response":{"agent_device_id":9,"ok":true}}"""))
+        assertNull(ServerFrame.decode("""{"kind":"rpc","response":{"request_id":"r1","agent_device_id":9}}"""))
+    }
+
+    @Test
+    fun decodeControlErrorCarriesRequestIDAndDetail() {
+        val err = ServerFrame.decode("""{"kind":"control","op":"error","code":"not_ready","ref":"agent_request","request_id":"r9","detail":"mid-replay"}""")
+                as ServerFrame.Error
+        assertEquals("not_ready", err.code)
+        assertEquals("agent_request", err.ref)
+        assertEquals("r9", err.requestID)
+        assertEquals("mid-replay", err.detail)
+
+        val noRid = ServerFrame.decode("""{"kind":"control","op":"error","code":"forbidden","ref":"send"}""")
+                as ServerFrame.Error
+        assertNull(noRid.requestID)
+    }
+
+    @Test
+    fun encodeAgentRequestOp() {
+        val params = """{"workdir":"~/dev","browser":true}"""
+        val op = ClientOp.AgentRequest("r1", 9, "start", params)
+        val obj = encodedObject(op)
+        assertEquals("agent_request", obj.stringOrNull("op"))
+        assertEquals("r1", obj.stringOrNull("request_id"))
+        assertEquals(9L, obj.longOrNull("agent_device_id"))
+        assertEquals("start", obj.stringOrNull("method"))
+        val sent = obj.objectOrNull("params")
+        assertEquals("~/dev", sent?.stringOrNull("workdir"))
+        assertEquals(true, sent?.boolOrNull("browser"))
+
+        val broken = ClientOp.AgentRequest("r2", 9, "recent_folders", "junk")
+        val brokenObj = encodedObject(broken)
+        assertEquals(true, brokenObj.objectOrNull("params")?.isEmpty())
+    }
+
+    @Test
+    fun encodeSendMediaFileKindUsesFileWireString() {
+        val media = encodedObject(ClientOp.SendMedia("c1", MediaKind.FILE, "b9", "report.pdf", "application/pdf",
+            42, null, null, "L2"))
+        assertEquals("file", media.stringOrNull("type"))
+    }
+
+    @Test
+    fun sessionStateWireRoundTrip() {
+        assertEquals(SessionState.Running, SessionState.fromWire("running"))
+        assertEquals(SessionState.Done, SessionState.fromWire("done"))
+        assertEquals("running", SessionState.Running.wire)
+        assertEquals("done", SessionState.Done.wire)
+
+        // Unknown wire values must round-trip unchanged rather than being
+        // coerced or dropped.
+        val other = SessionState.fromWire("waiting")
+        assertEquals(SessionState.Other("waiting"), other)
+        assertEquals("waiting", other.wire)
+    }
+
+    // MARK: workdir + vitals decode (matron-apple #90 port)
+
+    @Test
+    fun decodeStatusWorkdirAndVitals() {
+        val text = """{"kind":"ephemeral","convo_id":"c1","status":{"workdir":"/Users/alice/Dev/matron-apple","vitals":{"cpu_pct":12,"ram_pct":63}}}"""
+        val update = (ServerFrame.decode(text) as ServerFrame.SessionStatusFrame).update
+        assertEquals("/Users/alice/Dev/matron-apple", update.workdir)
+        assertEquals(SessionStatus.Vitals(cpuPct = 12, ramPct = 63), update.vitals)
+    }
+
+    @Test
+    fun decodeStatusVitalsWithOnlyRam() {
+        // CPU needs two sampler ticks after a bridge boot — the first frames
+        // carry RAM alone and must still decode.
+        val text = """{"kind":"ephemeral","convo_id":"c1","status":{"vitals":{"ram_pct":41}}}"""
+        val update = (ServerFrame.decode(text) as ServerFrame.SessionStatusFrame).update
+        assertEquals(SessionStatus.Vitals(cpuPct = null, ramPct = 41), update.vitals)
+    }
+
+    /// Ports matron-apple's `testDecodesDeviceMetaRenameFrame`.
+    @Test
+    fun decodesDeviceMetaRenameFrame() {
+        val frame = ServerFrame.decode("""{"kind":"device_meta","device_id":7,"name":"dev-y"}""")
+        // A server predating tags omits the key: null here is "unknown".
+        assertEquals(ServerFrame.DeviceMeta(7, "dev-y", tagChar = null, tagCharKnown = false), frame)
+        // Malformed frames are skipped, not crashed on.
+        assertNull(ServerFrame.decode("""{"kind":"device_meta","name":"dev-y"}"""))
+        assertNull(ServerFrame.decode("""{"kind":"device_meta","device_id":7}"""))
+    }
+
+    @Test
+    fun decodeStatusEmptyVitalsDegradesToNull() {
+        // An object carrying neither number degrades to null so the merge
+        // keeps the last good sample instead of blanking it.
+        val text = """{"kind":"ephemeral","convo_id":"c1","status":{"model":"m","vitals":{}}}"""
+        val update = (ServerFrame.decode(text) as ServerFrame.SessionStatusFrame).update
+        assertEquals("m", update.model)
+        assertNull(update.vitals)
+    }
+
+    // MARK: - session-derived argument lists + effort (apple #163)
+
+    private fun status(text: String) = (ServerFrame.decode(text) as ServerFrame.SessionStatusFrame).update
+
+    @Test
+    fun decodeSessionStatusCarriesSuggestionListsAndEffort() {
+        val update = status("""{"kind":"ephemeral","convo_id":"c1","status":{"model":"opus","effort":"high","model_options":[{"value":"opus","label":"Opus"},{"value":"sonnet","label":"Sonnet"}],"effort_levels":[{"value":"low","label":"Low"},{"value":"xhigh"}]}}""")
+        assertEquals(SessionStatusUpdate.Effort.Set("high"), update.effort)
+        assertEquals(listOf(SessionStatus.Option("opus", "Opus"), SessionStatus.Option("sonnet", "Sonnet")), update.modelOptions)
+        assertEquals(listOf(SessionStatus.Option("low", "Low"), SessionStatus.Option("xhigh", null)), update.effortLevels)
+    }
+
+    /// Absent and empty are different statements and must stay different in
+    /// the model: an older bridge omits the field entirely (null — "doesn't
+    /// say"), while an agent with nothing to offer sends `[]` ("offers
+    /// nothing"). Deliberately unlike `limits`, which collapses an empty array.
+    @Test
+    fun decodeSessionStatusDistinguishesAbsentFromEmptyOptionLists() {
+        val absent = status("""{"kind":"ephemeral","convo_id":"c1","status":{"model":"opus"}}""")
+        assertNull(absent.modelOptions)
+        assertNull(absent.effortLevels)
+        assertNull(absent.effort)
+        val empty = status("""{"kind":"ephemeral","convo_id":"c1","status":{"model_options":[],"effort_levels":[]}}""")
+        assertEquals(emptyList<SessionStatus.Option>(), empty.modelOptions)
+        assertEquals(emptyList<SessionStatus.Option>(), empty.effortLevels)
+        // An entry without a `value` carries nothing selectable and is skipped.
+        val mixed = status("""{"kind":"ephemeral","convo_id":"c1","status":{"model_options":[{"label":"Nameless"},{"value":"opus"}]}}""")
+        assertEquals(listOf("opus"), mixed.modelOptions?.map { it.value })
+    }
+
+    /// A non-empty array whose entries ALL fail to parse is a malformed frame,
+    /// not the agent saying it offers nothing — it degrades to null (silence)
+    /// so the held list stands. A wire `[]` is still a statement.
+    @Test
+    fun decodeSessionStatusAllMalformedOptionsSayNothing() {
+        val garbled = status("""{"kind":"ephemeral","convo_id":"c1","status":{"model_options":[{"label":"Nameless"}],"effort_levels":["low"]}}""")
+        assertNull(garbled.modelOptions)
+        assertNull(garbled.effortLevels)
+        var held = SessionStatus(modelOptions = listOf(SessionStatus.Option("opus", "Opus")))
+        held = held.merged(garbled)
+        assertEquals(listOf("opus"), held.modelOptions?.map { it.value })
+        held = held.merged(status("""{"kind":"ephemeral","convo_id":"c1","status":{"model_options":[]}}"""))
+        assertEquals(emptyList<SessionStatus.Option>(), held.modelOptions)
+    }
+
+    /// `effort` is the one tri-state field: missing is silence, null is the
+    /// bridge saying it is no longer tracking a level.
+    @Test
+    fun decodeSessionStatusEffortIsTriState() {
+        assertEquals(SessionStatusUpdate.Effort.Set("xhigh"), status("""{"kind":"ephemeral","convo_id":"c1","status":{"effort":"xhigh"}}""").effort)
+        val cleared = status("""{"kind":"ephemeral","convo_id":"c1","status":{"model":"opus","effort":null}}""")
+        assertEquals(SessionStatusUpdate.Effort.Cleared, cleared.effort)
+        assertEquals("opus", cleared.model)
+        assertNull(status("""{"kind":"ephemeral","convo_id":"c1","status":{"model":"gpt-5"}}""").effort)
+        assertNull("a non-string, non-null effort is not a statement", status("""{"kind":"ephemeral","convo_id":"c1","status":{"effort":7}}""").effort)
+    }
+
+    // MARK: - journal-held tag characters (apple #158)
+
+    /// Key-presence carries meaning on `device_meta`: absent = a server
+    /// predating tags (unknown), present-but-null = an authoritative clear.
+    @Test
+    fun decodeDeviceMetaDistinguishesAbsentTagFromNull() {
+        val tagged = ServerFrame.decode("""{"kind":"device_meta","device_id":7,"name":"dev-y","tag_char":"Q"}""")
+        assertEquals(ServerFrame.DeviceMeta(7, "dev-y", tagChar = "Q", tagCharKnown = true), tagged)
+        val cleared = ServerFrame.decode("""{"kind":"device_meta","device_id":7,"name":"dev-y","tag_char":null}""")
+        assertEquals(ServerFrame.DeviceMeta(7, "dev-y", tagChar = null, tagCharKnown = true), cleared)
+    }
+
+    /// Journal PR #82: a bridge's own capacity report, fanned to client
+    /// sockets. Not a conversation event — no seq, no convo.
+    @Test
+    fun decodesBoxStatusFrame() {
+        val frame = ServerFrame.decode(
+            """{"kind":"box_status","device_id":9,"reported_at":1754900000000,
+                "limits":{"lines":[{"id":"session","label":"Current session","percent":12}]},
+                "account":{"email":"bob@example.com"}}""",
+        )
+        assertTrue("expected a box_status frame, got $frame", frame is ServerFrame.BoxStatusFrame)
+        frame as ServerFrame.BoxStatusFrame
+        assertEquals(9L, frame.deviceID)
+        assertEquals(1_754_900_000_000L, frame.status.reportedAtMs)
+        assertEquals(listOf(12), frame.status.capacity.limitLines.map { it.percent })
+        assertEquals("bob@example.com", frame.status.capacity.accountEmail)
+        // Malformed frames are skipped, not crashed on.
+        assertNull(ServerFrame.decode("""{"kind":"box_status","reported_at":1}"""))
+        assertNull(ServerFrame.decode("""{"kind":"box_status","device_id":9}"""))
+        assertNull(ServerFrame.decode("""{"kind":"box_status","device_id":9,"reported_at":true}"""))
+    }
+
+    /// What tells a room's title from a session's (ported from matron-apple
+    /// `testAgentRoomTitles`). A session's own title leads with its `[ab] `
+    /// short, so an arrow further in is the user's own text.
+    @Test
+    fun agentRoomTitles() {
+        for (title in listOf(
+            "↔️ [ab] mac ↔ dev-z", // until 2026-08-19
+            "🔗 [ab] mac ↔ dev-z", // before matron-bridge#228
+            "G:0b ↔️ D:26 — 8573 merged by the train", // two session tags and a topic
+            "P:66 ↔️ C:33", // no topic
+            "oak ↔️ D:26 — ci triage", // a side with no short is the box's name
+            "G:0b ↔️ same-box session", // a peer on the same bridge, by its title
+            "G:0b \u2194 D:26", // the arrow without its emoji selector
+        )) {
+            assertTrue("a room: $title", JournalEventType.isAgentRoomTitle(title))
+        }
+        for (title in listOf(
+            "new session",
+            "[ab] Fix the login page",
+            "[ab] Sync staging ↔️ production", // the user's own words
+            "🐣 [ab] Spawned by the coordinator",
+            "🐣 [ab] Spawned ↔️ in its words",
+            "a↔b", // no spaces around the arrow
+            "",
+        )) {
+            assertFalse("not a room: $title", JournalEventType.isAgentRoomTitle(title))
+        }
+    }
+
+    /// Journal "Box defaults": the live frame carries the box's full new
+    /// state; malformed frames are skipped.
+    @Test
+    fun decodesBoxDefaultsFrame() {
+        val frame = ServerFrame.decode(
+            """{"kind":"box_defaults","device_id":9,"default_agent":"codex","default_model":"gpt-5.1-codex","default_effort":null}""",
+        )
+        assertEquals(
+            ServerFrame.BoxDefaultsFrame(BoxDefaultsUpdate(9, BoxDefaults(agent = "codex", model = "gpt-5.1-codex"))),
+            frame,
+        )
+        assertNull(ServerFrame.decode("""{"kind":"box_defaults","default_agent":"codex"}"""))
+        assertNull(ServerFrame.decode("""{"kind":"box_defaults","device_id":9,"default_agent":7}"""))
+    }
+}

@@ -1,0 +1,126 @@
+package chat.matron.android.designsystem
+
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/// Pins the `A:bc` tag composition — the Swift original's `SessionTagText`
+/// returns SwiftUI `Text` runs no test can inspect, but the Android port
+/// builds `AnnotatedString`s, so the composition and the tag/chip color
+/// parity (the PR's whole point) are pinnable here.
+class SessionTagTextTest {
+    private val secondary = Color(0xFF666666)
+
+    private fun spanColors(s: AnnotatedString): List<Color> =
+        s.spanStyles.map { it.item.color }
+
+    @Test
+    fun runComposesLetterAndShortAndGatesOnBoth() {
+        val full = SessionTagText.run("Y", "dev-y", "b5", darkTheme = false, secondary = secondary)!!
+        assertEquals("Y:b5", full.text)
+
+        // Letter only (a seed title with no session short)…
+        assertEquals("Y", SessionTagText.run("Y", "dev-y", null, false, secondary)!!.text)
+        // …short only (single-box user: no letter, but sessions still differ)…
+        assertEquals("b5", SessionTagText.run(null, null, "b5", false, secondary)!!.text)
+        // …and nothing at all renders no tag.
+        assertNull(SessionTagText.run(null, null, null, false, secondary))
+    }
+
+    /// The letter must carry the SAME hue as the box's chip — tags and chips
+    /// can never disagree on color (parity pin for apple #152's requirement
+    /// that the tag reuse the BoxChip palette).
+    @Test
+    fun letterColorMatchesTheBoxChipTint() {
+        val tag = SessionTagText.run("Y", "dev-y", "b5", darkTheme = false, secondary = secondary)!!
+        assertEquals(BoxChipColors.textTint("dev-y", darkTheme = false), spanColors(tag).first())
+        assertEquals(secondary, spanColors(tag).last())
+
+        val dark = SessionTagText.run("Y", "dev-y", null, darkTheme = true, secondary = secondary)!!
+        assertEquals(BoxChipColors.textTint("dev-y", darkTheme = true), spanColors(dark).first())
+    }
+
+    @Test
+    fun roomComposesPairWithArrowAndTrioWithCommas() {
+        val pair = SessionTagText.room(
+            letters = listOf("Y", "Z"), names = listOf("dev-y", "dev-z"),
+            sessionShort = "ab", darkTheme = false, secondary = secondary,
+        )!!
+        assertEquals("Y↔Z:ab", pair.text)
+        // Each letter carries its OWN box's hue.
+        assertEquals(BoxChipColors.textTint("dev-y", false), spanColors(pair)[0])
+        assertEquals(BoxChipColors.textTint("dev-z", false), spanColors(pair)[2])
+
+        val trio = SessionTagText.room(
+            letters = listOf("A", "B", "C"), names = listOf("a", "b", "c"),
+            sessionShort = null, darkTheme = false, secondary = secondary,
+        )!!
+        assertEquals("A,B,C", trio.text)
+    }
+
+    /// The gates upstream mean a non-room, a local room, or a single-box
+    /// user all fall through to `run(...)` — mirrored here: fewer than two
+    /// letters, or mismatched parallel arrays, render no room tag.
+    @Test
+    fun roomRequiresTwoParallelEntries() {
+        assertNull(SessionTagText.room(listOf("Y"), listOf("dev-y"), "ab", false, secondary))
+        assertNull(SessionTagText.room(listOf("Y", "Z"), listOf("dev-y"), "ab", false, secondary))
+        assertNull(SessionTagText.room(emptyList(), emptyList(), "ab", false, secondary))
+    }
+
+    /// apple #155: the session short reads at the title's weight — no colour
+    /// span of its own, so it inherits the Text colour — and only the colon
+    /// (or the room separator) stays secondary.
+    @Test
+    fun shortReadsPrimary_onlySeparatorSecondary() {
+        val tag = SessionTagText.run("Y", "dev-y", "b5", darkTheme = false, secondary = secondary)!!
+        assertEquals("Y:b5", tag.text)
+        val shortStart = tag.text.indexOf("b5")
+        assertTrue(tag.spanStyles.none { it.start <= shortStart && it.end > shortStart })
+        val colon = tag.spanStyles.first { it.start == tag.text.indexOf(':') }
+        assertEquals(secondary, colon.item.color)
+
+        val bare = SessionTagText.run(null, null, "b5", false, secondary)!!
+        assertTrue("no letter, no colon — and still no span on the short", bare.spanStyles.isEmpty())
+
+        val room = SessionTagText.room(listOf("Y", "Z"), listOf("dev-y", "dev-z"), "ab", false, secondary)!!
+        val roomShort = room.text.indexOf("ab")
+        assertTrue(room.spanStyles.none { it.start <= roomShort && it.end > roomShort })
+    }
+
+    // MARK: plainLabel — the TalkBack mirror of the visual tag (apple #216)
+
+    @Test
+    fun plainLabelJoinsRoomNamesWithCommas() {
+        assertEquals("box-1, box-2", SessionTagText.plainLabel("solo", null, listOf("box-1", "box-2")))
+        assertEquals("box-1, box-2, box-3, bc", SessionTagText.plainLabel("solo", "bc", listOf("box-1", "box-2", "box-3")))
+    }
+
+    @Test
+    fun plainLabelUsesTheBoxNameNotTheLetter() {
+        assertEquals("box-2", SessionTagText.plainLabel("box-2", null))
+        assertEquals("box-2, bc", SessionTagText.plainLabel("box-2", "bc"))
+    }
+
+    /// `roomBoxNames` with exactly ONE entry must fall through to the
+    /// single-box branch — the visual `room` run requires at least 2 names
+    /// and falls back to `run` (i.e. `boxName`) below that, so this must
+    /// agree or TalkBack speaks a "room" the eye never sees.
+    @Test
+    fun plainLabelSingleRoomNameFallsThroughToBoxName() {
+        assertEquals("box-2, bc", SessionTagText.plainLabel("box-2", "bc", listOf("box-2")))
+    }
+
+    @Test
+    fun plainLabelSessionShortOnly() {
+        assertEquals("bc", SessionTagText.plainLabel(null, "bc"))
+    }
+
+    @Test
+    fun plainLabelNothingToShowIsNull() {
+        assertNull(SessionTagText.plainLabel(null, null))
+    }
+}

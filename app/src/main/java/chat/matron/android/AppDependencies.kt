@@ -1,0 +1,827 @@
+package chat.matron.android
+
+import android.content.Context
+import android.content.pm.ApplicationInfo
+import chat.matron.android.auth.AuthService
+import chat.matron.android.platform.Haptics
+import chat.matron.android.platform.SystemHaptics
+import chat.matron.android.auth.JournalAuthService
+import chat.matron.android.chat.BoxLetterMigration
+import chat.matron.android.chat.BoxLetterOverrides
+import chat.matron.android.chat.ChatService
+import chat.matron.android.chat.JournalChatService
+import chat.matron.android.chat.JournalMediaService
+import chat.matron.android.chat.JournalTimelineService
+import chat.matron.android.chat.MediaService
+import chat.matron.android.chat.TimelineService
+import chat.matron.android.journal.AgentSpawnAnswering
+import chat.matron.android.journal.ItemsProviding
+import chat.matron.android.designsystem.TrackerItemLinkOutcome
+import chat.matron.android.journal.ItemsSync
+import chat.matron.android.journal.ItemsSyncing
+import chat.matron.android.journal.MemoriesSync
+import chat.matron.android.journal.MissionsSync
+import chat.matron.android.journal.MissionsSyncing
+import chat.matron.android.journal.CoordinatorSync
+import chat.matron.android.journal.PinsSync
+import chat.matron.android.journal.PinsSyncing
+import chat.matron.android.viewmodels.CoordinatorSetting
+import chat.matron.android.viewmodels.MemoriesListViewModel
+import chat.matron.android.viewmodels.MemoryEditorViewModel
+import chat.matron.android.viewmodels.MissionDetailViewModel
+import chat.matron.android.viewmodels.NoticesSettingViewModel
+import chat.matron.android.viewmodels.MissionsListViewModel
+import chat.matron.android.viewmodels.TrackerItemLinkResolver
+import chat.matron.android.journal.JournalApi
+import chat.matron.android.journal.JournalMaintenance
+import chat.matron.android.journal.JournalStore
+import chat.matron.android.journal.StoreDiagnostics
+import chat.matron.android.journal.JournalSyncEngine
+import chat.matron.android.journal.OkHttpWebSocketConnector
+import chat.matron.android.journal.db.MatronDatabase
+import chat.matron.android.models.LaunchTimeline
+import chat.matron.android.models.MatronDebug
+import chat.matron.android.models.UserSession
+import chat.matron.android.push.JournalPushService
+import chat.matron.android.push.PushService
+import chat.matron.android.search.SearchBackfillCoordinator
+import chat.matron.android.search.SearchDatabase
+import chat.matron.android.search.SearchService
+import chat.matron.android.search.SearchServiceLive
+import chat.matron.android.storage.EncryptedPrefsSessionStore
+import chat.matron.android.storage.SessionStore
+import chat.matron.android.storage.LRUCache
+import chat.matron.android.storage.StoragePaths
+import chat.matron.android.storage.TimelineCacheKey
+import chat.matron.android.sync.SyncService
+import chat.matron.android.sync.isAppProcessInForeground
+import chat.matron.android.viewmodels.AgentRPCProviding
+import chat.matron.android.viewmodels.DeviceLinking
+import chat.matron.android.viewmodels.AgentChatProviding
+import chat.matron.android.viewmodels.JournalAgentChatService
+import chat.matron.android.viewmodels.DevicesProviding
+import chat.matron.android.viewmodels.ItemsPanelViewModel
+import chat.matron.android.viewmodels.JournalAgentRPCService
+import chat.matron.android.viewmodels.JournalDeviceLinkService
+import chat.matron.android.viewmodels.JournalDevicesService
+import chat.matron.android.viewmodels.KeyValueBoxCapacityCache
+import chat.matron.android.viewmodels.KeyValueStore
+import chat.matron.android.viewmodels.RecentStartFolders
+import chat.matron.android.viewmodels.SharedPreferencesKeyValueStore
+import chat.matron.android.models.SyncConnectionState
+import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.OkHttpClient
+
+/**
+ * Composition root, porting matron-apple's `AppDependencies` (App/AppDependencies.swift).
+ *
+ * One [JournalCore] (API client + local Room mirror + sync engine) is built per
+ * signed-in session; every per-session / per-room service factory below is a thin
+ * wrapper over the same core so the engine, store, and API client stay singletons
+ * for the session's lifetime. The single [sharedClient] (built with `pingInterval`
+ * so the WebSocket keepalive fires) backs both the REST [JournalApi] and the
+ * [OkHttpWebSocketConnector], matching the Swift note that one URLSession serves
+ * both surfaces.
+ *
+ * Android adaptations vs iOS:
+ * - No App Group container: the Room databases live under [StoragePaths.appSupport].
+ * - `FileSessionStore` → [EncryptedPrefsSessionStore] (EncryptedSharedPreferences).
+ * - Push is dormant (FCM not wired). [pushService] returns a [JournalPushService]
+ *   whose `requestPermission()` is a stub — kept so a future FCM token can flow to
+ *   the same `/push/register` endpoint. APNs delegate plumbing is dropped entirely.
+ */
+class AppDependencies(
+    val context: Context,
+    /**
+     * Test seams (production defaults). The Swift `AppDependencies()` was
+     * directly constructible in the test runner because `FileSessionStore` and
+     * on-disk SQLite work there; on Android EncryptedSharedPreferences needs the
+     * AndroidKeyStore and Room a file, neither hermetic under Robolectric — so the
+     * session store and both databases are injectable, letting the smoke test
+     * build the whole graph with an in-memory store + in-memory Room.
+     */
+    private val sessionStoreFactory: (Context) -> SessionStore = { EncryptedPrefsSessionStore.create(it) },
+    private val journalDatabaseFactory: (Context, File) -> MatronDatabase = { c, f ->
+        // Room opens on first access, off the main thread; the launch
+        // timeline's store-open interval closes there, with the migration
+        // (if one ran) recorded nested inside it — the one launch that runs
+        // v9 pays its index build and backfill here, and that contrast is
+        // the headline number of apple #212.
+        MatronDatabase.open(c, f) { migrationMillis ->
+            LaunchTimeline.shared.endStoreOpen()
+            migrationMillis?.let { LaunchTimeline.shared.recordMigration(it) }
+        }
+    },
+    private val searchDatabaseFactory: (Context, File) -> SearchDatabase = { c, f -> SearchDatabase.open(c, f) },
+    /**
+     * Background scope for startup sweeps and sign-out teardown. Injectable so
+     * tests can pump teardown jobs on a paused dispatcher and pin down the
+     * signOut/awaitPendingTeardown interleavings deterministically.
+     */
+    private val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+) {
+
+    /**
+     * One shared OkHttp client (keepalive pings) for REST + WebSocket. Internal
+     * (not private) so the sign-in stage can hand it to [chat.matron.android.journal.RelayApi]
+     * for the rendezvous relay, which is unauthenticated and predates a session.
+     */
+    internal val sharedClient: OkHttpClient = OkHttpWebSocketConnector.defaultClient()
+
+    val auth: AuthService
+
+    /**
+     * The local FTS index. `null` only if the Room search DB can't be opened;
+     * the journal services all treat search as optional, so the app degrades to
+     * "search disabled" rather than failing to launch.
+     */
+    val search: SearchService?
+
+    /**
+     * The app's plain (unencrypted) preference store — the iOS originals'
+     * `UserDefaults.standard`. Holds nothing secret: answered-prompt ids,
+     * recent start folders, and the app-lock settings, all of which are
+     * device-local UI state rather than credentials (those live in the
+     * EncryptedSharedPreferences-backed session store).
+     */
+    val preferences: KeyValueStore
+
+    /**
+     * Recent start-folder completion, a `UserDefaults` singleton on iOS; here it
+     * rides the same [preferences] store, injected into the VMs the UI stage
+     * constructs.
+     */
+    val recentStartFolders: RecentStartFolders
+
+    /**
+     * User-chosen tag characters for agent boxes (Settings → Devices),
+     * riding the same [preferences] store. One shared instance: the Devices
+     * screen writes it and every chat service's summaries stream observes it
+     * (a settings edit writes no journal record, so nothing else would wake
+     * the chat list).
+     */
+    val boxLetterOverrides: BoxLetterOverrides
+
+    /** Where the composer stages picked/pasted attachment copies. */
+    val stagingDirectory: File
+
+    /** Foreground haptics singleton. No-op on devices without a vibrator. */
+    val haptics: Haptics = SystemHaptics(context)
+
+    private val appSupport: File = StoragePaths.appSupport(context)
+    private val journalDirectory: File = File(appSupport, "journal-store").apply { mkdirs() }
+
+    /**
+     * One journal stack per signed-in session: the API client, the local Room
+     * mirror (+ its database handle), and the sync engine that's the sole writer
+     * of that mirror.
+     */
+    class JournalCore(
+        val api: JournalApi,
+        val db: MatronDatabase,
+        /** Where the mirror lives on disk — the Storage section's size row. */
+        val dbFile: File,
+        val store: JournalStore,
+        val engine: JournalSyncEngine,
+        /**
+         * Background store housekeeping (TTL + retention sweeps and the
+         * matching search removal). Replaces the boot-time purge the
+         * composition root used to launch at store creation; stopped (and
+         * its in-flight pass awaited) by sign-out before the wipe.
+         */
+        val maintenance: JournalMaintenance,
+        /**
+         * Keeps the tracker cache fresh off the engine's item markers and
+         * connection state; started with the core, stopped (and awaited)
+         * before the sign-out wipe so no in-flight fetch writes into it.
+         */
+        val itemsSync: ItemsSync,
+        /**
+         * Keeps the mission cache fresh off the engine's mission/milestone
+         * markers and connection state; same lifecycle as [itemsSync].
+         */
+        val missionsSync: MissionsSync,
+        /** Memories (spec 2026-09-27): in-memory list + writes, per session. */
+        val memoriesSync: MemoriesSync,
+        /** Pinned desk chats: the journal's list, cached for a cold start. */
+        val pinsSync: PinsSync,
+        /** The journal-held Coordinator, mirrored into [CoordinatorSetting]. */
+        val coordinatorSync: CoordinatorSync,
+        /**
+         * Background search-history backfill sweep for this session (see
+         * [SearchBackfillCoordinator]). Cancelled on sign-out, and joined by
+         * teardown before the search wipe so a straggler page can't re-insert
+         * the previous user's rows after the wipe.
+         */
+        var backfillJob: Job? = null,
+    )
+
+    private val cores: MutableMap<String, JournalCore> = mutableMapOf()
+
+    /** Per-session [MediaService] cache — one instance (one image cache) per user. */
+    private val mediaServices: MutableMap<String, MediaService> = mutableMapOf()
+
+    /**
+     * Per-room [TimelineService] cache, bounded LRU so a long session that visits
+     * many rooms doesn't accumulate one timeline handle per room forever. Mirrors
+     * the iOS `timelineCache`.
+     */
+    private var timelineCache = LRUCache<TimelineCacheKey, JournalTimelineService>(timelineCacheLimit)
+
+    init {
+        val sessionStore = sessionStoreFactory(context)
+        auth = JournalAuthService(sessionStore = sessionStore, client = sharedClient)
+
+        search = runCatching {
+            SearchServiceLive(searchDatabaseFactory(context, StoragePaths.searchDb(appSupport)))
+        }.onFailure { MatronDebug.breadcrumb("AppDependencies: search DB open failed: $it") }.getOrNull()
+
+        val prefs = context.getSharedPreferences("matron-kv", Context.MODE_PRIVATE)
+        preferences = SharedPreferencesKeyValueStore(prefs)
+        LaunchTimeline.shared.attachStore(preferences)
+        recentStartFolders = RecentStartFolders(preferences)
+        boxLetterOverrides = BoxLetterOverrides(preferences)
+
+        stagingDirectory = File(context.cacheDir, "attachments").apply { mkdirs() }
+    }
+
+    /** Debuggable builds register sandbox push tokens; release builds are prod. */
+    private val pushEnvironment: JournalApi.PushEnvironment
+        get() =
+            if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+                JournalApi.PushEnvironment.SANDBOX
+            } else {
+                JournalApi.PushEnvironment.PROD
+            }
+
+    /**
+     * Builds (or returns the cached) journal stack for [session]. A store that
+     * fails to open is unrecoverable config; the exception propagates rather than
+     * limping along with a null store every caller would have to guard.
+     */
+    private fun core(session: UserSession): JournalCore {
+        cores[session.userID]?.let { return it }
+        val api = JournalApi(
+            baseUrl = session.homeserverURL,
+            client = sharedClient,
+            token = session.accessToken,
+        )
+        val dbFile = File(journalDirectory, "${session.userID.sanitizedForFilename()}.sqlite")
+        LaunchTimeline.shared.beginStoreOpen()
+        val db = journalDatabaseFactory(context, dbFile)
+        val store = JournalStore(db = db, ownSender = "user:${session.userID}")
+        val engine = JournalSyncEngine(
+            api = api,
+            store = store,
+            connector = OkHttpWebSocketConnector(client = sharedClient),
+            token = session.accessToken,
+            ownSender = "user:${session.userID}",
+            search = search,
+        )
+        val maintenance = JournalMaintenance(store = store, search = search)
+        val itemsSync = ItemsSync(
+            api = api,
+            store = store,
+            markers = { engine.itemMarkers() },
+            connectionStates = { engine.stateStream },
+        )
+        val missionsSync = MissionsSync(
+            api = api,
+            store = store,
+            markers = { engine.missionMarkers() },
+            connectionStates = { engine.stateStream },
+            // A mission detail refresh re-fetches the cached open items the
+            // server no longer lists under that mission (closed or moved).
+            refreshItem = itemsSync::refreshItem,
+        )
+        // Memories (spec 2026-09-27): in-memory, fetched when the screen
+        // shows; markers and reconnects refetch a list that was loaded.
+        val memoriesSync = MemoriesSync(
+            api = api,
+            markers = { engine.memoryMarkers() },
+            connectionStates = { engine.stateStream },
+        )
+        val pinsSync = PinsSync(
+            api = api,
+            updates = { engine.pinsUpdates() },
+            cache = preferences,
+            userID = session.userID,
+        )
+        val coordinatorSync = CoordinatorSync(
+            api = api,
+            setting = CoordinatorSetting(session.userID, preferences),
+            updates = { engine.coordinatorUpdates() },
+        )
+        val core = JournalCore(
+            api, db, dbFile, store, engine, maintenance, itemsSync, missionsSync, memoriesSync,
+            pinsSync = pinsSync, coordinatorSync = coordinatorSync,
+        )
+        cores[session.userID] = core
+        // Nothing proportional to store history runs on the launch path any
+        // more (apple #212): the tool-output TTL sweep that used to be
+        // launched here at store creation — a full `event` scan in one write
+        // transaction on every launch — now runs watermarked and chunked
+        // inside JournalMaintenance, 10 s after this core is built or as soon
+        // as the first catch-up reaches the live cursor, whichever comes
+        // first, then hourly, and on every foreground when the last pass is
+        // older than an hour.
+        engine.attachMaintenance(maintenance)
+        engine.setCatchUpCompleteHandler {
+            // The engine must not call LaunchTimeline itself; this hook lets
+            // the app layer record the mark the first time the replay
+            // reaches the live cursor — and lets maintenance past its launch
+            // hold early, since catch-up reaching the cursor is the signal
+            // the launch path is over.
+            LaunchTimeline.shared.mark(LaunchTimeline.Mark.CATCH_UP_COMPLETE)
+            appScope.launch { maintenance.runAfterCatchUp() }
+        }
+        maintenance.start()
+        // Subscribes to markers and connection state; the first `Running`
+        // runs the probe refresh (a 404 hides the tracker UI) and drains any
+        // outbox rows left from the previous run.
+        itemsSync.start()
+        // Same probe for `/missions`: a 404 hides the Missions tab.
+        missionsSync.start()
+        memoriesSync.start()
+        pinsSync.start()
+        coordinatorSync.start()
+        core.backfillJob = startBackfill(search = search, api = api, store = store)
+        return core
+    }
+
+    /**
+     * The session's background sweeper — the foreground trigger and the
+     * periodic worker call `runIfDue()` on it. Reads the EXISTING core only:
+     * housekeeping never builds a journal stack. A trigger that lands after
+     * [signOut] has cleared [cores] — the worker's post-catch-up run, or the
+     * foreground hook on the way out — would otherwise recreate an engine,
+     * sweeper and backfill against the very file teardown is about to wipe
+     * and close (Bugbot, #73). `null` then; the caller skips the pass, and a
+     * worker-started process sweeps once `backgroundCatchUp` has built the
+     * core it needs anyway.
+     */
+    fun journalMaintenance(session: UserSession): JournalMaintenance? = cores[session.userID]?.maintenance
+
+    /**
+     * Settings › Storage's numbers: on-disk size of the journal mirror and
+     * the FTS index (`.sqlite` + `-wal` + `-shm`), row counts, and the last
+     * maintenance stamp. On demand only, off the main thread.
+     */
+    suspend fun storeSizes(session: UserSession): StoreDiagnostics.Sizes {
+        val core = core(session)
+        return StoreDiagnostics.sizes(
+            store = core.store,
+            journalFile = core.dbFile,
+            searchFile = if (search != null) StoragePaths.searchDb(appSupport) else null,
+        )
+    }
+
+    /**
+     * Kicks off the background search-history backfill for a session's core:
+     * a low-priority sweep that walks every conversation's server history into
+     * the FTS index, so search covers messages this device never saw live
+     * (fresh installs and snapshot re-bootstraps start with an empty message
+     * index). Retries with backoff while any conversation fails (offline
+     * launch, server error). Stays resident for the whole session even after a
+     * clean sweep: a mid-session `snapshot_required` bootstrap resets the
+     * backfill bookkeeping (the engine's cold-start `resetBackfill`) and only
+     * a later pass here re-walks the gap — exiting after the first clean sweep
+     * would leave that hole until the next launch. An all-complete idle pass
+     * is pure local reads, so the long cadence costs no network.
+     *
+     * Ported from matron-apple's `AppDependencies.startBackfill` (including
+     * Apple PR #130's page-batched indexing in the coordinator). Android
+     * deviations: a coroutine [Job] on [appScope] instead of a `Task`; the
+     * "don't page history while backgrounded" check reads process importance
+     * ([isAppProcessInForeground] — the same check the catch-up worker uses)
+     * instead of `UIApplication.applicationState`; the iOS-only
+     * `resetBookkeepingFirst` late-attach path is dropped because the Android
+     * search DB opens with the process (no device-unlock deferral).
+     */
+    private fun startBackfill(search: SearchService?, api: JournalApi, store: JournalStore): Job? {
+        if (search == null) return null
+        val coordinator = SearchBackfillCoordinator(search = search) { convoID, beforeSeq, limit ->
+            api.messages(convoID, beforeSeq, limit)
+        }
+        return appScope.launch {
+            // Let the initial connect + catch-up replay land before adding
+            // background request load.
+            delay(10_000)
+            var backoffMillis = 30_000L
+            while (true) {
+                // Backgrounded (a WorkManager catch-up wake or the outbox
+                // grace window): that runtime belongs to catch-up and send
+                // delivery, not to history paging — don't spend its radio
+                // time on a sweep the next foreground can run.
+                if (!isAppProcessInForeground(context)) {
+                    delay(60_000)
+                    continue
+                }
+                // An empty list means the first snapshot hasn't landed yet —
+                // treat it like a failed pass and retry on the backoff curve.
+                val ids = runCatching { store.allConversationIDs() }.getOrDefault(emptyList())
+                if (ids.isNotEmpty() && coordinator.run(ids)) {
+                    backoffMillis = 30_000 // a later failure restarts the curve
+                    delay(900_000)
+                } else {
+                    delay(backoffMillis)
+                    backoffMillis = (backoffMillis * 2).coerceAtMost(600_000)
+                }
+            }
+        }
+    }
+
+    fun syncService(session: UserSession): SyncService = core(session).engine
+
+    /**
+     * Bounded background catch-up — the Android analog of iOS's BGAppRefresh
+     * handler (`chat.matron.refresh`): ensures the sync engine is running,
+     * waits (capped) until the journal is caught up, then gives queued outbox
+     * rows a short grace to flush so a send-then-pocket actually delivers.
+     * When this call started the engine itself (app not visible), it stops it
+     * again so a background process doesn't hold a socket open between runs;
+     * an engine the UI started is left untouched.
+     */
+    suspend fun backgroundCatchUp(session: UserSession, isAppVisible: () -> Boolean = { false }) {
+        val engine = core(session).engine
+        val startedHere = !engine.isRunning()
+        if (startedHere) engine.beginSync()
+        // stateStream is a StateFlow: an already-Running engine passes through
+        // immediately. The cap bounds the whole wait, not each yield.
+        withTimeoutOrNull(15_000) {
+            engine.stateStream.first { it is SyncConnectionState.Running }
+        }
+        withTimeoutOrNull(10_000) {
+            while (engine.hasPendingOutbox()) delay(500)
+        }
+        if (startedHere && !isAppVisible()) engine.endSync()
+    }
+
+    fun chatService(session: UserSession): ChatService {
+        val core = core(session)
+        return JournalChatService(store = core.store, engine = core.engine)
+    }
+
+    fun mediaService(session: UserSession): MediaService =
+        mediaServices.getOrPut(session.userID) { JournalMediaService(core(session).api) }
+
+    /**
+     * The session's journal store, for read-only feature queries (media
+     * browser). Same instance the sync engine writes. Port of apple #142's
+     * `journalStore(for:)`.
+     */
+    fun journalStore(session: UserSession): JournalStore = core(session).store
+
+    /** The tracker's sync for a session, for the panel and detail view models. */
+    fun itemsSync(session: UserSession): ItemsSyncing = core(session).itemsSync
+
+    fun missionsSync(session: UserSession): MissionsSyncing = core(session).missionsSync
+
+    /** The session's pinned desk chats (journal "Pinned desk chats"). */
+    fun pinsSync(session: UserSession): PinsSyncing = core(session).pinsSync
+
+    /** The session's journal-held Coordinator (Coordinator redesign §3a). */
+    fun coordinatorSync(session: UserSession): CoordinatorSync = core(session).coordinatorSync
+
+    /** Agent box id → name, live — the pin successor hint names the box. */
+    fun agentNamesFlow(session: UserSession): kotlinx.coroutines.flow.Flow<Map<Long, String>> =
+        core(session).store.agentNamesFlow()
+
+    /**
+     * The one Missions list instance per signed-in session (apple #209):
+     * feeds the Missions tab, its badge and the shell's support gate.
+     * Created and started by the shell, stopped when the shell leaves the
+     * composition on sign-out — like [makeDecisionsViewModel].
+     */
+    fun makeMissionsListViewModel(session: UserSession, scope: CoroutineScope): MissionsListViewModel {
+        val c = core(session)
+        return MissionsListViewModel(store = c.store, sync = c.missionsSync, scope = scope)
+    }
+
+    /** The Memories list VM, per screen showing (spec 2026-09-27 memories). */
+    fun makeMemoriesListViewModel(session: UserSession, scope: CoroutineScope): MemoriesListViewModel =
+        MemoriesListViewModel(sync = core(session).memoriesSync, scope = scope)
+
+    /** The editor VM for one memory by name, or a new one when [name] is null. */
+    fun makeMemoryEditorViewModel(session: UserSession, name: String?, scope: CoroutineScope): MemoryEditorViewModel =
+        MemoryEditorViewModel(name = name, sync = core(session).memoriesSync, scope = scope)
+
+    /** A fresh detail VM per mission page (not cached: one page, one mission). */
+    fun makeMissionDetailViewModel(session: UserSession, missionID: String, scope: CoroutineScope): MissionDetailViewModel {
+        val c = core(session)
+        return MissionDetailViewModel(missionID = missionID, store = c.store, sync = c.missionsSync, scope = scope)
+    }
+
+    /**
+     * Which mission a conversation belongs to, live (spec: Transcript and
+     * title). `null` until the first missions refresh lands — exactly when
+     * the title-tap affordance should appear.
+     */
+    fun missionIDFlow(session: UserSession, convoID: String): kotlinx.coroutines.flow.Flow<String?> =
+        core(session).store.missionIDFlow(convoID)
+
+    /** The tracker's network surface — the session's API client. */
+    fun itemsApi(session: UserSession): ItemsProviding = core(session).api
+
+    /**
+     * Per-chat / cross-chat items panel (spec: Apps → Panel content).
+     * `convoID = null` is the app-wide instance — see [makeDecisionsViewModel].
+     * [scope] is the host's lifecycle scope (the Swift original's implicit
+     * `@MainActor` tasks).
+     */
+    fun makeItemsPanelViewModel(session: UserSession, convoID: String?, scope: CoroutineScope): ItemsPanelViewModel {
+        val c = core(session)
+        return ItemsPanelViewModel(convoID = convoID, store = c.store, api = c.api, sync = c.itemsSync, scope = scope)
+    }
+
+    /**
+     * The one Decisions instance per signed-in session (app shell, spec §1):
+     * no home conversation, starts in `All`, feeds the Decisions list and the
+     * tab badge. Created and started by the shell, stopped when the shell
+     * leaves the composition on sign-out.
+     */
+    fun makeDecisionsViewModel(session: UserSession, scope: CoroutineScope): ItemsPanelViewModel =
+        makeItemsPanelViewModel(session, convoID = null, scope = scope)
+
+    /**
+     * Settings → For you's "notices" switch: `GET`/`PATCH /settings` on the
+     * session's API client, live-updated from the engine's settings frames.
+     * One per settings screen showing.
+     */
+    fun makeNoticesSettingViewModel(session: UserSession, scope: CoroutineScope): NoticesSettingViewModel {
+        val c = core(session)
+        return NoticesSettingViewModel(api = c.api, updates = { c.engine.settingsUpdates() }, scope = scope)
+    }
+
+    /**
+     * Resolves a tapped `[#65](matron://item/65)` link to a local item id,
+     * with one `refresh(All)` retry on a miss, expressed in the design
+     * system's vocabulary so a link-hosting screen can hand it straight to
+     * `TrackerItemLinkHost` (apple #208). Lives here
+     * because this is the one layer that sees both the resolver and the
+     * session's store + sync; mapping in each host instead is how the miss
+     * path drifts between surfaces. `alertMessage` is null only for `Open`,
+     * which the `when` has already taken.
+     */
+    suspend fun trackerItemLinkOutcome(num: Int, session: UserSession): TrackerItemLinkOutcome {
+        val c = core(session)
+        return when (val resolution = TrackerItemLinkResolver(c.store, c.itemsSync).resolve(num)) {
+            is TrackerItemLinkResolver.Resolution.Open -> TrackerItemLinkOutcome.Open(resolution.itemID)
+            else -> TrackerItemLinkOutcome.Explain(resolution.alertMessage(num) ?: "Item #$num couldn't be opened.")
+        }
+    }
+
+    fun pushService(session: UserSession): PushService =
+        JournalPushService(api = core(session).api, environment = pushEnvironment)
+
+    /** Devices/pairing surface (Settings → Manage Devices). */
+    fun devicesService(session: UserSession): DevicesProviding =
+        core(session).let { JournalDevicesService(it.api, it.engine) }
+
+    /**
+     * Agent-chat consent surface: answering the cards inline in a chat, and the
+     * Settings screen listing the parked requests.
+     */
+    fun agentChatService(session: UserSession): AgentChatProviding =
+        JournalAgentChatService(core(session).api)
+
+    /**
+     * Agent-spawn consent surface: answering the card inline in a chat.
+     * Unlike [agentChatService] there is no parked-list screen to back —
+     * [JournalApi] implements [AgentSpawnAnswering] directly, so this is
+     * just the session's existing API client.
+     */
+    fun agentSpawnService(session: UserSession): AgentSpawnAnswering = core(session).api
+
+    /** Show-QR surface (Settings → Link a Device). */
+    fun deviceLinkService(session: UserSession): DeviceLinking =
+        JournalDeviceLinkService(core(session).api)
+
+    /** New Chat surface: agent roster + recent-folders / start RPCs. */
+    fun agentRPCService(session: UserSession): AgentRPCProviding {
+        val core = core(session)
+        return JournalAgentRPCService(api = core.api, engine = core.engine)
+    }
+
+    /**
+     * Placeholder conversation row so navigating to a just-started conversation
+     * holds even when the `start` answer beats the convo's first journal frame.
+     */
+    suspend fun prepareConversation(session: UserSession, id: String) {
+        core(session).engine.ensurePlaceholderConversation(id = id, title = "New chat")
+    }
+
+    /**
+     * Per-room [TimelineService] factory, cached by `(userID, roomID)` so repeat
+     * navigations reuse the same overlay state instead of rebuilding it.
+     */
+    fun timelineService(session: UserSession, roomID: String): TimelineService {
+        val key = TimelineCacheKey(userID = session.userID, roomID = roomID)
+        timelineCache[key]?.let { return it }
+        val core = core(session)
+        val service = JournalTimelineService(
+            convoID = roomID,
+            store = core.store,
+            engine = core.engine,
+            api = core.api,
+            session = session,
+            search = search,
+        )
+        timelineCache[key] = service
+        return service
+    }
+
+    /**
+     * The parent conversation id of [convoID], or `null` for a top-level
+     * conversation. Backs the nav router's read-only sub-chat vs full-chat
+     * decision. Suspend on Android (the Room read is suspend) where iOS was
+     * synchronous.
+     */
+    suspend fun parentConvoID(session: UserSession, convoID: String): String? =
+        runCatching { core(session).store.parentConvoID(convoID) }.getOrNull()
+
+    /**
+     * Live parent linkage for the nav router: re-emits when the mirror learns
+     * a child's `parent_convo_id` (convo_meta / snapshot upsert) so a subagent
+     * chat opened before the field landed still switches to the read-only
+     * sub-chat presentation.
+     */
+    fun parentConvoIDFlow(session: UserSession, convoID: String): kotlinx.coroutines.flow.Flow<String?> =
+        core(session).store.parentConvoIDFlow(convoID)
+
+    /**
+     * Sign-out path. Ends every session's sync engine, wipes and closes its local
+     * mirror, clears every per-session/per-room cache, wipes the search index, and
+     * drops the persisted auth session. Runs as one sequenced teardown job — push
+     * deregistration first (while the token is still valid), then `endSync()` to
+     * stop the writer, then `wipe()` + `close()` — so the wipe can never race a
+     * still-running sync write. The job closes over its own cores, so it's safe to
+     * clear [cores] synchronously right after.
+     */
+    /// One-time push of legacy local tag letters up to the journal (apple
+    /// #158). Only the account that owns the relics migrates them; the mirror
+    /// is seeded first so the letters show before the push's `device_meta`
+    /// echo lands. Failures leave entries for the next launch.
+    suspend fun migrateBoxLetters(session: UserSession) {
+        if (!boxLetterOverrides.claim(session.userID)) return
+        val core = core(session)
+        // Seed the mirror from the relics FIRST, against the roster the store
+        // already holds: an offline launch must not lose the custom letters
+        // for the whole session just because GET /devices failed (Bugbot,
+        // #57). seedAgentTagChars only fills NULL rows, so a journal-held tag
+        // that already arrived wins.
+        val known = runCatching { core.store.agentNames().keys }.getOrDefault(emptySet())
+        runCatching { core.store.seedAgentTagChars(boxLetterOverrides.all().filterKeys { it in known }) }
+        val devices = runCatching { core.api.devices() }.getOrNull() ?: return
+        val serverTags = devices.filter { it.kind == "agent" }.associate { it.id to it.tagChar }
+        BoxLetterMigration.run(boxLetterOverrides, serverTags) { id, letter -> core.api.setDeviceTag(id, letter) }
+    }
+
+    fun signOut() {
+        val oldCores = cores.values.toList()
+        val oldUserIDs = cores.keys.toList()
+        // Chain onto any previous teardown: overwriting the job would leave
+        // awaitPendingTeardown() watching only the newest one while an older
+        // wipe/close still runs (bugbot "Sign-out drops prior teardown job").
+        val previous = teardownJob
+        teardownJob = appScope.launch {
+            previous?.join()
+            for (core in oldCores) {
+                // Stop the history sweep before anything else: joining (not
+                // just cancelling) guarantees no in-flight indexBatch commits
+                // after the search wipe below.
+                core.backfillJob?.cancel()
+                core.backfillJob?.join()
+                // Stop the sweeper too, and WAIT for a pass already running:
+                // one suspended in `search.removeAll` would otherwise resume
+                // after the wipe below and stamp `maintenance_last_run` on an
+                // empty `meta`. stop() also fences every later trigger, so a
+                // Running transition during the seconds of push deregistration
+                // below can't open a fresh pass against the doomed store.
+                core.maintenance.stop()
+                val pushResult = withTimeoutOrNull(5_000) { runCatching { core.api.unregisterPush() } }
+                when {
+                    pushResult == null ->
+                        MatronDebug.breadcrumb("signOut: unregisterPush timed out after 5s")
+                    pushResult.isFailure ->
+                        MatronDebug.breadcrumb("signOut: unregisterPush failed: ${pushResult.exceptionOrNull()}")
+                }
+                // Stop the tracker sync BEFORE the engine: it awaits every
+                // in-flight refresh/refetch/drain, so nothing can resume after
+                // the wipe below and write the old account's items back.
+                runCatching { core.itemsSync.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: itemsSync.stop failed: $it") }
+                runCatching { core.missionsSync.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: missionsSync.stop failed: $it") }
+                runCatching { core.memoriesSync.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: memoriesSync.stop failed: $it") }
+                runCatching { core.pinsSync.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: pinsSync.stop failed: $it") }
+                runCatching { core.coordinatorSync.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: coordinatorSync.stop failed: $it") }
+                core.engine.endSync()
+                runCatching { core.store.wipe() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: store.wipe failed: $it") }
+                // wipe() keeps the item outbox for the same reason it keeps
+                // the text outbox; sign-out clears the whole tracker cache.
+                runCatching { core.store.wipeItems() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: store.wipeItems failed: $it") }
+                // wipe() already cleared the mission tables; this is the
+                // belt for a wipe() that threw partway.
+                runCatching { core.store.wipeMissions() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: store.wipeMissions failed: $it") }
+                // wipe() deliberately preserves the offline outbox (a
+                // snapshot_required mirror wipe must not eat unsent messages);
+                // sign-out must clear it so the next account can't inherit —
+                // or send — the previous user's queued messages.
+                runCatching { core.store.wipeOutbox() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: store.wipeOutbox failed: $it") }
+                runCatching { core.db.close() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: db.close failed: $it") }
+            }
+            runCatching { search?.wipe() }
+                .onFailure { MatronDebug.breadcrumb("signOut: search.wipe failed: $it") }
+            // The chooser's last-known capacity cache is per account (agent
+            // device ids are only unique within a journal) and would otherwise
+            // outlive the sign-out (apple #164).
+            for (userID in oldUserIDs) KeyValueBoxCapacityCache.removeAll(userID, preferences)
+            // The pin list and the Coordinator cache are per account too.
+            for (userID in oldUserIDs) {
+                PinsSync.clear(userID, preferences)
+                CoordinatorSetting.clear(userID, preferences)
+            }
+        }
+        cores.clear()
+        mediaServices.clear()
+        timelineCache = LRUCache(timelineCacheLimit)
+        runCatching { auth.clearSession() }
+    }
+
+    private var teardownJob: Job? = null
+
+    /**
+     * Blocks until any pending sign-out teardown finishes. The sign-in path calls
+     * this before publishing the new session so no new journal core races the old
+     * one's endSync/wipe.
+     */
+    suspend fun awaitPendingTeardown() {
+        while (true) {
+            val job = teardownJob ?: return
+            job.join()
+            // A signOut() that ran while we were joining chained a newer job onto
+            // the field; loop so this caller waits for that one too. The field is
+            // deliberately never cleared here — nulling it after the join could
+            // drop a just-chained teardown, letting a later sign-in skip its wipe
+            // (bugbot "Teardown await drops newer job").
+            if (teardownJob === job) return
+        }
+    }
+
+    /**
+     * Removes every on-disk journal mirror plus the shared search index. Fresh
+     * interactive sign-in calls this (after [awaitPendingTeardown], before the
+     * first core opens): if the process died between `signOut()`'s synchronous
+     * `clearSession()` and its background wipe, the previous user's mirror and
+     * index survive on disk (bugbot "Sign-out leaves local mirror"). A fresh
+     * login resyncs from a server snapshot, so the clean slate costs nothing.
+     * Session restore must NOT call this — a restored session keeps its mirror.
+     */
+    suspend fun wipeLocalDataForFreshLogin() {
+        withContext(Dispatchers.IO) {
+            journalDirectory.listFiles()?.forEach { file ->
+                if (!file.deleteRecursively()) {
+                    MatronDebug.breadcrumb("freshLogin: could not delete ${file.name}")
+                }
+            }
+        }
+        runCatching { search?.wipe() }
+            .onFailure { MatronDebug.breadcrumb("freshLogin: search.wipe failed: $it") }
+    }
+
+    // MARK: - Test seams (mirror AppDependenciesTests.swift)
+
+    /** Number of entries currently held by the timeline cache. */
+    val timelineCacheCount: Int get() = timelineCache.count
+
+    /** Whether the timeline cache currently holds an entry for `(userID, roomID)`. */
+    fun timelineCacheContains(userID: String, roomID: String): Boolean =
+        timelineCache.contains(TimelineCacheKey(userID = userID, roomID = roomID))
+
+    companion object {
+        /** How many distinct rooms the timeline cache holds before LRU eviction. */
+        const val timelineCacheLimit = 16
+    }
+}
+
+/** Keeps a user id usable as a filename (ids are opaque but may carry `/` `:`). */
+private fun String.sanitizedForFilename(): String =
+    map { if (it.isLetterOrDigit() || it == '-' || it == '_' || it == '.') it else '_' }.joinToString("")

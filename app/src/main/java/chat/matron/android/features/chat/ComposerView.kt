@@ -1,0 +1,568 @@
+package chat.matron.android.features.chat
+
+import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.OpenableColumns
+import android.view.WindowManager
+import android.webkit.MimeTypeMap
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import chat.matron.android.designsystem.AttachmentTray
+import chat.matron.android.designsystem.LocalAppLockActive
+import chat.matron.android.designsystem.UploadProgressBar
+import chat.matron.android.models.BotCommand
+import chat.matron.android.platform.AudioFocusInterruptions
+import chat.matron.android.platform.AudioInputDiagnostics
+import chat.matron.android.platform.VoiceRecordingService
+import chat.matron.android.viewmodels.ComposerDraftMemory
+import chat.matron.android.viewmodels.ComposerViewModel
+import chat.matron.android.viewmodels.MediaRecorderAudioRecording
+import chat.matron.android.viewmodels.PaletteSuggestion
+import chat.matron.android.viewmodels.VoiceRecorder
+import chat.matron.android.viewmodels.VoiceRecorderBindings
+import chat.matron.android.viewmodels.VoiceRecorderHandoff
+import chat.matron.android.viewmodels.VoiceRecorderHost
+import java.io.File
+import java.util.UUID
+import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.launch
+
+/**
+ * Message composer. Ports the Features/Chat/Composer Swift views: a growing text field
+ * with a slash-command / recent-folder palette above it, an attachment tray, and
+ * a plus (attach) / mic (record) / send accessory column.
+ *
+ * Platform adaptations: PhotosPicker/fileImporter → Android Photo Picker +
+ * GetContent (ActivityResultContracts) copying the picked [Uri] to a temp file
+ * fed to [ComposerViewModel.attachFiles]; AVAudioRecorder → [VoiceRecorder] over
+ * [MediaRecorderAudioRecording] with a RECORD_AUDIO runtime request. The paste
+ * hooks (ComposerPasteSupport) are handled by the text field's own clipboard.
+ *
+ * [ComposerViewModel.input] is a plain var and `canSend`/`showPalette`/
+ * `filteredCommands`/`folderSuggestions` computed getters off it, so the field
+ * mirrors the var, writes through on edit (+ `handleInputChange()`), and re-syncs
+ * after a VM-driven mutation (command/folder pick).
+ */
+@Composable
+fun ComposerView(viewModel: ComposerViewModel) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    val isSending by viewModel.isSending.collectAsStateWithLifecycle()
+    val staged by viewModel.stagedAttachments.collectAsStateWithLifecycle()
+    val sendError by viewModel.sendError.collectAsStateWithLifecycle()
+    val uploadProgress by viewModel.uploadProgress.collectAsStateWithLifecycle()
+
+    // Keyed to the room: without this, swapping the VM at the same call site
+    // (navigating to a different room) leaves the previous room's typed text
+    // sitting in the field until something else happens to overwrite it.
+    var text by remember(viewModel.roomID) { mutableStateOf(viewModel.input) }
+    fun syncFromVm() { text = viewModel.input }
+
+    // --- Attachment picking -------------------------------------------------
+    val photoLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) scope.launch { attachUri(context, viewModel, uri) }
+    }
+    val fileLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        if (uri != null) scope.launch { attachUri(context, viewModel, uri) }
+    }
+
+    // --- Voice recording ----------------------------------------------------
+    val pendingPermission = remember { arrayOfNulls<CompletableDeferred<Boolean>>(1) }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> pendingPermission[0]?.complete(granted); pendingPermission[0] = null }
+    // A note still recording when the app lock replaced this composition is
+    // picked up here rather than started over (see VoiceRecorderHandoff); the
+    // composition-bound wiring is rebound below either way. Only a read: a
+    // `remember` calculation can run in a composition Compose then discards,
+    // so the parked entry is released in the DisposableEffect below, once
+    // this composition has actually committed.
+    val host = remember {
+        VoiceRecorderHandoff.parkedFor(viewModel.roomID) ?: makeVoiceRecorderHost(context)
+    }
+    val recorder = host.recorder
+    val isAppLocked = LocalAppLockActive.current
+    SideEffect {
+        host.bindings.requestPermission = {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED
+            ) {
+                true
+            } else {
+                val deferred = CompletableDeferred<Boolean>()
+                pendingPermission[0] = deferred
+                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                deferred.await()
+            }
+        }
+        // Locking the screen suspends the app and cuts the capture short, so
+        // the window keeps the screen on for exactly the span of a live
+        // recording (port of apple #159).
+        host.bindings.setKeepScreenAwake = { keepAwake ->
+            context.findActivity()?.window?.let { window ->
+                if (keepAwake) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+        }
+    }
+    val recorderState by recorder.state.collectAsStateWithLifecycle()
+    // Peak-level breadcrumbs every few seconds while capture is live, so a
+    // note that comes back silent can be told from one that was never heard
+    // (port of apple #181). Keyed on the state so a pause stops the ticker.
+    LaunchedEffect(recorderState) {
+        if (recorderState !is VoiceRecorder.State.Recording) return@LaunchedEffect
+        while (true) {
+            delay(LEVEL_SAMPLE_INTERVAL)
+            recorder.sampleLevel()
+        }
+    }
+
+    // Restore any per-room draft on first appearance; persist on disappear.
+    DisposableEffect(viewModel.roomID) {
+        // ComposerViewModel instances are cached per-room (ChatVMCache) and
+        // reused on revisit, so a `sendError` left undismissed from a prior
+        // visit would otherwise resurface here as if it just happened.
+        viewModel.dismissError()
+        // Committed: this composer owns the recorder it read from the handoff.
+        VoiceRecorderHandoff.confirmReclaim(viewModel.roomID, host)
+        if (viewModel.input.isEmpty()) {
+            ComposerDraftMemory.retrieve(viewModel.roomID)?.let { draft ->
+                viewModel.input = draft
+                syncFromVm()
+            }
+        }
+        onDispose {
+            ComposerDraftMemory.store(viewModel.roomID, viewModel.input)
+            // The lock shield replacing the composition is not the user
+            // leaving: a live note is parked for the composer that reopens
+            // this room after unlock. Any other teardown cancels, as before.
+            VoiceRecorderHandoff.onComposerDisposed(viewModel.roomID, host, appLocked = isAppLocked())
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        if (viewModel.showPalette) {
+            SlashCommandPalette(
+                commands = viewModel.filteredCommands,
+                suggestions = viewModel.paletteSuggestions,
+                onSelect = { cmd -> viewModel.selectCommand(cmd); syncFromVm() },
+                onSelectSuggestion = { suggestion -> viewModel.selectSuggestion(suggestion); syncFromVm() },
+            )
+        }
+
+        sendError?.let { message ->
+            ComposerErrorBanner(message = message, onDismiss = { viewModel.dismissError() })
+        }
+
+        // Determinate upload feedback: on a slow uplink a multi-MB screenshot
+        // otherwise spends many seconds behind a bare disabled send button,
+        // which reads as the app hanging.
+        uploadProgress?.let { upload ->
+            UploadProgressBar(label = upload.label, fraction = upload.fraction)
+        }
+
+        (recorderState as? VoiceRecorder.State.Recording)?.let { recording ->
+            RecordingBar(
+                isPaused = recording.isPaused,
+                onCancel = { recorder.cancel() },
+                onSend = {
+                    recorder.stop()?.let { note ->
+                        // The note takes the typed text and the tray with it.
+                        // Undispatched, the view model clears the draft before
+                        // the upload's first suspension, so the field can show
+                        // that at once — a slow upload must not leave the sent
+                        // text editable (an edit would write it back).
+                        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                            viewModel.sendVoiceNote(note.file, note.duration)
+                            syncFromVm()
+                        }
+                        syncFromVm()
+                    }
+                },
+            )
+        } ?: run {
+            AttachmentTray(attachments = staged, onRemove = { id -> viewModel.removeAttachment(id) })
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (ComposerViewModel.MEDIA_AVAILABLE) {
+                    AttachMenu(
+                        onPickPhoto = {
+                            photoLauncher.launch(
+                                // Videos too: screen recordings land in the photo
+                                // library, and the bridge extracts key frames for
+                                // claude (port of apple #160).
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
+                            )
+                        },
+                        onPickFile = { fileLauncher.launch("*/*") },
+                    )
+                }
+
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { new ->
+                        text = new
+                        viewModel.input = new
+                        viewModel.handleInputChange()
+                    },
+                    placeholder = { Text("Message…") },
+                    maxLines = 8,
+                    // iOS gives the field a `.regularMaterial` rounded-16
+                    // backing; without an opaque container the timeline's
+                    // cream gradient shows through the field.
+                    shape = RoundedCornerShape(16.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                    ),
+                    modifier = Modifier.weight(1f),
+                )
+
+                val canSend = viewModel.canSend
+                // The mic stays available beside a draft: a voice note sends the
+                // typed text and the tray along with it, as one message.
+                if (ComposerViewModel.MEDIA_AVAILABLE) {
+                    IconButton(
+                        enabled = !isSending,
+                        onClick = {
+                            scope.launch {
+                                try {
+                                    recorder.start()
+                                } catch (error: VoiceRecorder.RecorderError) {
+                                    viewModel.reportAttachmentError(voiceRecorderErrorMessage(error))
+                                }
+                            }
+                        },
+                    ) {
+                        Icon(Icons.Default.Mic, contentDescription = "Record voice note")
+                    }
+                }
+                if (canSend || !ComposerViewModel.MEDIA_AVAILABLE) {
+                    IconButton(
+                        onClick = { scope.launch { viewModel.send(); syncFromVm() } },
+                        enabled = canSend && !isSending,
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "Send",
+                            tint = if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AttachMenu(onPickPhoto: () -> Unit, onPickFile: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }) {
+            Icon(Icons.Default.Add, contentDescription = "Attach")
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(text = { Text("Photo") }, onClick = { open = false; onPickPhoto() })
+            DropdownMenuItem(text = { Text("File") }, onClick = { open = false; onPickFile() })
+        }
+    }
+}
+
+/// Interval between the recorder's peak-level diagnostics samples.
+private val LEVEL_SAMPLE_INTERVAL = 5.seconds
+
+/// The composer's recorder with its process-scoped wiring. The
+/// composition-bound halves (permission launcher, window flag) go through
+/// [VoiceRecorderBindings] and are rebound by whichever composer holds it.
+private fun makeVoiceRecorderHost(context: Context): VoiceRecorderHost {
+    val bindings = VoiceRecorderBindings()
+    val recorder = VoiceRecorder(
+        requestPermission = { bindings.requestPermission() },
+        makeRecorder = { file -> MediaRecorderAudioRecording(file) },
+        tempDirectory = File(context.cacheDir, "voice").apply { mkdirs() },
+        setKeepScreenAwake = { bindings.setKeepScreenAwake(it) },
+        // Switching apps mid-note used to kill the capture: a microphone
+        // foreground service holds mic access for exactly the span of a
+        // recording (port of apple #180's `audio` background mode).
+        holdRecordingSession = { hold ->
+            if (hold) VoiceRecordingService.start(context) else VoiceRecordingService.stop(context)
+        },
+        // A backgrounded recording is far more likely to be interrupted (a
+        // call, the assistant, another app taking the mic): audio-focus
+        // changes pause and resume the recorder (port of apple #180).
+        observeInterruptions = AudioFocusInterruptions(context)::observe,
+        describeInputRoute = AudioInputDiagnostics(context)::describe,
+    )
+    return VoiceRecorderHost(bindings, recorder)
+}
+
+/// The live-recording strip. While an interruption holds the capture
+/// ([isPaused]) it says so: the spinner and "Recording…" would claim to be
+/// capturing a call that the recorder is not hearing. Send still delivers
+/// what was captured up to the pause.
+@Composable
+private fun RecordingBar(isPaused: Boolean, onCancel: () -> Unit, onSend: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (isPaused) {
+            Icon(Icons.Default.Pause, contentDescription = "Recording paused", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(recordingBarLabel(isPaused = true), modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            CircularProgressIndicator(modifier = Modifier.padding(2.dp), strokeWidth = 2.dp)
+            Text(recordingBarLabel(isPaused = false), modifier = Modifier.weight(1f))
+        }
+        TextButton(onClick = onCancel) { Text("Cancel") }
+        IconButton(onClick = onSend) {
+            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send voice note", tint = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+/**
+ * Dismissible inline banner for [ComposerViewModel.sendError]: send /
+ * attachment / voice-note failures the view model records but has no
+ * `matron-apple` presentation to mirror (its composer records `sendError`
+ * but no shell renders it either — this is the Android-side fix).
+ */
+@Composable
+private fun ComposerErrorBanner(message: String, onDismiss: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
+        IconButton(onClick = onDismiss) {
+            Icon(Icons.Default.Close, contentDescription = "Dismiss error", tint = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
+/// Copy for the recording strip: truthful about a capture an interruption
+/// has paused (a call, another app on the mic) versus one that is live.
+internal fun recordingBarLabel(isPaused: Boolean): String =
+    if (isPaused) "Recording paused" else "Recording…"
+
+/** User-facing copy for a [VoiceRecorder.RecorderError] thrown by [VoiceRecorder.start]. */
+private fun voiceRecorderErrorMessage(error: VoiceRecorder.RecorderError): String = when (error) {
+    VoiceRecorder.RecorderError.PermissionDenied -> "Microphone access is needed to record a voice note."
+    VoiceRecorder.RecorderError.RecordFailed -> "Couldn't start recording."
+    VoiceRecorder.RecorderError.AlreadyRecording -> "Already recording."
+}
+
+/**
+ * Drop-down palette above the composer. Ports Composer/SlashCommandPalette.swift:
+ * argument/folder suggestion rows when [suggestions] is non-empty (a fully-typed
+ * command; apple #161), otherwise the filtered command rows. The two modes are
+ * mutually exclusive upstream; suggestions win here.
+ */
+@Composable
+fun SlashCommandPalette(
+    commands: List<BotCommand>,
+    suggestions: List<PaletteSuggestion>,
+    onSelect: (BotCommand) -> Unit,
+    onSelectSuggestion: (PaletteSuggestion) -> Unit,
+) {
+    Surface(
+        tonalElevation = 2.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    ) {
+        LazyColumn(modifier = Modifier.heightIn(max = 220.dp)) {
+            if (suggestions.isNotEmpty()) {
+                items(
+                    suggestions,
+                    key = {
+                        when (it) {
+                            is PaletteSuggestion.Folder -> "folder-${it.path}"
+                            is PaletteSuggestion.Argument -> "arg-${it.suggestion.value}"
+                        }
+                    },
+                ) { suggestion ->
+                    when (suggestion) {
+                        is PaletteSuggestion.Folder -> Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                suggestion.path,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(0.dp),
+                            )
+                            TextButton(onClick = { onSelectSuggestion(suggestion) }) { Text("Use") }
+                        }
+                        is PaletteSuggestion.Argument -> Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    suggestion.suggestion.displayLabel,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                suggestion.suggestion.summary?.let {
+                                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            TextButton(onClick = { onSelectSuggestion(suggestion) }) { Text("Insert") }
+                        }
+                    }
+                    HorizontalDivider()
+                }
+            } else {
+                items(commands, key = { it.trigger }) { cmd ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(cmd.trigger, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+                            cmd.argHint?.let { Text(it, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                            TextButton(onClick = { onSelect(cmd) }, modifier = Modifier.padding(0.dp)) { Text("Insert") }
+                        }
+                        Text(cmd.summary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    HorizontalDivider()
+                }
+            }
+        }
+    }
+}
+
+/** Copies a picked content [Uri] to a temp file and stages it on the composer. */
+private suspend fun attachUri(context: Context, viewModel: ComposerViewModel, uri: Uri) {
+    val file = copyUriToTemp(context, uri) ?: run {
+        viewModel.reportAttachmentError("Couldn't read that file.")
+        return
+    }
+    viewModel.attachFiles(listOf(file))
+}
+
+/// Copies a picked content [Uri] into the cache under the name [pickedFilename]
+/// gives it, ready to stage. `null` when unreadable. Shared with the item
+/// comment composer's pickers.
+internal fun copyUriToTemp(context: Context, uri: Uri): File? = runCatching {
+    val resolver = context.contentResolver
+    val declaredExt = resolver.getType(uri)?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
+    val name = pickedFilename(displayName(context, uri), declaredExt)
+    val dir = File(context.cacheDir, "picked").apply { mkdirs() }
+    val out = File(dir, "${UUID.randomUUID()}-$name")
+    resolver.openInputStream(uri)?.use { input -> out.outputStream().use { input.copyTo(it) } }
+        ?: return null
+    out
+}.getOrNull()
+
+/// The staged filename for a picked item: the provider's display name when it
+/// carries an extension; otherwise the name (or a generated one) with the
+/// extension implied by the provider's declared MIME type appended. The
+/// extension is what `StagedAttachment` types the attachment by, so a video
+/// that arrives without one must not fall through as an untyped blob — or
+/// worse, be relabelled an image (port of apple #160's class-aware fallback).
+internal fun pickedFilename(displayName: String?, extensionFromMime: String?): String {
+    val base = displayName?.takeIf { it.isNotBlank() } ?: "picked-${UUID.randomUUID()}"
+    if (base.substringAfterLast('.', "").isNotEmpty()) return base
+    return extensionFromMime?.let { "$base.$it" } ?: base
+}
+
+/// Walks the context chain to the hosting Activity (Compose hands out a
+/// ContextThemeWrapper), so a composable can reach the window flags.
+private fun Context.findActivity(): Activity? =
+    generateSequence(this) { (it as? ContextWrapper)?.baseContext }.filterIsInstance<Activity>().firstOrNull()
+
+private fun displayName(context: Context, uri: Uri): String? = runCatching {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) {
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0) cursor.getString(index) else null
+        } else {
+            null
+        }
+    }
+}.getOrNull()

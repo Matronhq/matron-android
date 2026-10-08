@@ -1,0 +1,1051 @@
+package chat.matron.android.journal
+
+import java.io.IOException
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.suspendCancellableCoroutine
+import chat.matron.android.models.ItemResolution
+import chat.matron.android.models.TrackerAttachment
+import chat.matron.android.models.TrackerComment
+import chat.matron.android.models.Memory
+import chat.matron.android.models.Milestone
+import chat.matron.android.models.Mission
+import chat.matron.android.models.TrackerItem
+import chat.matron.android.viewmodels.BoxStatus
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okio.buffer
+
+data class LoginResponse(val token: String, val deviceID: Long, val userID: Long)
+
+/// One of the user's agent boxes, as listed by `GET /snapshot`. Just identity
+/// and label — the full device row (lag, cursor, last seen) is [DeviceDTO]
+/// from `GET /devices`. Ported from matron-apple's `AgentDTO`.
+/// One box from the snapshot's `agents` list. [tagChar] is the user-chosen
+/// roster tag character, journal-held so every device shows the same letter
+/// (null = automatic). [tagCharKnown] is false when the server never sent the
+/// `tag_char` key at all — a journal predating tags — where null means
+/// "unknown", not "cleared", and `JournalStore.replaceAgents` preserves the
+/// local mirror. A tag-aware server always sends the key (explicit null = an
+/// authoritative clear), so the default is true (apple #158).
+data class AgentDTO(val id: Long, val name: String, val tagChar: String? = null, val tagCharKnown: Boolean = true)
+
+/// [agents] is the user's agent boxes, id → name. Presence-aware, diverging
+/// from the Swift original (which conflates): `null` = the server predates
+/// the field ("this server doesn't say" — the store keeps what it has),
+/// empty = the server said the user has NO boxes (revoking the last box must
+/// clear stale chips). Defaulted last (unlike the Swift original's middle
+/// position) so existing positional constructions compile.
+///
+/// [pins] and [coordinator] follow the same absent-is-unknown rule: null /
+/// [HelloCoordinator.Absent] from a journal predating pinned desk chats or
+/// the journal-held Coordinator.
+data class SnapshotResponse(
+    val conversations: List<ConvoSummaryDTO>,
+    val seq: Long,
+    val agents: List<AgentDTO>? = null,
+    val pins: List<ConvoPin>? = null,
+    val coordinator: HelloCoordinator = HelloCoordinator.Absent,
+)
+
+/// The journal's pinned desk chats (protocol "Pinned desk chats"). Every
+/// route answers with the whole list; a refused write throws
+/// [PinRequestError] with the reason in words. Client-only routes. A
+/// protocol so `PinsSync` tests fake it.
+interface PinsProviding {
+    /// `GET /pins`. 404 (`JournalApiError.NotFound`) on a journal without pins.
+    suspend fun pins(): PinList
+    /// `PUT /pins` — reorder; [order] names every pin exactly once.
+    suspend fun reorderPins(order: List<String>): PinList
+    /// `PUT /pins/:convo_id` — create (label required; new pins go last) or
+    /// edit. A null field is left out of the body (unchanged).
+    suspend fun putPin(convoID: String, label: String?, emoji: String?): PinList
+    /// `DELETE /pins/:convo_id`; 404 when not pinned.
+    suspend fun deletePin(convoID: String): PinList
+    /// `POST /pins/:convo_id/move` — repoint the pin, keeping its name,
+    /// emoji and position; 409 `already_pinned` when the target is pinned.
+    suspend fun movePin(convoID: String, toConvoID: String): PinList
+    /// `POST /pins/:convo_id/dismiss` — stop offering this successor.
+    suspend fun dismissPinSuccessor(convoID: String, successorID: String): PinList
+}
+
+/// `GET` / `PUT /coordinator` (Coordinator redesign contract): the user's
+/// one Coordinator conversation, null for none. Ported from matron-apple's
+/// `CoordinatorProviding`; a protocol so `CoordinatorSync` tests fake it.
+interface CoordinatorProviding {
+    suspend fun coordinator(): String?
+    /// Returns what the journal stored. Throws `JournalApiError.NotFound`
+    /// for a conversation the user does not own (or a journal without the
+    /// route).
+    suspend fun setCoordinator(convoID: String?): String?
+}
+
+/// The narrow slice of [JournalApi] the sync engine depends on: the WebSocket
+/// URL and the cold-start / refresh snapshot fetch. Extracted as an interface
+/// so engine tests can supply a scriptable fake (with request gating) instead
+/// of standing up a real HTTP server — the Apple original stubs `URLProtocol`
+/// globally, which has no clean Kotlin analogue. [JournalApi] implements it.
+interface SnapshotSource {
+    val wsUrl: String
+    suspend fun snapshot(): SnapshotResponse
+}
+
+/// Server-side conversation summary (shape of /snapshot rows). Also the input to
+/// store upserts.
+data class ConvoSummaryDTO(
+    val id: String,
+    val title: String,
+    val sessionState: String,
+    val lastSeq: Long,
+    val snippet: String,
+    val createdAt: Long,
+    /// Timestamp (ms) of the conversation's newest event, when the server
+    /// includes it (`last_ts`). `null` on older servers.
+    val lastTS: Long? = null,
+    /// Parent conversation id for a subagent child, else `null`.
+    val parentConvoID: String? = null,
+    /// Which agent box (journal device id) currently manages this
+    /// conversation, or `null` when the server has never recorded one (a row
+    /// predating the column, or a server predating this field). Unlike
+    /// [parentConvoID] this is mutable — resuming a session on another box
+    /// legitimately repoints it.
+    val agentDeviceID: Long? = null,
+    /// Every agent box in a multi-agent room (the journal's recorded owner
+    /// plus joined participants), or `null` when the server omits the key —
+    /// a solo conversation, a dissolved room, or a server predating the
+    /// field. Absent never clears a stored set (same discipline as
+    /// [agentDeviceID]); present replaces it wholesale.
+    val participants: List<Long>? = null,
+)
+
+/// One row of `GET /devices`. Timestamps are epoch ms; `lastSeenAt` is null for
+/// a device that has never connected.
+data class DeviceDTO(
+    val id: Long,
+    val kind: String,   // "client" | "agent"
+    val name: String,
+    val createdAt: Long,
+    val cursor: Long,
+    /// User's head seq minus this device's cursor. 0 = up to date.
+    val lag: Long,
+    val lastSeenAt: Long?,
+    val isSelf: Boolean,
+    /// Whether the device has a live journal connection right now. Defaults
+    /// false when the server predates the flag.
+    val connected: Boolean = false,
+    /// User-chosen roster tag character (agent boxes; journal-held). null =
+    /// automatic, and always null from a server predating the field.
+    val tagChar: String? = null,
+    /// An agent box's last capacity report (journal PR #82) — usage,
+    /// allowances and account, with when the box sent them. null until the
+    /// box has ever reported, and always null from a journal predating it.
+    val status: BoxStatus? = null,
+    /// An agent box's defaults for new sessions (journal "Box defaults").
+    /// null for clients, and always null from a journal predating them —
+    /// which is how the Devices screen knows to hide the editor.
+    val defaults: BoxDefaults? = null,
+)
+
+/// The user's answer to an agent-chat consent card. Mirrors the `decision`
+/// field of `POST /agent-chat/answer`.
+enum class AgentChatDecision(val wire: String) {
+    APPROVE("approve"),
+    DENY("deny"),
+}
+
+/// The user's answer to an agent-spawn consent card. Mirrors the `decision`
+/// field of `POST /agent-spawn/answer`.
+enum class AgentSpawnDecision(val wire: String) {
+    APPROVE("approve"),
+    DENY("deny"),
+}
+
+/// The one call that resolves an agent-spawn consent card, extracted (like
+/// `AgentChatAnswering`) so [chat.matron.android.viewmodels.ChatViewModel]
+/// can depend on just the answer, not the whole [JournalApi] surface. Put
+/// beside [JournalApi] itself, not in the viewmodels package: unlike
+/// agent-chat there is no parked-list screen for spawn cards — the durable
+/// record is the `spawn_outcome` journal event, not a server-side pending
+/// row — so there is no natural view-model home for a wrapper.
+interface AgentSpawnAnswering {
+    suspend fun answerAgentSpawn(requestId: String, decision: AgentSpawnDecision)
+}
+
+/// One row of `GET /agent-chat/pending` — an agent's request to chat that is
+/// parked waiting on this user. The durable form of the consent card, for asks
+/// that arrived while no client was connected.
+///
+/// `roomID` + `targetDeviceID` are the answer key; the two names are the
+/// devices', already sanitised server-side and null when a device has since
+/// been revoked.
+data class AgentChatPendingDTO(
+    val roomID: String,
+    val targetDeviceID: Long,
+    val initiatorDeviceID: Long,
+    val initiatorName: String?,
+    val targetName: String?,
+    val topic: String?,
+    val justification: String?,
+    val roomTitle: String,
+    val createdAt: Long,
+) {
+    /// Unique per parked row: the server's own primary key for one
+    /// (`convo_agents.convo_id`, `agent_device_id`).
+    val id: String get() = "$roomID/$targetDeviceID"
+
+    /// Who to name on the card. Falls back to the device id rather than going
+    /// blank when the requesting device has been revoked mid-ask.
+    val requesterLabel: String
+        get() = initiatorName?.trim()?.takeIf { it.isNotEmpty() } ?: "Device $initiatorDeviceID"
+
+    /// Same fallback for the far end. Only meaningful on an invite: a join
+    /// self-targets, so this would name the joiner twice.
+    val targetLabel: String
+        get() = targetName?.trim()?.takeIf { it.isNotEmpty() } ?: "Device $targetDeviceID"
+
+    /// One line stating what is being asked. A join self-targets (the
+    /// requester IS the target), which is what tells the two apart without a
+    /// separate field.
+    val headline: String
+        get() = if (initiatorDeviceID == targetDeviceID) {
+            "$requesterLabel wants to join a chat."
+        } else {
+            "$requesterLabel wants to start a chat with $targetLabel."
+        }
+}
+
+/// `POST /pair/preview` — who is asking to join, shown before approve.
+data class PairPreview(val requesterIP: String, val expiresIn: Int)
+
+/// `POST /link/start` — a fresh device-link session for QR sign-in. `code`
+/// is the display form (`XXXX-XXXX`), rendered under the QR and embedded in
+/// the payload verbatim.
+data class LinkStart(val code: String, val expiresIn: Int)
+
+/// `POST /link/status` — what the show side's poll sees. `Claimed` carries
+/// the claimant-supplied name and the IP the server saw — both go on screen
+/// before the user may approve (anti-phish, like [PairPreview]).
+sealed interface LinkStatus {
+    data class Waiting(val expiresIn: Int) : LinkStatus
+    data class Claimed(val deviceName: String, val requesterIP: String, val expiresIn: Int) : LinkStatus
+}
+
+/// `POST /link/claim` — the claimant's secret poll credential.
+data class LinkClaim(val claimToken: String, val expiresIn: Int)
+
+/// The identity minted at the approved `link/poll`. `username` exists because
+/// the app stores the typed username as `UserSession.userID` and a link
+/// claimant never types one.
+data class LinkApproval(val token: String, val deviceID: Long, val userID: Long, val username: String)
+
+/// `POST /link/poll` — pending until the starter acts; `Denied` and
+/// `Approved` each arrive at most once (the server deletes the session).
+sealed interface LinkPollResult {
+    data object Pending : LinkPollResult
+    data object Denied : LinkPollResult
+    data class Approved(val approval: LinkApproval) : LinkPollResult
+}
+
+/// Errors surfaced by the REST client. Exceptions so they throw through the
+/// suspend surface the way the Swift `throws` do. The messages are
+/// human-readable because they surface verbatim in UI banners via
+/// `error.message` (chat error overlay, composer send error, sign-in form) —
+/// without them a rate-limit on a flaky link rendered as an enum dump
+/// (seen on iOS).
+sealed class JournalApiError(message: String) : Exception(message) {
+    data object BadCredentials : JournalApiError("Invalid credentials.")
+    data class LockedOut(val retryAfterSeconds: Int) :
+        JournalApiError("Too many attempts — try again in ${retryAfterSeconds}s.")
+    data object RateLimited : JournalApiError("The server is busy — trying again shortly.")
+    data object Unauthenticated : JournalApiError("Signed out by the server — please sign in again.")
+    data object Forbidden : JournalApiError("The server refused the request.")
+    data object NotFound : JournalApiError("Not found on the server.")
+    /// 409 — exactly-once semantics: `pair/approve` (already approved),
+    /// `link/claim` (code already claimed), `link/approve` (nothing to
+    /// approve yet, or already resolved).
+    data object Conflict : JournalApiError("Already handled — possibly on another device.")
+    data class Http(val status: Int, val serverMessage: String) :
+        JournalApiError(serverMessage.ifEmpty { "Server error (HTTP $status)." })
+    data class Transport(val detail: String) :
+        JournalApiError(if (detail.isEmpty()) "Couldn't reach the server." else "Couldn't reach the server — $detail")
+}
+
+/// Thin HTTP surface of the journal server: login, snapshot, pagination, media,
+/// devices, and pairing. Suspend functions wrap OkHttp's async enqueue.
+class JournalApi(
+    private val baseUrl: HttpUrl,
+    private val client: OkHttpClient = OkHttpClient(),
+    token: String? = null,
+) : SnapshotSource, AgentSpawnAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
+    PinsProviding, CoordinatorProviding, UserSettingsProviding {
+    constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
+        : this(baseUrl.toHttpUrl(), client, token)
+
+    @Volatile
+    private var token: String? = token
+
+    fun setToken(token: String?) {
+        this.token = token
+    }
+
+    enum class PushEnvironment(val wire: String) { SANDBOX("sandbox"), PROD("prod") }
+
+    /// The server URL's own path, normalized so endpoint paths can be appended:
+    /// "" or "/" → "", "/prefix/" → "/prefix". Appending (not replacing) keeps
+    /// a server hosted under a subpath working.
+    private val basePath: String = baseUrl.encodedPath.trimEnd('/')
+
+    /// The server's base URL. Used by media-URL construction (the timeline
+    /// mapper builds `serverURL/media/<blobRef>`) and blob-ref extraction (the
+    /// media service). Apple exposes the same `serverURL`.
+    val serverURL: HttpUrl get() = baseUrl
+
+    /// The WebSocket URL for `/ws`, preserving any path prefix.
+    override val wsUrl: String
+        get() {
+            val scheme = if (baseUrl.scheme == "http") "ws" else "wss"
+            val portPart = if (baseUrl.port == HttpUrl.defaultPort(baseUrl.scheme)) "" else ":${baseUrl.port}"
+            return "$scheme://${baseUrl.host}$portPart$basePath/ws"
+        }
+
+    suspend fun login(username: String, password: String, deviceName: String): LoginResponse {
+        val body = buildJsonObject {
+            put("username", username)
+            put("password", password)
+            put("device_name", deviceName)
+        }
+        val obj = request(path = "/login", method = "POST", jsonBody = body, authenticated = false)
+        val token = obj.stringOrNull("token")
+        val deviceID = obj.longOrNull("device_id")
+        val userID = obj.longOrNull("user_id")
+        if (token == null || deviceID == null || userID == null) {
+            throw JournalApiError.Transport("malformed login response")
+        }
+        this.token = token
+        return LoginResponse(token, deviceID, userID)
+    }
+
+    override suspend fun snapshot(): SnapshotResponse {
+        val obj = request(path = "/snapshot")
+        val conversations = (obj.arrayOrNull("conversations")?.objects() ?: emptyList()).mapNotNull { c ->
+            val id = c.stringOrNull("id") ?: return@mapNotNull null
+            ConvoSummaryDTO(
+                id = id,
+                title = c.stringOrNull("title") ?: "",
+                sessionState = c.stringOrNull("session_state") ?: SessionState.RUNNING,
+                lastSeq = c.longOrNull("last_seq") ?: 0,
+                snippet = c.stringOrNull("snippet") ?: "",
+                createdAt = c.longOrNull("created_at") ?: 0,
+                lastTS = c.longOrNull("last_ts"),
+                parentConvoID = c.stringOrNull("parent_convo_id"),
+                // Which box manages this conversation. Absent on older
+                // servers -> null -> no chip.
+                agentDeviceID = c.longOrNull("agent_device_id"),
+                // Multi-agent room membership (owner + joined). Absent for
+                // solo conversations and on older servers -> null.
+                participants = c.longArrayOrNull("participants"),
+            )
+        }
+        // Absent field (old server) → null, present-but-empty → empty list:
+        // the store keeps its roster on null and clears it on empty.
+        val agents = obj.arrayOrNull("agents")?.objects()?.mapNotNull { a ->
+            val id = a.longOrNull("device_id") ?: return@mapNotNull null
+            val name = a.stringOrNull("name") ?: return@mapNotNull null
+            // Key-presence carries meaning: absent = a server predating tags,
+            // present-but-null = an authoritative "no tag".
+            AgentDTO(id, name, tagChar = a.stringOrNull("tag_char"), tagCharKnown = a.containsKey("tag_char"))
+        }
+        return SnapshotResponse(
+            conversations, obj.longOrNull("seq") ?: 0, agents,
+            pins = Pins.fromContainer(obj),
+            coordinator = HelloCoordinator.from(obj),
+        )
+    }
+
+    suspend fun messages(convoID: String, beforeSeq: Long?, limit: Int): List<JournalEvent> {
+        val query = buildList {
+            add("limit" to limit.toString())
+            if (beforeSeq != null) add("before_seq" to beforeSeq.toString())
+        }
+        val obj = request(path = "/convo/${pathSegment(convoID)}/messages", query = query)
+        return (obj.arrayOrNull("events")?.objects() ?: emptyList()).mapNotNull(JournalEvent::fromFrame)
+    }
+
+    suspend fun mediaData(blobRef: String): ByteArray {
+        val (status, data) = raw(path = "/media/${pathSegment(blobRef)}", method = "GET")
+        if (status != 200) throw error(status, data)
+        return data
+    }
+
+    /// Uploads raw media bytes and returns the server's `media_id`, which
+    /// callers pass back as the `blob_ref` on a subsequent media `send`.
+    ///
+    /// [progress] (optional) receives the fraction of the request body sent
+    /// (0…1), delivered on an OkHttp writer thread — the whole point on a slow
+    /// uplink, where a multi-MB screenshot otherwise looks frozen. The write/
+    /// read timeouts are raised well past the client default for the same
+    /// reason: a legitimate slow upload must not die mid-body.
+    override suspend fun uploadMedia(data: ByteArray, contentType: String, progress: ((Double) -> Unit)?): String {
+        val body = data.toRequestBody((contentType.ifEmpty { "application/octet-stream" }).toMediaTypeOrNull())
+        val counted = if (progress != null) ProgressRequestBody(body, data.size.toLong(), progress) else body
+        val builder = Request.Builder().url(buildUrl("/media", emptyList()))
+        token?.let { builder.header("Authorization", "Bearer $it") }
+        builder.method("POST", counted)
+        val uploadClient = client.newBuilder()
+            .writeTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+        val (status, respData) = execute(uploadClient.newCall(builder.build()))
+        if (status != 200) throw error(status, respData)
+        val obj = parseJsonObjectOrNull(String(respData, Charsets.UTF_8))
+        val mediaID = obj?.stringOrNull("media_id")
+            ?: throw JournalApiError.Transport("malformed media upload response")
+        return mediaID
+    }
+
+    /// Counts bytes as OkHttp writes the request body, reporting the running
+    /// fraction. `writeTo` can run more than once (OkHttp retries); the
+    /// counter is per-invocation so a retry restarts cleanly at 0.
+    private class ProgressRequestBody(
+        private val delegate: okhttp3.RequestBody,
+        private val totalBytes: Long,
+        private val onProgress: (Double) -> Unit,
+    ) : okhttp3.RequestBody() {
+        override fun contentType() = delegate.contentType()
+        override fun contentLength() = totalBytes
+        override fun writeTo(sink: okio.BufferedSink) {
+            var written = 0L
+            val counting = object : okio.ForwardingSink(sink) {
+                override fun write(source: okio.Buffer, byteCount: Long) {
+                    super.write(source, byteCount)
+                    written += byteCount
+                    if (totalBytes > 0) onProgress(written.toDouble() / totalBytes)
+                }
+            }
+            val buffered = counting.buffer()
+            delegate.writeTo(buffered)
+            buffered.flush()
+        }
+    }
+
+    /// The signed-in user's device roster. Order is not guaranteed — callers
+    /// sort. Pull-based: refresh on screen enter and after mutations.
+    suspend fun devices(): List<DeviceDTO> {
+        val obj = request(path = "/devices")
+        return (obj.arrayOrNull("devices")?.objects() ?: emptyList()).mapNotNull { d ->
+            val id = d.longOrNull("device_id") ?: return@mapNotNull null
+            DeviceDTO(
+                id = id,
+                kind = d.stringOrNull("kind") ?: "client",
+                name = d.stringOrNull("name") ?: "",
+                createdAt = d.longOrNull("created_at") ?: 0,
+                cursor = d.longOrNull("cursor") ?: 0,
+                lag = d.longOrNull("lag") ?: 0,
+                lastSeenAt = d.longOrNull("last_seen_at"),
+                isSelf = d.boolOrNull("is_self") ?: false,
+                connected = d.boolOrNull("connected") ?: false,
+                tagChar = d.stringOrNull("tag_char"),
+                status = d.objectOrNull("status")?.let(BoxStatus::parse),
+                defaults = d.objectOrNull("defaults")?.let(BoxDefaults::decodeRoster),
+            )
+        }
+    }
+
+    /// `PUT /devices/:id/defaults` — sets (or, with a null value, clears)
+    /// any subset of an agent box's defaults for new sessions, returning the
+    /// full state the journal stored. The journal clears the model when the
+    /// agent changes without one. 400 `bad_agent` / `bad_model` /
+    /// `bad_effort` / `not_agent_device` arrive as `JournalApiError.Http`
+    /// carrying the code; 404 (`NotFound`) is "not yours", or a journal
+    /// predating box defaults.
+    suspend fun putDeviceDefaults(id: Long, changes: Map<BoxDefaults.Key, String?>): BoxDefaults {
+        val obj = request(path = "/devices/$id/defaults", method = "PUT", jsonBody = buildJsonObject {
+            changes.forEach { (key, value) ->
+                if (value != null) put(key.wire, value) else put(key.wire, kotlinx.serialization.json.JsonNull)
+            }
+        })
+        if (obj.longOrNull("device_id") != id) throw JournalApiError.Transport("malformed defaults response")
+        return BoxDefaults.decodeState(obj) ?: throw JournalApiError.Transport("malformed defaults response")
+    }
+
+    /// Sets or clears (null) a device's roster tag character — the letter
+    /// clients show beside the box. Journal-held so the choice follows the
+    /// user to every device. 404 covers "not yours" and "gone", like rename.
+    /// The server keeps only the first grapheme of what it's sent; callers
+    /// re-fetch the roster rather than trusting the echo (apple #158).
+    suspend fun setDeviceTag(id: Long, tagChar: String?) {
+        request(path = "/devices/$id/tag", method = "POST", jsonBody = buildJsonObject {
+            if (tagChar != null) put("tag_char", tagChar) else put("tag_char", kotlinx.serialization.json.JsonNull)
+        })
+    }
+
+    /// Immediate, permanent revocation. 404 (`NotFound`) means already revoked
+    /// elsewhere — callers treat it as success.
+    suspend fun revokeDevice(id: Long) {
+        request(path = "/devices/$id/revoke", method = "POST", jsonBody = buildJsonObject { })
+    }
+
+    /// Renames a device. Client tokens only (the server 403s an agent), and
+    /// 404 covers both "not yours" and "gone".
+    suspend fun renameDevice(id: Long, name: String): DeviceDTO {
+        val obj = request(
+            path = "/devices/$id/rename", method = "POST",
+            jsonBody = buildJsonObject { put("name", name) },
+        )
+        val d = obj.objectOrNull("device")
+        val deviceID = d?.longOrNull("device_id")
+        val newName = d?.stringOrNull("name")
+        // An echo naming a DIFFERENT device is as malformed as a missing one.
+        if (deviceID == null || newName == null || deviceID != id) {
+            throw JournalApiError.Transport("malformed rename response")
+        }
+        // Partial DTO: the rename response carries only identity and the new
+        // name. Callers re-fetch the roster for the full row rather than
+        // trusting these zeros — see DevicesViewModel.rename.
+        return DeviceDTO(
+            id = deviceID, kind = "", name = newName, createdAt = 0,
+            cursor = 0, lag = 0, lastSeenAt = null, isSelf = false,
+        )
+    }
+
+    // MARK: Agent chat consent
+
+    /// Asks parked waiting on this user, across every room. The durable
+    /// counterpart to the live consent card — an ask minted while no client was
+    /// connected is only ever visible here.
+    suspend fun agentChatPending(): List<AgentChatPendingDTO> {
+        val obj = request(path = "/agent-chat/pending")
+        return (obj.arrayOrNull("pending")?.objects() ?: emptyList()).mapNotNull { p ->
+            val roomID = p.stringOrNull("convo_id") ?: return@mapNotNull null
+            val target = p.longOrNull("agent_device_id") ?: return@mapNotNull null
+            val initiator = p.longOrNull("initiator_device_id") ?: return@mapNotNull null
+            AgentChatPendingDTO(
+                roomID = roomID,
+                targetDeviceID = target,
+                initiatorDeviceID = initiator,
+                initiatorName = p.stringOrNull("initiator_name"),
+                targetName = p.stringOrNull("agent_name"),
+                topic = nonEmpty(p.stringOrNull("topic")),
+                justification = nonEmpty(p.stringOrNull("justification")),
+                roomTitle = p.stringOrNull("title") ?: "",
+                createdAt = p.longOrNull("created_at") ?: 0,
+            )
+        }
+    }
+
+    /// Answers one parked ask. The ONLY path that resolves a consent card — a
+    /// `prompt_reply` into the room never touches the parked row.
+    ///
+    /// One answer, one request: there is no standing consent to grant, so
+    /// approving here says nothing about the next ask from the same pair.
+    ///
+    /// Returns the server's `delivered` flag: whether the approved invite
+    /// reached the target's socket right now, or is still owed to it. Throws
+    /// `Conflict` if the row is no longer awaiting an answer (already answered
+    /// here or elsewhere, or expired) and `NotFound` if the room isn't this
+    /// user's.
+    suspend fun answerAgentChat(
+        roomID: String,
+        targetDeviceID: Long,
+        decision: AgentChatDecision,
+    ): Boolean {
+        val obj = request(
+            path = "/agent-chat/answer", method = "POST",
+            jsonBody = buildJsonObject {
+                put("room_id", roomID)
+                put("target_device_id", targetDeviceID)
+                put("decision", decision.wire)
+            },
+        )
+        return obj.boolOrNull("delivered") ?: false
+    }
+
+    /// The journal defaults an absent topic/justification to `""` rather than
+    /// omitting the key, so "absent" and "empty" arrive identically.
+    private fun nonEmpty(raw: String?): String? = raw?.trim()?.takeIf { it.isNotEmpty() }
+
+    // MARK: Agent spawn consent
+
+    /// Answers one agent-spawn consent card. The ONLY path that resolves
+    /// one — unlike agent-chat there is no parked-list counterpart, and the
+    /// answer produces no journal event of its own: the eventual
+    /// `spawn_outcome` event (a distinct, journal-authored row) is what
+    /// tells every device — including the asking agent — how this was
+    /// resolved.
+    ///
+    /// Throws `Conflict` if the row is no longer awaiting an answer (already
+    /// answered here or elsewhere, or expired) and `NotFound` if the request
+    /// isn't this user's (or is already gone).
+    override suspend fun answerAgentSpawn(requestId: String, decision: AgentSpawnDecision) {
+        request(
+            path = "/agent-spawn/answer", method = "POST",
+            jsonBody = buildJsonObject {
+                put("request_id", requestId)
+                put("decision", decision.wire)
+            },
+        )
+    }
+
+    /// Previews a pairing code before approval. 404 = unknown/expired/approved.
+    suspend fun pairPreview(code: String): PairPreview {
+        val obj = request(path = "/pair/preview", method = "POST",
+            jsonBody = buildJsonObject { put("pair_code", code) })
+        val ip = obj.stringOrNull("requester_ip")
+        val expiresIn = obj.intOrNull("expires_in")
+        if (ip == null || expiresIn == null) {
+            throw JournalApiError.Transport("malformed pair preview response")
+        }
+        return PairPreview(ip, expiresIn)
+    }
+
+    /// Approves a pairing code. Exactly-once: `Conflict` = already approved.
+    /// [tagChar], when given, lets the box be born with the right letter
+    /// (colleagues' dev-a/dev-b → a/b from day one); omitted entirely when
+    /// null, not sent as null (apple #158).
+    suspend fun pairApprove(code: String, agentName: String, tagChar: String? = null) {
+        request(path = "/pair/approve", method = "POST", jsonBody = buildJsonObject {
+            put("pair_code", code)
+            put("agent_name", agentName)
+            if (tagChar != null) put("tag_char", tagChar)
+        })
+    }
+
+    // MARK: Device link (QR sign-in)
+
+    /// Starts (or replaces) this device's link session. `NotFound` means the
+    /// server predates /link/* — callers surface "doesn't support device
+    /// linking yet".
+    suspend fun linkStart(): LinkStart {
+        val obj = request(path = "/link/start", method = "POST", jsonBody = buildJsonObject { })
+        val code = obj.stringOrNull("link_code")
+        val expiresIn = obj.intOrNull("expires_in")
+        if (code == null || expiresIn == null) throw JournalApiError.Transport("malformed link start response")
+        return LinkStart(code, expiresIn)
+    }
+
+    /// This device's active session state. `NotFound` = no active session
+    /// (expired or resolved) — the show side regenerates on it.
+    suspend fun linkStatus(): LinkStatus {
+        val obj = request(path = "/link/status", method = "POST", jsonBody = buildJsonObject { })
+        val expiresIn = obj.intOrNull("expires_in") ?: 0
+        return when (obj.stringOrNull("status")) {
+            "waiting" -> LinkStatus.Waiting(expiresIn)
+            "claimed" -> {
+                val name = obj.stringOrNull("device_name")
+                val ip = obj.stringOrNull("requester_ip")
+                if (name == null || ip == null) throw JournalApiError.Transport("malformed link status response")
+                LinkStatus.Claimed(name, ip, expiresIn)
+            }
+            else -> throw JournalApiError.Transport("malformed link status response")
+        }
+    }
+
+    /// Approves this device's claimed session. `Conflict` = nothing claimed
+    /// yet or already resolved; `NotFound` = expired/gone.
+    suspend fun linkApprove(code: String) {
+        request(path = "/link/approve", method = "POST",
+            jsonBody = buildJsonObject { put("link_code", code) })
+    }
+
+    suspend fun linkDeny(code: String) {
+        request(path = "/link/deny", method = "POST",
+            jsonBody = buildJsonObject { put("link_code", code) })
+    }
+
+    /// Claimant side: claims a scanned/typed code. Unauthenticated — this API
+    /// instance points at the *target* server and has no token yet.
+    /// `Conflict` = code already used; `NotFound` = unknown/expired.
+    suspend fun linkClaim(code: String, deviceName: String): LinkClaim {
+        val obj = request(path = "/link/claim", method = "POST", authenticated = false,
+            jsonBody = buildJsonObject {
+                put("link_code", code)
+                put("device_name", deviceName)
+            })
+        val token = obj.stringOrNull("claim_token")
+        val expiresIn = obj.intOrNull("expires_in")
+        if (token == null || expiresIn == null) throw JournalApiError.Transport("malformed link claim response")
+        return LinkClaim(token, expiresIn)
+    }
+
+    /// Claimant poll loop body. `NotFound` after a successful claim means the
+    /// session expired (or was replaced) — surface "Sign-in expired".
+    suspend fun linkPoll(claimToken: String): LinkPollResult {
+        val obj = request(path = "/link/poll", method = "POST", authenticated = false,
+            jsonBody = buildJsonObject { put("claim_token", claimToken) })
+        return when (obj.stringOrNull("status")) {
+            "pending" -> LinkPollResult.Pending
+            "denied" -> LinkPollResult.Denied
+            "approved" -> {
+                val token = obj.stringOrNull("token")
+                val deviceID = obj.longOrNull("device_id")
+                val userID = obj.longOrNull("user_id")
+                val username = obj.stringOrNull("username")
+                if (token == null || deviceID == null || userID == null || username == null) {
+                    throw JournalApiError.Transport("malformed link poll response")
+                }
+                LinkPollResult.Approved(LinkApproval(token, deviceID, userID, username))
+            }
+            else -> throw JournalApiError.Transport("malformed link poll response")
+        }
+    }
+
+    /// Registers this device for pushes (client devices only).
+    suspend fun registerPush(tokenHex: String, environment: PushEnvironment) {
+        request(path = "/push/register", method = "POST", jsonBody = buildJsonObject {
+            put("apns_token", tokenHex)
+            put("environment", environment.wire)
+        })
+    }
+
+    /// Clears this device's push registration (apns_token: null).
+    suspend fun unregisterPush() {
+        request(path = "/push/register", method = "POST", jsonBody = buildJsonObject {
+            put("apns_token", kotlinx.serialization.json.JsonNull)
+        })
+    }
+
+    // MARK: Items (task & decision tracker)
+    //
+    // protocol.md "Items → Routes". Ported from matron-apple's
+    // `JournalAPI+Items.swift`. A journal predating the tracker 404s on
+    // every one of these; `ItemsSync` turns the `GET /items` 404 into
+    // "unsupported" and hides the tracker UI.
+
+    private fun decodeItem(obj: JsonObject): TrackerItem =
+        obj.objectOrNull("item")?.let(TrackerItem::fromJson)
+            ?: throw JournalApiError.Transport("malformed item response")
+
+    private fun idempotencyHeaders(key: String?): Map<String, String> =
+        if (key != null) mapOf("Idempotency-Key" to key) else emptyMap()
+
+    override suspend fun listItems(query: ItemsListQuery): ItemsPage {
+        val obj = request(path = "/items", query = query.queryItems)
+        val items = obj.arrayOrNull("items")?.objects()?.mapNotNull(TrackerItem::fromJson) ?: emptyList()
+        return ItemsPage(items, obj.stringOrNull("next_cursor"))
+    }
+
+    /// [id] is `it_…` or `#num`; the `#` is percent-encoded by [pathSegment].
+    override suspend fun item(id: String): ItemDetail {
+        val obj = request(path = "/items/${pathSegment(id)}")
+        val comments = obj.arrayOrNull("comments")?.objects()?.mapNotNull(TrackerComment::fromJson) ?: emptyList()
+        return ItemDetail(decodeItem(obj), comments)
+    }
+
+    override suspend fun createItem(new: NewItem, idempotencyKey: String?): TrackerItem =
+        decodeItem(
+            request(
+                path = "/items", method = "POST", jsonBody = new.toJson(),
+                accept = setOf(200, 201), headers = idempotencyHeaders(idempotencyKey),
+            ),
+        )
+
+    override suspend fun updateItem(id: String, patch: ItemPatch): TrackerItem =
+        decodeItem(request(path = "/items/${pathSegment(id)}", method = "PATCH", jsonBody = patch.toJson()))
+
+    override suspend fun commentItem(
+        id: String,
+        body: String,
+        attachments: List<TrackerAttachment>,
+        idempotencyKey: String?,
+        action: String?,
+        replyTo: String?,
+    ): ItemCommentResult {
+        val json = buildJsonObject {
+            put("body", body)
+            action?.let { put("action", it) }
+            replyTo?.let { put("reply_to", it) }
+            if (attachments.isNotEmpty()) {
+                put("attachments", kotlinx.serialization.json.buildJsonArray { attachments.forEach { add(it.outgoingJson()) } })
+            }
+        }
+        val obj = request(
+            path = "/items/${pathSegment(id)}/comments", method = "POST", jsonBody = json,
+            accept = setOf(200, 201), headers = idempotencyHeaders(idempotencyKey),
+        )
+        val comment = obj.objectOrNull("comment")?.let(TrackerComment::fromJson)
+            ?: throw JournalApiError.Transport("malformed comment response")
+        return ItemCommentResult(decodeItem(obj), comment)
+    }
+
+    override suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem =
+        decodeItem(
+            request(
+                path = "/items/${pathSegment(id)}/close", method = "POST",
+                jsonBody = buildJsonObject {
+                    put("resolution", resolution.wire)
+                    comment?.let { put("comment", it) }
+                },
+            ),
+        )
+
+    override suspend fun reopenItem(id: String, comment: String?): TrackerItem =
+        decodeItem(
+            request(
+                path = "/items/${pathSegment(id)}/reopen", method = "POST",
+                jsonBody = buildJsonObject { comment?.let { put("comment", it) } },
+            ),
+        )
+
+    override suspend fun rankItem(id: String, change: ItemRankChange): TrackerItem =
+        decodeItem(request(path = "/items/${pathSegment(id)}/rank", method = "POST", jsonBody = change.toJson()))
+
+    // MARK: Settings
+    //
+    // matron-journal "For you" settings. A journal predating the route 404s
+    // the GET; the settings screen reads that as "not offered" and hides the
+    // switch.
+
+    override suspend fun settings(): UserSettings =
+        UserSettingsDecoding.settings(request(path = "/settings"))
+            ?: throw JournalApiError.Transport("malformed settings response")
+
+    override suspend fun updateSettings(notices: Boolean): UserSettings =
+        UserSettingsDecoding.settings(
+            request(path = "/settings", method = "PATCH", jsonBody = buildJsonObject { put("notices", notices) }),
+        ) ?: throw JournalApiError.Transport("malformed settings response")
+
+    // MARK: Memories
+    //
+    // protocol.md "Memories" (spec 2026-09-27). User-global routes; a
+    // journal predating them 404s `GET /memories`, which `MemoriesSync`
+    // reads as "unsupported".
+
+    override suspend fun listMemories(): List<Memory> =
+        MemoriesDecoding.memories(request(path = "/memories"))
+
+    /// PUT is an upsert by name: 201 when created, 200 when updated.
+    override suspend fun saveMemory(name: String, write: MemoryWrite): MemorySave {
+        val body = buildJsonObject {
+            put("description", write.description)
+            write.body?.let { put("body", it) }
+            write.type?.let { put("type", it.wire) }
+        }
+        val (status, data) = raw("/memories/${pathSegment(name)}", "PUT", jsonBody = body)
+        if (status != 200 && status != 201) throw error(status, data)
+        val obj = parseJsonObjectOrNull(String(data, Charsets.UTF_8))
+            ?: throw JournalApiError.Transport("non-JSON response for /memories/$name")
+        return MemorySave(MemoriesDecoding.memory(obj), created = status == 201)
+    }
+
+    override suspend fun deleteMemory(name: String): Memory =
+        MemoriesDecoding.memory(request(path = "/memories/${pathSegment(name)}", method = "DELETE"))
+
+    // MARK: Missions & milestones
+    //
+    // protocol.md "Missions & milestones → Routes". Ported from matron-apple's
+    // `JournalAPI+Missions.swift`. A journal predating missions 404s on every
+    // one of these; `MissionsSync` turns the `GET /missions` 404 into
+    // "unsupported" and hides the Missions tab.
+
+    override suspend fun listMissions(query: MissionsListQuery): MissionsListDecode =
+        MissionsDecoding.missions(request(path = "/missions", query = query.queryItems))
+
+    /// [id] is `ms_…` or `#num`; the `#` is percent-encoded by [pathSegment].
+    override suspend fun mission(id: String): MissionDetail =
+        MissionsDecoding.detail(request(path = "/missions/${pathSegment(id)}"))
+
+    /// `GET /milestones?convo=` — the spec's per-conversation read surface,
+    /// kept even though no screen consumes it yet: the transcript renders
+    /// milestones from timeline events and the mission page from the detail
+    /// fetch.
+    override suspend fun milestones(convoID: String): List<Milestone> =
+        MissionsDecoding.milestones(request(path = "/milestones", query = listOf("convo" to convoID)))
+
+    /// A device close always succeeds server-side, even over open items —
+    /// the journal records `closed_over_open_items` and names the numbers in
+    /// the close marker. The protocol's *Closing* 409s apply to AGENT
+    /// callers, so this method never has to render one.
+    override suspend fun closeMission(id: String, summary: String): Mission =
+        MissionsDecoding.mission(
+            request(path = "/missions/${pathSegment(id)}/close", method = "POST", jsonBody = buildJsonObject { put("summary", summary) }),
+        )
+
+    // MARK: Pinned desk chats
+    //
+    // protocol.md "Pinned desk chats". Ported from matron-web's `api.ts`
+    // pin routes. A refused write keeps its `detail` (the 409s are worded
+    // for the user), which the generic [error] mapping would drop.
+
+    override suspend fun pins(): PinList = Pins.parseResponse(request(path = "/pins"))
+
+    override suspend fun reorderPins(order: List<String>): PinList =
+        pinRequest("/pins", "PUT", buildJsonObject { put("order", JsonArray(order.map { JsonPrimitive(it) })) })
+
+    override suspend fun putPin(convoID: String, label: String?, emoji: String?): PinList =
+        pinRequest(
+            "/pins/${pathSegment(convoID)}", "PUT",
+            buildJsonObject {
+                label?.let { put("label", it) }
+                emoji?.let { put("emoji", it) }
+            },
+        )
+
+    override suspend fun deletePin(convoID: String): PinList =
+        pinRequest("/pins/${pathSegment(convoID)}", "DELETE", null)
+
+    override suspend fun movePin(convoID: String, toConvoID: String): PinList =
+        pinRequest("/pins/${pathSegment(convoID)}/move", "POST", buildJsonObject { put("to_convo_id", toConvoID) })
+
+    override suspend fun dismissPinSuccessor(convoID: String, successorID: String): PinList =
+        pinRequest("/pins/${pathSegment(convoID)}/dismiss", "POST", buildJsonObject { put("successor_id", successorID) })
+
+    private suspend fun pinRequest(path: String, method: String, body: JsonObject?): PinList {
+        val (status, data) = raw(path, method, jsonBody = body)
+        val obj = parseJsonObjectOrNull(String(data, Charsets.UTF_8))
+        if (status == 200) {
+            return Pins.parseResponse(obj ?: throw JournalApiError.Transport("non-JSON response for $path"))
+        }
+        if (status == 400 || status == 404 || status == 409) {
+            throw PinRequestError(status, obj?.stringOrNull("detail"), obj?.intOrNull("limit"))
+        }
+        throw error(status, data)
+    }
+
+    // MARK: Coordinator
+
+    override suspend fun coordinator(): String? = decodeCoordinator(request(path = "/coordinator"))
+
+    override suspend fun setCoordinator(convoID: String?): String? =
+        decodeCoordinator(
+            request(
+                path = "/coordinator", method = "PUT",
+                jsonBody = buildJsonObject { put("convo_id", convoID?.let { JsonPrimitive(it) } ?: JsonNull) },
+            ),
+        )
+
+    private fun decodeCoordinator(obj: JsonObject): String? = obj.stringOrNull("convo_id")?.takeIf { it.isNotEmpty() }
+
+    // MARK: Internals
+
+    /// Escapes one path segment: everything but unreserved characters is
+    /// percent-encoded, including "/".
+    private fun pathSegment(raw: String): String {
+        val sb = StringBuilder()
+        for (byte in raw.toByteArray(Charsets.UTF_8)) {
+            val code = byte.toInt() and 0xFF
+            val ch = code.toChar()
+            if (ch in 'A'..'Z' || ch in 'a'..'z' || ch in '0'..'9' || ch in "-._~") {
+                sb.append(ch)
+            } else {
+                sb.append('%').append("%02X".format(code))
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun buildUrl(path: String, query: List<Pair<String, String>>): HttpUrl {
+        val builder = baseUrl.newBuilder().encodedPath(basePath + path)
+        query.forEach { (name, value) -> builder.addQueryParameter(name, value) }
+        return builder.build()
+    }
+
+    /// [accept] is the set of statuses that count as success (the tracker's
+    /// create/comment routes answer 201, or 200 on an idempotent replay);
+    /// [headers] carries per-request extras such as `Idempotency-Key`.
+    private suspend fun request(
+        path: String,
+        method: String = "GET",
+        jsonBody: JsonObject? = null,
+        query: List<Pair<String, String>> = emptyList(),
+        authenticated: Boolean = true,
+        accept: Set<Int> = setOf(200),
+        headers: Map<String, String> = emptyMap(),
+    ): JsonObject {
+        val (status, data) = raw(path, method, jsonBody, query, authenticated, headers = headers)
+        if (status !in accept) throw error(status, data)
+        return parseJsonObjectOrNull(String(data, Charsets.UTF_8))
+            ?: throw JournalApiError.Transport("non-JSON response for $path")
+    }
+
+    private suspend fun raw(
+        path: String,
+        method: String,
+        jsonBody: JsonObject? = null,
+        query: List<Pair<String, String>> = emptyList(),
+        authenticated: Boolean = true,
+        rawBody: ByteArray? = null,
+        rawContentType: String? = null,
+        headers: Map<String, String> = emptyMap(),
+    ): Pair<Int, ByteArray> {
+        val builder = Request.Builder().url(buildUrl(path, query))
+        if (authenticated) token?.let { builder.header("Authorization", "Bearer $it") }
+        // Opt in to the item kinds this build understands on EVERY request,
+        // not just `/items`: missions, snapshots and anything else that may
+        // embed items then agree with the tracker's own answers.
+        builder.header(ITEM_KINDS_HEADER, ITEM_KINDS_VALUE)
+        // Same scope for inline attachment refs: with this header the journal
+        // hands bodies over with raw `![caption](attachment:ref)` markers.
+        builder.header(ITEM_INLINE_HEADER, ITEM_INLINE_VALUE)
+        headers.forEach { (name, value) -> builder.header(name, value) }
+        // A raw body (media upload) sends bytes verbatim under its own content
+        // type; the JSON body path is mutually exclusive with it.
+        val body = when {
+            rawBody != null ->
+                rawBody.toRequestBody((rawContentType ?: "application/octet-stream").toMediaTypeOrNull())
+            jsonBody != null ->
+                jsonBody.toString().toRequestBody("application/json".toMediaTypeOrNull())
+            else -> null
+        }
+        builder.method(method, body)
+        return execute(client.newCall(builder.build()))
+    }
+
+    private suspend fun execute(call: Call): Pair<Int, ByteArray> =
+        suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation { runCatching { call.cancel() } }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    cont.resumeWithException(JournalApiError.Transport(e.message ?: "transport error"))
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    response.use {
+                        val bytes = it.body?.bytes() ?: ByteArray(0)
+                        cont.resumeWith(Result.success(it.code to bytes))
+                    }
+                }
+            })
+        }
+
+    companion object {
+        /// The journal hands `kind: "notice"` only to clients that list it
+        /// here; everyone else sees those items as tasks, which keeps an
+        /// older app (whose decoder drops unknown kinds) showing them.
+        const val ITEM_KINDS_HEADER = "X-Matron-Item-Kinds"
+        const val ITEM_KINDS_VALUE = "notice"
+
+        /// The journal keeps `![caption](attachment:ref)` refs in item and
+        /// comment bodies only for clients that send this; others get the
+        /// caption text instead, so an old app never shows a broken link.
+        const val ITEM_INLINE_HEADER = "X-Matron-Item-Inline"
+        const val ITEM_INLINE_VALUE = "attachments"
+    }
+
+    private fun error(status: Int, data: ByteArray): JournalApiError {
+        val obj = parseJsonObjectOrNull(String(data, Charsets.UTF_8))
+        val code = obj?.stringOrNull("error")
+        return when {
+            status == 403 && code == "bad_credentials" -> JournalApiError.BadCredentials
+            status == 429 && code == "locked_out" ->
+                JournalApiError.LockedOut(obj?.intOrNull("retry_after") ?: 60)
+            status == 429 -> JournalApiError.RateLimited
+            status == 401 -> JournalApiError.Unauthenticated
+            status == 403 -> JournalApiError.Forbidden
+            status == 404 -> JournalApiError.NotFound
+            status == 409 -> JournalApiError.Conflict
+            else -> JournalApiError.Http(status, obj?.stringOrNull("message") ?: code ?: "")
+        }
+    }
+}

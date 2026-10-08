@@ -1,0 +1,365 @@
+package chat.matron.android.journal.db
+
+import android.content.Context
+import android.os.SystemClock
+import androidx.room.Database
+import androidx.room.Room
+import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+import chat.matron.android.journal.JournalEventType
+import chat.matron.android.journal.JournalStore
+import chat.matron.android.journal.parseJsonObjectOrNull
+import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+
+/// Room database backing the journal mirror. Schema v1 already includes
+/// `parent_convo_id` (the Apple original added it in a v2 migration; a fresh
+/// Android app has no installed base, so it ships in v1 and no migration is
+/// needed). `exportSchema = false`; migrations are hand-written below.
+///
+/// v2 adds the offline send outbox (matron-apple's v3): text sends that can't
+/// reach the server yet persist here (surviving relaunch and the
+/// `snapshot_required` mirror wipe — see `JournalStore.wipe`) and flush FIFO
+/// on reconnect.
+///
+/// v3 adds the summaries-TOC table (matron-apple's v4): one row per bridge
+/// `summary` journal event; the event's seq doubles as the transcript anchor.
+/// Unlike the Apple migration, it also backfills the table from `summary`
+/// events already stored in `event` (see MIGRATION_2_3).
+///
+/// v4 adds agent-box attribution (matron-apple's v5; spec: agent box rename).
+/// `agent` is the id → name mirror of the server's `agents` snapshot list;
+/// `conversation.agent_device_id` names which of those boxes owns the row.
+/// Additive: existing rows keep NULL and simply render no chip until the next
+/// snapshot fills them in.
+///
+/// v5 adds multi-agent room membership (matron-apple's v6): JSON `[Long]` of
+/// the journal's owner + joined participant device ids, NULL for everything
+/// that is not a room. Additive like v3: existing rows keep NULL and chip as
+/// before until the next snapshot / membership convo_meta fills them in.
+///
+/// v7 adds the task & decision tracker cache (matron-apple's v9): `item` and
+/// `item_comment` mirror the journal's rows (filled from `GET /items`, never
+/// from the event log), and `item_outbox` queues comments/creates written
+/// offline. Additive; all three start empty and the first refresh fills them.
+///
+/// v8 adds the mission cache (matron-apple's v10): `mission`, `milestone`
+/// and `mission_conversation` mirror `GET /missions` / `GET /missions/:id`
+/// (never the event log), plus an index on `item(mission_id, state,
+/// awaiting)` for the mission page's open-items query. Additive. Unlike the
+/// Apple migration it adds no item columns — `mission_id` / `mission_num`
+/// already shipped in v7 — so no items-watermark reset is needed.
+///
+/// v9 is the launch-performance migration (matron-apple's v11, #212): the
+/// `event(type, ts)` index the background sweeps range-scan, plus two derived
+/// `conversation` columns (`last_message_type`, `expired_snippet`) backfilled
+/// from the stored events so the chat list's first paint reads only the
+/// `conversation` table. Additive and self-contained (one `Migration`).
+///
+/// v10 adds `mission_conversation.auto_title`: the bridge's own title, which
+/// the journal replaces with the mission's name while a conversation is on a
+/// mission (matron-journal "Mission-named conversations"). Additive; rows
+/// keep NULL until the next mission detail fetch fills it in.
+///
+/// v11 adds `item.actions_json` and `item.chosen_action`: an item's own
+/// one-tap answers (a notice's Seen button) and the latest tap on them.
+/// Additive; cached rows read as "no buttons" until their next refetch.
+///
+/// v12 adds `item.origin_convo_title` (the journal's title for the item's
+/// origin conversation, the item detail's fallback label) and `mission.name`
+/// (the mission's optional short name). Additive; cached rows read `null`
+/// until their next fetch.
+@Database(
+    entities = [
+        ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
+        SummaryEntryEntity::class, AgentEntity::class,
+        ItemEntity::class, ItemCommentEntity::class, ItemOutboxEntity::class,
+        MissionEntity::class, MilestoneEntity::class, MissionConversationEntity::class,
+    ],
+    version = 12,
+    exportSchema = false,
+)
+abstract class MatronDatabase : RoomDatabase() {
+    abstract fun conversationDao(): ConversationDao
+    abstract fun eventDao(): EventDao
+    abstract fun metaDao(): MetaDao
+    abstract fun outboxDao(): OutboxDao
+    abstract fun summaryEntryDao(): SummaryEntryDao
+    abstract fun agentDao(): AgentDao
+    abstract fun itemDao(): ItemDao
+    abstract fun itemCommentDao(): ItemCommentDao
+    abstract fun itemOutboxDao(): ItemOutboxDao
+    abstract fun missionDao(): MissionDao
+    abstract fun milestoneDao(): MilestoneDao
+    abstract fun missionConversationDao(): MissionConversationDao
+
+    companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `outbox` (" +
+                        "`local_id` TEXT NOT NULL, " +
+                        "`convo_id` TEXT NOT NULL, " +
+                        "`body` TEXT NOT NULL, " +
+                        "`created_at` INTEGER NOT NULL, " +
+                        "`state` TEXT NOT NULL, " +
+                        "`attempts` INTEGER NOT NULL, " +
+                        "`last_error` TEXT, " +
+                        "PRIMARY KEY(`local_id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_outbox_convo_id` ON `outbox` (`convo_id`)")
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `summary_entry` (" +
+                        "`convo_id` TEXT NOT NULL, " +
+                        "`seq` INTEGER NOT NULL, " +
+                        "`toc` TEXT NOT NULL, " +
+                        "`detail` TEXT NOT NULL, " +
+                        "`created_at` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`convo_id`, `seq`))"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_summary_entry_convo_id` ON `summary_entry` (`convo_id`)"
+                )
+                // Backfill from `summary` events already in the mirror: they
+                // sit at/below the sync cursor, so no ingest path will ever
+                // re-process them — without this pass, summaries received
+                // before the upgrade never appear in the TOC (bugbot
+                // "Migration skips existing summaries"). Reuses the live
+                // ingest path's accept/skip contract ([SummaryEntryEntity.from]:
+                // only `summary` frames with a non-empty `toc`), parsing the
+                // payload in Kotlin rather than SQLite's json_extract (JSON1
+                // availability varies by API level). Diverges from
+                // matron-apple's v4 migration, which creates the table empty
+                // and has the same gap.
+                db.query(
+                    "SELECT `seq`, `convo_id`, `ts`, `sender`, `type`, `payload` FROM `event` WHERE `type` = ?",
+                    arrayOf(JournalEventType.SUMMARY),
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val event = EventEntity(
+                            seq = cursor.getLong(0), convoID = cursor.getString(1), ts = cursor.getLong(2),
+                            sender = cursor.getString(3), type = cursor.getString(4), payload = cursor.getString(5),
+                        ).toJournalEvent()
+                        val entry = SummaryEntryEntity.from(event) ?: continue
+                        db.execSQL(
+                            "INSERT OR IGNORE INTO `summary_entry` " +
+                                "(`convo_id`, `seq`, `toc`, `detail`, `created_at`) VALUES (?, ?, ?, ?, ?)",
+                            arrayOf(entry.convoID, entry.seq, entry.toc, entry.detail, entry.createdAt),
+                        )
+                    }
+                }
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `conversation` ADD COLUMN `agent_device_id` INTEGER")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `agent` (" +
+                        "`id` INTEGER NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "PRIMARY KEY(`id`))"
+                )
+            }
+        }
+
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `conversation` ADD COLUMN `participants` TEXT")
+            }
+        }
+
+        /// v6 (matron-apple's v7, #158): the journal-held box tag character.
+        /// Additive; NULL rows fall back to the derived letter until a
+        /// snapshot or the legacy-override migration fills them in.
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `agent` ADD COLUMN `tag_char` TEXT")
+            }
+        }
+
+        /// v7 (matron-apple's v9, #185): the tracker cache and its outbox.
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `item` (" +
+                        "`id` TEXT NOT NULL, `num` INTEGER NOT NULL, `kind` TEXT NOT NULL, `state` TEXT NOT NULL, " +
+                        "`resolution` TEXT, `awaiting` TEXT, `rank` REAL NOT NULL, `title` TEXT NOT NULL, " +
+                        "`body` TEXT NOT NULL, `labels_json` TEXT NOT NULL, `links_json` TEXT NOT NULL, " +
+                        "`attachments_json` TEXT NOT NULL, `supersedes` TEXT, `origin_convo_id` TEXT NOT NULL, " +
+                        "`created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, " +
+                        "`closed_at` INTEGER, `comment_count` INTEGER NOT NULL, `last_comment_at` INTEGER, " +
+                        "`has_image` INTEGER NOT NULL, `mission_id` TEXT, `mission_num` INTEGER, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_item_origin_convo_id` ON `item` (`origin_convo_id`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `item_comment` (" +
+                        "`id` TEXT NOT NULL, `item_id` TEXT NOT NULL, `author` TEXT NOT NULL, " +
+                        "`device_id` INTEGER NOT NULL, `kind` TEXT NOT NULL, `body` TEXT NOT NULL, " +
+                        "`attachments_json` TEXT NOT NULL, `meta_json` TEXT, `created_at` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_item_comment_item_id` ON `item_comment` (`item_id`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `item_outbox` (" +
+                        "`local_id` TEXT NOT NULL, `item_id` TEXT, `op` TEXT NOT NULL, `payload_json` TEXT NOT NULL, " +
+                        "`created_at` INTEGER NOT NULL, `attempts` INTEGER NOT NULL, `last_error` TEXT, " +
+                        "PRIMARY KEY(`local_id`))"
+                )
+            }
+        }
+
+        /// v8 (matron-apple's v10, #209): the mission cache. Index names
+        /// follow Room's own `index_<table>_<columns>` convention because
+        /// Room validates them against the entities at open.
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `mission` (" +
+                        "`id` TEXT NOT NULL, `num` INTEGER NOT NULL, `state` TEXT NOT NULL, `title` TEXT NOT NULL, " +
+                        "`body` TEXT NOT NULL, `close_summary` TEXT, `closed_by` TEXT, " +
+                        "`closed_over_open_items` INTEGER NOT NULL, `origin_convo_id` TEXT NOT NULL, " +
+                        "`origin_device_id` INTEGER NOT NULL, `created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, " +
+                        "`updated_at` INTEGER NOT NULL, `last_milestone_at` INTEGER, `closed_at` INTEGER, " +
+                        "`open_items` INTEGER NOT NULL, `needs_you` INTEGER NOT NULL, `conversation_count` INTEGER NOT NULL, " +
+                        "`milestone_count` INTEGER NOT NULL, `last_milestone_json` TEXT, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_mission_state_last_milestone_at` ON `mission` (`state`, `last_milestone_at`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_mission_origin_convo_id` ON `mission` (`origin_convo_id`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `milestone` (" +
+                        "`id` TEXT NOT NULL, `mission_id` TEXT NOT NULL, `num` INTEGER NOT NULL, `kind` TEXT NOT NULL, " +
+                        "`title` TEXT NOT NULL, `body` TEXT NOT NULL, `convo_id` TEXT NOT NULL, `seq` INTEGER NOT NULL, " +
+                        "`device_id` INTEGER NOT NULL, `created_by` TEXT NOT NULL, `created_at` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_milestone_mission_id_created_at` ON `milestone` (`mission_id`, `created_at`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_milestone_convo_id_seq` ON `milestone` (`convo_id`, `seq`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `mission_conversation` (" +
+                        "`mission_id` TEXT NOT NULL, `convo_id` TEXT NOT NULL, `title` TEXT NOT NULL, `box` TEXT, " +
+                        "`state` TEXT NOT NULL, PRIMARY KEY(`mission_id`, `convo_id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_item_mission_id_state_awaiting` ON `item` (`mission_id`, `state`, `awaiting`)")
+            }
+        }
+
+        /// v9 (matron-apple's v11, #212): the `event(type, ts)` index plus
+        /// `conversation.last_message_type` / `expired_snippet`, backfilled
+        /// one conversation at a time over the existing `convo_id` index —
+        /// the newest message-type row decides both columns, exactly as the
+        /// live write path (`JournalStore.applyJournal`) computes them.
+        /// Payloads are parsed in Kotlin rather than SQLite's json_extract
+        /// (JSON1 availability varies by API level), like MIGRATION_2_3.
+        /// This is the one-off cost of the migration: an index build over
+        /// the whole `event` table plus one indexed point lookup per
+        /// conversation; `LaunchTimeline` records how long it took.
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS `event_type_ts` ON `event` (`type`, `ts`)")
+                db.execSQL("ALTER TABLE `conversation` ADD COLUMN `last_message_type` TEXT")
+                db.execSQL("ALTER TABLE `conversation` ADD COLUMN `expired_snippet` TEXT")
+                val messageTypes = JournalEventType.MESSAGE_TYPES.toList()
+                val placeholders = messageTypes.joinToString(",") { "?" }
+                val ids = db.query("SELECT `id` FROM `conversation`").use { cursor ->
+                    buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+                }
+                for (id in ids) {
+                    db.query(
+                        "SELECT `type`, `payload` FROM `event` WHERE `convo_id` = ? AND `type` IN ($placeholders) " +
+                            "ORDER BY `seq` DESC LIMIT 1",
+                        arrayOf<Any>(id, *messageTypes.toTypedArray()),
+                    ).use { cursor ->
+                        if (!cursor.moveToFirst()) return@use
+                        val type = cursor.getString(0)
+                        val payload = parseJsonObjectOrNull(cursor.getString(1))
+                        db.execSQL(
+                            "UPDATE `conversation` SET `last_message_type` = ?, `expired_snippet` = ? WHERE `id` = ?",
+                            arrayOf(type, JournalStore.expiredSnippet(type, payload), id),
+                        )
+                    }
+                }
+            }
+        }
+
+        /// v10: `mission_conversation.auto_title` (see the class comment).
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `mission_conversation` ADD COLUMN `auto_title` TEXT")
+            }
+        }
+
+        /// v11: `item.actions_json` + `item.chosen_action` (see the class comment).
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `item` ADD COLUMN `actions_json` TEXT")
+                db.execSQL("ALTER TABLE `item` ADD COLUMN `chosen_action` TEXT")
+            }
+        }
+
+        /// v12: `item.origin_convo_title` + `mission.name` (see the class comment).
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `item` ADD COLUMN `origin_convo_title` TEXT")
+                db.execSQL("ALTER TABLE `mission` ADD COLUMN `name` TEXT")
+            }
+        }
+
+        private val MIGRATIONS = listOf(
+            MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
+            MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
+        )
+
+        /// Production, file-backed at the given path. [onOpened] fires from
+        /// Room's `onOpen` callback — i.e. on the FIRST ACTUAL open, which
+        /// Room defers to the first query, off the main thread — with the
+        /// total time the migration chain took on that open, or `null` when
+        /// none ran. The launch timeline turns that into its nested
+        /// `migration` interval (apple #212).
+        fun open(context: Context, file: File, onOpened: ((migrationMillis: Long?) -> Unit)? = null): MatronDatabase {
+            val timing = MigrationTiming()
+            return Room.databaseBuilder(context.applicationContext, MatronDatabase::class.java, file.absolutePath)
+                .addMigrations(*MIGRATIONS.map(timing::wrap).toTypedArray())
+                .addCallback(object : RoomDatabase.Callback() {
+                    override fun onOpen(db: SupportSQLiteDatabase) {
+                        onOpened?.invoke(timing.totalOrNull())
+                    }
+                })
+                .build()
+        }
+
+        /// Sums the wall time of every migration step Room actually runs on
+        /// an open. `SystemClock.elapsedRealtime` (not the wall clock) because
+        /// this is an elapsed-time measurement: an NTP step landing
+        /// mid-migration must not skew it.
+        private class MigrationTiming {
+            private val total = AtomicLong(0)
+            private val ran = AtomicBoolean(false)
+
+            fun wrap(migration: Migration): Migration = object : Migration(migration.startVersion, migration.endVersion) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    val began = SystemClock.elapsedRealtime()
+                    migration.migrate(db)
+                    total.addAndGet(SystemClock.elapsedRealtime() - began)
+                    ran.set(true)
+                }
+            }
+
+            fun totalOrNull(): Long? = if (ran.get()) total.get() else null
+        }
+
+        /// Test/ephemeral, memory-backed. Cleared when the last connection closes.
+        fun inMemory(context: Context): MatronDatabase =
+            Room.inMemoryDatabaseBuilder(context.applicationContext, MatronDatabase::class.java)
+                .build()
+    }
+}

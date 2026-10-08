@@ -1,0 +1,976 @@
+package chat.matron.android.viewmodels
+
+import chat.matron.android.journal.DeviceDTO
+import chat.matron.android.journal.JournalApi
+import chat.matron.android.journal.JournalSyncEngine
+import chat.matron.android.journal.RPCReply
+import chat.matron.android.journal.RPCRequestError
+import chat.matron.android.journal.arrayOrNull
+import chat.matron.android.journal.longOrNull
+import chat.matron.android.journal.objects
+import chat.matron.android.journal.stringOrNull
+import chat.matron.android.models.MatronDebug
+import chat.matron.android.models.SyncConnectionState
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+
+/// The RPC slice New Chat needs, extracted so the view model tests against a
+/// fake. Ported from matron-apple's `AgentRPCProviding` (whose `paramsData: Data`
+/// becomes `paramsJson: String`, matching the Kotlin engine's `agentRequest`).
+interface AgentRPCProviding {
+    suspend fun devices(): List<DeviceDTO>
+    suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply
+    /// Boxes' own capacity reports as the journal fans them (journal PR #82),
+    /// as `(deviceID, report)`.
+    fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>>
+    /// The socket's state, so the chooser can tell a reconnect: a report made
+    /// while the socket was down is never fanned or replayed (see
+    /// [NewChatViewModel.watchBoxStatus]).
+    fun connectionState(): StateFlow<SyncConnectionState>
+}
+
+/// Production adapter: the session's [JournalApi] (roster) + [JournalSyncEngine]
+/// (RPC send/correlate, engine-default timeout, and the live `box_status` feed).
+class JournalAgentRPCService(
+    private val api: JournalApi,
+    private val engine: JournalSyncEngine,
+) : AgentRPCProviding {
+    override suspend fun devices(): List<DeviceDTO> = api.devices()
+    override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply =
+        engine.agentRequest(agentDeviceID, method, paramsJson)
+    override fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = engine.boxStatusUpdates()
+    override fun connectionState(): StateFlow<SyncConnectionState> = engine.stateStream
+}
+
+/// One model a bridge offers on its `recent_folders` reply (`model_options`):
+/// [value] is the alias the `start` RPC's `model` param takes, [label] is what
+/// the picker shows for it. Deliberately not `SessionStatus.Option` (same wire
+/// shape, different job — that one rides a per-conversation status frame and
+/// keeps its label optional): this is chooser data, keyed for a list and
+/// always displayable. [label] is never empty — the parser falls back to
+/// [value] (apple #169).
+data class ModelOption(val value: String, val label: String)
+
+/// One coding agent a bridge offers on its `recent_folders` reply
+/// (`agent_options`): [value] is what the `start` RPC's `agent` param takes,
+/// [label] is what the switch shows. Same shape and rules as [ModelOption];
+/// a separate type because the two picks mean different things to `start`
+/// (a Codex session takes no Claude model) and must not be mixed up
+/// (apple #179).
+data class AgentOption(val value: String, val label: String) {
+    companion object {
+        /// The two agents a bridge can name today, as it spells them.
+        const val CLAUDE = "claude"
+        const val CODEX = "codex"
+    }
+}
+
+/// One entry of a bridge's `recent_folders` answer. [lastUsed] (epoch ms) is
+/// `null` for "available but never used here" — sorts last, reads "never used".
+data class RecentFolder(val path: String, val lastUsed: Long?)
+
+/// Drives the New Chat flow: connected-agent picker → recent-folders picker →
+/// `start` RPC → the caller navigates to `convo_id`. Ported from matron-apple's
+/// `NewChatViewModel`. Contract rules: `start` is single-flight (non-idempotent,
+/// no relay dedup); a failed `recent_folders` degrades the picker only; timeout
+/// and `agent_unreachable` read the same to the user.
+class NewChatViewModel(
+    private val api: AgentRPCProviding,
+    // Not defaulted: the cache is namespaced per account, and a convenient
+    // default here would be a silent app-global one (apple #164).
+    private val capacityCache: BoxCapacityCaching,
+    /// Injected clock (epoch ms), so tests can pin capture times.
+    private val now: () -> Long = System::currentTimeMillis,
+    /// Injected wake-retry sleep (ms), so the wake loops run at test speed.
+    private val wakeSleep: suspend (Long) -> Unit = { delay(it) },
+) {
+    sealed interface Phase {
+        data object LoadingAgents : Phase
+        data class Agents(val agents: List<DeviceDTO>) : Phase
+        data class Folders(val agent: DeviceDTO) : Phase
+        data class Done(val convoID: String) : Phase
+    }
+
+    private val _phase = MutableStateFlow<Phase>(Phase.LoadingAgents)
+    val phase: StateFlow<Phase> = _phase.asStateFlow()
+
+    private val _folders = MutableStateFlow<List<RecentFolder>>(emptyList())
+    val folders: StateFlow<List<RecentFolder>> = _folders.asStateFlow()
+
+    private val _foldersError = MutableStateFlow<String?>(null)
+    val foldersError: StateFlow<String?> = _foldersError.asStateFlow()
+
+    private val _errorMessage = MutableStateFlow<String?>(null)
+    val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+
+    private val _isStarting = MutableStateFlow(false)
+    val isStarting: StateFlow<Boolean> = _isStarting.asStateFlow()
+
+    // MARK: model picker (apple #169)
+
+    /// The model alias `start` will carry, or null for the bridge's own
+    /// default — the picker's "Default" row. Only ever set to a value the
+    /// current box listed (see [adoptModelOptions]).
+    private val _selectedModel = MutableStateFlow<String?>(null)
+    val selectedModel: StateFlow<String?> = _selectedModel.asStateFlow()
+
+    /// What the box on the folder step offers, in bridge order. Empty for a
+    /// bridge that doesn't send `model_options` at all, which hides the
+    /// picker rather than showing an empty menu.
+    private val _modelOptions = MutableStateFlow<List<ModelOption>>(emptyList())
+    val modelOptions: StateFlow<List<ModelOption>> = _modelOptions.asStateFlow()
+
+    /// What the picker's null "Default" row will actually run on, when the
+    /// box says (`default_model` on its `recent_folders` reply — the
+    /// bridge's `MATRON_DEFAULT_MODEL`). Display only: the row still omits
+    /// the `model` key, because the bridge applies its default itself and
+    /// naming it here would turn "no opinion" into an explicit pick. The
+    /// offered option's label when the value is listed, the raw alias
+    /// otherwise; null for a bridge that doesn't say (apple #177).
+    private val _defaultModelLabel = MutableStateFlow<String?>(null)
+    val defaultModelLabel: StateFlow<String?> = _defaultModelLabel.asStateFlow()
+
+    /// The null row's title in the picker: "Default (Fable)" on a box that
+    /// declares its default, plain "Default" otherwise. Lives here rather
+    /// than in the sheet so the platforms can't drift.
+    val defaultRowTitle: String get() = defaultRowTitle(_defaultModelLabel.value)
+
+    /// Model offers learned by the fan-out, keyed by device — same lifetime
+    /// as [folderCache], since both come out of the one `recent_folders`
+    /// reply and both are wrong the moment that reply is re-asked for.
+    private val modelOptionsCache = mutableMapOf<Long, List<ModelOption>>()
+
+    /// The `default_model` learned alongside [modelOptionsCache], same
+    /// lifetime; absent for a box that doesn't send one.
+    private val defaultModelCache = mutableMapOf<Long, String>()
+
+    /// The picker's choice: null is the bridge's default.
+    fun selectModel(value: String?) {
+        _selectedModel.value = value
+    }
+
+    /// Points the picker at one box's offer, and drops a selection that
+    /// offer doesn't contain. A model this box doesn't list can't start a
+    /// session here — carrying the previous box's pick across the switch
+    /// would send an alias the bridge answers `bad_model` to. A box that
+    /// offers nothing (older bridge) hides the picker, which is the same
+    /// situation: back to the bridge's default.
+    private fun adoptModelOptions(options: List<ModelOption>, defaultModel: String?) {
+        _modelOptions.value = options
+        _defaultModelLabel.value = defaultModel?.let { value ->
+            options.firstOrNull { it.value == value }?.label ?: value
+        }
+        val picked = _selectedModel.value
+        if (picked != null && options.none { it.value == picked }) _selectedModel.value = null
+    }
+
+    // MARK: agent switch (apple #179)
+
+    /// Which coding agents the box on the folder step can start, in bridge
+    /// order. Empty for a bridge that doesn't send `agent_options` (older
+    /// than the switch), which hides the switch AND keeps `agent` off the
+    /// `start` params — that bridge never offered, so it isn't told.
+    private val _agentOptions = MutableStateFlow<List<AgentOption>>(emptyList())
+    val agentOptions: StateFlow<List<AgentOption>> = _agentOptions.asStateFlow()
+
+    /// The box's `default_agent`: what a start with no `agent` would run.
+    private var defaultAgent: String? = null
+
+    /// The user's own pick, kept only while the current box offers it.
+    private var pickedAgent: String? = null
+
+    /// The agent `start` names: the user's pick when this box offers it,
+    /// else the box's default, else the first offer. Reads as Claude on a
+    /// bridge that offers nothing, which is what such a bridge runs.
+    private val _selectedAgent = MutableStateFlow(AgentOption.CLAUDE)
+    val selectedAgent: StateFlow<String> = _selectedAgent.asStateFlow()
+
+    /// One choice is no choice: the switch shows only when there is a second
+    /// agent to switch to.
+    val agentSwitchVisible: Boolean get() = _agentOptions.value.size > 1
+
+    /// The model picker is Claude-only — Claude aliases mean nothing to a
+    /// Codex session, and the bridge answers `bad_model` to one. Hidden
+    /// (and the pick parked, not dropped) while Codex is selected.
+    val modelPickerVisible: Boolean
+        get() = modelPickerVisible(_modelOptions.value, _selectedAgent.value)
+
+    /// The `agent_options` / `default_agent` learned alongside
+    /// [modelOptionsCache], same lifetime.
+    private val agentOptionsCache = mutableMapOf<Long, List<AgentOption>>()
+    private val defaultAgentCache = mutableMapOf<Long, String>()
+
+    /// The switch's choice. Parked (not dropped) while a later box doesn't
+    /// offer it — see [adoptAgentOptions].
+    fun selectAgent(value: String) {
+        pickedAgent = value
+        refreshSelectedAgent()
+    }
+
+    /// Points the switch at one box's offer. A pick this box doesn't list is
+    /// dropped (a `bad_agent` waiting to happen, same as a carried-over
+    /// model), and [selectedAgent] falls back to the box's own default.
+    private fun adoptAgentOptions(options: List<AgentOption>, defaultAgent: String?) {
+        _agentOptions.value = options
+        this.defaultAgent = defaultAgent
+        val picked = pickedAgent
+        if (picked != null && options.none { it.value == picked }) pickedAgent = null
+        refreshSelectedAgent()
+    }
+
+    private fun refreshSelectedAgent() {
+        val options = _agentOptions.value
+        val picked = pickedAgent
+        val boxDefault = defaultAgent
+        _selectedAgent.value = when {
+            picked != null && options.any { it.value == picked } -> picked
+            boxDefault != null && options.any { it.value == boxDefault } -> boxDefault
+            else -> options.firstOrNull()?.value ?: AgentOption.CLAUDE
+        }
+    }
+
+    // MARK: wake-on-pick (apple #168)
+    //
+    // The journal boots an idle-stopped box whenever an `agent_request`
+    // targets it and refuses with `agent_unreachable`, so the client's job is
+    // to keep re-asking until the bridge connects. `agent_unreachable` is the
+    // ONLY retried failure for `start` — the server refuses it before anything
+    // reaches the bridge, so a retry can never double-start; the folder loop
+    // also retries a timeout (mid-boot the socket can be up while the bridge
+    // is still starting).
+
+    /// True while a wake loop (folders or start) is re-asking a sleeping box.
+    private val _isWakingBox = MutableStateFlow(false)
+    val isWakingBox: StateFlow<Boolean> = _isWakingBox.asStateFlow()
+
+    /// When the current wake began (epoch ms), for the banner's elapsed time.
+    private val _wakeStartedAt = MutableStateFlow<Long?>(null)
+    val wakeStartedAt: StateFlow<Long?> = _wakeStartedAt.asStateFlow()
+
+    /// The last wake ran out of attempts or time; the sheet offers Try Again.
+    private val _wakeGaveUp = MutableStateFlow(false)
+    val wakeGaveUp: StateFlow<Boolean> = _wakeGaveUp.asStateFlow()
+
+    /// Ownership token per wake loop: a superseded loop (another box picked,
+    /// back to the roster, sheet dismissed) sees the token move and exits
+    /// without touching the flags the newer owner holds.
+    private var wakeToken = 0
+    private var wakeAgentID: Long? = null
+    private var isAbandoned = false
+
+    /// Capacity per agent device id. The journal is the source (journal PR
+    /// #82): every box is seeded from its last `status` report on `GET
+    /// /devices` and kept current by live `box_status` frames; connected
+    /// boxes are also fanned out to, for their folders and to-the-second
+    /// numbers. The capacity cache only fills in for a box the journal has no
+    /// report for. A box with no entry simply has no capacity to show — the
+    /// row still renders and stays pickable.
+    private val _capacities = MutableStateFlow<Map<Long, BoxCapacity>>(emptyMap())
+    val capacities: StateFlow<Map<Long, BoxCapacity>> = _capacities.asStateFlow()
+
+    /// Agent device ids whose fan-out request is still in flight, so a row can
+    /// say "Checking…" instead of looking capacity-less.
+    private val _capacityPending = MutableStateFlow<Set<Long>>(emptySet())
+    val capacityPending: StateFlow<Set<Long>> = _capacityPending.asStateFlow()
+
+    /// Folders harvested from the fan-out replies, so picking a box that already
+    /// answered skips a second `recent_folders` round trip.
+    private val folderCache = mutableMapOf<Long, List<RecentFolder>>()
+
+    /// Freshness for the entries in [capacities] that are not vouched for
+    /// this visit: an offline box's report (or cache entry), or a connected
+    /// box's report after its fan-out failed. A key here means exactly "this
+    /// row is showing last-known numbers" — absent reads
+    /// [AgentCapacityFreshness.Live]; see [capacityFreshness]. A flow of its
+    /// own, not a side table: a frame can change a row's freshness without
+    /// changing its numbers, and the sheet has to recompose on that too.
+    private val _capacityStaleness = MutableStateFlow<Map<Long, AgentCapacityFreshness>>(emptyMap())
+    val capacityStaleness: StateFlow<Map<Long, AgentCapacityFreshness>> = _capacityStaleness.asStateFlow()
+
+    /// The journal's latest report per box, from `GET /devices` and live
+    /// `box_status` frames — whichever `reported_at` is newer wins, so a frame
+    /// that beat the roster fetch is never replaced by the older stored row
+    /// the fetch answers with.
+    private val reports = mutableMapOf<Long, BoxStatus>()
+
+    /// When each live (uncaptioned) entry in [capacities] was read (epoch ms)
+    /// — a fan-out reply's arrival, or a frame's `reported_at`. A reload keeps
+    /// last visit's live numbers until the fan-out answers, and this is what
+    /// lets a report that is newer than them (a frame held while the folder
+    /// step was showing) take the row instead.
+    private val liveCapturedAt = mutableMapOf<Long, Long>()
+
+    /// How much a row's capacity numbers can be trusted: live for a box this
+    /// visit asked (or that is reporting right now), aged by `reported_at` for
+    /// an offline box, aged without the "offline" for a connected box that
+    /// didn't answer. A box with no entry at all reads
+    /// [AgentCapacityFreshness.Live] — it has nothing to disclaim, and its row
+    /// shows nothing either way.
+    fun capacityFreshness(agentID: Long): AgentCapacityFreshness =
+        _capacityStaleness.value[agentID] ?: AgentCapacityFreshness.Live
+
+    /// Applies live `box_status` frames for as long as the caller's coroutine
+    /// runs — the sheet holds it in a `LaunchedEffect`, so it ends with the
+    /// sheet.
+    ///
+    /// Frames only carry what lands while the socket is up. A box that
+    /// reports during an outage is stored by the journal but never fanned
+    /// to this client, and `box_status` is not a conversation event, so the
+    /// reconnect replay does not carry it either (journal PR #82). Without
+    /// this, an open roster would keep the older numbers until the box's
+    /// next report — so each reconnect re-reads the stored reports from
+    /// `GET /devices` (CodeRabbit, #80).
+    suspend fun watchBoxStatus() {
+        coroutineScope {
+            launch { api.boxStatusUpdates().collect { (agentID, status) -> apply(status, agentID) } }
+            launch { reconnects().collect { refreshReports() } }
+        }
+    }
+
+    /// Each time the socket comes back up after the watcher started. The
+    /// state in place at subscribe is the baseline, not a transition: a
+    /// sheet opened on a running socket does not repeat the fetch [load]
+    /// just made. A sheet opened while the socket is down does re-seed once
+    /// it connects — reports made between the roster fetch and the
+    /// connection are not replayed either.
+    private fun reconnects(): Flow<Unit> = api.connectionState()
+        .map { it is SyncConnectionState.Running }
+        .distinctUntilChanged()
+        .drop(1)
+        .filter { it }
+        .map { }
+
+    /// Re-seeds the held reports from `GET /devices`: a newer stored report
+    /// takes its row by the rules a frame follows ([apply]), an older one is
+    /// dropped the same way. Best effort — a failed fetch is logged and the
+    /// watcher goes on, so the next frame or reconnect still applies.
+    private suspend fun refreshReports() {
+        val agents = try {
+            api.devices()
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            MatronDebug.breadcrumb("NewChat: box report re-seed after reconnect failed: $error")
+            return
+        }
+        for (agent in agents) {
+            if (agent.kind != "agent") continue
+            agent.status?.let { apply(it, agent.id) }
+        }
+    }
+
+    internal fun hasReportForTesting(agentID: Long): Boolean = agentID in reports
+    internal fun cachedFoldersForTesting(agentID: Long): List<RecentFolder>? = folderCache[agentID]
+
+    /// Records a report unless an equal-or-newer one is already held.
+    /// Returns whether it was taken.
+    private fun adoptReport(status: BoxStatus, agentID: Long): Boolean {
+        val held = reports[agentID]
+        if (held != null && held.reportedAtMs >= status.reportedAtMs) return false
+        reports[agentID] = status
+        return true
+    }
+
+    /// A report worth showing: held, and young enough to mean something.
+    private fun usableReport(agentID: Long): BoxStatus? =
+        reports[agentID]?.takeIf { now() - it.reportedAtMs <= MAX_CACHED_CAPACITY_AGE_MS }
+
+    /// A live frame repaints its row in place while the roster is showing. A
+    /// connected box is reporting as we watch, so its numbers read live; an
+    /// offline one (by the roster's snapshot) keeps the aged caption, now
+    /// dated by this report. Off the roster, the report is only held — the
+    /// next [load] seeds from it.
+    ///
+    /// A frame can also arrive late, or in a backlog after a reconnect. For a
+    /// connected box whose row already shows live numbers read after the
+    /// frame was reported (its fan-out reply), the frame is older than the
+    /// row: it stays held, but must not repaint (CodeRabbit, #80) — the same
+    /// rule [seedCapacities] applies on a reload.
+    private fun apply(status: BoxStatus, agentID: Long) {
+        if (!adoptReport(status, agentID)) return
+        val roster = (_phase.value as? Phase.Agents)?.agents ?: return
+        val agent = roster.firstOrNull { it.id == agentID } ?: return
+        val report = usableReport(agentID) ?: return
+        if (agent.connected && showsNewerLiveNumbers(agentID, report)) return
+        _capacityStaleness.value = if (agent.connected) {
+            liveCapturedAt[agentID] = report.reportedAtMs
+            _capacityStaleness.value - agentID
+        } else {
+            _capacityStaleness.value + (agentID to AgentCapacityFreshness.Offline(report.reportedAtMs))
+        }
+        _capacities.value = _capacities.value + (agentID to report.capacity)
+    }
+
+    var customPath: String = ""
+    var browserEnabled: Boolean = false
+
+    suspend fun load() {
+        try {
+            val agents = api.devices().filter { it.kind == "agent" }
+            for (agent in agents) agent.status?.let { adoptReport(it, agent.id) }
+            val connected = agents.filter { it.connected }
+            // The roster is the authority on which boxes exist: prune the
+            // capacity cache here, on EVERY path — the single-box auto-skip
+            // below never reaches the fan-out, and an unpaired box would
+            // otherwise sit in the cache forever with its quota and account
+            // email (CodeRabbit, #51).
+            capacityCache.prune(keeping = agents.map { it.id }.toSet())
+            if (agents.size == 1) {
+                // Auto-skip straight to the folder step: there's no roster to
+                // decorate, so no fan-out. Asleep or not — a single-box roster
+                // would be a dead stop, and a pick wakes it (apple #168).
+                select(agents[0])
+            } else {
+                _phase.value = Phase.Agents(sorted(agents))
+                // The roster is already on screen (the phase flow was set
+                // first); this only fills in the capacity lines behind it.
+                val connectedIDs = connected.map { it.id }
+                val offlineIDs = agents.filter { !it.connected }.map { it.id }
+                _capacityPending.value = connectedIDs.toSet()
+                // Two entries never survive a reload: a box this fan-out won't
+                // ask at all (nothing would ever revalidate it — it is
+                // re-seeded below instead, captioned with its age), and any
+                // aged seed for a box that has since come online (never
+                // confirmed against the running box, so keeping it would
+                // launder last-known numbers into an uncaptioned, live-looking
+                // row).
+                modelOptionsCache.clear()
+                defaultModelCache.clear()
+                agentOptionsCache.clear()
+                defaultAgentCache.clear()
+                val refreshing = connectedIDs.toSet()
+                val stale = _capacityStaleness.value
+                _capacities.value = _capacities.value.filterKeys { it in refreshing && stale[it] == null }
+                _capacityStaleness.value = emptyMap()
+                seedCapacities(connected = connectedIDs, offline = offlineIDs)
+                coroutineScope {
+                    for (id in connectedIDs) launch { fetchCapacity(id) }
+                }
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            _phase.value = Phase.Agents(emptyList())
+            _errorMessage.value = "Couldn't load agents — try again."
+        }
+    }
+
+    suspend fun select(agent: DeviceDTO) {
+        // An impatient re-tap on the box already waking must not start a
+        // second loop — one wake per box.
+        if (_isWakingBox.value && sameFolderAgent(agent)) return
+        retireWakeOwner()
+        _errorMessage.value = null
+        _wakeGaveUp.value = false
+        _phase.value = Phase.Folders(agent)
+        _folders.value = emptyList()
+        _foldersError.value = null
+        // Model offers are per-box, so the step opens on what this box is
+        // known to offer — nothing, until its own reply lands.
+        adoptModelOptions(modelOptionsCache[agent.id] ?: emptyList(), defaultModelCache[agent.id])
+        adoptAgentOptions(agentOptionsCache[agent.id] ?: emptyList(), defaultAgentCache[agent.id])
+        if (!agent.connected) {
+            // The first ask has already booted the box server-side; keep
+            // asking until the bridge connects.
+            wakeAndFetchFolders(agent)
+            return
+        }
+        folderCache[agent.id]?.let {
+            _folders.value = it
+            return
+        }
+        try {
+            val reply = api.agentRequest(agent.id, "recent_folders", "{}")
+            // A fleet with one box auto-skips the roster and never fans out,
+            // so this is the only reply that box's capacity can be learned
+            // from before it goes to sleep. Recorded off the answer rather
+            // than off the phase: it is true whether or not the user has
+            // moved on since.
+            recordCapacity(reply, agent.id)
+            if (!sameFolderAgent(agent)) return // switched away meanwhile
+            when (reply) {
+                is RPCReply.Ok -> {
+                    _folders.value = parseFolders(reply.result)
+                    adoptModelOptions(parseModelOptions(reply.result), parseDefaultModel(reply.result))
+                    adoptAgentOptions(parseAgentOptions(reply.result), parseDefaultAgent(reply.result))
+                }
+                // The roster's `connected` is a snapshot; a box idle-stopped
+                // since then answers agent_unreachable — which has already
+                // fired its wake, so it gets the wake loop, not the degrade copy.
+                is RPCReply.Failure ->
+                    if (reply.code == AGENT_UNREACHABLE) wakeAndFetchFolders(agent) else folderFetchFailed(agent)
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            if (!sameFolderAgent(agent)) return
+            folderFetchFailed(agent)
+        }
+    }
+
+    /// Try Again after a wake gave up: runs the folder wake loop once more.
+    suspend fun retryWake() {
+        val phaseNow = _phase.value
+        if (phaseNow !is Phase.Folders || _isWakingBox.value || _isStarting.value) return
+        _errorMessage.value = null
+        _wakeGaveUp.value = false
+        wakeAndFetchFolders(phaseNow.agent)
+    }
+
+    /// The sheet went away: retire every wake loop and stop the start
+    /// re-asks — a retried start landing minutes later would silently open a
+    /// session (and a live Claude process) on a box nobody is looking at.
+    fun abandon() {
+        isAbandoned = true
+        retireWakeOwner()
+    }
+
+    private fun retireWakeOwner() {
+        wakeToken += 1
+        _isWakingBox.value = false
+        _wakeStartedAt.value = null
+        wakeAgentID = null
+    }
+
+    private fun beginWake(agentID: Long): Int {
+        wakeToken += 1
+        _isWakingBox.value = true
+        // Same box again (a start retry during its folder wake) keeps the
+        // clock running; a different box restarts it.
+        if (_wakeStartedAt.value == null || wakeAgentID != agentID) _wakeStartedAt.value = now()
+        wakeAgentID = agentID
+        return wakeToken
+    }
+
+    private fun endWake(token: Int) {
+        if (token != wakeToken) return // a newer owner holds the flags
+        _isWakingBox.value = false
+        _wakeStartedAt.value = null
+        wakeAgentID = null
+    }
+
+    private fun stillOwns(token: Int, agent: DeviceDTO): Boolean = token == wakeToken && sameFolderAgent(agent)
+
+    private suspend fun wakeAndFetchFolders(agent: DeviceDTO) {
+        val token = beginWake(agent.id)
+        try {
+            val wakeBegan = now()
+            for (attempt in 1..WAKE_ATTEMPT_LIMIT) {
+                try {
+                    val reply = api.agentRequest(agent.id, "recent_folders", "{}")
+                    recordCapacity(reply, agent.id)
+                    if (!stillOwns(token, agent)) return
+                    when (reply) {
+                        is RPCReply.Ok -> {
+                            _folders.value = parseFolders(reply.result)
+                            adoptModelOptions(parseModelOptions(reply.result), parseDefaultModel(reply.result))
+                            adoptAgentOptions(parseAgentOptions(reply.result), parseDefaultAgent(reply.result))
+                            return
+                        }
+                        is RPCReply.Failure -> if (reply.code != AGENT_UNREACHABLE) {
+                            _foldersError.value = FOLDERS_ERROR_COPY
+                            return
+                        } // else still booting — go around
+                    }
+                } catch (timeout: RPCRequestError.Timeout) {
+                    // Mid-boot the socket can be up while the bridge is still
+                    // starting: a wake in progress, not a dead end.
+                    if (!stillOwns(token, agent)) return
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (error: Throwable) {
+                    if (!stillOwns(token, agent)) return
+                    _foldersError.value = FOLDERS_ERROR_COPY
+                    return
+                }
+                // Attempts cost RPC + sleep, so a timeout streak would otherwise
+                // run many minutes of banner: the wall-clock deadline cuts in
+                // long before the attempt limit.
+                if (attempt >= WAKE_ATTEMPT_LIMIT || now() - wakeBegan >= WAKE_DEADLINE_MS) break
+                wakeSleep(WAKE_RETRY_DELAY_MS)
+                if (!stillOwns(token, agent)) return
+            }
+            if (!stillOwns(token, agent)) return
+            // Never bury a start error the user still needs to read.
+            if (_errorMessage.value == null) _errorMessage.value = WAKE_GAVE_UP_MESSAGE
+            _wakeGaveUp.value = true
+        } finally {
+            endWake(token)
+        }
+    }
+
+    private fun recordCapacity(reply: RPCReply, agentID: Long) {
+        if (reply is RPCReply.Ok) capacityCache.save(BoxCapacity.parse(reply.result), agentID, now())
+    }
+
+    /// The live `recent_folders` call for the folder step failed. The roster
+    /// fan-out may have warmed the cache for this box while that call was on
+    /// the wire — if so, its answer is as good as ours; only a still-cold
+    /// cache is worth an error (CodeRabbit, #36).
+    private fun folderFetchFailed(agent: DeviceDTO) {
+        folderCache[agent.id]?.let {
+            _folders.value = it
+            _foldersError.value = null
+            // The offer landed alongside those folders, after this step
+            // adopted the (then-empty) cache on entry — take it too, or the
+            // pickers stay hidden over a box that offered (Bugbot, #65).
+            adoptModelOptions(modelOptionsCache[agent.id] ?: emptyList(), defaultModelCache[agent.id])
+            adoptAgentOptions(agentOptionsCache[agent.id] ?: emptyList(), defaultAgentCache[agent.id])
+            return
+        }
+        _foldersError.value = FOLDERS_ERROR_COPY
+    }
+
+    /// Fires `start {workdir?, browser?}` at the picked agent. A `null`/blank
+    /// [workdir] means the bridge's default workdir — the key is omitted.
+    suspend fun start(workdir: String?) {
+        val phaseNow = _phase.value
+        if (phaseNow !is Phase.Folders || _isStarting.value) return
+        val agent = phaseNow.agent
+        _isStarting.value = true
+        var startWakeToken: Int? = null
+        try {
+            _errorMessage.value = null
+            _wakeGaveUp.value = false
+            val trimmed = workdir?.trim() ?: ""
+            val params = buildJsonObject {
+                if (trimmed.isNotEmpty()) put("workdir", trimmed)
+                if (browserEnabled) put("browser", true)
+                // Named whenever the bridge offered agents (so it accepts the
+                // key), even with one offer or the default picked: saying
+                // what was shown beats trusting the box default not to have
+                // moved since the reply. An older bridge that offered nothing
+                // isn't sent a key it doesn't know.
+                val agentPick = _selectedAgent.value
+                if (_agentOptions.value.isNotEmpty()) put("agent", agentPick)
+                // null is the bridge's own default model, and the bridge
+                // distinguishes "no opinion" from any alias it knows — so
+                // omit the key entirely. A Codex session takes no Claude
+                // alias at all: the pick stays parked for a flip back, but
+                // the bridge would answer `bad_model` to it.
+                if (agentPick == AgentOption.CLAUDE) _selectedModel.value?.let { put("model", it) }
+            }
+            try {
+                var reply = api.agentRequest(agent.id, "start", params.toString())
+                // `agent_unreachable` is refused before delivery, so re-asking
+                // is provably safe; a timeout is NOT retried (the start may
+                // have landed). Keep the banner up while the box boots.
+                var attempts = 1
+                while (attempts < WAKE_ATTEMPT_LIMIT && isUnreachable(reply) && !isAbandoned) {
+                    // Only take the banner when nothing else holds it: a
+                    // folder wake already running for this box keeps its loop
+                    // (and its Try Again) — retiring it here would leave the
+                    // folder step empty after a fast start failure (Bugbot, #52).
+                    if (startWakeToken == null && !(_isWakingBox.value && wakeAgentID == agent.id)) {
+                        startWakeToken = beginWake(agent.id)
+                    }
+                    wakeSleep(WAKE_RETRY_DELAY_MS)
+                    if (isAbandoned || !sameFolderAgent(agent)) return
+                    reply = api.agentRequest(agent.id, "start", params.toString())
+                    attempts += 1
+                }
+                when (reply) {
+                    is RPCReply.Ok -> {
+                        val convoID = (reply.result as? JsonObject)?.stringOrNull("convo_id")
+                        if (convoID.isNullOrEmpty()) {
+                            _errorMessage.value =
+                                "Couldn't start — the agent answered without a conversation id."
+                            return
+                        }
+                        _phase.value = Phase.Done(convoID)
+                    }
+                    is RPCReply.Failure -> _errorMessage.value = startErrorCopy(reply.code, reply.detail)
+                }
+            } catch (timeout: RPCRequestError.Timeout) {
+                _errorMessage.value = "The agent didn't answer — is the box awake?"
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (error: Throwable) {
+                _errorMessage.value = "Couldn't start — check your connection and try again."
+            }
+        } finally {
+            _isStarting.value = false
+            startWakeToken?.let { endWake(it) }
+        }
+    }
+
+    private fun isUnreachable(reply: RPCReply): Boolean =
+        reply is RPCReply.Failure && reply.code == AGENT_UNREACHABLE
+
+    /// Back from the folder step to the roster.
+    suspend fun backToAgents() = load()
+
+    /// One box's slice of the roster fan-out. The reply carries both the
+    /// capacity blocks and the folder list, so a success warms both caches. A
+    /// failure never presents numbers as live — a box that just failed to
+    /// answer is exactly the one whose old numbers shouldn't vouch for
+    /// themselves: the row falls back to the journal's report, aged and
+    /// de-emphasised ([AgentCapacityFreshness.Reported]), or to name +
+    /// "Connected" when there is none. The folder step falls back to its own
+    /// live RPC either way.
+    private suspend fun fetchCapacity(agentID: Long) {
+        // The request suspends on the wire, and a `box_status` frame can land
+        // meanwhile. The reply was computed before that frame, so it must not
+        // put older numbers back over it, nor downgrade it on failure
+        // (CodeRabbit, #80). What the row showed when we asked is the mark.
+        val reportAtRequest = reports[agentID]?.reportedAtMs
+        val liveCapturedAtRequest = liveCapturedAt[agentID]
+        try {
+            val reply = api.agentRequest(agentID, "recent_folders", "{}")
+            if (reply !is RPCReply.Ok) {
+                fanOutFailed(agentID, liveCapturedAtRequest)
+            } else {
+                val capacity = BoxCapacity.parse(reply.result)
+                // These numbers came off the wire, so the row must not carry an
+                // age caption for them — including one a `Reported` fallback or
+                // an offline-captioned frame left on this box earlier. Unless
+                // the box reported again while we waited: that word is newer.
+                if (reports[agentID]?.reportedAtMs == reportAtRequest) {
+                    _capacityStaleness.value = _capacityStaleness.value - agentID
+                    _capacities.value = _capacities.value + (agentID to capacity)
+                    liveCapturedAt[agentID] = now()
+                    // The fallback for a journal that holds no report: what the
+                    // row will show once the host puts this box to sleep.
+                    capacityCache.save(capacity, agentID, now())
+                }
+                val folders = parseFolders(reply.result)
+                folderCache[agentID] = folders
+                val offered = parseModelOptions(reply.result)
+                val agents = parseAgentOptions(reply.result)
+                val boxDefaultModel = parseDefaultModel(reply.result)
+                val boxDefaultAgent = parseDefaultAgent(reply.result)
+                modelOptionsCache[agentID] = offered
+                agentOptionsCache[agentID] = agents
+                // Absent on the wire means absent in the cache: a box that
+                // stopped declaring a default must not keep its old one.
+                if (boxDefaultModel != null) defaultModelCache[agentID] = boxDefaultModel else defaultModelCache.remove(agentID)
+                if (boxDefaultAgent != null) defaultAgentCache[agentID] = boxDefaultAgent else defaultAgentCache.remove(agentID)
+                // The folder step may already be showing this box with its own
+                // live fetch failed (it raced ahead of this reply): swap the
+                // fan-out's answer in rather than leaving a stale error over a
+                // now-warm cache (Bugbot, #36). The whole answer, not just the
+                // folders — the step opened on an empty offer, so the model
+                // picker and agent switch are waiting on this reply too
+                // (Bugbot, #65).
+                val phaseNow = _phase.value
+                if (phaseNow is Phase.Folders && phaseNow.agent.id == agentID && _foldersError.value != null) {
+                    _folders.value = folders
+                    _foldersError.value = null
+                    adoptModelOptions(offered, boxDefaultModel)
+                    adoptAgentOptions(agents, boxDefaultAgent)
+                }
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            // Capacity is a convenience, never a gate.
+            fanOutFailed(agentID, liveCapturedAtRequest)
+        } finally {
+            _capacityPending.value = _capacityPending.value - agentID
+        }
+    }
+
+    /// See [fetchCapacity]. The *persisted* cache entry is left alone: it is
+    /// the fallback for a journal that holds no report. A frame that painted
+    /// the row live during the request ([liveCapturedAt] moved on from
+    /// [liveCapturedAtRequest]) is the box's own newer word; the failed
+    /// request has nothing to say about it.
+    private fun fanOutFailed(agentID: Long, liveCapturedAtRequest: Long?) {
+        if (liveCapturedAt[agentID] != liveCapturedAtRequest) return
+        val report = usableReport(agentID)
+        if (report != null) {
+            _capacityStaleness.value =
+                _capacityStaleness.value + (agentID to AgentCapacityFreshness.Reported(report.reportedAtMs))
+            _capacities.value = _capacities.value + (agentID to report.capacity)
+        } else {
+            _capacityStaleness.value = _capacityStaleness.value - agentID
+            _capacities.value = _capacities.value - agentID
+        }
+    }
+
+    /// Fills rows from what each box last reported to the journal, before
+    /// anything is asked over the wire. For a box the host has put to sleep
+    /// that is the whole point — the user picks which box to wake by its
+    /// remaining quota — and it is aged by the box's own `reported_at`. A
+    /// connected box's report fills its row while the fan-out is in flight,
+    /// uncaptioned: the box is up and reports on every limits refresh, and its
+    /// own answer replaces the seed within seconds (or demotes it to an aged
+    /// `Reported` row if it never comes — see [fetchCapacity]).
+    ///
+    /// The capacity cache is only the fallback, for an offline box the
+    /// journal has no report for (a journal or bridge predating PR #82).
+    private fun seedCapacities(connected: List<Long>, offline: List<Long>) {
+        val cached = capacityCache.loadAll()
+        val moment = now()
+        val seeded = mutableMapOf<Long, BoxCapacity>()
+        val stale = mutableMapOf<Long, AgentCapacityFreshness>()
+        for (id in connected) {
+            val report = usableReport(id) ?: continue
+            // Last visit's live numbers stand only while they are the newer
+            // word; otherwise the report takes the row.
+            if (showsNewerLiveNumbers(id, report)) continue
+            seeded[id] = report.capacity
+            liveCapturedAt[id] = report.reportedAtMs
+        }
+        for (id in offline) {
+            val report = usableReport(id)
+            if (report != null) {
+                seeded[id] = report.capacity
+                stale[id] = AgentCapacityFreshness.Offline(report.reportedAtMs)
+                continue
+            }
+            // A box the journal holds a report for is the journal's to answer
+            // for, even when that report is too old to show — the cache only
+            // stands in for a journal with nothing to say about the box.
+            if (id in reports) continue
+            val entry = cached[id] ?: continue
+            if (moment - entry.capturedAtMs > MAX_CACHED_CAPACITY_AGE_MS) continue
+            seeded[id] = entry.capacity
+            stale[id] = AgentCapacityFreshness.Offline(entry.capturedAtMs)
+        }
+        if (stale.isNotEmpty()) _capacityStaleness.value = _capacityStaleness.value + stale
+        if (seeded.isNotEmpty()) _capacities.value = _capacities.value + seeded
+    }
+
+    /// Whether the row already shows live (uncaptioned) numbers read at or
+    /// after [report] was made — in which case the report is the older word
+    /// and must not take the row.
+    private fun showsNewerLiveNumbers(agentID: Long, report: BoxStatus): Boolean {
+        if (agentID !in _capacities.value || agentID in _capacityStaleness.value) return false
+        val capturedAt = liveCapturedAt[agentID] ?: return false
+        return capturedAt >= report.reportedAtMs
+    }
+
+    private fun sameFolderAgent(agent: DeviceDTO): Boolean {
+        val phaseNow = _phase.value
+        return phaseNow is Phase.Folders && phaseNow.agent.id == agent.id
+    }
+
+    companion object {
+        /// The journal's refusal for an idle-stopped box — its wake has
+        /// already fired server-side by the time this arrives.
+        const val AGENT_UNREACHABLE = "agent_unreachable"
+        const val WAKE_RETRY_DELAY_MS = 3_000L
+        const val WAKE_ATTEMPT_LIMIT = 40
+        /// Wall-clock bound on a wake: a mid-boot timeout streak runs ~18s per
+        /// attempt, so the attempt limit alone would mean ~12 minutes of banner.
+        const val WAKE_DEADLINE_MS = 120_000L
+        const val WAKE_GAVE_UP_MESSAGE = "The box didn't wake — try again."
+        const val FOLDERS_ERROR_COPY = "Couldn't fetch recent folders — you can still type a path."
+
+        /// How old a box's numbers may be before they stop being worth
+        /// showing: past this, every limit window they describe has rolled
+        /// over several times, so the percentages say nothing about the box
+        /// today. Measured from the box's own `reported_at` for a journal
+        /// report, and from the capture on this device for a fallback cache
+        /// entry.
+        const val MAX_CACHED_CAPACITY_AGE_MS: Long = 7L * 86_400_000
+
+        fun sorted(agents: List<DeviceDTO>): List<DeviceDTO> =
+            agents.sortedWith(compareByDescending<DeviceDTO> { it.connected }.thenBy { it.name })
+
+        /// Reads `model_options` out of a `recent_folders` reply. Like every
+        /// block a bridge attaches there it is optional: an absent key is an
+        /// older bridge, and parses to no offer rather than to a failure of
+        /// the folders parse it rides along with. Bridge order is kept; a
+        /// repeated value keeps its first row (value is the row identity); a
+        /// missing label falls back to the value. The bridge's list mirrors
+        /// its `/model` buttons, which lead with the `default` alias — but the
+        /// picker already renders "no pick" as its own null "Default" row, so
+        /// that entry is dropped rather than shown as a second Default.
+        fun parseModelOptions(result: JsonElement): List<ModelOption> {
+            val obj = result as? JsonObject ?: return emptyList()
+            val raw = obj.arrayOrNull("model_options") ?: return emptyList()
+            val seen = mutableSetOf<String>()
+            return raw.objects().mapNotNull { entry ->
+                val value = entry.stringOrNull("value")?.takeIf { it.isNotEmpty() && it != "default" }
+                    ?: return@mapNotNull null
+                if (!seen.add(value)) return@mapNotNull null
+                ModelOption(value, entry.stringOrNull("label")?.takeIf { it.isNotEmpty() } ?: value)
+            }
+        }
+
+        /// Reads `default_model` out of a `recent_folders` reply: the alias
+        /// (or full model name) a start with no `model` will run on. Like
+        /// `model_options` it is optional — an older bridge, or one with no
+        /// `MATRON_DEFAULT_MODEL`, omits it, and the row reads plain "Default".
+        fun parseDefaultModel(result: JsonElement): String? =
+            (result as? JsonObject)?.stringOrNull("default_model")?.takeIf { it.isNotEmpty() }
+
+        /// "Default (Fable)" for a box that declares its default, plain
+        /// "Default" otherwise.
+        fun defaultRowTitle(defaultModelLabel: String?): String =
+            defaultModelLabel?.let { "Default ($it)" } ?: "Default"
+
+        /// Reads `agent_options` out of a `recent_folders` reply: the coding
+        /// agents a `start` there may name. Optional like every block a
+        /// bridge attaches — absent on a bridge older than the switch. Bridge
+        /// order is kept; the same identity and label rules as
+        /// [parseModelOptions] (no `default` row to drop here, though).
+        fun parseAgentOptions(result: JsonElement): List<AgentOption> {
+            val obj = result as? JsonObject ?: return emptyList()
+            val raw = obj.arrayOrNull("agent_options") ?: return emptyList()
+            val seen = mutableSetOf<String>()
+            return raw.objects().mapNotNull { entry ->
+                val value = entry.stringOrNull("value")?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                if (!seen.add(value)) return@mapNotNull null
+                AgentOption(value, entry.stringOrNull("label")?.takeIf { it.isNotEmpty() } ?: value)
+            }
+        }
+
+        /// Reads `default_agent`: what a start with no `agent` would run as,
+        /// so the switch opens on it. Optional; null falls back to the first
+        /// offer.
+        fun parseDefaultAgent(result: JsonElement): String? =
+            (result as? JsonObject)?.stringOrNull("default_agent")?.takeIf { it.isNotEmpty() }
+
+        /// Whether the (Claude-only) model picker has anything to show for
+        /// this offer and agent pick.
+        fun modelPickerVisible(options: List<ModelOption>, selectedAgent: String): Boolean =
+            options.isNotEmpty() && selectedAgent == AgentOption.CLAUDE
+
+        fun parseFolders(result: JsonElement): List<RecentFolder> {
+            val obj = result as? JsonObject ?: return emptyList()
+            val raw = obj.arrayOrNull("folders") ?: return emptyList()
+            return raw.objects().mapNotNull { entry ->
+                val path = entry.stringOrNull("path")?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                RecentFolder(path, entry.longOrNull("last_used"))
+            }.sortedWith { a, b ->
+                val la = a.lastUsed
+                val lb = b.lastUsed
+                when {
+                    la != null && lb != null -> lb.compareTo(la)
+                    la != null && lb == null -> -1
+                    la == null && lb != null -> 1
+                    else -> a.path.compareTo(b.path)
+                }
+            }
+        }
+
+        fun startErrorCopy(code: String, detail: String?): String = when (code) {
+            "agent_unreachable", "not_ready" -> "The agent didn't answer — is the box awake?"
+            "bad_workdir" -> "That folder doesn't exist on the box."
+            // The offer came from this box's own reply, so this means it has
+            // changed its mind since — the default always works.
+            "bad_model" -> "That box doesn't offer that model — pick another."
+            // Same story: the switch only ever shows what this box's own
+            // reply offered, so the box has changed since (Codex uninstalled).
+            "bad_agent" -> "That box can't start that agent — pick another."
+            else -> "Couldn't start — ${detail ?: code}."
+        }
+    }
+}

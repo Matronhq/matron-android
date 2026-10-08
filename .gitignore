@@ -1,0 +1,17 @@
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.keystore
+*.jks
+.kotlin/
+
+# Local SQLite dev artifacts
+matron.db
+matron.db-shm
+matron.db-wal
