@@ -62,6 +62,7 @@ import chat.matron.android.models.ItemAwaiting
 import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.ItemState
+import chat.matron.android.models.ItemWorkingIndicator
 import chat.matron.android.models.StagedAttachment
 import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
@@ -171,6 +172,10 @@ data class ItemDetailModel(
     /// drawn as chosen before the journal confirms
     /// (`ItemDetailViewModel.pendingItemTap`).
     val pendingItemTap: String? = null,
+    /// The indicator at the foot of the thread while the agent that owns the
+    /// item is busy (`ItemDetailViewModel.workingIndicator`); `null` draws
+    /// none.
+    val working: ItemWorkingIndicator? = null,
 )
 
 /// The state pill's four values: Needs you / Closed · resolution / With the
@@ -348,10 +353,12 @@ fun ItemDetailView(
     val scrollable by remember(listState) { derivedStateOf { listState.canScrollForward || listState.canScrollBackward } }
     // The bottom anchor's index, from the model rather than the layout (which
     // reports 0 rows before the first measure): header, optional meta,
-    // optional body card, divider, comments, pending rows, anchor.
+    // optional body card, divider, comments, pending rows, the working
+    // indicator, anchor.
     val hasMeta = item.labels.isNotEmpty() || item.links.isNotEmpty()
     val hasBody = item.body.isNotEmpty() || item.attachments.isNotEmpty()
-    val lastIndex = 1 + (if (hasMeta) 1 else 0) + (if (hasBody) 1 else 0) + 1 + rowCount
+    val lastIndex = 1 + (if (hasMeta) 1 else 0) + (if (hasBody) 1 else 0) + 1 + rowCount +
+        (if (model.working != null) 1 else 0)
 
     LaunchedEffect(item.id) {
         itemThreadPlaceInitially(startsAtBottom, { listState.scrollToItem(lastIndex) }) { placed = true }
@@ -363,6 +370,12 @@ fun ItemDetailView(
         if (itemThreadShouldFollowTail(model.loadedCommentCount, startsAtBottom, placed, atBottom, old, rowCount)) {
             listState.scrollToItem(lastIndex)
         }
+    }
+    // The working indicator arriving is a row at the tail too: a reader
+    // settled there keeps it in view.
+    val showsWorking = model.working != null
+    LaunchedEffect(showsWorking) {
+        if (showsWorking && placed && atBottom) listState.scrollToItem(lastIndex)
     }
     LaunchedEffect(atBottom) { onBottomVisibilityChange?.invoke(atBottom) }
 
@@ -395,6 +408,12 @@ fun ItemDetailView(
                     )
                 }
                 items(model.pending.size, key = { "p-${model.pending[it].id}" }) { i -> PendingView(model.pending[i]) }
+                model.working?.let { working ->
+                    // The chat's own indicator, flush with the cards above it.
+                    item(key = "working") {
+                        ActivityIndicatorRow(working.label, horizontalPadding = 0.dp)
+                    }
+                }
                 item(key = "bottom") { Spacer(Modifier.height(1.dp)) }
             }
             if (itemThreadShowsJumpToBottom(placed, scrollable, atBottom)) {

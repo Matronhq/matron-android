@@ -60,6 +60,9 @@ internal class FakeItemsStore : ItemsStoreReading {
         return items
     }
     override fun itemFlow(id: String): Flow<TrackerItem?> = item
+    /// The owner conversation's session state, as the item detail follows it.
+    val ownerSession = MutableSharedFlow<String?>(replay = 1)
+    override fun itemOwnerSessionStateFlow(convoID: String): Flow<String?> = ownerSession
     override fun commentsFlow(itemID: String): Flow<List<TrackerComment>> {
         commentsSubscriptions += 1
         return comments

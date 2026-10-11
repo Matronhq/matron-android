@@ -1,5 +1,6 @@
 package chat.matron.android.journal
 
+import chat.matron.android.models.ItemWorking
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
@@ -673,6 +674,34 @@ class MatronDatabaseMigrationTest {
         }
     }
 
+    /// MIGRATION_12_13: `item` gains `working_json`. Rows cached before the
+    /// upgrade read as "nothing to show", and rows written after it keep the
+    /// state, and lose it again when the next copy has none.
+    @Test
+    fun migratesToV13AndKeepsAnItemsWorkingState() = runBlocking {
+        val file = File.createTempFile("migration-test-v8-v13", ".sqlite").also { it.delete() }
+        buildV8(file)
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:alice")
+            val cached = store.items(chat.matron.android.models.ItemsScope.All)
+            assertTrue("the v7 fixture caches an item", cached.isNotEmpty())
+            assertTrue(cached.all { it.working == null })
+
+            val working = ItemWorking(
+                ItemWorking.State.QUEUED, since = Instant.ofEpochMilli(5_000), until = Instant.ofEpochMilli(605_000),
+            )
+            val item = TrackerItem(id = "it_w", num = 99, kind = ItemKind.QUESTION, title = "Ship?", originConvoID = "c9", working = working)
+            store.upsertItems(listOf(item))
+            assertEquals(working, store.item("it_w")?.working)
+            store.upsertItems(listOf(item.copy(working = null)))
+            assertNull(store.item("it_w")?.working)
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
     /// `open(onOpened:)` reports how long the migration chain took on the
     /// open that ran it (the launch timeline's nested `migration` interval)
     /// and `null` on a later open of the same, now up-to-date file.
@@ -684,7 +713,7 @@ class MatronDatabaseMigrationTest {
         val database = MatronDatabase.open(context, file) { reported = it }
         try {
             JournalStore(database, ownSender = "user:alice").cursor() // forces the lazy open
-            assertNotNull("the v6 → v12 chain ran on this open, so a duration is reported", reported)
+            assertNotNull("the v6 → v13 chain ran on this open, so a duration is reported", reported)
             assertTrue("a duration, not the sentinel", (reported ?: -1) >= 0)
         } finally {
             database.close()

@@ -14,6 +14,7 @@ import chat.matron.android.models.ItemAwaiting
 import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.ItemState
+import chat.matron.android.models.ItemWorking
 import chat.matron.android.models.MilestoneKind
 import chat.matron.android.models.Mission
 import chat.matron.android.models.MissionConversation
@@ -29,6 +30,10 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
+import java.util.UUID
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import chat.matron.android.journal.objectOrNull
 import kotlinx.serialization.json.JsonObject
 
 /// Local mirror of one conversation summary. Table/column names match the
@@ -222,6 +227,22 @@ data class OutboxEntity(
 /// an invalidation signal. Column names match matron-apple's `ItemRecord`.
 /// JSON-list columns (labels, links, attachments) are stored as text so the
 /// schema stays flat and additive, exactly like `conversation.participants`.
+/// This launch's stamp on the `working` states it stores.
+private val itemWorkingLaunch: String = UUID.randomUUID().toString()
+
+/// An item's `working` state as the `item.working_json` column holds it:
+/// stamped with the launch that fetched it. A turn starting or ending does
+/// not touch the item, so a copy left by an earlier launch says nothing about
+/// now and reads back ([storedItemWorking]) as no state at all.
+internal fun storedItemWorkingJson(working: ItemWorking, launch: String = itemWorkingLaunch): String =
+    buildJsonObject { put("launch", launch); put("working", working.toJson()) }.toString()
+
+internal fun storedItemWorking(json: String): ItemWorking? {
+    val stored = parseJsonObjectOrNull(json) ?: return null
+    if (stored.stringOrNull("launch") != itemWorkingLaunch) return null
+    return ItemWorking.fromJson(stored.objectOrNull("working"))
+}
+
 @Entity(tableName = "item", indices = [Index("origin_convo_id"), Index("mission_id", "state", "awaiting")])
 data class ItemEntity(
     @PrimaryKey val id: String,
@@ -256,6 +277,9 @@ data class ItemEntity(
     /// before v12 read `null` until the item's next refetch, which opening
     /// the item always runs.
     @ColumnInfo(name = "origin_convo_title") val originConvoTitle: String? = null,
+    /// The item's `working` state as JSON (v13), with the launch that
+    /// fetched it ([storedItemWorkingJson]); `null` when it has none.
+    @ColumnInfo(name = "working_json") val workingJson: String? = null,
 ) {
     fun toItem(): TrackerItem = TrackerItem(
         id = id, num = num, kind = ItemKind.fromWire(kind) ?: ItemKind.TASK,
@@ -273,6 +297,7 @@ data class ItemEntity(
         missionID = missionID, missionNum = missionNum,
         actions = actionsJson?.let { decodeList(it, ListSerializer(String.serializer())) } ?: emptyList(),
         chosenAction = chosenAction,
+        working = workingJson?.let(::storedItemWorking),
     )
 
     companion object {
@@ -291,6 +316,7 @@ data class ItemEntity(
                 ?.let { MatronJson.encodeToString(ListSerializer(String.serializer()), it) },
             chosenAction = i.chosenAction,
             originConvoTitle = i.originConvoTitle,
+            workingJson = i.working?.let(::storedItemWorkingJson),
         )
     }
 }
