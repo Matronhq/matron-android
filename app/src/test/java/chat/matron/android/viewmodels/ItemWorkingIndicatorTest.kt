@@ -121,6 +121,36 @@ class ItemWorkingIndicatorTest {
         vm.stop()
     }
 
+    /// A turn that ends while the read its start asked for is still open is
+    /// seen at once: the next state does not wait behind that read.
+    @Test
+    fun aTurnEndingIsSeenWhileTheReadItsStartAskedForIsStillOpen() = runBlocking {
+        val store = FakeItemsStore()
+        val gate = CompletableDeferred<Unit>()
+        var reads = 0
+        val sync = object : FakeItemsSync() {
+            override suspend fun refreshItem(id: String) {
+                reads += 1
+                if (reads > 1) gate.await()
+                super.refreshItem(id)
+            }
+        }
+        val vm = ItemDetailViewModel("it_1", store, FakeItemsApi(), sync, this, staging)
+        vm.start()
+        store.ownerSession.emit("waiting")
+        store.item.emit(item(null))
+        waitUntil { vm.loadedCommentCount.value != null }
+        store.ownerSession.emit("running")
+        waitUntil { reads == 2 }
+        store.item.emit(item(running()))
+        waitUntil { vm.workingIndicator.value == ItemWorkingIndicator.WORKING }
+
+        store.ownerSession.emit("waiting")
+        waitUntil { vm.workingIndicator.value == null }
+        gate.complete(Unit)
+        vm.stop()
+    }
+
     /// A stored copy that still says `running` after this device has seen the
     /// turn end is not shown while the fresh read is on its way.
     @Test

@@ -309,6 +309,15 @@ fun itemThreadShouldFollowTail(
 /// [image] resolves an image attachment to a Coil model (bytes/URL) or
 /// `null` while loading; [onOpenAttachment] opens any attachment
 /// (image viewer, file, voice note) — the host decides how.
+/// Whether the working indicator appearing re-pins the viewport to the
+/// bottom: for a reader settled there, as a new reply does. An indicator
+/// that arrives with the opening load is part of that load, and must not
+/// drag an unread thread to its end: [wasLoaded] is whether the thread had
+/// loaded BEFORE the indicator appeared.
+fun itemThreadShouldFollowWorking(
+    appeared: Boolean, startsAtBottom: Boolean, placed: Boolean, atBottom: Boolean, wasLoaded: Boolean,
+): Boolean = appeared && placed && atBottom && (startsAtBottom || wasLoaded)
+
 @Composable
 fun ItemDetailView(
     model: ItemDetailModel,
@@ -374,8 +383,14 @@ fun ItemDetailView(
     // The working indicator arriving is a row at the tail too: a reader
     // settled there keeps it in view.
     val showsWorking = model.working != null
-    LaunchedEffect(showsWorking) {
-        if (showsWorking && placed && atBottom) listState.scrollToItem(lastIndex)
+    val loaded = model.loadedCommentCount != null
+    var previousWorking by remember(item.id) { mutableStateOf(showsWorking to loaded) }
+    LaunchedEffect(showsWorking, loaded) {
+        val (showed, wasLoaded) = previousWorking
+        previousWorking = showsWorking to loaded
+        if (itemThreadShouldFollowWorking(showsWorking && !showed, startsAtBottom, placed, atBottom, wasLoaded)) {
+            listState.scrollToItem(lastIndex)
+        }
     }
     LaunchedEffect(atBottom) { onBottomVisibilityChange?.invoke(atBottom) }
 

@@ -187,8 +187,12 @@ class ItemDetailViewModel(
                 ownerSessionState = state
                 updateWorkingIndicator()
                 // The first value is the state the opening refetch already
-                // read the item under.
-                if (!first && changed) sync.refreshItem(id)
+                // read the item under. Not awaited here: the next state must
+                // not wait behind this one's read.
+                if (!first && changed) {
+                    jobs.removeAll { it.isCompleted }
+                    jobs += scope.launch { sync.refreshItem(id) }
+                }
                 first = false
             }
         }

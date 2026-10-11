@@ -172,6 +172,19 @@ class ItemsViewsTest {
         assertEquals(emptyList<TaskMoveOption>(), taskMoveOptions(5, 3))
     }
 
+    /// The indicator appearing keeps a reader at the tail there, and never
+    /// moves anyone else: not a reader who scrolled up, and not an unread
+    /// thread whose opening load brings the indicator with it.
+    @Test
+    fun theWorkingRowAppearingFollowsOnlyAReaderSettledAtTheTail() {
+        assertTrue(itemThreadShouldFollowWorking(appeared = true, startsAtBottom = false, placed = true, atBottom = true, wasLoaded = true))
+        assertFalse(itemThreadShouldFollowWorking(appeared = false, startsAtBottom = false, placed = true, atBottom = true, wasLoaded = true))
+        assertFalse(itemThreadShouldFollowWorking(appeared = true, startsAtBottom = false, placed = false, atBottom = true, wasLoaded = true))
+        assertFalse(itemThreadShouldFollowWorking(appeared = true, startsAtBottom = false, placed = true, atBottom = false, wasLoaded = true))
+        assertFalse("it arrived with the opening load", itemThreadShouldFollowWorking(true, false, true, true, wasLoaded = false))
+        assertTrue("a tail reader follows it through the load", itemThreadShouldFollowWorking(true, true, true, true, wasLoaded = false))
+    }
+
     @Test
     fun followTailAndJumpToBottomRules() {
         // The opening load of an unread thread (0 → 8 with loaded 8) must not drag the reader to the end.
