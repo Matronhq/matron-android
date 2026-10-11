@@ -5,22 +5,28 @@ import chat.matron.android.journal.ItemsStoreReading
 import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.ItemsSyncing
 import chat.matron.android.journal.MatronJson
+import chat.matron.android.journal.SessionState
 import chat.matron.android.journal.db.ItemOutboxEntity
 import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemAuthor
 import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.ItemState
+import chat.matron.android.models.ItemWorking
+import chat.matron.android.models.ItemWorkingIndicator
 import chat.matron.android.models.StagedAttachment
 import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
 import java.io.File
+import java.time.Duration
+import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -49,6 +55,7 @@ class ItemDetailViewModel(
     private val sync: ItemsSyncing,
     private val scope: CoroutineScope,
     private val stagingDirectory: File,
+    private val now: () -> Instant = Instant::now,
 ) {
     private val _item = MutableStateFlow<TrackerItem?>(null)
     val item: StateFlow<TrackerItem?> = _item.asStateFlow()
@@ -87,6 +94,20 @@ class ItemDetailViewModel(
     private val _loadedCommentCount = MutableStateFlow<Int?>(null)
     val loadedCommentCount: StateFlow<Int?> = _loadedCommentCount.asStateFlow()
 
+    /// The indicator to draw at the foot of the thread while the agent that
+    /// owns the item is busy, from the item's `working` state: `null` when
+    /// there is nothing to show.
+    private val _workingIndicator = MutableStateFlow<ItemWorkingIndicator?>(null)
+    val workingIndicator: StateFlow<ItemWorkingIndicator?> = _workingIndicator.asStateFlow()
+
+    /// The owner conversation's session state on this device: `null` until
+    /// its flow has delivered, and while this device has no row for it.
+    private var ownerSessionState: String? = null
+    private var ownerConvoID: String? = null
+    private var ownerSessionJob: Job? = null
+    private var workingLapseJob: Job? = null
+    private var workingLapseAt: Instant? = null
+
     private val jobs = mutableListOf<Job>()
     private var commentsJob: Job? = null
     private var refreshJob: Job? = null
@@ -94,7 +115,14 @@ class ItemDetailViewModel(
     fun start() {
         stop()
         val id = itemID
-        jobs += scope.launch { store.itemFlow(id).collect { _item.value = it } }
+        jobs += scope.launch {
+            store.itemFlow(id).collect {
+                _item.value = it
+                subscribeOwnerSession(it?.originConvoID)
+                scheduleWorkingLapse(it?.working?.until)
+                updateWorkingIndicator()
+            }
+        }
         subscribeComments()
         jobs += scope.launch { store.itemOutboxFlow(id).collect { _pendingComments.value = it } }
         // Comments only reach the local cache through a refetch — opening the
@@ -109,6 +137,7 @@ class ItemDetailViewModel(
             subscribeComments()
             runCatching { store.comments(id) }.getOrNull()?.let { _comments.value = it }
             _loadedCommentCount.value = _comments.value.size
+            updateWorkingIndicator()
         }
     }
 
@@ -116,6 +145,71 @@ class ItemDetailViewModel(
         jobs.forEach { it.cancel() }; jobs.clear()
         commentsJob?.cancel(); commentsJob = null
         refreshJob?.cancel(); refreshJob = null
+        ownerSessionJob?.cancel(); ownerSessionJob = null
+        ownerConvoID = null; ownerSessionState = null
+        workingLapseJob?.cancel(); workingLapseJob = null; workingLapseAt = null
+    }
+
+    private fun updateWorkingIndicator() {
+        // Another person's item has no owner conversation here, and never
+        // says whether its agent is busy.
+        val working = _item.value?.takeIf { it.originConvoID.isNotEmpty() }?.working?.takeIf { it.isCurrent(now()) }
+        val known = ownerSessionState
+        _workingIndicator.value = when (working?.state) {
+            null -> null
+            ItemWorking.State.QUEUED -> ItemWorkingIndicator.STARTING
+            // The stored copy is as old as its last fetch. A device that has
+            // the owner conversation sets it against what it knows itself:
+            // once it has seen the turn end, the copy is stale, and the
+            // refetch that event started will say so. A device without the
+            // conversation waits for the opening read before it claims any
+            // work at all.
+            ItemWorking.State.RUNNING -> ItemWorkingIndicator.WORKING.takeIf {
+                if (known != null) known == SessionState.RUNNING else _loadedCommentCount.value != null
+            }
+        }
+    }
+
+    /// Follows the owner conversation's session state. A turn starting or
+    /// ending changes `working` without touching the item, so each change
+    /// reads the item again. A granted item's owner is "": nothing to follow.
+    private fun subscribeOwnerSession(convoID: String?) {
+        if (convoID == ownerConvoID) return
+        ownerConvoID = convoID
+        ownerSessionJob?.cancel(); ownerSessionJob = null
+        ownerSessionState = null
+        if (convoID.isNullOrEmpty()) return
+        val id = itemID
+        ownerSessionJob = scope.launch {
+            var first = true
+            store.itemOwnerSessionStateFlow(convoID).collect { state ->
+                val changed = state != ownerSessionState
+                ownerSessionState = state
+                updateWorkingIndicator()
+                // The first value is the state the opening refetch already
+                // read the item under. Not awaited here: the next state must
+                // not wait behind this one's read.
+                if (!first && changed) {
+                    jobs.removeAll { it.isCompleted }
+                    jobs += scope.launch { sync.refreshItem(id) }
+                }
+                first = false
+            }
+        }
+    }
+
+    /// A queued state stops showing at its `until` without the item being
+    /// read again: wake then, once per deadline.
+    private fun scheduleWorkingLapse(until: Instant?) {
+        if (until == workingLapseAt) return
+        workingLapseAt = until
+        workingLapseJob?.cancel(); workingLapseJob = null
+        val wait = until?.let { Duration.between(now(), it).toMillis() } ?: return
+        if (wait <= 0) return
+        workingLapseJob = scope.launch {
+            delay(wait + 50)
+            updateWorkingIndicator()
+        }
     }
 
     private fun subscribeComments() {

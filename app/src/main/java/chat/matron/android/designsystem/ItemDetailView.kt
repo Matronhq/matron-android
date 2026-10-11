@@ -62,6 +62,7 @@ import chat.matron.android.models.ItemAwaiting
 import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.ItemState
+import chat.matron.android.models.ItemWorkingIndicator
 import chat.matron.android.models.StagedAttachment
 import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
@@ -171,6 +172,10 @@ data class ItemDetailModel(
     /// drawn as chosen before the journal confirms
     /// (`ItemDetailViewModel.pendingItemTap`).
     val pendingItemTap: String? = null,
+    /// The indicator at the foot of the thread while the agent that owns the
+    /// item is busy (`ItemDetailViewModel.workingIndicator`); `null` draws
+    /// none.
+    val working: ItemWorkingIndicator? = null,
 )
 
 /// The state pill's four values: Needs you / Closed · resolution / With the
@@ -304,6 +309,15 @@ fun itemThreadShouldFollowTail(
 /// [image] resolves an image attachment to a Coil model (bytes/URL) or
 /// `null` while loading; [onOpenAttachment] opens any attachment
 /// (image viewer, file, voice note) — the host decides how.
+/// Whether the working indicator appearing re-pins the viewport to the
+/// bottom: for a reader settled there, as a new reply does. An indicator
+/// that arrives with the opening load is part of that load, and must not
+/// drag an unread thread to its end: [wasLoaded] is whether the thread had
+/// loaded BEFORE the indicator appeared.
+fun itemThreadShouldFollowWorking(
+    appeared: Boolean, startsAtBottom: Boolean, placed: Boolean, atBottom: Boolean, wasLoaded: Boolean,
+): Boolean = appeared && placed && atBottom && (startsAtBottom || wasLoaded)
+
 @Composable
 fun ItemDetailView(
     model: ItemDetailModel,
@@ -348,10 +362,12 @@ fun ItemDetailView(
     val scrollable by remember(listState) { derivedStateOf { listState.canScrollForward || listState.canScrollBackward } }
     // The bottom anchor's index, from the model rather than the layout (which
     // reports 0 rows before the first measure): header, optional meta,
-    // optional body card, divider, comments, pending rows, anchor.
+    // optional body card, divider, comments, pending rows, the working
+    // indicator, anchor.
     val hasMeta = item.labels.isNotEmpty() || item.links.isNotEmpty()
     val hasBody = item.body.isNotEmpty() || item.attachments.isNotEmpty()
-    val lastIndex = 1 + (if (hasMeta) 1 else 0) + (if (hasBody) 1 else 0) + 1 + rowCount
+    val lastIndex = 1 + (if (hasMeta) 1 else 0) + (if (hasBody) 1 else 0) + 1 + rowCount +
+        (if (model.working != null) 1 else 0)
 
     LaunchedEffect(item.id) {
         itemThreadPlaceInitially(startsAtBottom, { listState.scrollToItem(lastIndex) }) { placed = true }
@@ -361,6 +377,18 @@ fun ItemDetailView(
         val old = previousCount
         previousCount = rowCount
         if (itemThreadShouldFollowTail(model.loadedCommentCount, startsAtBottom, placed, atBottom, old, rowCount)) {
+            listState.scrollToItem(lastIndex)
+        }
+    }
+    // The working indicator arriving is a row at the tail too: a reader
+    // settled there keeps it in view.
+    val showsWorking = model.working != null
+    val loaded = model.loadedCommentCount != null
+    var previousWorking by remember(item.id) { mutableStateOf(showsWorking to loaded) }
+    LaunchedEffect(showsWorking, loaded) {
+        val (showed, wasLoaded) = previousWorking
+        previousWorking = showsWorking to loaded
+        if (itemThreadShouldFollowWorking(showsWorking && !showed, startsAtBottom, placed, atBottom, wasLoaded)) {
             listState.scrollToItem(lastIndex)
         }
     }
@@ -395,6 +423,12 @@ fun ItemDetailView(
                     )
                 }
                 items(model.pending.size, key = { "p-${model.pending[it].id}" }) { i -> PendingView(model.pending[i]) }
+                model.working?.let { working ->
+                    // The chat's own indicator, flush with the cards above it.
+                    item(key = "working") {
+                        ActivityIndicatorRow(working.label, horizontalPadding = 0.dp)
+                    }
+                }
                 item(key = "bottom") { Spacer(Modifier.height(1.dp)) }
             }
             if (itemThreadShowsJumpToBottom(placed, scrollable, atBottom)) {

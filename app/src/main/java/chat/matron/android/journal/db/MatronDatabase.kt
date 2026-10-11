@@ -71,6 +71,10 @@ import java.util.concurrent.atomic.AtomicLong
 /// origin conversation, the item detail's fallback label) and `mission.name`
 /// (the mission's optional short name). Additive; cached rows read `null`
 /// until their next fetch.
+///
+/// v13 adds `item.working_json`: whether the session that owns the item is
+/// busy, the indicator at the foot of the item's thread. Additive; cached
+/// rows read "nothing to show" until their next fetch.
 @Database(
     entities = [
         ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
@@ -78,7 +82,7 @@ import java.util.concurrent.atomic.AtomicLong
         ItemEntity::class, ItemCommentEntity::class, ItemOutboxEntity::class,
         MissionEntity::class, MilestoneEntity::class, MissionConversationEntity::class,
     ],
-    version = 12,
+    version = 13,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -314,9 +318,17 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
+        /// v13: `item.working_json` (see the class comment).
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `item` ADD COLUMN `working_json` TEXT")
+            }
+        }
+
         private val MIGRATIONS = listOf(
             MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
             MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
+            MIGRATION_12_13,
         )
 
         /// Production, file-backed at the given path. [onOpened] fires from

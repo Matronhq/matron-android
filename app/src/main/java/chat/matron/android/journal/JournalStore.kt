@@ -623,6 +623,9 @@ class JournalStore(
         is ItemsScope.Convo -> itemDao.forConversationFlow(scope.id)
     }.map { list -> list.map { it.toItem() } }.distinctUntilChanged()
 
+    override fun itemOwnerSessionStateFlow(convoID: String): Flow<String?> =
+        conversationDao.sessionStateFlow(convoID).distinctUntilChanged()
+
     override fun itemFlow(id: String): Flow<TrackerItem?> =
         itemDao.byIdFlow(id).map { it?.toItem() }.distinctUntilChanged()
 

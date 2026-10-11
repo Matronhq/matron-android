@@ -24,19 +24,22 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 /// A bot-aligned typing / tool-use indicator: three softly pulsing dots
 /// followed by a [label] ("Thinking…", "Running <tool>"). Rendered as a
-/// trailing timeline row while the agent is working, then removed.
+/// trailing timeline row while the agent is working, then removed. A host
+/// that already sits in a padded column (an item thread) passes its own
+/// [horizontalPadding].
 @Composable
-fun ActivityIndicatorRow(label: String, modifier: Modifier = Modifier) {
+fun ActivityIndicatorRow(label: String, modifier: Modifier = Modifier, horizontalPadding: Dp = 16.dp) {
     val transition = rememberInfiniteTransition(label = "activityDots")
     val dotColor = MaterialTheme.colorScheme.onSurfaceVariant
 
     Row(
         modifier
-            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .padding(horizontal = horizontalPadding, vertical = 4.dp)
             .semantics { contentDescription = label.ifEmpty { "Agent is working" } },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),

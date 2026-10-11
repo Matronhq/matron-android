@@ -153,6 +153,64 @@ data class TrackerLink(val url: String, val title: String? = null) {
     }
 }
 
+/// Whether the session that owns an item is busy (protocol.md "Working
+/// indicator"), so the item's thread can show the indicator a chat shows for
+/// its own conversation. The journal derives it each time the item is read;
+/// a turn starting or ending does not change the item's `updated_at`.
+data class ItemWorking(
+    val state: State,
+    /// When the turn started ([State.RUNNING], `null` when not recorded) or
+    /// when the user wrote ([State.QUEUED]).
+    val since: Instant? = null,
+    /// When a [State.QUEUED] state lapses if nothing else happens; `null`
+    /// while [State.RUNNING].
+    val until: Instant? = null,
+) {
+    enum class State(val wire: String) {
+        /// The owning conversation is mid-turn, whether or not the turn is
+        /// about this item.
+        RUNNING("running"),
+
+        /// The user wrote something on the item that reaches the agent as a
+        /// turn, and no turn has started since: the box is being started,
+        /// the session resumed, or the reply is waiting behind the turn in
+        /// flight.
+        QUEUED("queued");
+
+        companion object {
+            fun fromWire(raw: String?): State? = entries.firstOrNull { it.wire == raw }
+        }
+    }
+
+    /// Whether the state still stands at [now]: a queued state stops showing
+    /// at [until] without the item being read again.
+    fun isCurrent(now: Instant): Boolean = until == null || now.isBefore(until)
+
+    /// The wire shape, which is also what the local mirror stores.
+    fun toJson(): JsonObject = buildJsonObject {
+        put("state", state.wire)
+        since?.let { put("since", it.toEpochMilli()) }
+        until?.let { put("until", it.toEpochMilli()) }
+    }
+
+    companion object {
+        fun fromJson(json: JsonObject?): ItemWorking? {
+            val state = State.fromWire(json?.stringOrNull("state")) ?: return null
+            return ItemWorking(state, msInstant(json?.longOrNull("since")), msInstant(json?.longOrNull("until")))
+        }
+    }
+}
+
+/// The indicator an item's thread draws at its foot while the agent behind
+/// it is busy: the chat's dots, with a [label].
+enum class ItemWorkingIndicator(val label: String) {
+    /// The reply is on its way to the agent; its turn has not started.
+    STARTING("Starting…"),
+
+    /// The agent is mid-turn.
+    WORKING("Working…"),
+}
+
 /// One tracker item — a task, a question or a decision (spec: Data model).
 data class TrackerItem(
     val id: String,
@@ -195,6 +253,11 @@ data class TrackerItem(
     val actions: List<String> = emptyList(),
     /// The label of the user's latest tap on [actions]; `null` until one.
     val chosenAction: String? = null,
+    /// Whether the session that owns the item is busy, as the journal derived
+    /// it when the item was read; `null` when there is nothing to show, on
+    /// an item another person shares, and on a journal that predates the
+    /// field.
+    val working: ItemWorking? = null,
 ) {
     /// The `from`/`to` halves of a status comment's `meta`.
     data class StatusSnapshot(
@@ -260,6 +323,7 @@ data class TrackerItem(
                     ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.takeIf(String::isNotEmpty) }
                     ?: emptyList(),
                 chosenAction = json.stringOrNull("chosen_action"),
+                working = ItemWorking.fromJson(json.objectOrNull("working")),
             )
         }
     }

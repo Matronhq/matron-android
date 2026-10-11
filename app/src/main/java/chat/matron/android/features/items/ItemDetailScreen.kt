@@ -169,6 +169,7 @@ fun ItemDetailScreen(
     val staged by viewModel.stagedAttachments.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
     val loadedCount by viewModel.loadedCommentCount.collectAsStateWithLifecycle()
+    val working by viewModel.workingIndicator.collectAsStateWithLifecycle()
     var draft by remember(viewModel.itemID) { mutableStateOf(viewModel.draft) }
     // A send that fails restores the draft on the view model, possibly after
     // this screen was left and reopened: follow it. Typing writes the same
@@ -402,6 +403,7 @@ fun ItemDetailScreen(
                                     loadedCommentCount = loadedCount,
                                     pendingTaps = ItemDetailViewModel.pendingTaps(pending),
                                     pendingItemTap = ItemDetailViewModel.pendingItemTap(pending),
+                                    working = working,
                                 ),
                                 draft = draft,
                                 onDraftChange = { draft = it; viewModel.draft = it },

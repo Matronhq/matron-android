@@ -5,6 +5,7 @@ import chat.matron.android.models.ItemsScope
 import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 
 /// The store reads the items panel and detail views need, as an interface so
@@ -34,6 +35,13 @@ interface ItemsStoreReading {
     /// Defaulted to `itemsFlow(All)` so `JournalStore` needs no new query;
     /// fakes override it to drive it separately.
     fun needsUserFlow(): Flow<List<TrackerItem>> = itemsFlow(ItemsScope.All)
+    /// One conversation's session state (`"running"` while its agent is
+    /// mid-turn), followed live; `null` while this device has no row for the
+    /// conversation. An item's `working` state is derived by the journal
+    /// when the item is read, so the item detail re-reads the item each time
+    /// its owner conversation's state changes here. Defaulted to a store
+    /// that never reports one, so fakes that don't care skip it.
+    fun itemOwnerSessionStateFlow(convoID: String): Flow<String?> = emptyFlow()
 }
 
 /// Reads one tracker item by its human-facing NUMBER (`#65`) — the single
