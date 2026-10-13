@@ -7,6 +7,7 @@ import chat.matron.android.journal.NumberLookup
 import chat.matron.android.models.Mission
 import chat.matron.android.models.TrackerItem
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,21 +23,25 @@ object GoToNumberCopy {
     const val TITLE = "Go to number"
     const val FIELD_LABEL = "Number"
     const val GO = "Go"
-    /// The confirm button while a lookup is out.
+    /// The confirm button while Go is resolving and opening.
     const val GOING = "Looking…"
     const val CANCEL = "Cancel"
-    const val INVALID = "Enter a number, like 412."
+    /// Read out for the progress mark while a typed number is looked up.
+    const val LOOKING_UP = "Looking up"
+    const val PROJECT_NOTE = "Projects aren't available in this app yet."
 
-    fun notFound(num: Int) = "No #$num"
-    fun lookupFailed(num: Int) = "Couldn't look up #$num"
-    fun lookupFailed(num: Int, detail: String) = "Couldn't look up #$num — $detail"
+    fun nothingNumbered(num: Int) = "Nothing is numbered $num."
+    fun lookupFailed(num: Int) = "Couldn't look up #$num. Try again in a moment."
     fun cantOpen(num: Int) = "Couldn't open #$num"
     fun cantOpen(num: Int, detail: String) = "Couldn't open #$num — $detail"
-    fun project(num: Int) = "#$num is a project. Projects aren't available in this app yet."
+    fun project(num: Int) = "#$num is a project. $PROJECT_NOTE"
     fun missionsUnsupported(num: Int) = "#$num is a mission. Missions aren't available on this server."
 
     /// A search row's heading: `#412 · Item`.
     fun hitHeading(hit: NumberHit) = "#${hit.num} · ${hit.kind.label}"
+
+    /// The dialog's result row: the kind, then the number.
+    fun rowHeading(hit: NumberHit) = "${hit.kind.label} #${hit.num}"
 }
 
 /// Reads what the user typed as a number: `412` or `#412`, surrounding
@@ -122,7 +127,7 @@ class GoToNumberResolver(
         } catch (e: JournalApiError.NotFound) {
             Found.Missing
         } catch (e: Exception) {
-            Found.Failed(e.message?.takeIf { it.isNotBlank() }?.let { GoToNumberCopy.lookupFailed(num, it) } ?: GoToNumberCopy.lookupFailed(num))
+            Found.Failed(GoToNumberCopy.lookupFailed(num))
         }
     }
 
@@ -176,57 +181,139 @@ class GoToNumberResolver(
     }
 }
 
-/// The "Go to number" dialog's state: the typed text, a busy flag while a
-/// lookup is out, and the one inline message. [go] returns `true` once
-/// [navigate] has run, which is the dialog's cue to dismiss; on anything
-/// else the dialog stays open with [message] under the field, so a typo
-/// costs one correction rather than a second alert to dismiss.
+/// What the dialog shows under the field for the number typed. [asked] is
+/// the number the answer is FOR, which is not always the one the hit shows
+/// (the journal may name another), so it is what a later edit is compared to.
+sealed interface GoToNumberResult {
+    val asked: Int
+
+    /// Something carries the number: the row to tap.
+    data class Hit(override val asked: Int, val hit: NumberHit) : GoToNumberResult {
+        /// A project shows what it is but has no page here to open.
+        val canOpen: Boolean get() = hit.kind != NumberKind.PROJECT
+    }
+
+    /// The journal answered: nothing carries it. Information, not an error.
+    data class Missing(override val asked: Int) : GoToNumberResult
+
+    /// The journal could not be asked. Go asks again.
+    data class Failed(override val asked: Int, val message: String) : GoToNumberResult
+}
+
+/// The "Go to number" dialog's state. The number is looked up AS it is
+/// typed: the dialog calls [lookUp] on every text change (cancelling the
+/// call before it), and [result] fills in under the field once the text has
+/// settled, so the user sees what a number is before choosing to open it.
+///
+/// [go] opens the result, resolving on the spot when the debounced lookup
+/// has not answered yet, and returns `true` once [navigate] has run — the
+/// dialog's cue to dismiss. A target that will not open leaves the dialog up
+/// with [message] under the row.
+///
+/// [sleep] is the debounce wait, injectable so tests need no real time.
 class GoToNumberViewModel(
     private val resolver: GoToNumberResolver,
+    private val debounceMs: Long = DEBOUNCE_MS,
+    private val sleep: suspend (Long) -> Unit = { delay(it) },
     private val navigate: (GoToTarget) -> Unit,
 ) {
     private val _text = MutableStateFlow("")
     val text: StateFlow<String> = _text.asStateFlow()
 
+    /// `null` while the text is not a number, or not answered yet.
+    private val _result = MutableStateFlow<GoToNumberResult?>(null)
+    val result: StateFlow<GoToNumberResult?> = _result.asStateFlow()
+
+    /// A typed number is waiting out the debounce or its lookup.
+    private val _isLooking = MutableStateFlow(false)
+    val isLooking: StateFlow<Boolean> = _isLooking.asStateFlow()
+
+    /// Go is resolving and opening.
     private val _isBusy = MutableStateFlow(false)
     val isBusy: StateFlow<Boolean> = _isBusy.asStateFlow()
 
+    /// Why the result would not open.
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 
-    /// Editing clears the message: it described the text that was there.
+    /// Bumped whenever an in-flight [lookUp] stops being the one to listen
+    /// to: an edit, a newer lookup, or Go taking over.
+    private var generation = 0
+
+    val canGo: Boolean get() = canGo(_text.value, _result.value, _isBusy.value)
+
+    /// Editing drops whatever described the text that was there. A result
+    /// survives only an edit that leaves the number itself unchanged.
     fun setText(value: String) {
         if (value == _text.value) return
         _text.value = value
         _message.value = null
+        supersedeLookups()
+        if (_result.value?.asked != GoToNumberParser.parse(value)) _result.value = null
+    }
+
+    /// Looks the typed number up once the text has stayed put for
+    /// [debounceMs]. Text that is not a number shows nothing at all. An
+    /// answer is applied only while it is still the newest lookup, so a late
+    /// one for a number since edited away never shows — whether or not the
+    /// caller cancelled it.
+    suspend fun lookUp() {
+        val num = GoToNumberParser.parse(_text.value) ?: return
+        if (_isBusy.value || _result.value?.asked == num) return
+        val mine = ++generation
+        _isLooking.value = true
+        try {
+            sleep(debounceMs)
+            // Superseded while waiting: nobody wants the answer, so the
+            // journal is not asked for it.
+            if (mine != generation) return
+            val found = resolver.find(num)
+            if (mine == generation) _result.value = found.asResult(num)
+        } finally {
+            if (mine == generation) _isLooking.value = false
+        }
     }
 
     suspend fun go(): Boolean {
-        if (_isBusy.value) return false
-        val num = GoToNumberParser.parse(_text.value)
-        if (num == null) {
-            _message.value = GoToNumberCopy.INVALID
-            return false
-        }
+        if (!canGo) return false
+        val num = GoToNumberParser.parse(_text.value) ?: return false
         _isBusy.value = true
         _message.value = null
+        // Go answers for itself from here; a lookup still out is ignored.
+        supersedeLookups()
         try {
-            val hit = when (val found = resolver.find(num)) {
-                is GoToNumberResolver.Found.Hit -> found.hit
-                GoToNumberResolver.Found.Missing -> return fail(GoToNumberCopy.notFound(num))
-                is GoToNumberResolver.Found.Failed -> return fail(found.message)
-            }
-            return when (val opened = resolver.open(hit)) {
+            val known = (_result.value as? GoToNumberResult.Hit)?.takeIf { it.asked == num }
+            val result = known ?: resolver.find(num).asResult(num).also { _result.value = it }
+            if (result !is GoToNumberResult.Hit || !result.canOpen) return false
+            return when (val opened = resolver.open(result.hit)) {
                 is GoToNumberResolver.Opened.Target -> { navigate(opened.target); true }
-                is GoToNumberResolver.Opened.Message -> fail(opened.text)
+                is GoToNumberResolver.Opened.Message -> { _message.value = opened.text; false }
             }
         } finally {
             _isBusy.value = false
         }
     }
 
-    private fun fail(text: String): Boolean {
-        _message.value = text
-        return false
+    private fun supersedeLookups() {
+        generation++
+        _isLooking.value = false
+    }
+
+    private fun GoToNumberResolver.Found.asResult(num: Int): GoToNumberResult = when (this) {
+        is GoToNumberResolver.Found.Hit -> GoToNumberResult.Hit(num, hit)
+        GoToNumberResolver.Found.Missing -> GoToNumberResult.Missing(num)
+        is GoToNumberResolver.Found.Failed -> GoToNumberResult.Failed(num, message)
+    }
+
+    companion object {
+        const val DEBOUNCE_MS = 200L
+
+        /// Go needs a number, and one that is not already known to have no
+        /// page to open. It does not need the answer: Go resolves by itself.
+        fun canGo(text: String, result: GoToNumberResult?, busy: Boolean): Boolean {
+            val num = GoToNumberParser.parse(text) ?: return false
+            if (busy) return false
+            return !(result is GoToNumberResult.Hit && result.asked == num && !result.canOpen)
+        }
     }
 }
