@@ -567,23 +567,28 @@ class ItemsSyncTest {
         rig.sync.stop()
     }
 
-    /// The refusal's own words win: the response's `message`, else its
-    /// `reason` (the known too-many-attachments reason in words).
+    /// The refusal's own words win: the response's `message`; else the
+    /// too-many-attachments code in words; else its `reason`.
     @Test
     fun rejectionReasonPrefersTheResponsesMessageThenItsReason() {
         assertEquals(
             "Comments carry at most 20 attachments.",
             ItemsSync.rejectionReason(
-                JournalApiError.Http(400, "x", bodyMessage = "Comments carry at most 20 attachments.", reason = "too_many_attachments", max = 20),
+                JournalApiError.Http(400, "x", code = "too_many_attachments", bodyMessage = "Comments carry at most 20 attachments.", max = 20),
             ),
         )
         assertEquals(
             "Too many attachments on one comment — the server takes at most 12.",
-            ItemsSync.rejectionReason(JournalApiError.Http(400, "bad_request", reason = "too_many_attachments", max = 12)),
+            ItemsSync.rejectionReason(JournalApiError.Http(400, "too_many_attachments", code = "too_many_attachments", max = 12)),
         )
         assertEquals(
             "Too many attachments on one comment — the server takes at most 20.",
-            ItemsSync.rejectionReason(JournalApiError.Http(400, "bad_request", reason = "too_many_attachments")),
+            ItemsSync.rejectionReason(JournalApiError.Http(400, "too_many_attachments", code = "too_many_attachments")),
+        )
+        assertEquals(
+            "a bare error code is not words: the generic path",
+            "The server refused it (HTTP 400).",
+            ItemsSync.rejectionReason(JournalApiError.Http(400, "invalid_actions", code = "invalid_actions")),
         )
         assertEquals("invalid_attachment_ref", ItemsSync.rejectionReason(JournalApiError.Http(400, "bad_request", reason = "invalid_attachment_ref")))
         assertEquals("The server refused it (HTTP 422).", ItemsSync.rejectionReason(JournalApiError.Http(422, "bad_request", bodyMessage = "  ")))

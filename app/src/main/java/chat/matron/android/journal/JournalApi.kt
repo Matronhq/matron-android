@@ -277,13 +277,15 @@ sealed class JournalApiError(message: String) : Exception(message) {
     /// approve yet, or already resolved).
     data object Conflict : JournalApiError("Already handled — possibly on another device.")
     /// Any other non-success status. [serverMessage] is the body's `message`,
-    /// else its `error` code, else empty. [bodyMessage], [reason] and [max]
-    /// are the body's own `message`, `reason` and `max` fields, null when
-    /// absent: a refusal such as `{"error":"bad_request","reason":
-    /// "too_many_attachments","max":20}` says why in words only through them.
+    /// else its `error` code, else empty. [code], [bodyMessage], [reason] and
+    /// [max] are the body's own `error`, `message`, `reason` and `max`
+    /// fields, null when absent: a refusal such as
+    /// `{"error":"too_many_attachments","max":20}` is told apart only through
+    /// them.
     data class Http(
         val status: Int,
         val serverMessage: String,
+        val code: String? = null,
         val bodyMessage: String? = null,
         val reason: String? = null,
         val max: Int? = null,
@@ -1068,6 +1070,7 @@ class JournalApi(
             else -> JournalApiError.Http(
                 status,
                 obj?.stringOrNull("message") ?: code ?: "",
+                code = code,
                 bodyMessage = obj?.stringOrNull("message"),
                 reason = obj?.stringOrNull("reason"),
                 max = obj?.intOrNull("max"),

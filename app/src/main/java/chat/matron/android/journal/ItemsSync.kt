@@ -720,8 +720,9 @@ class ItemsSync(
         /// must not spin this forever.
         private const val MAX_PAGES = 50
 
-        /// The journal's `reason` for a write carrying more than
-        /// [ATTACHMENTS_MAX] attachments.
+        /// The journal's `error` code for a write carrying more than
+        /// [ATTACHMENTS_MAX] attachments (`{"error":"too_many_attachments",
+        /// "max":20}`).
         const val TOO_MANY_ATTACHMENTS = "too_many_attachments"
 
         /// One reply as the comments the journal will take: [attachments] in
@@ -747,11 +748,12 @@ class ItemsSync(
             if (index == 0) localID else "$localID-${(index + 1).toString().padStart(3, '0')}"
 
         /// The words shown under a reply the journal refused: the response's
-        /// own `message`, else its `reason`, else the bare status.
+        /// own `message`; else, for too many attachments, that in words; else
+        /// its `reason`; else the bare status.
         fun rejectionReason(error: Throwable): String {
             val http = error as? JournalApiError.Http
             http?.bodyMessage?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
-            if (http?.reason == TOO_MANY_ATTACHMENTS) {
+            if (http?.code == TOO_MANY_ATTACHMENTS) {
                 return "Too many attachments on one comment — the server takes at most ${http.max ?: ATTACHMENTS_MAX}."
             }
             http?.reason?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
