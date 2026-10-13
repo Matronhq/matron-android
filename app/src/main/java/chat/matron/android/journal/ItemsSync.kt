@@ -96,7 +96,9 @@ interface ItemsSyncing {
     suspend fun retryComment(localID: String)
 
     /// The user's Discard on a queued reply the journal refused: it leaves
-    /// the outbox and the thread.
+    /// the outbox and the thread. Only a refused reply: one that is queued to
+    /// send (or being sent right now) is left alone, as is everything once
+    /// the sync has stopped.
     suspend fun discardComment(localID: String)
 
     /// `false` once a `GET /items` has answered 404 (a journal predating the
@@ -484,7 +486,14 @@ class ItemsSync(
     }
 
     override suspend fun discardComment(localID: String) {
-        store.itemOutboxDelete(localID)
+        if (stopped) return
+        // A refused row is never in a drain (`itemOutboxPending` skips it),
+        // and Retry clears the refusal before draining it, so a delete that
+        // is conditional on the refusal in the same statement can never race
+        // a send.
+        if (!store.itemOutboxDeleteRejected(localID)) {
+            MatronDebug.breadcrumb("ItemsSync: discard of $localID ignored — not a refused row")
+        }
     }
 
     /// The drain itself is kicked in the background, NOT awaited: the write

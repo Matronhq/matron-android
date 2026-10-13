@@ -467,6 +467,12 @@ interface ItemOutboxDao {
     @Query("DELETE FROM item_outbox WHERE local_id = :localID")
     suspend fun delete(localID: String)
 
+    /// Deletes the row only while it is refused, in one statement, so a row
+    /// that a Retry has just put back in the drain can never be pulled out from
+    /// under the send. Returns the number of rows deleted (0 or 1).
+    @Query("DELETE FROM item_outbox WHERE local_id = :localID AND rejected_reason IS NOT NULL")
+    suspend fun deleteRejected(localID: String): Int
+
     @Query("DELETE FROM item_outbox")
     suspend fun deleteAll()
 }

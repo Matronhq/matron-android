@@ -663,6 +663,39 @@ class ItemsSyncTest {
         rig.sync.stop()
     }
 
+    /// Discard acts only on a refused reply: not on one queued to send, not on
+    /// one being posted right now (it still lands), and not after stop.
+    @Test
+    fun discardOnlyRemovesARefusedReply() = runBlocking {
+        val api = FakeItems()
+        val rig = make(api)
+        // Queued, not refused (offline): Discard leaves it.
+        api.failComments = true
+        rig.sync.enqueueComment("it_1", "L1", "queued", emptyList())
+        rig.sync.discardComment("L1")
+        assertEquals(listOf("L1"), rig.store.itemOutboxRows("it_1").map { it.localID })
+
+        // Being posted right now (a Retry in flight): Discard leaves it, and the send lands.
+        api.failComments = false
+        api.blockNextComment = true
+        val retry = launch(Dispatchers.Default) { rig.sync.retryComment("L1") }
+        waitUntil { api.isCommentGated }
+        rig.sync.discardComment("L1")
+        assertEquals(listOf("L1"), rig.store.itemOutboxRows("it_1").map { it.localID })
+        api.releaseCommentGate()
+        retry.join()
+        waitUntil { rig.store.itemOutboxRows("it_1").isEmpty() }
+        assertEquals("ic_srv", rig.store.comments("it_1").single().id)
+
+        // Refused, but the sync has stopped (signing out): left for the wipe.
+        api.commentError("it_2", JournalApiError.Http(400, "bad_request"))
+        rig.sync.enqueueComment("it_2", "L2", "refused", emptyList())
+        assertTrue(rig.store.itemOutboxRows("it_2").single().isRejected)
+        rig.sync.stop()
+        rig.sync.discardComment("L2")
+        assertEquals(listOf("L2"), rig.store.itemOutboxRows("it_2").map { it.localID })
+    }
+
     /// A refused row carrying more than the limit (queued before replies were
     /// split) is re-split on Retry rather than sent as it stands again.
     @Test

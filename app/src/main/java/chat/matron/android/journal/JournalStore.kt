@@ -680,6 +680,10 @@ class JournalStore(
 
     suspend fun itemOutboxClearRejection(localID: String) = itemOutboxDao.clearRejection(localID)
 
+    /// Deletes a row only while it is refused; `false` when it was not (gone,
+    /// or queued to send).
+    suspend fun itemOutboxDeleteRejected(localID: String): Boolean = itemOutboxDao.deleteRejected(localID) > 0
+
     /// Swaps a refused row for [rows] (the same reply re-split into parts the
     /// journal will take) in one transaction.
     suspend fun itemOutboxReplace(localID: String, rows: List<ItemOutboxEntity>) {
