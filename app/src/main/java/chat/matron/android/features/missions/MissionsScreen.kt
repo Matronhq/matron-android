@@ -27,6 +27,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.MissionsListModel
 import chat.matron.android.designsystem.MissionsListView
+import chat.matron.android.features.gotonumber.GoToNumberButton
 import chat.matron.android.viewmodels.MissionsListViewModel
 import kotlinx.coroutines.launch
 
@@ -43,6 +44,8 @@ fun MissionsScreen(
     onSelect: (String) -> Unit,
     /// The toolbar's Memories entry (spec 2026-09-27 memories).
     onOpenMemories: () -> Unit = {},
+    /// The toolbar's "Go to number" entry; the shell owns the dialog.
+    onGoToNumber: () -> Unit = {},
     rootGesture: Modifier = Modifier,
 ) {
     val open by viewModel.open.collectAsStateWithLifecycle()
@@ -57,6 +60,7 @@ fun MissionsScreen(
             TopAppBar(
                 title = { Text("Missions") },
                 actions = {
+                    GoToNumberButton(onClick = onGoToNumber)
                     IconButton(onClick = onOpenMemories) { Icon(Icons.Outlined.Lightbulb, contentDescription = "Memories") }
                 },
             )

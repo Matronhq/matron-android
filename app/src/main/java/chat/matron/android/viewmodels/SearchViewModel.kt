@@ -6,9 +6,12 @@ import chat.matron.android.models.MatronDebug
 import chat.matron.android.search.SearchChatHit
 import chat.matron.android.search.SearchHit
 import chat.matron.android.search.SearchService
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /// Drives the unified search UI. Owns the query string, the FTS message hits, and
 /// the chat (title/bot) hits derived from a chat-list snapshot. Ported from
@@ -16,6 +19,10 @@ import kotlinx.coroutines.flow.asStateFlow
 class SearchViewModel(
     private val search: SearchService,
     allChats: List<ChatSummary>,
+    /// "What is #N?" for a query that is a bare number — the same resolution
+    /// the "Go to number" dialog uses. `null` (the default) turns the number
+    /// section off, e.g. where no journal session backs the search.
+    private val numberLookup: (suspend (Int) -> NumberHit?)? = null,
 ) {
     /// User-editable query.
     var query: String = ""
@@ -30,6 +37,12 @@ class SearchViewModel(
     /// The current query, ready to hand to the opened chat's in-conversation
     /// search when the user taps a grouped message row.
     val trimmedQuery: String get() = query.trim()
+
+    /// The item, mission, milestone or project the query names when it is a
+    /// bare number (`412` / `#412`), shown above the chat and message hits.
+    /// `null` for any other query and when nothing has that number.
+    private val _numberHit = MutableStateFlow<NumberHit?>(null)
+    val numberHit: StateFlow<NumberHit?> = _numberHit.asStateFlow()
 
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
@@ -138,6 +151,10 @@ class SearchViewModel(
 
     suspend fun search() {
         val trimmed = query.trim()
+        val num = numberLookup?.let { GoToNumberParser.parse(trimmed) }
+        // Drop a hit the new query no longer names BEFORE anything suspends,
+        // so "#412 · Item" never sits above results for a different query.
+        if (_numberHit.value?.let { it.num != num } == true) _numberHit.value = null
         if (trimmed.isEmpty()) {
             _messageHits.value = emptyList()
             _searchFailed.value = false
@@ -145,12 +162,36 @@ class SearchViewModel(
         }
         _isSearching.value = true
         try {
-            val result = runCatching { search.queryGrouped(trimmed, limit = 50) }
-            result.onFailure { MatronDebug.breadcrumb("SearchViewModel: search failed for query \"$trimmed\": $it") }
-            _searchFailed.value = result.isFailure
-            _messageHits.value = result.getOrDefault(emptyList())
+            coroutineScope {
+                // Alongside the message search, not before it: a local miss
+                // costs a round trip, which must not hold the FTS hits back.
+                if (num != null) launch { lookUpNumber(num, trimmed) }
+                val result = runCatching { search.queryGrouped(trimmed, limit = 50) }
+                result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+                result.onFailure { MatronDebug.breadcrumb("SearchViewModel: search failed for query \"$trimmed\": $it") }
+                _searchFailed.value = result.isFailure
+                _messageHits.value = result.getOrDefault(emptyList())
+            }
         } finally {
             _isSearching.value = false
         }
+    }
+
+    /// A failed lookup adds nothing — the number section is a bonus over the
+    /// message search, never a reason to show an error. The answer is
+    /// applied only while the query is still the one it was asked for: each
+    /// keystroke starts its own [search], and a slow lookup for `41` must
+    /// not land over the results for `412`.
+    private suspend fun lookUpNumber(num: Int, askedFor: String) {
+        val lookup = numberLookup ?: return
+        val hit = try {
+            lookup(num)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (e: Exception) {
+            MatronDebug.breadcrumb("SearchViewModel: number lookup failed: $e")
+            null
+        }
+        if (query.trim() == askedFor) _numberHit.value = hit
     }
 }

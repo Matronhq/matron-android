@@ -289,7 +289,7 @@ class JournalApi(
     private val client: OkHttpClient = OkHttpClient(),
     token: String? = null,
 ) : SnapshotSource, AgentSpawnAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
-    PinsProviding, CoordinatorProviding, UserSettingsProviding {
+    PinsProviding, CoordinatorProviding, UserSettingsProviding, NumberLookupProviding {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -815,6 +815,16 @@ class JournalApi(
         UserSettingsDecoding.settings(
             request(path = "/settings", method = "PATCH", jsonBody = buildJsonObject { put("notices", notices) }),
         ) ?: throw JournalApiError.Transport("malformed settings response")
+
+    // MARK: Lookup
+    //
+    // "What is #N?" across the shared item / mission / milestone / project
+    // number space. 404 is the journal's "no such number".
+
+    override suspend fun lookup(user: String, num: Int): NumberLookup =
+        NumberLookupDecoding.lookup(
+            request(path = "/lookup", query = listOf("user" to user, "num" to num.toString())),
+        ) ?: throw JournalApiError.Transport("malformed lookup response")
 
     // MARK: Memories
     //
