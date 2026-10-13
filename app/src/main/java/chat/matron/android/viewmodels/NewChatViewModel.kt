@@ -114,6 +114,15 @@ class NewChatViewModel(
     private val _foldersError = MutableStateFlow<String?>(null)
     val foldersError: StateFlow<String?> = _foldersError.asStateFlow()
 
+    /// True while the folder step's own `recent_folders` ask is out, so the
+    /// step can say it is loading instead of "no recent folders".
+    private val _isLoadingFolders = MutableStateFlow(false)
+    val isLoadingFolders: StateFlow<Boolean> = _isLoadingFolders.asStateFlow()
+
+    /// Which folder-step ask owns [isLoadingFolders]: a later pick takes it
+    /// over, and the ask it replaced must not switch the flag off.
+    private var folderFetchToken = 0
+
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
@@ -540,6 +549,8 @@ class NewChatViewModel(
         _phase.value = Phase.Folders(agent)
         _folders.value = emptyList()
         _foldersError.value = null
+        val fetchToken = ++folderFetchToken
+        _isLoadingFolders.value = false
         // Model offers are per-box, so the step opens on what this box is
         // known to offer — nothing, until its own reply lands.
         adoptModelOptions(modelOptionsCache[agent.id] ?: emptyList(), defaultModelCache[agent.id])
@@ -554,8 +565,10 @@ class NewChatViewModel(
             _folders.value = it
             return
         }
+        _isLoadingFolders.value = true
         try {
             val reply = api.agentRequest(agent.id, "recent_folders", "{}")
+            if (fetchToken == folderFetchToken) _isLoadingFolders.value = false
             // A fleet with one box auto-skips the roster and never fans out,
             // so this is the only reply that box's capacity can be learned
             // from before it goes to sleep. Recorded off the answer rather
@@ -580,6 +593,8 @@ class NewChatViewModel(
         } catch (error: Throwable) {
             if (!sameFolderAgent(agent)) return
             folderFetchFailed(agent)
+        } finally {
+            if (fetchToken == folderFetchToken) _isLoadingFolders.value = false
         }
     }
 

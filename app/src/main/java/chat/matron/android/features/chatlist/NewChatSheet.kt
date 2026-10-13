@@ -80,6 +80,7 @@ fun NewChatSheet(
     val phase by viewModel.phase.collectAsStateWithLifecycle()
     val folders by viewModel.folders.collectAsStateWithLifecycle()
     val foldersError by viewModel.foldersError.collectAsStateWithLifecycle()
+    val isLoadingFolders by viewModel.isLoadingFolders.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val isStarting by viewModel.isStarting.collectAsStateWithLifecycle()
     val capacities by viewModel.capacities.collectAsStateWithLifecycle()
@@ -177,6 +178,7 @@ fun NewChatSheet(
                 }
                 when {
                     foldersError != null -> Text(foldersError!!, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    isLoadingFolders -> LoadingRow("Loading recent folders…")
                     folders.isEmpty() && !isWakingBox && !wakeGaveUp ->
                         Text("No recent folders on ${agent.name}.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

@@ -432,11 +432,45 @@ class NewChatViewModelWakeTest {
         val fanOut = fake.gateNextRequest()
         val goingBack = launch { vm.backToAgents() }
         fanOut.arrived.await()
-        vm.select(rosterBox(vm, box.id))
+        // Its own ask is on the wire for a moment: the step says so rather
+        // than claiming the box has no recent folders.
+        val ownAsk = fake.gateNextRequest()
+        val reopening = launch { vm.select(rosterBox(vm, box.id)) }
+        ownAsk.arrived.await()
+        assertTrue(vm.isLoadingFolders.value)
+        assertTrue(vm.folders.value.isEmpty())
+        ownAsk.resume.complete(Unit)
+        reopening.join()
+        assertFalse(vm.isLoadingFolders.value)
         assertEquals(listOf("opus"), vm.modelOptions.value.map { it.value })
         assertEquals(listOf("/home/alice/app"), vm.folders.value.map { it.path })
         fanOut.resume.complete(Unit)
         goingBack.join()
+    }
+
+    @Test
+    fun pickingAnotherBoxWhileFoldersLoad_keepsTheNewBoxLoading() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        val first = agent(7, "box-7", connected = true)
+        val second = agent(8, "box-8", connected = true)
+        fake.devicesResult = Result.success(listOf(first, second))
+        fake.rpcError = RPCRequestError.Timeout
+        val vm = makeVM(fake, sleeper)
+        vm.load()
+        fake.rpcError = null
+        fake.replies["recent_folders"] = noFolders
+        val firstAsk = fake.gateNextRequest()
+        val openingFirst = launch { vm.select(first) }
+        firstAsk.arrived.await()
+        val secondAsk = fake.gateNextRequest()
+        val openingSecond = launch { vm.select(second) }
+        secondAsk.arrived.await()
+        firstAsk.resume.complete(Unit)
+        openingFirst.join()
+        assertTrue("the replaced ask does not end the new box's loading", vm.isLoadingFolders.value)
+        secondAsk.resume.complete(Unit)
+        openingSecond.join()
+        assertFalse(vm.isLoadingFolders.value)
     }
 
     @Test
