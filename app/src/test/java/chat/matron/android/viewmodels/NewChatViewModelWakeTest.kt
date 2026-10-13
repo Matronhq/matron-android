@@ -54,16 +54,31 @@ class NewChatViewModelWakeTest {
         var devicesResult: Result<List<DeviceDTO>> = Result.success(emptyList())
         val replies = mutableMapOf<String, RPCReply>()
         val sequences = mutableMapOf<String, ArrayDeque<Result<RPCReply>>>()
+        /// Per-box answers, consulted before [replies].
+        val repliesByDevice = mutableMapOf<Long, RPCReply>()
         var rpcError: RPCRequestError? = null
         data class Request(val method: String, val agentDeviceID: Long)
         val requests = mutableListOf<Request>()
-        override suspend fun devices(): List<DeviceDTO> = devicesResult.getOrThrow()
+        private var devicesGate: Park? = null
+        /// Holds the next roster read: its answer is taken when the read
+        /// arrives, and handed back only once the park is resumed.
+        fun gateNextDevicesRead(): Park = Park().also { devicesGate = it }
+        override suspend fun devices(): List<DeviceDTO> {
+            val answer = devicesResult
+            devicesGate?.let { gate ->
+                devicesGate = null
+                gate.arrived.complete(Unit)
+                gate.resume.await()
+            }
+            return answer.getOrThrow()
+        }
         override fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = emptyFlow()
         override fun connectionState(): StateFlow<SyncConnectionState> = MutableStateFlow(SyncConnectionState.Running)
         override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply {
             requests.add(Request(method, agentDeviceID))
             sequences[method]?.removeFirstOrNull()?.let { return it.getOrThrow() }
             rpcError?.let { throw it }
+            repliesByDevice[agentDeviceID]?.let { return it }
             return replies[method] ?: RPCReply.Failure("unknown_method", null)
         }
         fun folderRequests() = requests.count { it.method == "recent_folders" }
@@ -78,6 +93,8 @@ class NewChatViewModelWakeTest {
         Result.success(RPCReply.Ok(Json.parseToJsonElement("""{"folders":[{"path":"/home/alice/app","last_used":100}]}""")))
     private val started: Result<RPCReply> = Result.success(RPCReply.Ok(Json.parseToJsonElement("""{"convo_id":"c-new"}""")))
     private val timeout: Result<RPCReply> = Result.failure(RPCRequestError.Timeout)
+    private val noFolders = RPCReply.Ok(Json.parseToJsonElement("""{"folders":[]}"""))
+    private val stillBooting = RPCReply.Failure("agent_unreachable", null)
 
     private fun seq(vararg r: Any) = ArrayDeque(r.map { @Suppress("UNCHECKED_CAST") (it as Result<RPCReply>) })
 
@@ -177,19 +194,277 @@ class NewChatViewModelWakeTest {
     }
 
     @Test
-    fun backDuringWake_stopsTheLoopSilently() = runBlocking {
+    fun backDuringWake_stopsTheFolderLoopSilently_andTheRowKeepsWaking() = runBlocking {
         val fake = Fake(); val sleeper = SleepRecorder()
-        fake.replies["recent_folders"] = RPCReply.Failure("agent_unreachable", null)
+        fake.replies["recent_folders"] = stillBooting
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        val folderPark = sleeper.parkNext()
+        val selecting = launch { vm.select(box) }
+        folderPark.arrived.await()
+        // The box is still booting, so going back hands it to a row wake:
+        // park that loop's first wait to look at the roster mid-boot.
+        val rowPark = sleeper.parkNext()
+        val goingBack = launch { vm.backToAgents() }
+        rowPark.arrived.await()
+        assertTrue("back shows the roster", vm.phase.value is NewChatViewModel.Phase.Agents)
+        assertFalse("the folder step's banner is gone with the step", vm.isWakingBox.value)
+        assertNull("an abandoned wake is not a failure", vm.errorMessage.value)
+        assertEquals("the booting box does not go back to Asleep", NewChatViewModel.RowWake.Waking, rowWake(vm, box))
+        val asked = fake.folderRequests()
+        folderPark.resume.complete(Unit)
+        selecting.join()
+        assertEquals("the retired folder loop asks nothing more once it wakes up", asked, fake.folderRequests())
+        fake.replies["recent_folders"] = noFolders
+        rowPark.resume.complete(Unit)
+        goingBack.join()
+        assertNull("the row finishes awake", rowWake(vm, rosterBox(vm, box.id)))
+    }
+
+    private fun rowWake(vm: NewChatViewModel, agent: DeviceDTO) =
+        NewChatViewModel.rowWake(agent, vm.wakingRows.value, vm.rowWakeFailed.value)
+
+    private fun roster(vm: NewChatViewModel): List<DeviceDTO> =
+        (vm.phase.value as? NewChatViewModel.Phase.Agents)?.agents ?: error("the roster is showing")
+
+    private fun rosterBox(vm: NewChatViewModel, id: Long): DeviceDTO = roster(vm).first { it.id == id }
+
+    // MARK: waking from the roster row
+
+    @Test
+    fun rowWake_retriesUntilTheBoxAnswers_thenReadsConnectedInPlace() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        fake.sequences["recent_folders"] = seq(unreachable, unreachable, folders)
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        assertEquals(NewChatViewModel.RowWake.Asleep, rowWake(vm, box))
+        val park = sleeper.parkNext()
+        val waking = launch { vm.wake(box) }
+        park.arrived.await()
+        assertTrue("waking a row stays on the roster", vm.phase.value is NewChatViewModel.Phase.Agents)
+        assertEquals(NewChatViewModel.RowWake.Waking, rowWake(vm, box))
+        assertFalse("the folder step's banner is not the row's", vm.isWakingBox.value)
+        park.resume.complete(Unit)
+        waking.join()
+        assertEquals(3, fake.folderRequests())
+        val agents = roster(vm)
+        assertEquals("rows do not move when one wakes", listOf(7L, 8L), agents.map { it.id })
+        assertTrue(agents[0].connected)
+        assertNull("an awake box offers no Wake", rowWake(vm, agents[0]))
+        assertEquals(NewChatViewModel.RowWake.Asleep, rowWake(vm, agents[1]))
+        assertEquals(
+            "the answer that proved it awake also fills its folder step",
+            listOf("/home/alice/app"), vm.cachedFoldersForTesting(7)?.map { it.path },
+        )
+    }
+
+    @Test
+    fun rowWake_severalBoxesAtOnce() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        fake.replies["recent_folders"] = stillBooting
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        val other = agent(8, "box-8", connected = false)
+        val firstPark = sleeper.parkNext()
+        val secondPark = sleeper.parkNext()
+        val first = launch { vm.wake(box) }
+        val second = launch { vm.wake(other) }
+        firstPark.arrived.await()
+        secondPark.arrived.await()
+        assertEquals(setOf(7L, 8L), vm.wakingRows.value)
+        fake.replies["recent_folders"] = noFolders
+        firstPark.resume.complete(Unit)
+        secondPark.resume.complete(Unit)
+        first.join()
+        second.join()
+        assertTrue(vm.wakingRows.value.isEmpty())
+        assertTrue(roster(vm).all { it.connected })
+    }
+
+    @Test
+    fun rowWake_secondTapWhileWakingIsIgnored() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        fake.sequences["recent_folders"] = seq(unreachable, folders)
         val (vm, box) = makeAsleepVM(fake, sleeper)
         val park = sleeper.parkNext()
-        val selecting = launch { vm.select(box) }
+        val waking = launch { vm.wake(box) }
+        park.arrived.await()
+        vm.wake(box)
+        assertEquals("a second tap must not stack a second loop", 1, fake.folderRequests())
+        park.resume.complete(Unit)
+        waking.join()
+        assertEquals(2, fake.folderRequests())
+    }
+
+    @Test
+    fun rowWake_givesUpAfterAttemptLimit_andOffersWakeAgain() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        fake.replies["recent_folders"] = stillBooting
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        vm.wake(box)
+        assertEquals(NewChatViewModel.WAKE_ATTEMPT_LIMIT, fake.folderRequests())
+        assertEquals(NewChatViewModel.RowWake.Failed, rowWake(vm, box))
+        assertNull("one row's failure is the row's, not the sheet's", vm.errorMessage.value)
+        fake.replies["recent_folders"] = noFolders
+        vm.wake(box)
+        assertNull(rowWake(vm, rosterBox(vm, box.id)))
+    }
+
+    @Test
+    fun rowWake_keepsGoingWhileAnotherBoxIsOpen() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        fake.repliesByDevice[7] = stillBooting
+        fake.repliesByDevice[8] = noFolders
+        val park = sleeper.parkNext()
+        val waking = launch { vm.wake(box) }
+        park.arrived.await()
+        vm.select(agent(8, "box-8", connected = false))
+        assertFalse(vm.isWakingBox.value)
+        assertTrue("opening another box does not stop the row", 7L in vm.wakingRows.value)
+        fake.repliesByDevice[7] = noFolders
+        park.resume.complete(Unit)
+        waking.join()
+        assertTrue(vm.canGoBackToAgents)
+        vm.backToAgents()
+        assertTrue("back shows the roster", vm.phase.value is NewChatViewModel.Phase.Agents)
+        assertTrue(vm.wakingRows.value.isEmpty())
+    }
+
+    @Test
+    fun rowWake_stopsWhenTheSheetGoesAway() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        fake.replies["recent_folders"] = stillBooting
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        val park = sleeper.parkNext()
+        val waking = launch { vm.wake(box) }
+        park.arrived.await()
+        vm.abandon()
+        park.resume.complete(Unit)
+        waking.join()
+        assertEquals("an abandoned sheet asks no box again", 1, fake.folderRequests())
+        assertTrue(vm.wakingRows.value.isEmpty())
+        assertTrue("walking away is not a failed wake", vm.rowWakeFailed.value.isEmpty())
+    }
+
+    @Test
+    fun rowWake_boxThatAnswersWithAFailure_isUp() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        fake.replies["recent_folders"] = RPCReply.Failure("not_ready", null)
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        vm.wake(box)
+        assertEquals("only agent_unreachable means still booting", 1, fake.folderRequests())
+        assertTrue(rosterBox(vm, box.id).connected)
+        assertFalse(
+            "a box that answered is not captioned as offline",
+            vm.capacityFreshness(box.id) is AgentCapacityFreshness.Offline,
+        )
+    }
+
+    @Test
+    fun rowWake_finishingDuringARosterRead_isNotPutBackToSleepByItsOlderSnapshot() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        fake.replies["recent_folders"] = noFolders
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        vm.select(agent(8, "box-8", connected = false))
+        // The read is answered (both asleep) before the wake completes.
+        val read = fake.gateNextDevicesRead()
+        val goingBack = launch { vm.backToAgents() }
+        read.arrived.await()
+        vm.wake(box)
+        read.resume.complete(Unit)
+        goingBack.join()
+        assertTrue(rosterBox(vm, box.id).connected)
+        assertNull(rowWake(vm, rosterBox(vm, box.id)))
+    }
+
+    // MARK: back to the roster
+
+    @Test
+    fun back_isRefusedWhileAStartIsInFlight() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        fake.replies["recent_folders"] = noFolders
+        fake.replies["start"] = stillBooting
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        vm.select(box)
+        val park = sleeper.parkNext()
+        val starting = launch { vm.start("/x") }
         park.arrived.await()
         vm.backToAgents()
+        assertTrue("a start in flight holds the folder step", vm.phase.value is NewChatViewModel.Phase.Folders)
+        fake.sequences["start"] = seq(started)
         park.resume.complete(Unit)
+        starting.join()
+        assertEquals(NewChatViewModel.Phase.Done("c-new"), vm.phase.value)
+    }
+
+    @Test
+    fun back_thenOpeningABoxBeforeTheRefreshLands_staysOnThatBox() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        fake.replies["recent_folders"] = noFolders
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        vm.select(box)
+        val read = fake.gateNextDevicesRead()
+        val goingBack = launch { vm.backToAgents() }
+        read.arrived.await()
+        assertTrue("the roster is up before the refresh lands", vm.phase.value is NewChatViewModel.Phase.Agents)
+        val other = agent(8, "box-8", connected = false)
+        vm.select(other)
+        read.resume.complete(Unit)
+        goingBack.join()
+        assertEquals(
+            "a late roster refresh must not pull the user off the box they opened",
+            NewChatViewModel.Phase.Folders(other), vm.phase.value,
+        )
+    }
+
+    @Test
+    fun backFromABootingBox_thenOpeningAnother_keepsTheFirstWaking() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        fake.repliesByDevice[7] = stillBooting
+        fake.repliesByDevice[8] = noFolders
+        val folderPark = sleeper.parkNext()
+        val selecting = launch { vm.select(box) }
+        folderPark.arrived.await()
+        val read = fake.gateNextDevicesRead()
+        val rowPark = sleeper.parkNext()
+        val goingBack = launch { vm.backToAgents() }
+        read.arrived.await()
+        val other = agent(8, "box-8", connected = false)
+        vm.select(other)
+        read.resume.complete(Unit)
+        rowPark.arrived.await()
+        assertEquals(NewChatViewModel.Phase.Folders(other), vm.phase.value)
+        assertTrue("the booting box keeps waking behind the other's folder step", 7L in vm.wakingRows.value)
+        fake.repliesByDevice[7] = noFolders
+        folderPark.resume.complete(Unit)
+        rowPark.resume.complete(Unit)
         selecting.join()
-        assertEquals("leaving the folder step ends the wake loop before its next ask", 1, fake.folderRequests())
-        assertNull("an abandoned wake is not a failure", vm.errorMessage.value)
-        assertFalse(vm.isWakingBox.value)
+        goingBack.join()
+        assertTrue(vm.wakingRows.value.isEmpty())
+        assertTrue(vm.rowWakeFailed.value.isEmpty())
+    }
+
+    @Test
+    fun singleBoxFleet_hasNoRosterToGoBackTo() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        fake.devicesResult = Result.success(listOf(agent(7, "box-7", connected = true)))
+        fake.replies["recent_folders"] = noFolders
+        val vm = makeVM(fake, sleeper)
+        vm.load()
+        assertTrue("one box skips the roster", vm.phase.value is NewChatViewModel.Phase.Folders)
+        assertFalse(vm.canGoBackToAgents)
+    }
+
+    @Test
+    fun back_clearsTheFolderStepsError() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        fake.replies["recent_folders"] = noFolders
+        fake.replies["start"] = RPCReply.Failure("bad_workdir", null)
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        vm.select(box)
+        vm.start("/nope")
+        assertNotNull(vm.errorMessage.value)
+        vm.backToAgents()
+        assertNull("one box's start error must not head the boxes list", vm.errorMessage.value)
     }
 
     @Test

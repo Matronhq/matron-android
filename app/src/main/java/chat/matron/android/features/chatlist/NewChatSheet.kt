@@ -12,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenuItem
@@ -19,7 +20,9 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -42,6 +45,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.size
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.UsageMetersFormat
 import chat.matron.android.journal.DeviceDTO
@@ -89,6 +93,8 @@ fun NewChatSheet(
     val defaultModelLabel by viewModel.defaultModelLabel.collectAsStateWithLifecycle()
     val agentOptions by viewModel.agentOptions.collectAsStateWithLifecycle()
     val selectedAgent by viewModel.selectedAgent.collectAsStateWithLifecycle()
+    val wakingRows by viewModel.wakingRows.collectAsStateWithLifecycle()
+    val rowWakeFailed by viewModel.rowWakeFailed.collectAsStateWithLifecycle()
 
     var navigated by remember { mutableStateOf(false) }
 
@@ -117,6 +123,18 @@ fun NewChatSheet(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            // Back from a box to the boxes list. A fleet of one box skipped
+            // the list, so it has nothing to go back to. Off while a start is
+            // in flight: it can't be recalled, and its late answer would pull
+            // the sheet off the list.
+            if (phase is NewChatViewModel.Phase.Folders && viewModel.canGoBackToAgents) {
+                IconButton(
+                    onClick = { scope.launch { viewModel.backToAgents() } },
+                    enabled = !isStarting,
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to boxes")
+                }
+            }
             Text("New Chat", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
             TextButton(onClick = onCancel) { Text("Cancel") }
         }
@@ -142,6 +160,8 @@ fun NewChatSheet(
                         // Its own flow: a live frame can change a row's
                         // freshness without changing its numbers.
                         freshness = capacityStaleness[agent.id] ?: AgentCapacityFreshness.Live,
+                        rowWake = NewChatViewModel.rowWake(agent, wakingRows, rowWakeFailed),
+                        onWake = { scope.launch { viewModel.wake(agent) } },
                         onClick = { scope.launch { viewModel.select(agent) } },
                     )
                 }
@@ -310,6 +330,9 @@ private fun AgentRow(
     capacity: BoxCapacity?,
     capacityPending: Boolean,
     freshness: AgentCapacityFreshness = AgentCapacityFreshness.Live,
+    /// What the row offers about waking its box; null for a box that is up.
+    rowWake: NewChatViewModel.RowWake? = null,
+    onWake: () -> Unit = {},
     onClick: () -> Unit,
 ) {
     Row(
@@ -344,7 +367,8 @@ private fun AgentRow(
                 }
             }
             Text(
-                if (agent.connected) "Connected" else "Asleep · Last seen ${agent.lastSeenText()} — tap to wake",
+                rowWake?.caption
+                    ?: if (agent.connected) "Connected" else "Asleep · Last seen ${agent.lastSeenText()} — tap to wake",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -408,6 +432,15 @@ private fun AgentRow(
                     color = MaterialTheme.colorScheme.outline,
                 )
             }
+        }
+        // Wakes the box from the list, so several can be started without
+        // opening each one. The row itself still opens the box.
+        when (rowWake) {
+            NewChatViewModel.RowWake.Waking ->
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+            NewChatViewModel.RowWake.Asleep, NewChatViewModel.RowWake.Failed ->
+                OutlinedButton(onClick = onWake) { Text("Wake") }
+            null -> Unit
         }
     }
 }

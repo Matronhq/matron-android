@@ -265,12 +265,37 @@ class NewChatViewModel(
     private val _wakeGaveUp = MutableStateFlow(false)
     val wakeGaveUp: StateFlow<Boolean> = _wakeGaveUp.asStateFlow()
 
+    /// Boxes being woken from their roster row ([wake]). Separate from
+    /// [isWakingBox], which belongs to the one box on the folder step: any
+    /// number of rows can be waking at once, and they keep waking while the
+    /// user looks at another box's folders.
+    private val _wakingRows = MutableStateFlow<Set<Long>>(emptySet())
+    val wakingRows: StateFlow<Set<Long>> = _wakingRows.asStateFlow()
+
+    /// Rows whose wake ran out of attempts; the row offers Wake again.
+    private val _rowWakeFailed = MutableStateFlow<Set<Long>>(emptySet())
+    val rowWakeFailed: StateFlow<Set<Long>> = _rowWakeFailed.asStateFlow()
+
     /// Ownership token per wake loop: a superseded loop (another box picked,
     /// back to the roster, sheet dismissed) sees the token move and exits
     /// without touching the flags the newer owner holds.
     private var wakeToken = 0
     private var wakeAgentID: Long? = null
     private var isAbandoned = false
+
+    /// The roster as last shown, so going back from the folder step can put
+    /// it on screen at once instead of holding the folder step up for the
+    /// reload. Empty when the roster was never shown (the single-box
+    /// auto-skip), which is also what hides the back button.
+    private var roster: List<DeviceDTO> = emptyList()
+
+    /// Boxes a row wake proved awake while a roster read was out. That read
+    /// may have been answered before the box connected, so its snapshot must
+    /// not put the box back to sleep on screen.
+    private val wokeDuringLoad = mutableSetOf<Long>()
+
+    /// Whether the folder step has a roster to go back to.
+    val canGoBackToAgents: Boolean get() = roster.isNotEmpty()
 
     /// Capacity per agent device id. The journal is the source (journal PR
     /// #82): every box is seeded from its last `status` report on `GET
@@ -418,9 +443,30 @@ class NewChatViewModel(
     var customPath: String = ""
     var browserEnabled: Boolean = false
 
-    suspend fun load() {
+    suspend fun load() = load(onlyIfStillOnRoster = false)
+
+    /// [onlyIfStillOnRoster] is for the refresh behind a roster that is
+    /// already on screen (going back): the rows are tappable while the read
+    /// is out, and a user who has since opened a box must not be pulled back
+    /// off its folder step when the read lands. [alongsideFanOut] runs once
+    /// the roster has been read, without waiting for the boxes to answer.
+    private suspend fun load(onlyIfStillOnRoster: Boolean, alongsideFanOut: suspend () -> Unit = {}) {
+        val fanOut = readRoster(onlyIfStillOnRoster)
+        coroutineScope {
+            for (id in fanOut) launch { fetchCapacity(id) }
+            launch { alongsideFanOut() }
+        }
+    }
+
+    /// Reads the roster and shows it (or skips to the only box's folder
+    /// step). Returns the connected boxes to fan out to.
+    private suspend fun readRoster(onlyIfStillOnRoster: Boolean): List<Long> {
+        fun leftRoster() = onlyIfStillOnRoster && _phase.value !is Phase.Agents
         try {
+            wokeDuringLoad.clear()
             val agents = api.devices().filter { it.kind == "agent" }
+                .map { if (it.id in wokeDuringLoad) it.copy(connected = true) else it }
+            if (leftRoster()) return emptyList()
             for (agent in agents) agent.status?.let { adoptReport(it, agent.id) }
             val connected = agents.filter { it.connected }
             // The roster is the authority on which boxes exist: prune the
@@ -433,9 +479,12 @@ class NewChatViewModel(
                 // Auto-skip straight to the folder step: there's no roster to
                 // decorate, so no fan-out. Asleep or not — a single-box roster
                 // would be a dead stop, and a pick wakes it (apple #168).
+                roster = emptyList()
                 select(agents[0])
+                return emptyList()
             } else {
-                _phase.value = Phase.Agents(sorted(agents))
+                roster = sorted(agents)
+                _phase.value = Phase.Agents(roster)
                 // The roster is already on screen (the phase flow was set
                 // first); this only fills in the capacity lines behind it.
                 val connectedIDs = connected.map { it.id }
@@ -457,15 +506,16 @@ class NewChatViewModel(
                 _capacities.value = _capacities.value.filterKeys { it in refreshing && stale[it] == null }
                 _capacityStaleness.value = emptyMap()
                 seedCapacities(connected = connectedIDs, offline = offlineIDs)
-                coroutineScope {
-                    for (id in connectedIDs) launch { fetchCapacity(id) }
-                }
+                return connectedIDs
             }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
+            if (leftRoster()) return emptyList()
+            roster = emptyList()
             _phase.value = Phase.Agents(emptyList())
             _errorMessage.value = "Couldn't load agents — try again."
+            return emptyList()
         }
     }
 
@@ -711,8 +761,146 @@ class NewChatViewModel(
     private fun isUnreachable(reply: RPCReply): Boolean =
         reply is RPCReply.Failure && reply.code == AGENT_UNREACHABLE
 
-    /// Back from the folder step to the roster.
-    suspend fun backToAgents() = load()
+    /// Back from the folder step to the roster (only reachable when the
+    /// roster was shown — the auto-skip case has nowhere to go back to).
+    /// Refused while a `start` is in flight: it cannot be recalled, and its
+    /// late answer would pull the sheet off the roster into the new chat.
+    ///
+    /// The roster as last shown goes up at once and the reload refreshes it.
+    /// A box that was still booting on the folder step keeps waking as a
+    /// row, so it does not go back to reading "Asleep" while it starts.
+    suspend fun backToAgents() {
+        if (_isStarting.value) return
+        val folderAgent = (_phase.value as? Phase.Folders)?.agent
+        val handover = folderAgent?.takeIf { _isWakingBox.value && claimRowWake(it.id) }
+        retireWakeOwner()
+        _errorMessage.value = null
+        _wakeGaveUp.value = false
+        val showingRoster = roster.isNotEmpty()
+        if (showingRoster) _phase.value = Phase.Agents(roster)
+        load(onlyIfStillOnRoster = showingRoster) {
+            if (handover == null) return@load
+            // Two places a row wake has no business running: the box is back
+            // on the folder step (the fleet shrank to it, or the user
+            // re-opened it), which wakes it itself, or the reload found it
+            // already up. Anywhere else it carries on, including behind
+            // another box's folder step opened before the reload landed.
+            if (sameFolderAgent(handover) || roster.any { it.id == handover.id && it.connected }) {
+                _wakingRows.value = _wakingRows.value - handover.id
+            } else {
+                runRowWake(handover)
+            }
+        }
+    }
+
+    // MARK: waking from the roster
+
+    /// What a roster row says about waking its box, and whether it carries a
+    /// Wake button.
+    enum class RowWake(
+        /// Replaces the row's connection caption; null keeps the usual one.
+        val caption: String?,
+    ) {
+        Asleep(null),
+        Waking("Waking…"),
+        Failed("Didn't wake — try again"),
+    }
+
+    /// Wakes a sleeping box from its roster row, without leaving the roster.
+    /// The same protocol as the folder step's loop ([wakeAndFetchFolders]):
+    /// the first refused ask boots the box, and re-asking until it answers
+    /// is how the row learns it is up. Each box runs its own loop, so several
+    /// can be woken at once. Returns when the box answered, the attempts ran
+    /// out, or the sheet went away.
+    suspend fun wake(agent: DeviceDTO) {
+        if (!claimRowWake(agent.id)) return
+        runRowWake(agent)
+    }
+
+    /// Marks a row as waking; false when it already is (an impatient second
+    /// tap must not stack a second loop) or the sheet has gone.
+    private fun claimRowWake(agentID: Long): Boolean {
+        if (isAbandoned || agentID in _wakingRows.value) return false
+        _wakingRows.value = _wakingRows.value + agentID
+        _rowWakeFailed.value = _rowWakeFailed.value - agentID
+        return true
+    }
+
+    /// The loop behind a claimed row. Not tied to the roster being on
+    /// screen: the user may open another box meanwhile, and this row should
+    /// be awake when they come back. Only [abandon] stops it early.
+    private suspend fun runRowWake(agent: DeviceDTO) {
+        try {
+            val wakeBegan = now()
+            for (attempt in 1..WAKE_ATTEMPT_LIMIT) {
+                val reportAtRequest = reports[agent.id]?.reportedAtMs
+                try {
+                    val reply = api.agentRequest(agent.id, "recent_folders", "{}")
+                    if (isAbandoned) return
+                    when (reply) {
+                        is RPCReply.Ok -> {
+                            markConnected(agent.id)
+                            if (reply.result !is JsonObject) {
+                                showLastReportIfAged(agent.id)
+                                return
+                            }
+                            adoptLiveReply(reply.result, agent.id, reportAtRequest)
+                            // The box reported while the request was out, and
+                            // the frame was captioned as an offline box's:
+                            // those are the newer numbers, and the box is up.
+                            val report = usableReport(agent.id)
+                            if (reports[agent.id]?.reportedAtMs != reportAtRequest &&
+                                agent.id in _capacityStaleness.value && report != null
+                            ) {
+                                _capacities.value = _capacities.value + (agent.id to report.capacity)
+                                liveCapturedAt[agent.id] = report.reportedAtMs
+                                _capacityStaleness.value = _capacityStaleness.value - agent.id
+                            }
+                            return
+                        }
+                        is RPCReply.Failure -> if (reply.code != AGENT_UNREACHABLE) {
+                            // It answered, so it is up; it just can't list folders.
+                            markConnected(agent.id)
+                            showLastReportIfAged(agent.id)
+                            return
+                        } // else still booting — go around
+                    }
+                } catch (timeout: RPCRequestError.Timeout) {
+                    if (isAbandoned) return
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (error: Throwable) {
+                    if (isAbandoned) return
+                    _rowWakeFailed.value = _rowWakeFailed.value + agent.id
+                    return
+                }
+                if (attempt >= WAKE_ATTEMPT_LIMIT || now() - wakeBegan >= WAKE_DEADLINE_MS) break
+                wakeSleep(WAKE_RETRY_DELAY_MS)
+                if (isAbandoned) return
+            }
+            _rowWakeFailed.value = _rowWakeFailed.value + agent.id
+        } finally {
+            _wakingRows.value = _wakingRows.value - agent.id
+        }
+    }
+
+    /// A woken box that gave no numbers of its own keeps its last-known ones,
+    /// but they are no longer an offline box's: the same aged, de-emphasised
+    /// [AgentCapacityFreshness.Reported] row a connected box gets when its
+    /// fan-out leg fails.
+    private fun showLastReportIfAged(agentID: Long) {
+        if (agentID in _capacityStaleness.value) showLastReport(agentID)
+    }
+
+    /// Flips a woken box to connected where it stands. The roster is not
+    /// re-sorted: rows must not move under a user working down the list
+    /// tapping Wake. The next reload sorts it.
+    private fun markConnected(agentID: Long) {
+        wokeDuringLoad.add(agentID)
+        if (roster.none { it.id == agentID && !it.connected }) return
+        roster = roster.map { if (it.id == agentID) it.copy(connected = true) else it }
+        if (_phase.value is Phase.Agents) _phase.value = Phase.Agents(roster)
+    }
 
     /// One box's slice of the roster fan-out. The reply carries both the
     /// capacity blocks and the folder list, so a success warms both caches. A
@@ -734,45 +922,7 @@ class NewChatViewModel(
             if (reply !is RPCReply.Ok) {
                 fanOutFailed(agentID, liveCapturedAtRequest)
             } else {
-                val capacity = BoxCapacity.parse(reply.result)
-                // These numbers came off the wire, so the row must not carry an
-                // age caption for them — including one a `Reported` fallback or
-                // an offline-captioned frame left on this box earlier. Unless
-                // the box reported again while we waited: that word is newer.
-                if (reports[agentID]?.reportedAtMs == reportAtRequest) {
-                    _capacityStaleness.value = _capacityStaleness.value - agentID
-                    _capacities.value = _capacities.value + (agentID to capacity)
-                    liveCapturedAt[agentID] = now()
-                    // The fallback for a journal that holds no report: what the
-                    // row will show once the host puts this box to sleep.
-                    capacityCache.save(capacity, agentID, now())
-                }
-                val folders = parseFolders(reply.result)
-                folderCache[agentID] = folders
-                val offered = parseModelOptions(reply.result)
-                val agents = parseAgentOptions(reply.result)
-                val boxDefaultModel = parseDefaultModel(reply.result)
-                val boxDefaultAgent = parseDefaultAgent(reply.result)
-                modelOptionsCache[agentID] = offered
-                agentOptionsCache[agentID] = agents
-                // Absent on the wire means absent in the cache: a box that
-                // stopped declaring a default must not keep its old one.
-                if (boxDefaultModel != null) defaultModelCache[agentID] = boxDefaultModel else defaultModelCache.remove(agentID)
-                if (boxDefaultAgent != null) defaultAgentCache[agentID] = boxDefaultAgent else defaultAgentCache.remove(agentID)
-                // The folder step may already be showing this box with its own
-                // live fetch failed (it raced ahead of this reply): swap the
-                // fan-out's answer in rather than leaving a stale error over a
-                // now-warm cache (Bugbot, #36). The whole answer, not just the
-                // folders — the step opened on an empty offer, so the model
-                // picker and agent switch are waiting on this reply too
-                // (Bugbot, #65).
-                val phaseNow = _phase.value
-                if (phaseNow is Phase.Folders && phaseNow.agent.id == agentID && _foldersError.value != null) {
-                    _folders.value = folders
-                    _foldersError.value = null
-                    adoptModelOptions(offered, boxDefaultModel)
-                    adoptAgentOptions(agents, boxDefaultAgent)
-                }
+                adoptLiveReply(reply.result, agentID, reportAtRequest)
             }
         } catch (cancel: CancellationException) {
             throw cancel
@@ -784,6 +934,51 @@ class NewChatViewModel(
         }
     }
 
+    /// Takes a box's own `recent_folders` answer into its roster row and the
+    /// folder-step caches. Shared by the fan-out and a row wake: both asked
+    /// the box directly, so both hold numbers that read live.
+    private fun adoptLiveReply(result: JsonElement, agentID: Long, reportAtRequest: Long?) {
+        val capacity = BoxCapacity.parse(result)
+        // These numbers came off the wire, so the row must not carry an
+        // age caption for them — including one a `Reported` fallback or
+        // an offline-captioned frame left on this box earlier. Unless
+        // the box reported again while we waited: that word is newer.
+        if (reports[agentID]?.reportedAtMs == reportAtRequest) {
+            _capacityStaleness.value = _capacityStaleness.value - agentID
+            _capacities.value = _capacities.value + (agentID to capacity)
+            liveCapturedAt[agentID] = now()
+            // The fallback for a journal that holds no report: what the
+            // row will show once the host puts this box to sleep.
+            capacityCache.save(capacity, agentID, now())
+        }
+        val folders = parseFolders(result)
+        folderCache[agentID] = folders
+        val offered = parseModelOptions(result)
+        val agents = parseAgentOptions(result)
+        val boxDefaultModel = parseDefaultModel(result)
+        val boxDefaultAgent = parseDefaultAgent(result)
+        modelOptionsCache[agentID] = offered
+        agentOptionsCache[agentID] = agents
+        // Absent on the wire means absent in the cache: a box that
+        // stopped declaring a default must not keep its old one.
+        if (boxDefaultModel != null) defaultModelCache[agentID] = boxDefaultModel else defaultModelCache.remove(agentID)
+        if (boxDefaultAgent != null) defaultAgentCache[agentID] = boxDefaultAgent else defaultAgentCache.remove(agentID)
+        // The folder step may already be showing this box with its own
+        // live fetch failed (it raced ahead of this reply): swap the
+        // fan-out's answer in rather than leaving a stale error over a
+        // now-warm cache (Bugbot, #36). The whole answer, not just the
+        // folders — the step opened on an empty offer, so the model
+        // picker and agent switch are waiting on this reply too
+        // (Bugbot, #65).
+        val phaseNow = _phase.value
+        if (phaseNow is Phase.Folders && phaseNow.agent.id == agentID && _foldersError.value != null) {
+            _folders.value = folders
+            _foldersError.value = null
+            adoptModelOptions(offered, boxDefaultModel)
+            adoptAgentOptions(agents, boxDefaultAgent)
+        }
+    }
+
     /// See [fetchCapacity]. The *persisted* cache entry is left alone: it is
     /// the fallback for a journal that holds no report. A frame that painted
     /// the row live during the request ([liveCapturedAt] moved on from
@@ -791,6 +986,13 @@ class NewChatViewModel(
     /// request has nothing to say about it.
     private fun fanOutFailed(agentID: Long, liveCapturedAtRequest: Long?) {
         if (liveCapturedAt[agentID] != liveCapturedAtRequest) return
+        showLastReport(agentID)
+    }
+
+    /// The row for a connected box that did not answer for itself: the
+    /// journal's report, aged and de-emphasised, or nothing when there is
+    /// none.
+    private fun showLastReport(agentID: Long) {
         val report = usableReport(agentID)
         if (report != null) {
             _capacityStaleness.value =
@@ -879,6 +1081,16 @@ class NewChatViewModel(
         /// report, and from the capture on this device for a fallback cache
         /// entry.
         const val MAX_CACHED_CAPACITY_AGE_MS: Long = 7L * 86_400_000
+
+        /// What [agent]'s roster row offers; null for a box that is up and
+        /// not being woken, which has nothing to offer. Takes the two sets
+        /// so the sheet recomposes on them.
+        fun rowWake(agent: DeviceDTO, waking: Set<Long>, failed: Set<Long>): RowWake? = when {
+            agent.id in waking -> RowWake.Waking
+            agent.connected -> null
+            agent.id in failed -> RowWake.Failed
+            else -> RowWake.Asleep
+        }
 
         fun sorted(agents: List<DeviceDTO>): List<DeviceDTO> =
             agents.sortedWith(compareByDescending<DeviceDTO> { it.connected }.thenBy { it.name })
