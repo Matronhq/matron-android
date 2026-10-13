@@ -74,8 +74,16 @@ class NewChatViewModelWakeTest {
         }
         override fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = emptyFlow()
         override fun connectionState(): StateFlow<SyncConnectionState> = MutableStateFlow(SyncConnectionState.Running)
+        private var requestGate: Park? = null
+        /// Holds the next agent request on the wire until the park is resumed.
+        fun gateNextRequest(): Park = Park().also { requestGate = it }
         override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply {
             requests.add(Request(method, agentDeviceID))
+            requestGate?.let { gate ->
+                requestGate = null
+                gate.arrived.complete(Unit)
+                gate.resume.await()
+            }
             sequences[method]?.removeFirstOrNull()?.let { return it.getOrThrow() }
             rpcError?.let { throw it }
             repliesByDevice[agentDeviceID]?.let { return it }
@@ -375,7 +383,61 @@ class NewChatViewModelWakeTest {
         assertNull(rowWake(vm, rosterBox(vm, box.id)))
     }
 
+    @Test
+    fun rowWake_finishingDuringOverlappingRosterReads_staysAwakeThroughBoth() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        fake.replies["recent_folders"] = noFolders
+        val (vm, box) = makeAsleepVM(fake, sleeper)
+        val other = agent(8, "box-8", connected = false)
+        vm.select(other)
+        // The first read is answered (both asleep) before the wake completes.
+        val firstRead = fake.gateNextDevicesRead()
+        val firstBack = launch { vm.backToAgents() }
+        firstRead.arrived.await()
+        vm.wake(box)
+        // A second read starts while the first is still out; by now the
+        // journal knows the box is up.
+        fake.devicesResult = Result.success(listOf(agent(7, "box-7", connected = true), other))
+        vm.select(other)
+        val secondRead = fake.gateNextDevicesRead()
+        val secondBack = launch { vm.backToAgents() }
+        secondRead.arrived.await()
+        firstRead.resume.complete(Unit)
+        firstBack.join()
+        assertTrue("the older snapshot does not put the box back to sleep", rosterBox(vm, box.id).connected)
+        secondRead.resume.complete(Unit)
+        secondBack.join()
+        assertTrue(rosterBox(vm, box.id).connected)
+    }
+
     // MARK: back to the roster
+
+    /// The reload behind Back re-asks every connected box. A box re-opened
+    /// before its answer lands must ask for itself: cached folders with no
+    /// offer would hide the model picker and start on defaults.
+    @Test
+    fun back_thenReopeningABoxBeforeItsFanOutAnswers_stillShowsItsModelOffer() = runBlocking {
+        val fake = Fake(); val sleeper = SleepRecorder()
+        val box = agent(7, "box-7", connected = true)
+        fake.devicesResult = Result.success(listOf(box, agent(8, "box-8", connected = false)))
+        fake.replies["recent_folders"] = RPCReply.Ok(
+            Json.parseToJsonElement(
+                """{"folders":[{"path":"/home/alice/app","last_used":100}],"model_options":[{"value":"opus","label":"Opus"}]}""",
+            ),
+        )
+        val vm = makeVM(fake, sleeper)
+        vm.load()
+        vm.select(box)
+        assertEquals(listOf("opus"), vm.modelOptions.value.map { it.value })
+        val fanOut = fake.gateNextRequest()
+        val goingBack = launch { vm.backToAgents() }
+        fanOut.arrived.await()
+        vm.select(rosterBox(vm, box.id))
+        assertEquals(listOf("opus"), vm.modelOptions.value.map { it.value })
+        assertEquals(listOf("/home/alice/app"), vm.folders.value.map { it.path })
+        fanOut.resume.complete(Unit)
+        goingBack.join()
+    }
 
     @Test
     fun back_isRefusedWhileAStartIsInFlight() = runBlocking {

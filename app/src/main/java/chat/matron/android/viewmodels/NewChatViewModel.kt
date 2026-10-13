@@ -289,10 +289,11 @@ class NewChatViewModel(
     /// auto-skip), which is also what hides the back button.
     private var roster: List<DeviceDTO> = emptyList()
 
-    /// Boxes a row wake proved awake while a roster read was out. That read
-    /// may have been answered before the box connected, so its snapshot must
-    /// not put the box back to sleep on screen.
-    private val wokeDuringLoad = mutableSetOf<Long>()
+    /// Boxes a row wake proved awake while a roster read was out, one set per
+    /// read in flight (going back twice can overlap two). A read may have
+    /// been answered before the box connected, so its snapshot must not put
+    /// the box back to sleep on screen.
+    private val wokeDuringLoads = mutableListOf<MutableSet<Long>>()
 
     /// Whether the folder step has a roster to go back to.
     val canGoBackToAgents: Boolean get() = roster.isNotEmpty()
@@ -462,9 +463,14 @@ class NewChatViewModel(
     /// step). Returns the connected boxes to fan out to.
     private suspend fun readRoster(onlyIfStillOnRoster: Boolean): List<Long> {
         fun leftRoster() = onlyIfStillOnRoster && _phase.value !is Phase.Agents
+        val wokeDuringLoad = mutableSetOf<Long>()
+        wokeDuringLoads += wokeDuringLoad
         try {
-            wokeDuringLoad.clear()
-            val agents = api.devices().filter { it.kind == "agent" }
+            val agents = try {
+                api.devices()
+            } finally {
+                wokeDuringLoads.removeAll { it === wokeDuringLoad }
+            }.filter { it.kind == "agent" }
                 .map { if (it.id in wokeDuringLoad) it.copy(connected = true) else it }
             if (leftRoster()) return emptyList()
             for (agent in agents) agent.status?.let { adoptReport(it, agent.id) }
@@ -497,6 +503,11 @@ class NewChatViewModel(
                 // confirmed against the running box, so keeping it would
                 // launder last-known numbers into an uncaptioned, live-looking
                 // row).
+                // The folders go with the offers they arrived with: a box
+                // re-opened before its fan-out answers must ask for itself,
+                // or its folder step would open on cached folders with no
+                // model picker or agent switch.
+                folderCache.clear()
                 modelOptionsCache.clear()
                 defaultModelCache.clear()
                 agentOptionsCache.clear()
@@ -896,7 +907,7 @@ class NewChatViewModel(
     /// re-sorted: rows must not move under a user working down the list
     /// tapping Wake. The next reload sorts it.
     private fun markConnected(agentID: Long) {
-        wokeDuringLoad.add(agentID)
+        for (read in wokeDuringLoads) read += agentID
         if (roster.none { it.id == agentID && !it.connected }) return
         roster = roster.map { if (it.id == agentID) it.copy(connected = true) else it }
         if (_phase.value is Phase.Agents) _phase.value = Phase.Agents(roster)
