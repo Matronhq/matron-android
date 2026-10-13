@@ -71,6 +71,10 @@ interface ItemsSyncing {
     /// [action] + [replyTo] make the comment a tap on one of the buttons the
     /// comment [replyTo] offers (see [ItemsProviding.commentItem]). Returns
     /// whether the outbox insert itself succeeded, like [enqueueCreate].
+    ///
+    /// A reply with more than [ATTACHMENTS_MAX] attachments is queued as
+    /// several comments of at most that many each, in order, with [body] on
+    /// the first only ([ItemsSync.commentParts]).
     suspend fun enqueueComment(
         itemID: String,
         localID: String,
@@ -85,6 +89,17 @@ interface ItemsSyncing {
     /// row is durably queued; delivery is a separate, unawaited background
     /// drain.
     suspend fun enqueueCreate(localID: String, new: NewItem): Boolean
+
+    /// The user's Retry on a queued reply, normally one the journal refused:
+    /// it goes back into the drain and is sent now. A refused reply carrying
+    /// more than [ATTACHMENTS_MAX] attachments is re-split first.
+    suspend fun retryComment(localID: String)
+
+    /// The user's Discard on a queued reply the journal refused: it leaves
+    /// the outbox and the thread. Only a refused reply: one that is queued to
+    /// send (or being sent right now) is left alone, as is everything once
+    /// the sync has stopped.
+    suspend fun discardComment(localID: String)
 
     /// `false` once a `GET /items` has answered 404 (a journal predating the
     /// tracker); back to `true` on the next successful fetch. Starts `true`
@@ -435,17 +450,50 @@ class ItemsSync(
         // already run — `stop()` is called before the wipe, so this flag being
         // set means the outbox is either already cleared or about to be.
         if (stopped) return false
-        val payload = MatronJson.encodeToString(CommentPayload.serializer(), CommentPayload(body, attachments, action, replyTo))
-        val inserted = runCatching {
-            store.itemOutboxInsert(
-                ItemOutboxEntity(
-                    localID = localID, itemID = itemID, op = ItemOutboxEntity.OP_COMMENT, payloadJson = payload,
-                    createdAt = System.currentTimeMillis(), attempts = 0, lastError = null,
-                ),
+        val createdAt = System.currentTimeMillis()
+        val rows = commentParts(body, attachments, action, replyTo).mapIndexed { index, part ->
+            ItemOutboxEntity(
+                localID = partLocalID(localID, index), itemID = itemID, op = ItemOutboxEntity.OP_COMMENT,
+                payloadJson = MatronJson.encodeToString(CommentPayload.serializer(), part),
+                createdAt = createdAt, attempts = 0, lastError = null,
             )
-        }.onFailure { MatronDebug.breadcrumb("ItemsSync: enqueueComment insert failed for $localID: $it") }.isSuccess
+        }
+        val inserted = runCatching { store.itemOutboxInsertAll(rows) }
+            .onFailure { MatronDebug.breadcrumb("ItemsSync: enqueueComment insert failed for $localID: $it") }.isSuccess
         drainOutbox()
         return inserted
+    }
+
+    override suspend fun retryComment(localID: String) {
+        if (stopped) return
+        val row = store.itemOutboxRow(localID) ?: return
+        val payload = runCatching { MatronJson.decodeFromString(CommentPayload.serializer(), row.payloadJson) }.getOrNull()
+        if (row.op == ItemOutboxEntity.OP_COMMENT && payload != null && payload.attachments.size > ATTACHMENTS_MAX) {
+            // Queued before replies were split (or refused for its size): it
+            // can only ever be refused again as it stands.
+            val parts = commentParts(payload.body, payload.attachments, payload.action, payload.replyTo).mapIndexed { index, part ->
+                row.copy(
+                    localID = partLocalID(localID, index),
+                    payloadJson = MatronJson.encodeToString(CommentPayload.serializer(), part),
+                    attempts = 0, lastError = null, rejectedReason = null,
+                )
+            }
+            store.itemOutboxReplace(localID, parts)
+        } else {
+            store.itemOutboxClearRejection(localID)
+        }
+        drainOutbox()
+    }
+
+    override suspend fun discardComment(localID: String) {
+        if (stopped) return
+        // A refused row is never in a drain (`itemOutboxPending` skips it),
+        // and Retry clears the refusal before draining it, so a delete that
+        // is conditional on the refusal in the same statement can never race
+        // a send.
+        if (!store.itemOutboxDeleteRejected(localID)) {
+            MatronDebug.breadcrumb("ItemsSync: discard of $localID ignored — not a refused row")
+        }
     }
 
     /// The drain itself is kicked in the background, NOT awaited: the write
@@ -559,7 +607,9 @@ class ItemsSync(
 
     /// How a failed outbox request should be handled: auth/support loss
     /// needs a third behaviour beyond retry/poison — leave the row alone and
-    /// stop, rather than deleting it or bumping its attempt count.
+    /// stop, rather than deleting it or bumping its attempt count. POISON is
+    /// the journal refusing the request itself: a reply is then kept, marked
+    /// refused, for the user to retry or discard; a create is dropped.
     private enum class FailureDisposition { RETRYABLE, POISON, PAUSE }
 
     private fun disposition(error: Throwable): FailureDisposition = when (error) {
@@ -581,7 +631,7 @@ class ItemsSync(
     }
 
     private sealed interface DrainOutcome {
-        /// Every pending row was either applied or dropped as poison.
+        /// Every pending row was either applied, or refused and set aside.
         data object Clean : DrainOutcome
 
         /// Stopped early on a retryable failure; carries the failed row's
@@ -651,7 +701,15 @@ class ItemsSync(
                         // comments on one item.
                         return DrainOutcome.Retry(row.attempts + 1)
                     }
-                    FailureDisposition.POISON -> {
+                    FailureDisposition.POISON -> if (row.op == ItemOutboxEntity.OP_COMMENT) {
+                        // Never dropped: the user's words and files stay in the
+                        // thread as a failed reply, out of the drain until they
+                        // retry or discard it.
+                        val reason = rejectionReason(error)
+                        MatronDebug.breadcrumb("ItemsSync: outbox row ${row.localID} refused ($error) — kept as failed")
+                        runCatching { store.itemOutboxMarkRejected(row.localID, reason) }
+                            .onFailure { MatronDebug.breadcrumb("ItemsSync: itemOutboxMarkRejected failed for ${row.localID}: $it") }
+                    } else {
                         MatronDebug.breadcrumb("ItemsSync: outbox row ${row.localID} rejected non-retryably ($error) — dropping")
                         runCatching { store.itemOutboxDelete(row.localID) }
                             .onFailure { MatronDebug.breadcrumb("ItemsSync: itemOutboxDelete failed for poisoned row ${row.localID}: $it") }
@@ -666,9 +724,50 @@ class ItemsSync(
         return DrainOutcome.Clean
     }
 
-    private companion object {
+    internal companion object {
         /// Pagination safety valve: a runaway or looping server pagination
         /// must not spin this forever.
-        const val MAX_PAGES = 50
+        private const val MAX_PAGES = 50
+
+        /// The journal's `error` code for a write carrying more than
+        /// [ATTACHMENTS_MAX] attachments (`{"error":"too_many_attachments",
+        /// "max":20}`).
+        const val TOO_MANY_ATTACHMENTS = "too_many_attachments"
+
+        /// One reply as the comments the journal will take: [attachments] in
+        /// order, at most [ATTACHMENTS_MAX] to a comment, with [body] (and a
+        /// tap's [action] / [replyTo]) on the first only. A reply within the
+        /// limit is one comment, unchanged.
+        fun commentParts(
+            body: String,
+            attachments: List<TrackerAttachment>,
+            action: String? = null,
+            replyTo: String? = null,
+        ): List<CommentPayload> =
+            attachments.chunked(ATTACHMENTS_MAX).ifEmpty { listOf(emptyList()) }.mapIndexed { index, chunk ->
+                if (index == 0) CommentPayload(body, chunk, action, replyTo) else CommentPayload("", chunk)
+            }
+
+        /// The outbox id (and Idempotency-Key) of part [index] of the reply
+        /// queued as [localID]: the first part keeps it, later parts add a
+        /// zero-padded number. The parts share `created_at`, so the outbox's
+        /// `created_at, local_id` order sends them in order — an id sorts
+        /// before its own extensions, and padding keeps "-010" after "-009".
+        fun partLocalID(localID: String, index: Int): String =
+            if (index == 0) localID else "$localID-${(index + 1).toString().padStart(3, '0')}"
+
+        /// The words shown under a reply the journal refused: the response's
+        /// own `message`; else, for too many attachments, that in words; else
+        /// its `reason`; else the bare status.
+        fun rejectionReason(error: Throwable): String {
+            val http = error as? JournalApiError.Http
+            http?.bodyMessage?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+            if (http?.code == TOO_MANY_ATTACHMENTS) {
+                return "Too many attachments on one comment — the server takes at most ${http.max ?: ATTACHMENTS_MAX}."
+            }
+            http?.reason?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+            val status = http?.status ?: if (error === JournalApiError.Conflict) 409 else null
+            return if (status != null) "The server refused it (HTTP $status)." else "The server refused it."
+        }
     }
 }

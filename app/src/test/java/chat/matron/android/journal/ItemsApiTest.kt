@@ -92,6 +92,27 @@ class ItemsApiTest {
         assertNull(typed["action"]); assertNull(typed["reply_to"])
     }
 
+    /// A refused comment hands its body's `error`, `message`, `reason` and
+    /// `max` on to the outbox, each null when absent.
+    @Test
+    fun aRefusedCommentCarriesTheBodysCodeMessageReasonAndMax() = runBlocking {
+        server.enqueue(json(400, """{"error":"too_many_attachments","max":20}"""))
+        server.enqueue(json(400, """{"error":"bad_request","reason":"why","message":"In words."}"""))
+        try {
+            api().commentItem("it_1", "hi", emptyList(), idempotencyKey = "k5")
+            fail("expected a 400")
+        } catch (e: JournalApiError.Http) {
+            assertEquals(JournalApiError.Http(400, "too_many_attachments", code = "too_many_attachments", max = 20), e)
+            assertNull(e.bodyMessage); assertNull(e.reason)
+        }
+        try {
+            api().commentItem("it_1", "hi", emptyList(), idempotencyKey = "k6")
+            fail("expected a 400")
+        } catch (e: JournalApiError.Http) {
+            assertEquals(JournalApiError.Http(400, "In words.", code = "bad_request", bodyMessage = "In words.", reason = "why"), e)
+        }
+    }
+
     @Test
     fun commentItemAccepts201DecodesItemAndCommentAndStripsTranscript() = runBlocking {
         server.enqueue(json(201, """{"item":$itemJSON,"comment":$commentJSON}"""))

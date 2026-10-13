@@ -20,6 +20,11 @@ import kotlinx.serialization.json.put
 // route implementations themselves live on [JournalApi] (its request
 // plumbing is private), which implements [ItemsProviding].
 
+/// The most attachments the journal accepts on one item or one comment (its
+/// own `ATTACHMENTS_MAX`): a write carrying more is refused with a 400. A
+/// reply with more goes out as several comments (`ItemsSync.enqueueComment`).
+const val ATTACHMENTS_MAX = 20
+
 data class ItemsListQuery(
     val convoID: String? = null,
     val kind: ItemKind? = null,

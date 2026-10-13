@@ -668,7 +668,30 @@ class JournalStore(
 
     suspend fun itemOutboxInsert(row: ItemOutboxEntity) = itemOutboxDao.insertIgnore(row)
 
+    /// Several rows in one transaction (the parts of one reply).
+    suspend fun itemOutboxInsertAll(rows: List<ItemOutboxEntity>) = itemOutboxDao.insertAllIgnore(rows)
+
+    /// The rows the drain sends — every queued row the journal has not refused.
     suspend fun itemOutboxPending(): List<ItemOutboxEntity> = itemOutboxDao.pending()
+
+    suspend fun itemOutboxRow(localID: String): ItemOutboxEntity? = itemOutboxDao.row(localID)
+
+    suspend fun itemOutboxMarkRejected(localID: String, reason: String) = itemOutboxDao.markRejected(localID, reason)
+
+    suspend fun itemOutboxClearRejection(localID: String) = itemOutboxDao.clearRejection(localID)
+
+    /// Deletes a row only while it is refused; `false` when it was not (gone,
+    /// or queued to send).
+    suspend fun itemOutboxDeleteRejected(localID: String): Boolean = itemOutboxDao.deleteRejected(localID) > 0
+
+    /// Swaps a refused row for [rows] (the same reply re-split into parts the
+    /// journal will take) in one transaction.
+    suspend fun itemOutboxReplace(localID: String, rows: List<ItemOutboxEntity>) {
+        db.withTransaction {
+            itemOutboxDao.delete(localID)
+            itemOutboxDao.insertAllIgnore(rows)
+        }
+    }
 
     override suspend fun itemOutboxRows(itemID: String): List<ItemOutboxEntity> = itemOutboxDao.forItem(itemID)
 

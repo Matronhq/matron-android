@@ -47,7 +47,9 @@ private class OutgoingAttachment(val data: ByteArray, val name: String, val mime
 ///
 /// Picked photos/files are staged into a tray ([stagedAttachments], copies
 /// under [stagingDirectory] — the chat composer's [StagedAttachment]) and
-/// leave with the draft as one comment, never on their own at pick time.
+/// leave with the draft as one reply, never on their own at pick time. The
+/// tray has no cap: a reply with more attachments than one comment may carry
+/// is queued as several comments by [ItemsSyncing.enqueueComment].
 class ItemDetailViewModel(
     val itemID: String,
     private val store: ItemsStoreReading,
@@ -225,11 +227,11 @@ class ItemDetailViewModel(
     /// have actually replied — before that the only honest close is to
     /// dismiss it. An open decision is already in force, so reversing it
     /// leads. A reply still in the outbox counts: it is the user's, and it
-    /// will land.
+    /// will land — unless the journal refused it.
     val availableResolutions: List<ItemResolution>
         get() = resolutions(
             _item.value?.kind,
-            userHasReplied = _pendingComments.value.isNotEmpty() ||
+            userHasReplied = _pendingComments.value.any { !it.isRejected } ||
                 _comments.value.any { it.author == ItemAuthor.USER && it.kind == TrackerComment.Kind.COMMENT },
         )
 
@@ -326,10 +328,6 @@ class ItemDetailViewModel(
     /// unreadable file is reported via [error] and stages nothing.
     suspend fun attachFiles(files: List<File>) {
         for (file in files) {
-            if (_stagedAttachments.value.size >= MAX_COMMENT_ATTACHMENTS) {
-                _error.value = "A reply carries at most $MAX_COMMENT_ATTACHMENTS attachments."
-                return
-            }
             try {
                 val staged = withContext(Dispatchers.IO) { StagedAttachment.stage(file, stagingDirectory) }
                 _stagedAttachments.value = _stagedAttachments.value + staged
@@ -338,6 +336,23 @@ class ItemDetailViewModel(
             } catch (error: Throwable) {
                 _error.value = "Couldn't attach that file: ${error.message ?: error}"
             }
+        }
+    }
+
+    /// The Retry under a reply the journal refused: it is sent again now
+    /// (re-split first if it carries more attachments than one comment may).
+    suspend fun retryComment(localID: String) = runOutboxAction { sync.retryComment(localID) }
+
+    /// The Discard under a reply the journal refused: it leaves the thread.
+    suspend fun discardComment(localID: String) = runOutboxAction { sync.discardComment(localID) }
+
+    private suspend fun runOutboxAction(action: suspend () -> Unit) {
+        try {
+            action()
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            _error.value = error.message ?: error.toString()
         }
     }
 
@@ -412,11 +427,6 @@ class ItemDetailViewModel(
         if (!file.isFile || size == 0L) {
             _error.value = "Voice note was empty."
             file.delete()
-            return
-        }
-        // A full tray leaves no room for the note on the same comment: it goes alone.
-        if (_stagedAttachments.value.size >= MAX_COMMENT_ATTACHMENTS) {
-            sendUnstagedVoiceNote(file)
             return
         }
         val voiceNote = try {
@@ -502,14 +512,13 @@ class ItemDetailViewModel(
         private const val VOICE_NOTE_NAME = "voice-note.m4a"
         private const val VOICE_NOTE_MIME = "audio/mp4"
 
-        /// The journal takes at most this many attachments on one comment.
-        const val MAX_COMMENT_ATTACHMENTS = 20
-
         /// The taps still in the outbox, as asking-comment id → label (the
         /// latest wins, as it will on the journal). The thread marks these as
-        /// chosen straight away instead of waiting for the round trip.
+        /// chosen straight away instead of waiting for the round trip. A tap
+        /// the journal refused is not an answer.
         fun pendingTaps(pending: List<ItemOutboxEntity>): Map<String, String> = buildMap {
             for (row in pending) {
+                if (row.isRejected) continue
                 val payload = runCatching { MatronJson.decodeFromString(ItemsSync.CommentPayload.serializer(), row.payloadJson) }.getOrNull() ?: continue
                 val action = payload.action ?: continue
                 val replyTo = payload.replyTo ?: continue
@@ -518,8 +527,9 @@ class ItemDetailViewModel(
         }
 
         /// The latest tap on the item's own buttons still in the outbox (a
-        /// row with an `action` and no `replyTo`), or `null`.
-        fun pendingItemTap(pending: List<ItemOutboxEntity>): String? = pending.mapNotNull { row ->
+        /// row with an `action` and no `replyTo`), or `null`. A refused tap
+        /// does not count.
+        fun pendingItemTap(pending: List<ItemOutboxEntity>): String? = pending.filterNot { it.isRejected }.mapNotNull { row ->
             val payload = runCatching { MatronJson.decodeFromString(ItemsSync.CommentPayload.serializer(), row.payloadJson) }.getOrNull()
             payload?.action?.takeIf { payload.replyTo == null }
         }.lastOrNull()

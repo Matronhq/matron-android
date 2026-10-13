@@ -425,8 +425,17 @@ interface ItemOutboxDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertIgnore(row: ItemOutboxEntity)
 
-    @Query("SELECT * FROM item_outbox ORDER BY created_at, local_id")
+    /// [insertIgnore] for several rows in one transaction: the parts of one
+    /// reply are queued together or not at all.
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAllIgnore(rows: List<ItemOutboxEntity>)
+
+    /// The rows the drain sends: everything but what the journal refused.
+    @Query("SELECT * FROM item_outbox WHERE rejected_reason IS NULL ORDER BY created_at, local_id")
     suspend fun pending(): List<ItemOutboxEntity>
+
+    @Query("SELECT * FROM item_outbox WHERE local_id = :localID")
+    suspend fun row(localID: String): ItemOutboxEntity?
 
     @Query("SELECT * FROM item_outbox WHERE item_id = :itemID ORDER BY created_at, local_id")
     suspend fun forItem(itemID: String): List<ItemOutboxEntity>
@@ -447,8 +456,22 @@ interface ItemOutboxDao {
     @Query("UPDATE item_outbox SET attempts = attempts + 1, last_error = :error WHERE local_id = :localID")
     suspend fun markAttempt(localID: String, error: String?)
 
+    /// The journal refused the row: keep it, with [reason], out of the drain.
+    @Query("UPDATE item_outbox SET rejected_reason = :reason WHERE local_id = :localID")
+    suspend fun markRejected(localID: String, reason: String)
+
+    /// The user's Retry on a refused row: back in the drain as if new.
+    @Query("UPDATE item_outbox SET rejected_reason = NULL, attempts = 0, last_error = NULL WHERE local_id = :localID")
+    suspend fun clearRejection(localID: String)
+
     @Query("DELETE FROM item_outbox WHERE local_id = :localID")
     suspend fun delete(localID: String)
+
+    /// Deletes the row only while it is refused, in one statement, so a row
+    /// that a Retry has just put back in the drain can never be pulled out from
+    /// under the send. Returns the number of rows deleted (0 or 1).
+    @Query("DELETE FROM item_outbox WHERE local_id = :localID AND rejected_reason IS NOT NULL")
+    suspend fun deleteRejected(localID: String): Int
 
     @Query("DELETE FROM item_outbox")
     suspend fun deleteAll()

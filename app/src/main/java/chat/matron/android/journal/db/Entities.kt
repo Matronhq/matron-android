@@ -405,6 +405,11 @@ data class ItemCommentEntity(
 /// so at-least-once resends are dedup-safe. Like the text [OutboxEntity],
 /// rows survive the `snapshot_required` mirror wipe and are cleared only at
 /// sign-out.
+///
+/// [rejectedReason] is set when the journal refused the row outright (a 4xx
+/// that is not about the session): the words shown under the failed reply.
+/// A rejected row stays in the thread but is no longer drained — it goes
+/// again only when the user retries it, or leaves when they discard it.
 @Entity(tableName = "item_outbox")
 data class ItemOutboxEntity(
     @PrimaryKey @ColumnInfo(name = "local_id") val localID: String,
@@ -414,7 +419,10 @@ data class ItemOutboxEntity(
     @ColumnInfo(name = "created_at") val createdAt: Long,
     val attempts: Int,
     @ColumnInfo(name = "last_error") val lastError: String?,
+    @ColumnInfo(name = "rejected_reason") val rejectedReason: String? = null,
 ) {
+    val isRejected: Boolean get() = rejectedReason != null
+
     companion object {
         const val OP_COMMENT = "comment"
         const val OP_CREATE = "create"
