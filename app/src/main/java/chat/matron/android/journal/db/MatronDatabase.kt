@@ -75,6 +75,10 @@ import java.util.concurrent.atomic.AtomicLong
 /// v13 adds `item.working_json`: whether the session that owns the item is
 /// busy, the indicator at the foot of the item's thread. Additive; cached
 /// rows read "nothing to show" until their next fetch.
+///
+/// v14 adds `item_outbox.rejected_reason`: a reply the journal refused stays
+/// queued and visible as failed instead of being dropped. Additive; queued
+/// rows read NULL (not refused) and drain as before.
 @Database(
     entities = [
         ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
@@ -82,7 +86,7 @@ import java.util.concurrent.atomic.AtomicLong
         ItemEntity::class, ItemCommentEntity::class, ItemOutboxEntity::class,
         MissionEntity::class, MilestoneEntity::class, MissionConversationEntity::class,
     ],
-    version = 13,
+    version = 14,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -325,10 +329,17 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
+        /// v14: `item_outbox.rejected_reason` (see the class comment).
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `item_outbox` ADD COLUMN `rejected_reason` TEXT")
+            }
+        }
+
         private val MIGRATIONS = listOf(
             MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
             MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
-            MIGRATION_12_13,
+            MIGRATION_12_13, MIGRATION_13_14,
         )
 
         /// Production, file-backed at the given path. [onOpened] fires from

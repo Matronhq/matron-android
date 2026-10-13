@@ -651,23 +651,70 @@ class ItemDetailViewModelTest {
         assertEquals(ItemResolution.DONE to "why", api.closes.first())
     }
 
-    /// The journal takes at most 20 attachments on one comment: the tray stops
-    /// there, and a voice note on a full tray goes alone, leaving it in place.
+    /// The tray takes more than one comment may carry: the whole reply —
+    /// text, voice note first, then every picked file in order — goes to the
+    /// outbox as one reply, which queues it as several comments.
     @Test
-    fun aFullTrayStopsAtTwentyAndAVoiceNoteThenGoesAlone() = runBlocking {
+    fun aTrayPastTheAttachmentLimitGoesAsOneReply() = runBlocking {
         val api = Api(); val sync = Sync()
         val vm = ItemDetailViewModel("it_1", FakeItemsStore(), api, sync, this, staging)
-        vm.draft = "still here"
-        vm.attachFiles((0 until 21).map { picked("f$it.png") })
-        assertEquals(ItemDetailViewModel.MAX_COMMENT_ATTACHMENTS, vm.stagedAttachments.value.size)
-        assertNotNull(vm.error.value)
+        vm.draft = "all of them"
+        vm.attachFiles((0 until 41).map { picked("f$it.png") })
+        assertEquals(41, vm.stagedAttachments.value.size)
+        assertNull(vm.error.value)
 
         vm.sendVoiceNote(tempNote(byteArrayOf(1, 2, 3)))
 
-        assertEquals(1, sync.comments.size)
-        assertEquals(listOf("voice-note.m4a"), sync.comments.single().third.map { it.name })
-        assertEquals("still here", vm.draft)
-        assertEquals(ItemDetailViewModel.MAX_COMMENT_ATTACHMENTS, vm.stagedAttachments.value.size)
+        val (_, body, sent) = sync.comments.single()
+        assertEquals("all of them", body)
+        assertEquals(listOf("voice-note.m4a") + (0 until 41).map { "f$it.png" }, sent.map { it.name })
+        assertEquals("", vm.draft)
+        assertTrue(vm.stagedAttachments.value.isEmpty())
+    }
+
+    /// A reply the journal refused is not an answer to a question, and a
+    /// refused button tap is not a choice: the user can tap again.
+    @Test
+    fun aRefusedReplyIsNotAReplyOrAChoice() = runBlocking {
+        val sync = Sync(); val store = FakeItemsStore()
+        val vm = ItemDetailViewModel("it_1", store, Api(), sync, this, staging)
+        vm.start()
+        waitUntil { sync.refetched == listOf("it_1") }
+        store.item.emit(TrackerItem(id = "it_1", num = 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, title = "Q", originConvoID = "c1"))
+        waitUntil { vm.item.value?.kind == ItemKind.QUESTION }
+        val refused = ItemOutboxEntity(
+            "L1", "it_1", "comment", """{"body":"Keep it.","attachments":[]}""", 0, 0, null, rejectedReason = "The server refused it (HTTP 400).",
+        )
+        store.outbox.emit(listOf(refused))
+        waitUntil { vm.pendingComments.value.size == 1 }
+        assertEquals(listOf(ItemResolution.CANCELLED), vm.availableResolutions)
+        vm.stop()
+
+        val refusedTap = outboxTap("L2", "Merge", "ic_q").copy(rejectedReason = "unknown_action")
+        val refusedItemTap = outboxItemTap("L3", "Seen").copy(rejectedReason = "unknown_action")
+        assertTrue(ItemDetailViewModel.pendingTaps(listOf(refusedTap)).isEmpty())
+        assertNull(ItemDetailViewModel.pendingItemTap(listOf(refusedItemTap)))
+    }
+
+    /// Retry and Discard under a refused reply go straight to the outbox; a
+    /// failure there reaches the error banner.
+    @Test
+    fun retryAndDiscardReachTheOutbox() = runBlocking {
+        val sync = object : Sync() {
+            var failDiscard = false
+            override suspend fun discardComment(localID: String) {
+                if (failDiscard) throw IllegalStateException("disk full")
+                super.discardComment(localID)
+            }
+        }
+        val vm = ItemDetailViewModel("it_1", FakeItemsStore(), Api(), sync, this, staging)
+        vm.retryComment("L1")
+        vm.discardComment("L2")
+        assertEquals(listOf("L1"), sync.retried)
+        assertEquals(listOf("L2"), sync.discarded)
+        sync.failDiscard = true
+        vm.discardComment("L3")
+        assertEquals("disk full", vm.error.value)
     }
 
     /// A restore lands on [ItemDetailViewModel.draftFlow], so a field that was

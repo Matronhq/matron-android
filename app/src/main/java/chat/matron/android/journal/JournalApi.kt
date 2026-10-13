@@ -276,8 +276,18 @@ sealed class JournalApiError(message: String) : Exception(message) {
     /// `link/claim` (code already claimed), `link/approve` (nothing to
     /// approve yet, or already resolved).
     data object Conflict : JournalApiError("Already handled — possibly on another device.")
-    data class Http(val status: Int, val serverMessage: String) :
-        JournalApiError(serverMessage.ifEmpty { "Server error (HTTP $status)." })
+    /// Any other non-success status. [serverMessage] is the body's `message`,
+    /// else its `error` code, else empty. [bodyMessage], [reason] and [max]
+    /// are the body's own `message`, `reason` and `max` fields, null when
+    /// absent: a refusal such as `{"error":"bad_request","reason":
+    /// "too_many_attachments","max":20}` says why in words only through them.
+    data class Http(
+        val status: Int,
+        val serverMessage: String,
+        val bodyMessage: String? = null,
+        val reason: String? = null,
+        val max: Int? = null,
+    ) : JournalApiError(serverMessage.ifEmpty { "Server error (HTTP $status)." })
     data class Transport(val detail: String) :
         JournalApiError(if (detail.isEmpty()) "Couldn't reach the server." else "Couldn't reach the server — $detail")
 }
@@ -1055,7 +1065,13 @@ class JournalApi(
             status == 403 -> JournalApiError.Forbidden
             status == 404 -> JournalApiError.NotFound
             status == 409 -> JournalApiError.Conflict
-            else -> JournalApiError.Http(status, obj?.stringOrNull("message") ?: code ?: "")
+            else -> JournalApiError.Http(
+                status,
+                obj?.stringOrNull("message") ?: code ?: "",
+                bodyMessage = obj?.stringOrNull("message"),
+                reason = obj?.stringOrNull("reason"),
+                max = obj?.intOrNull("max"),
+            )
         }
     }
 }

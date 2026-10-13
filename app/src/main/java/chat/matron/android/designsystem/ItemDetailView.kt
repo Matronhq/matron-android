@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.Link
@@ -34,6 +35,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -141,13 +143,15 @@ fun itemVoiceNoteCaption(attachment: TrackerAttachment): Pair<String, Boolean> {
 }
 
 /// A comment queued locally (offline outbox / in-flight send) that hasn't
-/// landed in the thread yet.
+/// landed in the thread yet. [rejectedReason] is set when the journal refused
+/// it: the row then says why and offers Retry and Discard.
 data class PendingCommentModel(
     val id: String,
     val body: String,
     val attachmentCount: Int,
     val attempts: Int,
     val lastError: String?,
+    val rejectedReason: String? = null,
 )
 
 /// Everything the detail view renders, supplied by the host from
@@ -340,6 +344,9 @@ fun ItemDetailView(
     onTapItemAction: (String) -> Unit = {},
     /// Opens a mission page by id: the context block's mission row.
     onOpenMission: (String) -> Unit = {},
+    /// Retry / Discard under a reply the journal refused, by its local id.
+    onRetryPending: (String) -> Unit = {},
+    onDiscardPending: (String) -> Unit = {},
     now: Instant = Instant.now(),
     /// Whether the reader had previously scrolled to the bottom of this
     /// item's thread (`ItemReadMemory.wasAtBottom`, read once by the host).
@@ -422,7 +429,10 @@ fun ItemDetailView(
                         onTapAction = { label -> onTapAction(c, label) },
                     )
                 }
-                items(model.pending.size, key = { "p-${model.pending[it].id}" }) { i -> PendingView(model.pending[i]) }
+                items(model.pending.size, key = { "p-${model.pending[it].id}" }) { i ->
+                    val p = model.pending[i]
+                    PendingView(p, onRetry = { onRetryPending(p.id) }, onDiscard = { onDiscardPending(p.id) })
+                }
                 model.working?.let { working ->
                     // The chat's own indicator, flush with the cards above it.
                     item(key = "working") {
@@ -636,7 +646,7 @@ private fun CommentView(
 }
 
 @Composable
-private fun PendingView(p: PendingCommentModel) {
+private fun PendingView(p: PendingCommentModel, onRetry: () -> Unit, onDiscard: () -> Unit) {
     ItemCard(mine = true, alpha = 0.85f) {
         Text("You", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
         if (p.body.isNotEmpty()) Text(p.body, style = ItemTypography.bodyStyle())
@@ -646,7 +656,25 @@ private fun PendingView(p: PendingCommentModel) {
                 Text("${p.attachmentCount} attachment${if (p.attachmentCount == 1) "" else "s"}", style = MaterialTheme.typography.labelMedium)
             }
         }
-        SendStateIndicator(pendingCommentSendState(p.attempts, p.lastError))
+        val refused = p.rejectedReason
+        if (refused != null) RefusedReplyFooter(refused, onRetry, onDiscard)
+        else SendStateIndicator(pendingCommentSendState(p.attempts, p.lastError))
+    }
+}
+
+/// Under a reply the journal refused: why, and the only two ways on — send
+/// it again, or let it go. Nothing retries it on its own.
+@Composable
+private fun RefusedReplyFooter(reason: String, onRetry: () -> Unit, onDiscard: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.Error, contentDescription = null, modifier = Modifier.size(12.dp), tint = MatronRed)
+            Text("Not sent: $reason", style = MaterialTheme.typography.labelSmall, color = MatronRed)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = onRetry) { Text("Retry") }
+            TextButton(onClick = onDiscard) { Text("Discard") }
+        }
     }
 }
 

@@ -395,6 +395,7 @@ fun ItemDetailScreen(
                                         PendingCommentModel(
                                             id = row.localID, body = payload?.body ?: "", attachmentCount = payload?.attachments?.size ?: 0,
                                             attempts = row.attempts, lastError = row.lastError,
+                                            rejectedReason = row.rejectedReason,
                                         )
                                     },
                                     context = itemContext(current, currentConvoID, origin, mission),
@@ -427,6 +428,8 @@ fun ItemDetailScreen(
                                 },
                                 onTapAction = { comment, label -> scope.launch { viewModel.tapAction(comment, label) } },
                                 onTapItemAction = { label -> scope.launch { viewModel.tapItemAction(label) } },
+                                onRetryPending = { id -> scope.launch { viewModel.retryComment(id) } },
+                                onDiscardPending = { id -> scope.launch { viewModel.discardComment(id) } },
                                 onAttach = { attachMenu = true },
                                 onVoiceNote = {
                                     scope.launch {

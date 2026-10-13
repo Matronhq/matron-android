@@ -702,6 +702,36 @@ class MatronDatabaseMigrationTest {
         }
     }
 
+    /// MIGRATION_13_14: `item_outbox` gains `rejected_reason`. A reply queued
+    /// before the upgrade is not refused and still drains; a refused one
+    /// keeps its reason and leaves the drain until it is retried.
+    @Test
+    fun migratesToV14AndQueuedRepliesStillDrain() = runBlocking {
+        val file = File.createTempFile("migration-test-v8-v14", ".sqlite").also { it.delete() }
+        buildV8(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL(
+                "INSERT INTO item_outbox VALUES ('L_old', 'it_1', 'comment', '{\"body\":\"queued\"}', 1, 0, NULL)"
+            )
+        }
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:alice")
+            val old = store.itemOutboxRows("it_1").single()
+            assertNull(old.rejectedReason)
+            assertEquals(listOf("L_old"), store.itemOutboxPending().map { it.localID })
+
+            store.itemOutboxMarkRejected("L_old", "The server refused it (HTTP 400).")
+            assertEquals("The server refused it (HTTP 400).", store.itemOutboxRows("it_1").single().rejectedReason)
+            assertTrue(store.itemOutboxPending().isEmpty())
+            store.itemOutboxClearRejection("L_old")
+            assertEquals(listOf("L_old"), store.itemOutboxPending().map { it.localID })
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
     /// `open(onOpened:)` reports how long the migration chain took on the
     /// open that ran it (the launch timeline's nested `migration` interval)
     /// and `null` on a later open of the same, now up-to-date file.
@@ -713,7 +743,7 @@ class MatronDatabaseMigrationTest {
         val database = MatronDatabase.open(context, file) { reported = it }
         try {
             JournalStore(database, ownSender = "user:alice").cursor() // forces the lazy open
-            assertNotNull("the v6 → v13 chain ran on this open, so a duration is reported", reported)
+            assertNotNull("the v6 → v14 chain ran on this open, so a duration is reported", reported)
             assertTrue("a duration, not the sentinel", (reported ?: -1) >= 0)
         } finally {
             database.close()

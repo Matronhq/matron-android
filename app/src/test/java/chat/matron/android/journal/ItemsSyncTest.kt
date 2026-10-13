@@ -82,6 +82,7 @@ private class FakeItems : ItemsProviding {
 
     fun detail(id: String, item: TrackerItem, comments: List<TrackerComment>) = synchronized(lock) { _detail[id] = ItemDetail(item, comments) }
     fun commentError(id: String, error: Throwable) = synchronized(lock) { _commentErrorForItemID[id] = error }
+    fun clearCommentError(id: String) = synchronized(lock) { _commentErrorForItemID.remove(id) }
     fun releaseListGate() = synchronized(lock) { _listGates.removeFirstOrNull() }?.complete(Unit)
     fun releaseItemGate() = synchronized(lock) { val g = _itemGate; _itemGate = null; g }?.complete(Unit)
     fun releaseCommentGate() = synchronized(lock) { val g = _commentGate; _commentGate = null; g }?.complete(Unit)
@@ -132,6 +133,10 @@ private class FakeItems : ItemsProviding {
 
     override suspend fun updateItem(id: String, patch: ItemPatch): TrackerItem = error("unused")
 
+    /// (idempotency key, body, attachment refs) of every comment call, in order.
+    private val _commentSends = mutableListOf<Triple<String, String, List<String>>>()
+    val commentSends: List<Triple<String, String, List<String>>> get() = synchronized(lock) { _commentSends.toList() }
+
     /// (action, replyTo) of every comment call, in order.
     private val _commentTaps = mutableListOf<Pair<String?, String?>>()
     val commentTaps: List<Pair<String?, String?>> get() = synchronized(lock) { _commentTaps.toList() }
@@ -145,7 +150,10 @@ private class FakeItems : ItemsProviding {
             if (blockNextComment) { blockNextComment = false; CompletableDeferred<Unit>().also { _commentGate = it } } else null
         }
         gate?.await()
-        synchronized(lock) { _commentCalls.add(id to (idempotencyKey ?: "")) }
+        synchronized(lock) {
+            _commentCalls.add(id to (idempotencyKey ?: ""))
+            _commentSends.add(Triple(idempotencyKey ?: "", body, attachments.map { it.blobRef }))
+        }
         synchronized(lock) { _commentErrorForItemID[id] }?.let { throw it }
         if (failComments) throw JournalApiError.Transport("offline")
         val item = TrackerItem(id = id, num = 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.AGENT, title = "Q", originConvoID = "c1")
@@ -523,10 +531,13 @@ class ItemsSyncTest {
         assertEquals("the row is left queued, not deleted", 1, rig.store.itemOutboxPending().size)
     }
 
+    /// A reply the journal refuses does not block the queue, and is not
+    /// dropped either: it stays in the outbox, marked refused with the
+    /// reason, out of every later drain.
     @Test
     fun poisonRowIsSkippedNotBlockingQueue() = runBlocking {
         val api = FakeItems()
-        api.commentError("it_bad", JournalApiError.Http(400, "bad request"))
+        api.commentError("it_bad", JournalApiError.Http(400, "bad_request"))
         val rig = make(api)
         rig.store.itemOutboxInsert(outboxRow("L1", "it_bad", "bad", 0))
         rig.store.itemOutboxInsert(outboxRow("L2", "it_good", "ok", 1))
@@ -534,6 +545,137 @@ class ItemsSyncTest {
         waitUntil { rig.store.itemOutboxPending().isEmpty() }
         assertEquals(listOf("it_bad", "it_good"), api.commentCalls.map { it.first })
         assertEquals(1, api.commentCalls.count { it.first == "it_bad" })
+        val kept = rig.store.itemOutboxRows("it_bad").single()
+        assertEquals("L1", kept.localID)
+        assertEquals("no message or reason: the bare status", "The server refused it (HTTP 400).", kept.rejectedReason)
+        assertEquals("the reply's words are still there", "bad", MatronJson.decodeFromString(ItemsSync.CommentPayload.serializer(), kept.payloadJson).body)
+        rig.sync.drainOutbox()
+        rig.sync.drainOutbox()
+        assertEquals("a refused row is never sent again on its own", 1, api.commentCalls.count { it.first == "it_bad" })
+    }
+
+    /// A 409 on a reply (a closed item, say) is a refusal like any other 4xx:
+    /// kept, not dropped.
+    @Test
+    fun conflictOnAReplyKeepsItAsRefused() = runBlocking {
+        val api = FakeItems()
+        api.commentError("it_1", JournalApiError.Conflict)
+        val rig = make(api)
+        rig.sync.enqueueComment("it_1", "L1", "hello", emptyList())
+        assertEquals("The server refused it (HTTP 409).", rig.store.itemOutboxRows("it_1").single().rejectedReason)
+        assertTrue(rig.store.itemOutboxPending().isEmpty())
+        rig.sync.stop()
+    }
+
+    /// The refusal's own words win: the response's `message`, else its
+    /// `reason` (the known too-many-attachments reason in words).
+    @Test
+    fun rejectionReasonPrefersTheResponsesMessageThenItsReason() {
+        assertEquals(
+            "Comments carry at most 20 attachments.",
+            ItemsSync.rejectionReason(
+                JournalApiError.Http(400, "x", bodyMessage = "Comments carry at most 20 attachments.", reason = "too_many_attachments", max = 20),
+            ),
+        )
+        assertEquals(
+            "Too many attachments on one comment — the server takes at most 12.",
+            ItemsSync.rejectionReason(JournalApiError.Http(400, "bad_request", reason = "too_many_attachments", max = 12)),
+        )
+        assertEquals(
+            "Too many attachments on one comment — the server takes at most 20.",
+            ItemsSync.rejectionReason(JournalApiError.Http(400, "bad_request", reason = "too_many_attachments")),
+        )
+        assertEquals("invalid_attachment_ref", ItemsSync.rejectionReason(JournalApiError.Http(400, "bad_request", reason = "invalid_attachment_ref")))
+        assertEquals("The server refused it (HTTP 422).", ItemsSync.rejectionReason(JournalApiError.Http(422, "bad_request", bodyMessage = "  ")))
+    }
+
+    private fun attachments(count: Int) = (1..count).map { TrackerAttachment(blobRef = "b$it", mime = "image/png", name = "f$it.png", size = 1) }
+
+    /// More attachments than the journal takes on one comment go out as
+    /// several comments of at most [ATTACHMENTS_MAX] each, in order, with the
+    /// typed text on the first only and a key of their own each.
+    @Test
+    fun aReplyPastTheAttachmentLimitIsSentAsSeveralCommentsInOrder() = runBlocking {
+        val api = FakeItems()
+        val rig = make(api)
+        assertTrue(rig.sync.enqueueComment("it_1", "L1", "here they are", attachments(42)))
+        waitUntil { api.commentSends.size == 3 && rig.store.itemOutboxRows("it_1").isEmpty() }
+        val sends = api.commentSends
+        assertEquals(listOf("L1", "L1-002", "L1-003"), sends.map { it.first })
+        assertEquals(listOf("here they are", "", ""), sends.map { it.second })
+        assertEquals(listOf(20, 20, 2), sends.map { it.third.size })
+        assertEquals("every attachment, once, in the order picked", attachments(42).map { it.blobRef }, sends.flatMap { it.third })
+        rig.sync.stop()
+    }
+
+    /// Exactly the limit is one comment; so is a reply with no attachments.
+    @Test
+    fun commentPartsSplitOnlyPastTheLimit() {
+        assertEquals(1, ItemsSync.commentParts("x", attachments(ATTACHMENTS_MAX)).size)
+        assertEquals(listOf(ItemsSync.CommentPayload("x")), ItemsSync.commentParts("x", emptyList()))
+        val parts = ItemsSync.commentParts("x", attachments(ATTACHMENTS_MAX + 1))
+        assertEquals(listOf(ATTACHMENTS_MAX, 1), parts.map { it.attachments.size })
+        assertEquals(listOf("x", ""), parts.map { it.body })
+        // Ten or more parts still sort in order (zero-padded suffixes).
+        val ids = (0 until 12).map { ItemsSync.partLocalID("L", it) }
+        assertEquals(ids, ids.sorted())
+    }
+
+    /// The parts are queued together, in order, before the drain sends any:
+    /// offline, both wait in the outbox.
+    @Test
+    fun theQueuedPartsOfAReplyKeepTheirOrderWhileOffline() = runBlocking {
+        val api = FakeItems(); api.failComments = true
+        val rig = make(api)
+        rig.sync.start()
+        rig.sync.enqueueComment("it_1", "L1", "hi", attachments(25))
+        val rows = rig.store.itemOutboxRows("it_1")
+        assertEquals(listOf("L1", "L1-002"), rows.map { it.localID })
+        assertEquals(listOf(20, 5), rows.map { MatronJson.decodeFromString(ItemsSync.CommentPayload.serializer(), it.payloadJson).attachments.size })
+        rig.sync.stop()
+    }
+
+    /// Retry puts a refused reply back in the drain and sends it now; Discard
+    /// takes it away. Neither touches anything else in the outbox.
+    @Test
+    fun retrySendsARefusedReplyAgainAndDiscardRemovesIt() = runBlocking {
+        val api = FakeItems()
+        api.commentError("it_1", JournalApiError.Http(400, "bad_request"))
+        val rig = make(api)
+        rig.sync.enqueueComment("it_1", "L1", "first", emptyList())
+        rig.sync.enqueueComment("it_1", "L2", "second", emptyList())
+        assertEquals(listOf("L1", "L2"), rig.store.itemOutboxRows("it_1").filter { it.isRejected }.map { it.localID })
+
+        api.clearCommentError("it_1")
+        rig.sync.retryComment("L1")
+        waitUntil { rig.store.itemOutboxRows("it_1").map { it.localID } == listOf("L2") }
+        assertEquals("L1 went again, once; L2 stayed put", listOf("L1", "L2", "L1"), api.commentSends.map { it.first })
+        assertTrue("still refused until the user says otherwise", rig.store.itemOutboxRows("it_1").single().isRejected)
+
+        rig.sync.discardComment("L2")
+        assertTrue(rig.store.itemOutboxRows("it_1").isEmpty())
+        assertEquals(3, api.commentSends.size)
+        rig.sync.stop()
+    }
+
+    /// A refused row carrying more than the limit (queued before replies were
+    /// split) is re-split on Retry rather than sent as it stands again.
+    @Test
+    fun retryReSplitsARefusedReplyCarryingTooManyAttachments() = runBlocking {
+        val api = FakeItems()
+        val rig = make(api)
+        val payload = MatronJson.encodeToString(ItemsSync.CommentPayload.serializer(), ItemsSync.CommentPayload("lots", attachments(30)))
+        rig.store.itemOutboxInsert(
+            ItemOutboxEntity("L1", "it_1", ItemOutboxEntity.OP_COMMENT, payload, 5, 1, null, rejectedReason = "The server refused it (HTTP 400)."),
+        )
+        rig.sync.drainOutbox()
+        assertTrue("a refused row is not drained", api.commentSends.isEmpty())
+        rig.sync.retryComment("L1")
+        waitUntil { rig.store.itemOutboxRows("it_1").isEmpty() }
+        assertEquals(listOf("L1", "L1-002"), api.commentSends.map { it.first })
+        assertEquals(listOf("lots", ""), api.commentSends.map { it.second })
+        assertEquals(listOf(20, 10), api.commentSends.map { it.third.size })
+        rig.sync.stop()
     }
 
     @Test

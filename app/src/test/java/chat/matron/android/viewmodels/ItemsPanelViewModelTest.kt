@@ -107,6 +107,11 @@ internal open class FakeItemsSync : ItemsSyncing {
         return commentSucceeds
     }
     override suspend fun enqueueCreate(localID: String, new: NewItem): Boolean { created += new; return createSucceeds }
+    /// Local ids of every Retry / Discard on a queued reply, in order.
+    val retried = mutableListOf<String>()
+    val discarded = mutableListOf<String>()
+    override suspend fun retryComment(localID: String) { retried += localID }
+    override suspend fun discardComment(localID: String) { discarded += localID }
 }
 
 internal open class FakeItemsApi : ItemsProviding {
