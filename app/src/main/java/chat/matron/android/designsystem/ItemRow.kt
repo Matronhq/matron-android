@@ -61,9 +61,10 @@ fun itemRowTitleIsSecondary(item: TrackerItem): Boolean = item.kind == ItemKind.
 /// rendering: `semantics(mergeDescendants)` with an explicit
 /// `contentDescription` REPLACES the merged children, so every fact the
 /// reader should hear — the mission chip included — is folded in here.
-fun itemRowAccessibilityLabel(item: TrackerItem): String =
+fun itemRowAccessibilityLabel(item: TrackerItem, closedCaption: String? = null): String =
     "${ItemGlyph.label(item.kind)} ${item.num}, ${item.title}" +
         (if (item.needsUser) (if (item.kind == ItemKind.NOTICE) ", to read" else ", needs you") else "") +
+        (closedCaption?.let { ", ${it.replace(" · ", ", ")}" } ?: "") +
         (itemMissionChipText(item)?.let { ", mission $it" } ?: "")
 
 /// One tracker item in the list: kind glyph, `#num`, title, a one-line body
@@ -83,7 +84,7 @@ fun ItemRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .semantics(mergeDescendants = true) { contentDescription = itemRowAccessibilityLabel(item) },
+            .semantics(mergeDescendants = true) { contentDescription = itemRowAccessibilityLabel(item, closedCaption) },
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.Top,
     ) {

@@ -46,6 +46,7 @@ class ItemsViewsTest {
         assertEquals("Reversed", itemRowStatusCaption(item(state = ItemState.CLOSED, awaiting = null, resolution = ItemResolution.REVERSED)))
         assertNull(itemRowStatusCaption(item(kind = ItemKind.DECISION, awaiting = null)))
         assertEquals("Task 12, Which auth?", itemRowAccessibilityLabel(item()))
+        assertEquals("Task 12, Which auth?, Answered, 2 hr ago", itemRowAccessibilityLabel(item(), "Answered · 2 hr ago"))
         assertEquals("Question 12, Which auth?, needs you, mission #61", itemRowAccessibilityLabel(item(kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, missionNum = 61)))
         assertEquals("#61", itemMissionChipText(item(missionNum = 61)))
         assertNull(itemMissionChipText(item()))
