@@ -32,6 +32,7 @@ import chat.matron.android.designsystem.DecisionsListModel
 import chat.matron.android.designsystem.DecisionsListView
 import chat.matron.android.designsystem.DecisionsRow
 import chat.matron.android.designsystem.MatronTimelineBackground
+import chat.matron.android.features.gotonumber.GoToNumberButton
 import chat.matron.android.viewmodels.ItemsPanelViewModel
 import kotlinx.coroutines.launch
 
@@ -53,6 +54,8 @@ fun DecisionsScreen(
     originLabels: suspend () -> Map<String, String>,
     onSelect: (String) -> Unit,
     onOpenConversation: (String) -> Unit,
+    /// The toolbar's "Go to number" entry; the shell owns the dialog.
+    onGoToNumber: () -> Unit = {},
     rootGesture: Modifier = Modifier,
 ) {
     val awaiting by viewModel.awaitingYou.collectAsStateWithLifecycle()
@@ -67,7 +70,14 @@ fun DecisionsScreen(
         if (origins.isNotEmpty()) titles = runCatching { originLabels() }.getOrDefault(emptyMap())
     }
 
-    Scaffold(topBar = { TopAppBar(title = { Text(ForYouCopy.TITLE) }) }) { padding ->
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(ForYouCopy.TITLE) },
+                actions = { GoToNumberButton(onClick = onGoToNumber) },
+            )
+        },
+    ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).then(rootGesture)) {
             MatronTimelineBackground()
             Column(Modifier.fillMaxSize()) {

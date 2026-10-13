@@ -26,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.graphics.luminance
@@ -34,13 +35,16 @@ import chat.matron.android.designsystem.SearchResultRow
 import chat.matron.android.designsystem.SessionTagText
 import chat.matron.android.search.SearchChatHit
 import chat.matron.android.search.SearchHit
+import chat.matron.android.viewmodels.GoToNumberCopy
+import chat.matron.android.viewmodels.NumberHit
 import chat.matron.android.viewmodels.SearchViewModel
 import kotlinx.coroutines.launch
 
 /**
  * Search screen. Ports Features/Search/SearchView.swift: two sections — Chats
  * (title/bot matches filtered in-memory) and Messages (FTS hits). Tapping a
- * result routes back through [onSelectChat] / [onSelectMessage].
+ * result routes back through [onSelectChat] / [onSelectMessage]. A query that
+ * is a bare number (`412`, `#412`) adds the thing with that number above both.
  *
  * [SearchViewModel.query] is a plain var and [SearchViewModel.chatHits] a
  * computed getter off it, so the field mirrors the var and each edit both
@@ -53,6 +57,9 @@ fun SearchScreen(
     viewModel: SearchViewModel,
     onSelectChat: (ChatSummary) -> Unit,
     onSelectMessage: (SearchChatHit) -> Unit,
+    /// Opens the number hit. Resolves to why it could not open, in words,
+    /// shown under the row; `null` once it has navigated.
+    onSelectNumber: suspend (NumberHit) -> String? = { null },
     onBack: () -> Unit,
     liveChats: List<ChatSummary>,
 ) {
@@ -60,6 +67,10 @@ fun SearchScreen(
     val messageHits by viewModel.messageHits.collectAsStateWithLifecycle()
     val isSearching by viewModel.isSearching.collectAsStateWithLifecycle()
     val searchFailed by viewModel.searchFailed.collectAsStateWithLifecycle()
+    val numberHit by viewModel.numberHit.collectAsStateWithLifecycle()
+    // Why the number hit did not open, keyed to the hit so it leaves with it.
+    var numberNote by remember(numberHit) { mutableStateOf<String?>(null) }
+    var numberOpening by remember(numberHit) { mutableStateOf(false) }
 
     var query by remember { mutableStateOf(viewModel.query) }
 
@@ -102,6 +113,44 @@ fun SearchScreen(
             )
 
             LazyColumn(modifier = Modifier.fillMaxSize()) {
+                // First: a query that IS a number most likely means "take me
+                // to #N", so that answer sits above any chat or message that
+                // merely contains the digits.
+                numberHit?.let { hit ->
+                    item(key = "number-${hit.num}") {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !numberOpening) {
+                                    numberOpening = true
+                                    numberNote = null
+                                    scope.launch {
+                                        try {
+                                            numberNote = onSelectNumber(hit)
+                                        } finally {
+                                            numberOpening = false
+                                        }
+                                    }
+                                }
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                        ) {
+                            Text(GoToNumberCopy.hitHeading(hit), style = MaterialTheme.typography.bodyLarge)
+                            hit.title?.let {
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            numberNote?.let {
+                                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+
                 if (chatHits.isNotEmpty()) {
                     item { SectionHeader("Chats") }
                     items(chatHits, key = { "chat-${it.id}" }) { chat ->
@@ -160,7 +209,7 @@ fun SearchScreen(
                     item {
                         HintRow("Search across chat titles, bots, and messages.")
                     }
-                } else if (chatHits.isEmpty() && messageHits.isEmpty() && !isSearching) {
+                } else if (numberHit == null && chatHits.isEmpty() && messageHits.isEmpty() && !isSearching) {
                     val hint = if (searchFailed) "Search failed. Try again." else viewModel.emptyResultsMessage
                     item { HintRow(hint) }
                 }

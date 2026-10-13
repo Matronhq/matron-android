@@ -73,6 +73,7 @@ import chat.matron.android.features.coordinator.CoordinatorRoot
 import chat.matron.android.features.coordinator.CoordinatorSetupView
 import chat.matron.android.features.coordinator.coordinatorRoot
 import chat.matron.android.features.decisions.DecisionsScreen
+import chat.matron.android.features.gotonumber.GoToNumberDialog
 import chat.matron.android.features.missions.MissionDetailScreen
 import chat.matron.android.features.missions.MissionOpenConversationOutcome
 import chat.matron.android.features.memories.MemoriesScreen
@@ -112,6 +113,9 @@ import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.VoiceRecorderHandoff
 import chat.matron.android.viewmodels.KeyValueBoxCapacityCache
 import chat.matron.android.viewmodels.ChatListViewModel
+import chat.matron.android.viewmodels.GoToNumberResolver
+import chat.matron.android.viewmodels.GoToNumberViewModel
+import chat.matron.android.viewmodels.GoToTarget
 import chat.matron.android.viewmodels.LinkSignInViewModel
 import chat.matron.android.viewmodels.MediaBrowserViewModel
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -502,6 +506,10 @@ private fun SignedInApp(
     var hasEverConnected by remember { mutableStateOf(false) }
     var newChatTarget by remember { mutableStateOf<NewChatTarget?>(null) }
     var showCoordinatorChooser by remember { mutableStateOf(false) }
+    // The tab whose "Go to number" button opened the dialog: the target is
+    // pushed on THAT tab's stack where the tab can host it.
+    var goToNumberFrom by remember { mutableStateOf<AppTab?>(null) }
+    val goToResolver = remember(session.userID, shell) { deps.goToNumberResolver(session) { shell.missionsSupported } }
 
     val groups by chatListVM.groups.collectAsStateWithLifecycle()
     val allChats = remember(groups) { groups.flatMap { it.summaries } }
@@ -873,7 +881,11 @@ private fun SignedInApp(
                         // composition").
                         LaunchedEffect(Unit) { nav.popBackStack() }
                     } else {
-                        val searchVM = remember { SearchViewModel(searchService, allChats) }
+                        val searchVM = remember {
+                            SearchViewModel(searchService, allChats) { num ->
+                                (goToResolver.find(num) as? GoToNumberResolver.Found.Hit)?.hit
+                            }
+                        }
                         SearchScreen(
                             viewModel = searchVM,
                             // A result REPLACES the Conversations path (the shell's
@@ -891,6 +903,21 @@ private fun SignedInApp(
                                 // query's first suspend (Bugbot, #56).
                                 sessionScope.launch { chatVM.beginChatSearch(query) }
                                 shell.openChat(hit.roomID)
+                            },
+                            // A number hit: the item is pushed over the
+                            // search (back returns to the results); a mission
+                            // or a milestone's mission opens on its own tab.
+                            onSelectNumber = { hit ->
+                                when (val opened = goToResolver.open(hit)) {
+                                    is GoToNumberResolver.Opened.Message -> opened.text
+                                    is GoToNumberResolver.Opened.Target -> {
+                                        when (val target = opened.target) {
+                                            is GoToTarget.Item -> nav.pushItem(AppTab.CONVERSATIONS.routePrefix, target.itemID)
+                                            is GoToTarget.Mission -> shell.openMission(target.missionID)
+                                        }
+                                        null
+                                    }
+                                }
                             },
                             onBack = { nav.popBackStack() },
                             liveChats = allChats,
@@ -969,6 +996,7 @@ private fun SignedInApp(
                         viewModel = missionsVM,
                         onSelect = { shell.pushMission(it) },
                         onOpenMemories = { shell.openMemories() },
+                        onGoToNumber = { goToNumberFrom = AppTab.MISSIONS },
                         rootGesture = rootSwipe,
                     )
                 }
@@ -1036,6 +1064,7 @@ private fun SignedInApp(
                         originLabels = { deps.journalStore(session).conversationOriginLabels() },
                         onSelect = { shell.pushDecision(it) },
                         onOpenConversation = onOpenConversationFromDecisions,
+                        onGoToNumber = { goToNumberFrom = AppTab.DECISIONS },
                         rootGesture = rootSwipe,
                     )
                 }
@@ -1078,6 +1107,25 @@ private fun SignedInApp(
                 onCancel = { newChatTarget = null },
             )
         }
+    }
+
+    goToNumberFrom?.let { from ->
+        // A fresh view model per opening, so the dialog never reopens on the
+        // last number or its message.
+        val goToVM = remember(from, goToResolver) {
+            GoToNumberViewModel(goToResolver) { target ->
+                when (target) {
+                    // On Missions the item joins that tab's stack; anywhere
+                    // else it opens where items live, on For you.
+                    is GoToTarget.Item ->
+                        if (from == AppTab.MISSIONS) shell.pushMissionItem(target.itemID) else shell.pushDecision(target.itemID)
+                    // From For you (which hosts no mission page) this opens
+                    // the mission on the Missions tab — the shell's own rule.
+                    is GoToTarget.Mission -> shell.pushMission(target.missionID)
+                }
+            }
+        }
+        GoToNumberDialog(viewModel = goToVM, onDismiss = { goToNumberFrom = null })
     }
 
     PinDialogsHost(pinsController, chats = allChats, isLoading = chatListVM.isLoading.collectAsStateWithLifecycle().value)

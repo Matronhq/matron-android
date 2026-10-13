@@ -31,6 +31,7 @@ import chat.matron.android.viewmodels.MemoryEditorViewModel
 import chat.matron.android.viewmodels.MissionDetailViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
 import chat.matron.android.viewmodels.MissionsListViewModel
+import chat.matron.android.viewmodels.GoToNumberResolver
 import chat.matron.android.viewmodels.TrackerItemLinkResolver
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalMaintenance
@@ -578,6 +579,26 @@ class AppDependencies(
             is TrackerItemLinkResolver.Resolution.Open -> TrackerItemLinkOutcome.Open(resolution.itemID)
             else -> TrackerItemLinkOutcome.Explain(resolution.alertMessage(num) ?: "Item #$num couldn't be opened.")
         }
+    }
+
+    /**
+     * "Go to #N" for a session: the local store first, then the journal's
+     * `/lookup`, then whatever sync puts the target on this device. Lives
+     * here for the same reason as [trackerItemLinkOutcome] — this is the one
+     * layer that sees the store, the API and both syncs. [missionsSupported]
+     * is the shell's live answer, read at open time.
+     */
+    fun goToNumberResolver(session: UserSession, missionsSupported: () -> Boolean): GoToNumberResolver {
+        val c = core(session)
+        return GoToNumberResolver(
+            localItem = { c.store.item(num = it) },
+            localMission = { c.store.mission(num = it) },
+            lookup = { c.api.lookup(user = session.userID, num = it) },
+            resolveItem = { TrackerItemLinkResolver(c.store, c.itemsSync).resolve(it) },
+            missionCached = { c.store.mission(id = it) != null },
+            refreshMission = { c.missionsSync.refreshMission(it) },
+            missionsSupported = missionsSupported,
+        )
     }
 
     fun pushService(session: UserSession): PushService =

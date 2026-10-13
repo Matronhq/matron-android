@@ -1,10 +1,14 @@
 package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.ChatSummary
+import chat.matron.android.journal.NumberKind
 import chat.matron.android.models.BotIdentity
 import chat.matron.android.search.SearchHit
 import java.time.Instant
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -214,5 +218,121 @@ class SearchViewModelTest {
         assertEquals(listOf(3, 1), vm.messageHits.value.map { it.count })
         assertEquals("4", vm.messageHits.value[0].newestHit.id)
         assertEquals("x", vm.trimmedQuery)
+    }
+
+    // MARK: Search by number
+
+    private fun itemHit(num: Int, title: String? = "Fix the login form") =
+        NumberHit(NumberKind.ITEM, num, title, "i$num")
+
+    @Test
+    fun aBareNumberQueryExposesTheNumberHit() = runBlocking {
+        val asked = mutableListOf<Int>()
+        val vm = SearchViewModel(FakeSearchService(), emptyList()) { num -> asked += num; itemHit(num) }
+        vm.query = " #412 "
+        vm.search()
+        assertEquals(itemHit(412), vm.numberHit.value)
+        vm.query = "412"
+        vm.search()
+        assertEquals(itemHit(412), vm.numberHit.value)
+        assertEquals(listOf(412, 412), asked)
+    }
+
+    @Test
+    fun messageSearchStillRunsForANumber() = runBlocking {
+        val fakeSearch = FakeSearchService(
+            hits = listOf(SearchHit("\$1", "!r:s", "@a:s", Instant.now(), "build <mark>412</mark> passed")),
+        )
+        val vm = SearchViewModel(fakeSearch, emptyList()) { itemHit(it) }
+        vm.query = "412"
+        vm.search()
+        assertEquals(1, vm.messageHits.value.size)
+        assertEquals(itemHit(412), vm.numberHit.value)
+    }
+
+    @Test
+    fun onlyABareNumberIsLookedUp() = runBlocking {
+        val asked = mutableListOf<Int>()
+        val vm = SearchViewModel(FakeSearchService(), emptyList()) { num -> asked += num; itemHit(num) }
+        for (text in listOf("build 412", "412a", "# 412", "0", "")) {
+            vm.query = text
+            vm.search()
+            assertEquals("\"$text\"", null, vm.numberHit.value)
+        }
+        assertEquals(emptyList<Int>(), asked)
+    }
+
+    @Test
+    fun noMatchOrAFailedLookupAddsNothing() = runBlocking {
+        var answer: () -> NumberHit? = { null }
+        val vm = SearchViewModel(FakeSearchService(), emptyList()) { answer() }
+        vm.query = "412"
+        vm.search()
+        assertEquals(null, vm.numberHit.value)
+        answer = { throw IllegalStateException("offline") }
+        vm.search()
+        assertEquals(null, vm.numberHit.value)
+        assertEquals("a failed lookup is not a failed search", false, vm.searchFailed.value)
+    }
+
+    @Test
+    fun withoutALookupThereIsNoNumberSection() = runBlocking {
+        val vm = SearchViewModel(FakeSearchService(), emptyList())
+        vm.query = "412"
+        vm.search()
+        assertEquals(null, vm.numberHit.value)
+    }
+
+    @Test
+    fun editingAwayFromTheNumberDropsItsHitAtOnce() = runBlocking {
+        val gate = CompletableDeferred<Unit>()
+        val fakeSearch = FakeSearchService()
+        val vm = SearchViewModel(fakeSearch, emptyList()) { itemHit(it) }
+        vm.query = "412"
+        vm.search()
+        assertEquals(itemHit(412), vm.numberHit.value)
+        // The next search parks in the message query; the stale hit must
+        // already be gone rather than sit above the new query's results.
+        fakeSearch.queryGate = gate
+        vm.query = "412 passed"
+        val next = launch { vm.search() }
+        yield()
+        assertEquals(null, vm.numberHit.value)
+        gate.complete(Unit)
+        next.join()
+        assertEquals(null, vm.numberHit.value)
+    }
+
+    /// Each keystroke starts its own search: a slow answer for `41` must not
+    /// land once the query has become `412`.
+    @Test
+    fun aStaleLookupNeverOverwritesTheCurrentQuery() = runBlocking {
+        val slow = CompletableDeferred<Unit>()
+        val vm = SearchViewModel(FakeSearchService(), emptyList()) { num ->
+            if (num == 41) slow.await()
+            itemHit(num, title = "T$num")
+        }
+        vm.query = "41"
+        val first = launch { vm.search() }
+        yield()
+        vm.query = "412"
+        vm.search()
+        assertEquals(itemHit(412, title = "T412"), vm.numberHit.value)
+        slow.complete(Unit)
+        first.join()
+        assertEquals("the late #41 answer is dropped", itemHit(412, title = "T412"), vm.numberHit.value)
+    }
+
+    @Test
+    fun aStaleLookupIsDroppedWhenTheQueryIsNoLongerANumber() = runBlocking {
+        val slow = CompletableDeferred<Unit>()
+        val vm = SearchViewModel(FakeSearchService(), emptyList()) { num -> slow.await(); itemHit(num) }
+        vm.query = "412"
+        val first = launch { vm.search() }
+        yield()
+        vm.query = "412 passed"
+        slow.complete(Unit)
+        first.join()
+        assertEquals(null, vm.numberHit.value)
     }
 }
