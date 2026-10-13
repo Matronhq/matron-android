@@ -69,13 +69,16 @@ fun itemRowAccessibilityLabel(item: TrackerItem): String =
 /// One tracker item in the list: kind glyph, `#num`, title, a one-line body
 /// preview, origin (All scope), state caption, comment count, and a thumbnail
 /// of the first image attachment. Ported from matron-apple's `ItemRow`.
-/// [thumbnail] is a Coil model (bytes, URL, file) or `null`.
+/// [thumbnail] is a Coil model (bytes, URL, file) or `null`. [closedCaption]
+/// replaces the state caption — For you's Done tab passes
+/// [ItemGlyph.closedCaption] so the row also says when.
 @Composable
 fun ItemRow(
     item: TrackerItem,
     modifier: Modifier = Modifier,
     origin: String? = null,
     thumbnail: Any? = null,
+    closedCaption: String? = null,
 ) {
     Row(
         modifier = modifier
@@ -133,7 +136,7 @@ fun ItemRow(
                 itemMissionChipText(item)?.let { chip ->
                     Text(chip, style = MaterialTheme.typography.labelSmall, color = tertiary)
                 }
-                itemRowStatusCaption(item)?.let { caption ->
+                (closedCaption ?: itemRowStatusCaption(item))?.let { caption ->
                     Text(
                         caption,
                         style = MaterialTheme.typography.labelSmall,

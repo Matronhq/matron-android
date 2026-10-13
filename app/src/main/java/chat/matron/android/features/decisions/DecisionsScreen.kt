@@ -33,11 +33,15 @@ import chat.matron.android.designsystem.DecisionsListView
 import chat.matron.android.designsystem.DecisionsRow
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.features.gotonumber.GoToNumberButton
+import chat.matron.android.models.ForYouTab
 import chat.matron.android.viewmodels.ItemsPanelViewModel
+import java.time.Instant
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /// The For you tab's root (app shell, spec §3; once "Decisions"): every open item awaiting
-/// the user across every conversation, fed by the shell's app-wide
+/// the user across every conversation, and on its Done tab every closed
+/// question, decision and notice, fed by the shell's app-wide
 /// `ItemsPanelViewModel(convoID = null)`. The SHELL starts and stops that
 /// view model (its badge must be live app-wide, not only while this tab
 /// shows); this screen only reads it. Refresh failures surface through the
@@ -65,7 +69,23 @@ fun DecisionsScreen(
     val coroutineScope = rememberCoroutineScope()
     var titles by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
-    val origins = remember(awaiting) { awaiting.map { it.originConvoID }.distinct() }
+    val tab by viewModel.forYouTab.collectAsStateWithLifecycle()
+    val decided by viewModel.decided.collectAsStateWithLifecycle()
+    val decidedVisibleCount by viewModel.decidedVisibleCount.collectAsStateWithLifecycle()
+    // Only while the Done tab shows, so the open list never pays for it.
+    val closed = remember(tab, decided, decidedVisibleCount) {
+        if (tab == ForYouTab.CLOSED) decided.take(decidedVisibleCount) else emptyList()
+    }
+    // The Done captions' clock, ticking only while that tab shows.
+    var now by remember { mutableStateOf(Instant.now()) }
+    LaunchedEffect(tab) {
+        while (tab == ForYouTab.CLOSED) {
+            now = Instant.now()
+            delay(60_000)
+        }
+    }
+
+    val origins = remember(awaiting, closed) { (awaiting + closed).map { it.originConvoID }.distinct() }
     LaunchedEffect(origins) {
         if (origins.isNotEmpty()) titles = runCatching { originLabels() }.getOrDefault(emptyMap())
     }
@@ -95,11 +115,17 @@ fun DecisionsScreen(
                         rows = awaiting.map { DecisionsRow(it, titles[it.originConvoID]) },
                         isSupported = isSupported,
                         isRefreshing = isRefreshing,
+                        tab = tab,
+                        closed = closed.map { DecisionsRow(it, titles[it.originConvoID]) },
+                        closedTotalCount = decided.size,
                     ),
                     onSelect = onSelect,
                     onOpenConversation = onOpenConversation,
                     onRefresh = { coroutineScope.launch { viewModel.refresh() } },
                     onMarkSeen = { item -> coroutineScope.launch { viewModel.markSeen(item) } },
+                    onSelectTab = viewModel::selectForYouTab,
+                    onShowMoreClosed = viewModel::showMoreDecided,
+                    now = now,
                 )
             }
         }

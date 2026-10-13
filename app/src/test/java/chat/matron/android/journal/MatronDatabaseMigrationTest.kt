@@ -732,6 +732,35 @@ class MatronDatabaseMigrationTest {
         }
     }
 
+    /// MIGRATION_14_15: `item` gains `last_user_input_at`. A row cached before
+    /// the upgrade has none, so it sorts by its close time; a row written
+    /// after it keeps the time, and loses it again when the next copy has
+    /// none.
+    @Test
+    fun migratesToV15AndKeepsAnItemsLastUserInput() = runBlocking {
+        val file = File.createTempFile("migration-test-v8-v15", ".sqlite").also { it.delete() }
+        buildV8(file)
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:alice")
+            val cached = store.items(chat.matron.android.models.ItemsScope.All)
+            assertTrue("the v7 fixture caches an item", cached.isNotEmpty())
+            assertTrue(cached.all { it.lastUserInputAt == null })
+
+            val item = TrackerItem(
+                id = "it_u", num = 99, kind = ItemKind.QUESTION, title = "Ship?", originConvoID = "c9",
+                lastUserInputAt = Instant.ofEpochMilli(7_000),
+            )
+            store.upsertItems(listOf(item))
+            assertEquals(Instant.ofEpochMilli(7_000), store.item("it_u")?.lastUserInputAt)
+            store.upsertItems(listOf(item.copy(lastUserInputAt = null)))
+            assertNull(store.item("it_u")?.lastUserInputAt)
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
     /// `open(onOpened:)` reports how long the migration chain took on the
     /// open that ran it (the launch timeline's nested `migration` interval)
     /// and `null` on a later open of the same, now up-to-date file.

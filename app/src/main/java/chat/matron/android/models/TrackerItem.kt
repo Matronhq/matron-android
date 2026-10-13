@@ -253,6 +253,11 @@ data class TrackerItem(
     val actions: List<String> = emptyList(),
     /// The label of the user's latest tap on [actions]; `null` until one.
     val chosenAction: String? = null,
+    /// When the user last acted on the item, as the journal derives it: their
+    /// latest comment, action tap, close or reopen, else the filing time of
+    /// an item they filed. `null` when only agents have touched it, and on a
+    /// journal that predates the field.
+    val lastUserInputAt: Instant? = null,
     /// Whether the session that owns the item is busy, as the journal derived
     /// it when the item was read; `null` when there is nothing to show, on
     /// an item another person shares, and on a journal that predates the
@@ -279,6 +284,12 @@ data class TrackerItem(
 
     /// `awaiting='user'` on an open item is the "Needs you" set across all kinds.
     val needsUser: Boolean get() = state == ItemState.OPEN && awaiting == ItemAwaiting.USER
+
+    /// Where a closed item sorts on For you's Done tab, and the time its row
+    /// shows: the user's own last input when the journal reports one, else
+    /// when it was closed. An agent often closes an item long after the user
+    /// answered it, so the close time alone buries a decision just made.
+    val closedSortDate: Instant get() = lastUserInputAt ?: closedAt ?: updatedAt
 
     /// An open notice the user can still mark as read with one tap — the For
     /// you row's Seen button and swipe, and the detail screen's button.
@@ -323,6 +334,7 @@ data class TrackerItem(
                     ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.takeIf(String::isNotEmpty) }
                     ?: emptyList(),
                 chosenAction = json.stringOrNull("chosen_action"),
+                lastUserInputAt = msInstant(json.longOrNull("last_user_input_at")),
                 working = ItemWorking.fromJson(json.objectOrNull("working")),
             )
         }

@@ -280,6 +280,10 @@ data class ItemEntity(
     /// The item's `working` state as JSON (v13), with the launch that
     /// fetched it ([storedItemWorkingJson]); `null` when it has none.
     @ColumnInfo(name = "working_json") val workingJson: String? = null,
+    /// When the user last acted on the item (v15), the order of For you's
+    /// Done tab; rows cached before v15 read `null` and sort by their close
+    /// time until their next refetch.
+    @ColumnInfo(name = "last_user_input_at") val lastUserInputAt: Long? = null,
 ) {
     fun toItem(): TrackerItem = TrackerItem(
         id = id, num = num, kind = ItemKind.fromWire(kind) ?: ItemKind.TASK,
@@ -297,6 +301,7 @@ data class ItemEntity(
         missionID = missionID, missionNum = missionNum,
         actions = actionsJson?.let { decodeList(it, ListSerializer(String.serializer())) } ?: emptyList(),
         chosenAction = chosenAction,
+        lastUserInputAt = lastUserInputAt?.let(Instant::ofEpochMilli),
         working = workingJson?.let(::storedItemWorking),
     )
 
@@ -317,6 +322,7 @@ data class ItemEntity(
             chosenAction = i.chosenAction,
             originConvoTitle = i.originConvoTitle,
             workingJson = i.working?.let(::storedItemWorkingJson),
+            lastUserInputAt = i.lastUserInputAt?.toEpochMilli(),
         )
     }
 }
