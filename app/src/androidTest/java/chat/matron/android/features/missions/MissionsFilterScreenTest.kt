@@ -124,8 +124,12 @@ class MissionsFilterScreenTest {
                     node(archived) // Clearing preserves the expanded fold too.
 
                     node(field).text = "#56"
+                    // The archived row already existed before this edit. Wait
+                    // for the open rows to leave before tapping its new position.
+                    absent(launch)
+                    absent(upload)
                     node(archived).click()
-                    device.waitForIdle()
+                    InstrumentationRegistry.getInstrumentation().waitForIdleSync()
                     assertEquals("ms_3", selected.get())
                 }
             } finally {
