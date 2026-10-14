@@ -10,9 +10,9 @@ import kotlinx.serialization.json.JsonObject
 ///
 /// It arrives as a `permission_request` event whose payload carries
 /// `kind: "agent_chat"`, and it is *client-only*: the journal filters it out
-/// of every agent-facing replay and refuses to let an agent mint one. Nothing
-/// in the timeline answers it — the answer is `POST /agent-chat/answer`, over
-/// HTTP, keyed on `roomID` + `targetDeviceID`.
+/// of every agent-facing replay and refuses to let an agent mint one. Answers
+/// use `POST /agent-chat/answer`, over HTTP, keyed on `roomID` +
+/// `targetDeviceID`; consent markers record the resulting state in history.
 ///
 /// Deliberately NOT modelled as an `AskUserEvent`: that type's generic
 /// Allow/Deny buttons answer over `prompt_reply`, which never reaches the
@@ -47,6 +47,9 @@ data class AgentChatRequest(
     val topic: String?,
     val justification: String?,
 ) {
+    /// Stable ask key carried by consent markers and Coordinator decisions.
+    val askID: String get() = askID(roomID, targetDeviceID)
+
     /// Which way round the ask goes. An `INVITE` is the requesting agent
     /// pulling `targetDeviceID` into a room it owns; a `JOIN` is the requester
     /// asking to be let into someone else's room, in which case it
@@ -88,6 +91,8 @@ data class AgentChatRequest(
         }
 
     companion object {
+        fun askID(roomID: String, targetDeviceID: Long): String = "$roomID/$targetDeviceID"
+
         /// Parses a `permission_request` payload, or null if this is not an
         /// agent-chat card. Strict about the four fields an answer needs
         /// (`room_id`, `target_device_id`, `from_device_id`, a known
@@ -155,14 +160,13 @@ data class AgentChatRequest(
 
 /// Where one consent card is in its short life.
 ///
-/// `Answered` has to be remembered by the client: answering is an HTTP call,
-/// so unlike an ask-user reply it leaves no event in the timeline to read the
-/// outcome back from. `Expired` is the server's 409 — the row is no longer
-/// awaiting anyone, because it timed out or was decided on another device.
+/// The timeline's consent markers settle answers from any device. Local
+/// answers are remembered while those markers arrive. `Expired` also covers
+/// the server's 409 when the real decision is not yet available locally.
 sealed class AgentChatCardState {
     data object Idle : AgentChatCardState()
     data object Sending : AgentChatCardState()
-    data class Answered(val approved: Boolean) : AgentChatCardState()
+    data class Answered(val approved: Boolean, val byCoordinator: Boolean = false) : AgentChatCardState()
     data object Expired : AgentChatCardState()
     data class Failed(val message: String) : AgentChatCardState()
 }

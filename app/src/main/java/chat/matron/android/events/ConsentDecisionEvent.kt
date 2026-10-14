@@ -1,6 +1,7 @@
 package chat.matron.android.events
 
 import chat.matron.android.journal.stringOrNull
+import chat.matron.android.journal.longOrNull
 import kotlinx.serialization.json.JsonObject
 
 /// The journal's `consent_decision` event (protocol: "Coordinator consent →
@@ -14,6 +15,8 @@ data class ConsentDecisionEvent(
     val decision: Decision,
     /// The Coordinator's one-line reason, as the user reads it on the card.
     val reason: String? = null,
+    /// Chat: room/device key; spawn: request id. Absent on older payloads.
+    val askID: String? = null,
 ) {
     enum class Kind(val wire: String) { CHAT("chat"), SPAWN("spawn") }
     enum class Decision(val wire: String) { APPROVE("approve"), DECLINE("decline") }
@@ -34,7 +37,15 @@ data class ConsentDecisionEvent(
         fun parse(payload: JsonObject): ConsentDecisionEvent? {
             val kind = Kind.entries.firstOrNull { it.wire == payload.stringOrNull("kind") } ?: return null
             val decision = Decision.entries.firstOrNull { it.wire == payload.stringOrNull("decision") } ?: return null
-            return ConsentDecisionEvent(kind, decision, payload.stringOrNull("reason"))
+            val askID = when (kind) {
+                Kind.CHAT -> {
+                    val room = payload.stringOrNull("room_id")?.takeIf { it.isNotEmpty() }
+                    val target = payload.longOrNull("target_device_id")
+                    if (room != null && target != null) AgentChatRequest.askID(room, target) else null
+                }
+                Kind.SPAWN -> payload.stringOrNull("request_id")?.takeIf { it.isNotEmpty() }
+            }
+            return ConsentDecisionEvent(kind, decision, payload.stringOrNull("reason"), askID)
         }
     }
 }
