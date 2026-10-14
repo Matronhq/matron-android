@@ -368,6 +368,7 @@ fun ItemDetailScreen(
                                 isBusy = isBusy,
                                 onClose = { r -> scope.launch { viewModel.close(r) } },
                                 onReopen = { scope.launch { viewModel.reopen() } },
+                                canReopen = viewModel.canReopen,
                             )
                         }
                     },

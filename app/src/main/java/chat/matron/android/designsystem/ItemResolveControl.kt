@@ -39,9 +39,10 @@ internal fun resolveActionIcon(resolution: ItemResolution): ImageVector = when (
 
 /// Whether the control renders at all: an open item with nothing honest to
 /// offer (a question nobody has replied to has only "Dismiss", so that still
-/// shows) hides it; a closed item always offers Reopen.
-fun resolveControlVisible(isOpen: Boolean, resolutions: List<ItemResolution>): Boolean =
-    if (isOpen) resolutions.isNotEmpty() else true
+/// shows) hides it; a closed item shows it only when it can be reopened (a
+/// consent ask's mirror cannot).
+fun resolveControlVisible(isOpen: Boolean, resolutions: List<ItemResolution>, canReopen: Boolean = true): Boolean =
+    if (isOpen) resolutions.isNotEmpty() else canReopen
 
 /// The item's resolve/reopen menu — an overflow button in the top bar, not a
 /// button above the keyboard: a "Close" over the composer read as "close
@@ -59,8 +60,9 @@ fun ItemResolveControl(
     onClose: (ItemResolution) -> Unit,
     onReopen: () -> Unit,
     modifier: Modifier = Modifier,
+    canReopen: Boolean = true,
 ) {
-    if (!resolveControlVisible(isOpen, resolutions)) return
+    if (!resolveControlVisible(isOpen, resolutions, canReopen)) return
     var open by remember { mutableStateOf(false) }
     Box(modifier) {
         IconButton(onClick = { open = true }, enabled = !isBusy) {

@@ -106,7 +106,15 @@ class ItemsViewsTest {
         assertEquals(listOf("Mark done", "Mark answered", "Mark decided", "Reverse", "Dismiss"), ItemResolution.entries.map(::resolveActionLabel))
         assertFalse("an open item with nothing honest to offer hides the control", resolveControlVisible(isOpen = true, resolutions = emptyList()))
         assertTrue(resolveControlVisible(isOpen = true, resolutions = listOf(ItemResolution.CANCELLED)))
-        assertTrue("a closed item always offers Reopen", resolveControlVisible(isOpen = false, resolutions = emptyList()))
+        assertTrue("a closed item offers Reopen", resolveControlVisible(isOpen = false, resolutions = emptyList()))
+        assertFalse(
+            "a closed item that cannot be reopened has nothing to offer",
+            resolveControlVisible(isOpen = false, resolutions = emptyList(), canReopen = false),
+        )
+        assertTrue(
+            "canReopen says nothing about closing an open item",
+            resolveControlVisible(isOpen = true, resolutions = listOf(ItemResolution.CANCELLED), canReopen = false),
+        )
     }
 
     private fun status(from: TrackerItem.StatusSnapshot?, to: TrackerItem.StatusSnapshot?, author: ItemAuthor = ItemAuthor.AGENT) =

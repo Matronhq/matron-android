@@ -9,6 +9,7 @@ import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.ItemState
 import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
+import chat.matron.android.models.TrackerLink
 import java.io.File
 import java.nio.file.Files
 import kotlinx.coroutines.CompletableDeferred
@@ -471,6 +472,52 @@ class ItemDetailViewModelTest {
         assertEquals(listOf("it_1", "it_1", "it_1"), sync.refetched)
         assertFalse(vm.isBusy.value)
         vm.stop()
+    }
+
+    /// The journal refuses to reopen a consent ask's mirror (409), so a closed
+    /// one offers no Reopen; an ordinary closed item still does.
+    @Test
+    fun aConsentAskCannotBeReopened() = runBlocking {
+        val api = Api(); val sync = Sync(); val store = FakeItemsStore()
+        val vm = ItemDetailViewModel("it_1", store, api, sync, this, staging)
+        vm.start()
+        waitUntil { sync.refetched == listOf("it_1") }
+        val plain = TrackerItem(id = "it_1", num = 1, kind = ItemKind.QUESTION, state = ItemState.CLOSED, title = "Q", originConvoID = "c1")
+        store.item.emit(plain)
+        waitUntil { vm.item.value != null }
+        assertTrue(vm.canReopen)
+        store.item.emit(plain.copy(labels = listOf("consent"), links = listOf(TrackerLink("matron://consent/spawn/sp_1"))))
+        waitUntil { vm.item.value?.links?.isNotEmpty() == true }
+        assertFalse(vm.canReopen)
+        vm.stop()
+    }
+
+    @Test
+    fun consentLinksAreReadFromTheLinkNotTheLabel() {
+        fun item(vararg urls: String, labels: List<String> = emptyList()) =
+            TrackerItem(id = "it_1", num = 1, kind = ItemKind.QUESTION, title = "Q", originConvoID = "c1", labels = labels, links = urls.map { TrackerLink(it) })
+        for (url in listOf(
+            "matron://consent/spawn/sp_1",
+            "matron://consent/chat/room_1/7",
+            "matron://consent/contact/ct_1",
+            "matron://consent/share/gr_1",
+            "MATRON://Consent/spawn/sp_1",
+        )) {
+            assertTrue(url, item(url).isConsentAsk)
+        }
+        assertTrue("any one link is enough", item("https://example.com/pr/1", "matron://consent/spawn/sp_1").isConsentAsk)
+        for (url in listOf(
+            "matron://consent",
+            "matron://consent/",
+            "matron://consent/spawn/sp_1?x=1",
+            "matron://consent/spawn/sp_1#f",
+            "matron://item/65",
+            "https://consent/spawn/sp_1",
+            "not a url",
+        )) {
+            assertFalse(url, item(url).isConsentAsk)
+        }
+        assertFalse("the label alone is decoration", item(labels = listOf("consent")).isConsentAsk)
     }
 
     /// A failed send puts the text and the tray back for another go.
