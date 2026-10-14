@@ -26,7 +26,26 @@ data class ItemMarkerEvent(
     val awaiting: ItemAwaiting? = null,
     val resolution: ItemResolution? = null,
     val comment: Comment? = null,
+    /// Consent mirror metadata; absent from ordinary items and older journals.
+    val consent: String? = null,
+    val consentAsk: String? = null,
+    val consentOutcome: String? = null,
+    val decidedBy: String? = null,
 ) {
+    /// Restate a card from later lifecycle/reply markers, keeping its identity
+    /// and closing note unless the item has since reopened.
+    fun restated(latest: ItemMarkerEvent): ItemMarkerEvent {
+        val closed = latest.action == Action.CLOSED ||
+            (latest.action != Action.REOPENED && latest.resolution != null)
+        return copy(
+            title = latest.title,
+            action = if (closed) Action.CLOSED else Action.CREATED,
+            awaiting = latest.awaiting,
+            resolution = if (closed) latest.resolution ?: resolution else null,
+            comment = if (closed == (action == Action.CLOSED)) comment else null,
+        )
+    }
+
     enum class Action(val wire: String) {
         CREATED("created"), COMMENTED("commented"), CLOSED("closed"), REOPENED("reopened"),
         REORDERED("reordered"), UPDATED("updated");
@@ -64,6 +83,10 @@ data class ItemMarkerEvent(
                 awaiting = ItemAwaiting.fromWire(payload.stringOrNull("awaiting")),
                 resolution = ItemResolution.fromWire(payload.stringOrNull("resolution")),
                 comment = comment,
+                consent = payload.stringOrNull("consent")?.takeIf { it.isNotEmpty() },
+                consentAsk = payload.stringOrNull("consent_ask")?.takeIf { it.isNotEmpty() },
+                consentOutcome = payload.stringOrNull("consent_outcome")?.takeIf { it.isNotEmpty() },
+                decidedBy = payload.stringOrNull("decided_by")?.takeIf { it.isNotEmpty() },
             )
         }
     }

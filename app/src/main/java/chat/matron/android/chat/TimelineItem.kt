@@ -113,9 +113,8 @@ data class TimelineItem(
         /// another. Its own kind, not an [AskUser], because the answer goes
         /// over HTTP (`POST /agent-chat/answer`) rather than into the timeline,
         /// and because who-is-asking and why are the whole point of the
-        /// decision. `eventID` is the journal seq, used to remember locally
-        /// that this card was answered — the answer produces no journal event
-        /// to read that back from.
+        /// decision. `eventID` is the journal seq, used for local answers and
+        /// resolutions derived from the journal's consent markers.
         data class AgentChatRequestCard(
             val eventID: String,
             val request: AgentChatRequest,

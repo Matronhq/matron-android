@@ -473,11 +473,8 @@ class ChatViewModel(
     /// Consent cards answered on THIS device, keyed by journal seq, with the
     /// decision made. Persisted under `matron.agentChatAnswers.<roomID>`.
     ///
-    /// Unlike an ask-user reply, answering a consent card is an HTTP call and
-    /// produces no journal event — so there is nothing in the timeline to read
-    /// the outcome back from, on this device or any other. Local memory is the
-    /// only thing standing between the user and a card that looks unanswered
-    /// forever.
+    /// Answering is an HTTP call. Local memory bridges the wait for durable
+    /// consent markers, and remembers a 409 when no matching marker is loaded.
     ///
     /// Stored as "<seq>:<decision>" strings because [KeyValueStore] carries
     /// ordered string lists, not maps. Journal seqs are digits, so the first
@@ -495,9 +492,15 @@ class ChatViewModel(
     private val _agentChatStates = MutableStateFlow<Map<String, AgentChatCardState>>(emptyMap())
     val agentChatStates: StateFlow<Map<String, AgentChatCardState>> = _agentChatStates.asStateFlow()
 
-    /// Render state for one consent card. A remembered decision wins over
-    /// everything: once answered, the card is history.
+    /// Durable decisions derived from history, including answers made elsewhere.
+    /// Observed separately so a late decision redraws an unchanged request row.
+    private val _agentChatResolutions = MutableStateFlow<Map<String, AgentChatCardState>>(emptyMap())
+    val agentChatResolutions: StateFlow<Map<String, AgentChatCardState>> = _agentChatResolutions.asStateFlow()
+
+    /// Journal history knows the actual outcome and who decided; it takes
+    /// precedence over a locally remembered answer or 409 fallback.
     fun agentChatState(eventID: String): AgentChatCardState {
+        _agentChatResolutions.value[eventID]?.let { return it }
         agentChatAnswers[eventID]?.let { decision ->
             return if (decision == EXPIRED_ANSWER) {
                 AgentChatCardState.Expired
@@ -531,6 +534,7 @@ class ChatViewModel(
     ) {
         val answerer = agentChat ?: return
         if (agentChatAnswers.containsKey(eventID)) return
+        if (_agentChatResolutions.value.containsKey(eventID)) return
         if (_agentChatStates.value[eventID] is AgentChatCardState.Sending) return
         setAgentChatState(eventID, AgentChatCardState.Sending)
         scope.launch {
@@ -663,9 +667,11 @@ class ChatViewModel(
         applyDerivedRecompute()
     }
 
-    /// Single pass: filter hidden items, interleave day separators, capture
-    /// first/last renderable ids and the activity-indicator label.
+    /// Fold consent/item history, then build render rows and day separators,
+    /// capturing first/last renderable ids and the activity-indicator label.
     private fun applyDerivedRecompute() {
+        val consentFold = TimelineConsentFold.read(_items.value)
+        _agentChatResolutions.value = consentFold.chatResolutions
         val nextRows = ArrayList<TimelineRow>(_items.value.size + 4)
         var first: String? = null
         var last: String? = null
@@ -679,7 +685,13 @@ class ChatViewModel(
         val cardReleaseKey = mutableMapOf<String, String>()
         val nonOwnSenders = mutableSetOf<String>()
         var nextHasMultipleSenders = false
-        for (item in _items.value) {
+        for (original in _items.value) {
+            if (original.id in consentFold.hiddenItemRows) continue
+            val marker = original.kind as? TimelineItem.Kind.ItemMarker
+            val restated = consentFold.restatedItemMarkers[original.id]
+            val item = if (marker != null && restated != null) {
+                original.copy(kind = TimelineItem.Kind.ItemMarker(marker.eventID, restated))
+            } else original
             when (val kind = item.kind) {
                 // The trailing activity indicator renders as a fixed footer, NOT a
                 // row (as a row it became the scroll anchor during every bot turn

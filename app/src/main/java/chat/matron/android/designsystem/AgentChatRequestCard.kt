@@ -31,8 +31,8 @@ import chat.matron.android.events.AgentChatRequest
 /// Deliberately its own card rather than an [AskUserCard]: a consent decision
 /// rests on facts (who is asking, about what, and why) that a generic prompt
 /// has nowhere to put, and its answer leaves over HTTP rather than into the
-/// conversation, so there is no timeline echo to read the outcome back from —
-/// hence the explicit [state].
+/// conversation. The explicit [state] includes the journal's later consent
+/// markers, which also record answers made elsewhere.
 @Composable
 fun AgentChatRequestCard(
     request: AgentChatRequest,
@@ -84,7 +84,8 @@ fun AgentChatRequestCard(
                     modifier = Modifier.size(18.dp),
                 )
                 Text(
-                    if (state.approved) "Approved" else "Declined",
+                    (if (state.approved) "Approved" else "Declined") +
+                        (if (state.byCoordinator) " by the Coordinator" else ""),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

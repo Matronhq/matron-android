@@ -784,10 +784,9 @@ private fun TimelineRowView(
     onOpenItem: ((String) -> Unit)?,
     onOpenMission: ((String) -> Unit)?,
 ) {
-    // Collected so a consent card's in-flight / answered state redraws: the
-    // answer is an HTTP call with no journal event behind it, so nothing in the
-    // timeline snapshot would otherwise change.
+    // Local HTTP answers and durable journal decisions both redraw a card.
     val agentChatStates by chatVM.agentChatStates.collectAsStateWithLifecycle()
+    val agentChatResolutions by chatVM.agentChatResolutions.collectAsStateWithLifecycle()
     // Collected so a file chip's spinner appears on tap and clears when the
     // open/share fires — the download flips no timeline snapshot either
     // (port of apple #138).
@@ -837,9 +836,9 @@ private fun TimelineRowView(
                     isPromptAnswered = { id -> releaseResolvedAnswers.let { chatVM.isPromptAnswered(id) } },
                     answerSummary = { id -> releaseResolvedAnswers.let { chatVM.answerSummary(id) } },
                     agentChatState = { id ->
-                        // Read through the view model (persisted decision wins);
-                        // `agentChatStates` above is what makes this recompose.
-                        agentChatStates.let { chatVM.agentChatState(id) }
+                        // Both local answers and decisions from journal history
+                        // must redraw the existing request row.
+                        agentChatResolutions[id] ?: agentChatStates.let { chatVM.agentChatState(id) }
                     },
                     onAnswerAgentChat = { eventID, request, approve ->
                         // Deliberately NOT wrapped in this row's coroutine
