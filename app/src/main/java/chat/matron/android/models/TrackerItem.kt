@@ -364,7 +364,27 @@ data class TrackerComment(
     /// comment it answers (`null` when it answered the item's own buttons).
     val action: String? = null,
     val replyTo: String? = null,
+    /// The journal's attribution for an agent comment. Absent on older rows
+    /// and on the user's own comments.
+    val deviceName: String? = null,
+    val convoID: String? = null,
+    val convoTitle: String? = null,
 ) {
+    val authorName: String
+        get() = if (author == ItemAuthor.USER) "You" else deviceName?.trim()?.takeIf { it.isNotEmpty() } ?: "Agent"
+
+    data class AuthorConversation(val id: String, val title: String)
+
+    /// A named conversation, flattened to one line; the view separately
+    /// checks whether this device has it before offering a tap.
+    val authorConversation: AuthorConversation?
+        get() {
+            if (author != ItemAuthor.AGENT || convoID.isNullOrBlank()) return null
+            val title = convoTitle.orEmpty().map { if (it.isWhitespace()) ' ' else it }.joinToString("")
+                .splitToSequence(' ').filter { it.isNotEmpty() }.joinToString(" ")
+            return title.takeIf { it.isNotEmpty() }?.let { AuthorConversation(convoID, it) }
+        }
+
     enum class Kind(val wire: String) {
         COMMENT("comment"), STATUS("status");
 
@@ -394,6 +414,9 @@ data class TrackerComment(
                 chosenAction = json.stringOrNull("chosen_action"),
                 action = json.stringOrNull("action"),
                 replyTo = json.stringOrNull("reply_to"),
+                deviceName = json.stringOrNull("device_name"),
+                convoID = json.stringOrNull("convo_id"),
+                convoTitle = json.stringOrNull("convo_title"),
             )
         }
     }

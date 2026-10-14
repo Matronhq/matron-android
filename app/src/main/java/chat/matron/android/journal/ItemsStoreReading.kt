@@ -16,6 +16,9 @@ interface ItemsStoreReading {
     fun itemsFlow(scope: ItemsScope): Flow<List<TrackerItem>>
     fun itemFlow(id: String): Flow<TrackerItem?>
     fun commentsFlow(itemID: String): Flow<List<TrackerComment>>
+    /// Which comment conversations this device has, followed live. A store
+    /// that cannot answer offers no conversation links.
+    fun knownConversationIDsFlow(ids: Set<String>): Flow<Set<String>> = flowOf(emptySet())
     /// One-shot read of [commentsFlow]'s current value — read by
     /// `ItemDetailViewModel` right after its opening refetch returns, so
     /// `loadedCommentCount` never flips ahead of the thread it vouches for.

@@ -29,6 +29,7 @@ import java.time.Instant
 import kotlin.math.max
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
@@ -635,6 +636,10 @@ class JournalStore(
 
     override fun commentsFlow(itemID: String): Flow<List<TrackerComment>> =
         itemCommentDao.forItemFlow(itemID).map { list -> list.map { it.toComment() } }.distinctUntilChanged()
+
+    override fun knownConversationIDsFlow(ids: Set<String>): Flow<Set<String>> =
+        if (ids.isEmpty()) flowOf(emptySet())
+        else conversationDao.knownIDsFlow(ids).map { it.toSet() }.distinctUntilChanged()
 
     suspend fun itemsMaxUpdatedAt(): Instant? = itemDao.maxUpdatedAt()?.let(Instant::ofEpochMilli)
 

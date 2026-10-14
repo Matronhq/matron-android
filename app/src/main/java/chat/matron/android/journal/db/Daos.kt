@@ -17,6 +17,9 @@ interface ConversationDao {
     @Query("SELECT EXISTS(SELECT 1 FROM conversation WHERE id = :id)")
     suspend fun exists(id: String): Boolean
 
+    @Query("SELECT id FROM conversation WHERE id IN (:ids)")
+    fun knownIDsFlow(ids: Set<String>): Flow<List<String>>
+
     @Query("SELECT parent_convo_id FROM conversation WHERE id = :id")
     suspend fun parentConvoID(id: String): String?
 
