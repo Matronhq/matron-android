@@ -21,6 +21,7 @@ class AppShellNavigationTest {
         override fun pushMission(tab: AppTab, missionID: String) { commands += "pushMission:${tab.name}:$missionID" }
         override fun replaceMissions(missionID: String) { commands += "replaceMissions:$missionID" }
         override fun pushMissionItem(itemID: String) { commands += "pushMissionItem:$itemID" }
+        override fun pushItem(tab: AppTab, itemID: String) { commands += "pushItem:${tab.name}:$itemID" }
         override fun pushMemories() { commands += "pushMemories" }
         override fun pushMemory(name: String?) { commands += "pushMemory:${name ?: "new"}" }
         override fun popToRoot(tab: AppTab) { commands += "popToRoot:${tab.name}" }
@@ -96,6 +97,27 @@ class AppShellNavigationTest {
         assertEquals(listOf("item/it_9"), nav.decisionsPath)
         assertEquals("pushing a decision never changes the tab", AppTab.CONVERSATIONS, nav.tab.value)
         assertEquals(listOf("pushDecision:it_9"), host.commands)
+    }
+
+    /// A shareable link opens its item over whatever the selected tab shows,
+    /// so Back returns to where the link was tapped; never a tab change.
+    @Test
+    fun openItemPushesOnTheSelectedTabAndIsIdempotent() {
+        val host = RecordingHost()
+        val nav = AppShellNavigation(host)
+        nav.openChat("c1")
+        host.commands.clear()
+        nav.openItem("it_4")
+        nav.openItem("it_4")
+        assertEquals(listOf("c1", "item/it_4"), nav.chatPath)
+        assertEquals(AppTab.CONVERSATIONS, nav.tab.value)
+        assertEquals("one host command, not two", listOf("pushItem:CONVERSATIONS:it_4"), host.commands)
+
+        nav.selectTab(AppTab.DECISIONS)
+        host.commands.clear()
+        nav.openItem("it_5")
+        assertEquals(listOf("item/it_5"), nav.decisionsPath)
+        assertEquals(listOf("pushItem:DECISIONS:it_5"), host.commands)
     }
 
     /// A double tap on a Decisions row: the host's own push no-ops for the
@@ -340,6 +362,7 @@ class AppShellNavigationTest {
             push(AppTab.MISSIONS, "mission/$missionID")
         }
         override fun pushMissionItem(itemID: String) { commands += "pushMissionItem:$itemID"; push(AppTab.MISSIONS, "item/$itemID") }
+        override fun pushItem(tab: AppTab, itemID: String) { commands += "pushItem:${tab.name}:$itemID"; push(tab, "item/$itemID") }
         override fun pushMemories() { commands += "pushMemories"; push(AppTab.MISSIONS, "memories") }
         override fun pushMemory(name: String?) { commands += "pushMemory:${name ?: "new"}"; push(AppTab.MISSIONS, AppShellNavigation.memoryRoute(name)) }
         override fun popToRoot(tab: AppTab) {

@@ -20,6 +20,7 @@ class MissionsNavigationTest {
         override fun pushMission(tab: AppTab, missionID: String) { commands += "pushMission:${tab.name}:$missionID" }
         override fun replaceMissions(missionID: String) { commands += "replaceMissions:$missionID" }
         override fun pushMissionItem(itemID: String) { commands += "pushMissionItem:$itemID" }
+        override fun pushItem(tab: AppTab, itemID: String) { commands += "pushItem:${tab.name}:$itemID" }
         override fun pushMemories() { commands += "pushMemories" }
         override fun pushMemory(name: String?) { commands += "pushMemory:${name ?: "new"}" }
         override fun popToRoot(tab: AppTab) { commands += "popToRoot:${tab.name}" }

@@ -67,6 +67,9 @@ class AppShellNavigation(var host: Host? = null) {
         fun replaceMissions(missionID: String)
         /// Push item [itemID]'s detail on the Missions stack.
         fun pushMissionItem(itemID: String)
+        /// Push item [itemID]'s detail on [tab]'s stack — every tab hosts
+        /// an item route under its own prefix.
+        fun pushItem(tab: AppTab, itemID: String)
         /// Push the Memories list on the Missions stack (spec 2026-09-27).
         fun pushMemories()
         /// Push the editor for memory [name] — `null` = a new memory — on
@@ -271,6 +274,18 @@ class AppShellNavigation(var host: Host? = null) {
         if (missionsPath.lastOrNull() == value) return
         missionsPath = missionsPath + value
         navigateExpecting(AppTab.MISSIONS, value) { host?.pushMissionItem(itemID) }
+    }
+
+    /// Open an item from a shareable link — tapped in a message or an item
+    /// body, or arriving from outside the app: push it on the SELECTED
+    /// tab's stack, so Back returns to wherever the link was. Never changes
+    /// the tab. Idempotent for the item already on top, like [pushDecision].
+    fun openItem(itemID: String) {
+        val tab = _tab.value
+        val value = itemRoute(itemID)
+        if (path(tab).lastOrNull() == value) return
+        setPath(tab, path(tab) + value)
+        navigateExpecting(tab, value) { host?.pushItem(tab, itemID) }
     }
 
     private fun handOffToConversations(convoID: String) {
