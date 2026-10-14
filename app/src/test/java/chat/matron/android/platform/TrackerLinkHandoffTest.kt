@@ -20,6 +20,21 @@ class TrackerLinkHandoffTest {
     }
 
     @Test
+    fun aRecreatedActivityResumesOnlyTheLinkStillWaiting() {
+        val url = "https://journal.example.com/u/alice/4"
+        assertEquals("a fresh launch reads its intent", url, launchLink(restored = false, saved = null, action = Intent.ACTION_VIEW, data = url))
+        assertEquals(
+            "a link still waiting survives the recreate",
+            url,
+            launchLink(restored = true, saved = url, action = Intent.ACTION_MAIN, data = null),
+        )
+        assertNull(
+            "the launching intent of a restored activity was taken already",
+            launchLink(restored = true, saved = null, action = Intent.ACTION_VIEW, data = url),
+        )
+    }
+
+    @Test
     fun trackerLinksStayInAppAndEverythingElseGoesToThePlatform() {
         val platform = mutableListOf<String>()
         val inApp = mutableListOf<String>()

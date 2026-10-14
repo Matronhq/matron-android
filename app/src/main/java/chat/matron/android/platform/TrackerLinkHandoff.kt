@@ -21,6 +21,13 @@ fun incomingViewLink(action: String?, data: String?): String? {
     return data.takeIf { scheme == "https" || scheme == "http" }
 }
 
+/// The link waiting to be opened when the activity is created. A restored
+/// activity is handed the intent it was first started with, already taken
+/// then, so it resumes only the link it [saved] as still waiting; a fresh
+/// one reads its launching intent.
+fun launchLink(restored: Boolean, saved: String?, action: String?, data: String?): String? =
+    if (restored) saved else incomingViewLink(action, data)
+
 /// The [UriHandler] every surface under the signed-in shell gets: a tracker
 /// link on this session's journal ([isTrackerLink]) opens in-app through
 /// [openTrackerLink]; everything else goes to [platform] as before. One

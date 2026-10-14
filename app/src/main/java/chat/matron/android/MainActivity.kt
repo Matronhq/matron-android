@@ -127,6 +127,7 @@ import chat.matron.android.viewmodels.SignInViewModel
 import chat.matron.android.platform.BrowserHandoff
 import chat.matron.android.platform.TrackerLinkUriHandler
 import chat.matron.android.platform.incomingViewLink
+import chat.matron.android.platform.launchLink
 import chat.matron.android.viewmodels.TrackerLinkRouter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -158,11 +159,18 @@ class MainActivity : FragmentActivity() {
     /// the signed-in shell takes it.
     private val incomingLinks = MutableStateFlow<String?>(null)
 
+    private companion object {
+        const val PENDING_LINK_KEY = "matron.pending-tracker-link"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // A restored activity's intent is the one it was first started with,
-        // already handled then.
-        if (savedInstanceState == null) incomingLinks.value = incomingViewLink(intent?.action, intent?.dataString)
+        incomingLinks.value = launchLink(
+            restored = savedInstanceState != null,
+            saved = savedInstanceState?.getString(PENDING_LINK_KEY),
+            action = intent?.action,
+            data = intent?.dataString,
+        )
         // Android 15 (targetSdk 35) enforces edge-to-edge, which disables the
         // manifest's adjustResize; opting in on every version keeps inset
         // behaviour uniform so screens can rely on imePadding() for the IME.
@@ -185,6 +193,14 @@ class MainActivity : FragmentActivity() {
     // single-activity app, so the two coincide, and ON_START/ON_STOP need no
     // extra dependency. The controller's own guards absorb the churn from the
     // credential prompt, which runs in a system activity that stops ours.
+    // A link still waiting for sign-in or unlock outlives a recreated
+    // activity (process death, a configuration change the activity does
+    // not handle itself).
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        incomingLinks.value?.let { outState.putString(PENDING_LINK_KEY, it) }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
