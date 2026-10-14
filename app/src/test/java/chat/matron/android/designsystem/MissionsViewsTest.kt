@@ -10,7 +10,9 @@ import chat.matron.android.models.MissionConversation
 import chat.matron.android.models.MissionState
 import chat.matron.android.models.SessionTagInputs
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /// Pins the missions views' pure UI rules (row labels, list states, card
@@ -51,6 +53,44 @@ class MissionsViewsTest {
         assertEquals("Closed (2)", missionsClosedHeaderText(2))
         assertEquals("Show closed missions", missionsClosedToggleLabel(false))
         assertEquals("Hide closed missions", missionsClosedToggleLabel(true))
+    }
+
+    @Test
+    fun filteringKeepsSectionOrderAndRefreshState() {
+        val open = listOf(mission().copy(id = "ms_2", num = 62), mission())
+        val closed = listOf(mission(state = MissionState.CLOSED).copy(id = "ms_3", num = 63, title = "Archived work", name = "Milestones"))
+        val model = MissionsListModel(open, closed, isSupported = true, isRefreshing = true, filterQuery = "milestones")
+        assertEquals(open, model.visibleOpen)
+        assertEquals(closed, model.visibleClosed)
+        assertTrue(model.isRefreshing)
+        assertEquals(MissionsListState.POPULATED, missionsListState(model))
+        val closedOnly = model.copy(filterQuery = "#63")
+        assertEquals(emptyList<Mission>(), closedOnly.visibleOpen)
+        assertEquals(closed, closedOnly.visibleClosed)
+        assertEquals(MissionsListState.POPULATED, missionsListState(closedOnly))
+    }
+
+    @Test
+    fun noMatchesIsDifferentFromNoMissionsOrUnsupported() {
+        val model = MissionsListModel(listOf(mission()), emptyList(), isSupported = true, isRefreshing = false, filterQuery = "zebra")
+        assertEquals(MissionsListState.NO_MATCHES, missionsListState(model))
+        assertEquals(MissionsListState.UNSUPPORTED, missionsListState(model.copy(isSupported = false)))
+        assertEquals(MissionsListState.EMPTY, missionsListState(model.copy(open = emptyList())))
+        assertEquals(MissionsListState.POPULATED, missionsListState(model.copy(filterQuery = "")))
+    }
+
+    @Test
+    fun closedMatchesAreRevealedUntilTheFilterIsCleared() {
+        val model = MissionsListModel(emptyList(), listOf(mission(state = MissionState.CLOSED)), true, false)
+        assertFalse(model.showsClosed(expanded = false))
+        assertTrue(model.showsClosed(expanded = true))
+        val filtered = model.copy(filterQuery = "milestones")
+        assertTrue(filtered.showsClosed(expanded = false))
+        assertTrue(filtered.showsClosed(expanded = true))
+        val cleared = filtered.copy(filterQuery = " \t")
+        assertFalse(cleared.showsClosed(expanded = false))
+        assertTrue(cleared.showsClosed(expanded = true))
+        assertEquals(model.closed, cleared.visibleClosed)
     }
 
     @Test
