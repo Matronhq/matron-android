@@ -1,12 +1,14 @@
 package chat.matron.android.designsystem
 
 import chat.matron.android.models.ItemKind
+import chat.matron.android.models.ItemHandover
 import chat.matron.android.models.Mission
 import chat.matron.android.models.TrackerItem
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.Instant
 
 /// Pins the item detail's context block: the mission an
 /// item belongs to and the conversation that owns it, under its "#N · Kind"
@@ -26,6 +28,21 @@ class ItemContextTest {
     private fun mission(name: String? = null) = Mission(id = "ms_1", num = 61, title = "Item detail context", name = name, originConvoID = "c1")
 
     // MARK: - Mission row
+
+    @Test
+    fun pendingOfferKeepsTheOwnerAndShowsEvenInsideTheOwningChat() {
+        val handover = ItemHandover(ItemHandover.State.OFFERED, "c2", "Review changes", Instant.ofEpochMilli(60_000))
+        val offered = item(missionID = null, missionNum = null).copy(handover = handover)
+        val outside = itemContext(offered, null, "Original chat", null)
+        assertEquals(ItemContextConversation("c1", "Original chat"), outside.owner)
+        assertEquals(handover, outside.handover)
+        val inside = itemContext(offered, "c1", null, null)
+        assertNull(inside.owner)
+        assertEquals(handover, inside.handover)
+        assertTrue(!inside.isEmpty)
+        val settled = itemContext(offered.copy(handover = null), "c1", null, null)
+        assertTrue(settled.isEmpty)
+    }
 
     @Test
     fun missionRowUsesTheNameThenTheTitle() {

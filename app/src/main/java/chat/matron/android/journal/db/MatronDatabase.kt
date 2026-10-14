@@ -83,6 +83,9 @@ import java.util.concurrent.atomic.AtomicLong
 /// v15 adds `item.last_user_input_at`: when the user last acted on an item,
 /// which orders For you's Done tab. Additive; cached rows read NULL and sort
 /// by their close time until their next fetch.
+///
+/// v16 adds `item.handover_json`: the pending offer shown below the owner.
+/// Additive; cached rows show no offer until their next fetch.
 @Database(
     entities = [
         ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
@@ -90,7 +93,7 @@ import java.util.concurrent.atomic.AtomicLong
         ItemEntity::class, ItemCommentEntity::class, ItemOutboxEntity::class,
         MissionEntity::class, MilestoneEntity::class, MissionConversationEntity::class,
     ],
-    version = 15,
+    version = 16,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -347,10 +350,16 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `item` ADD COLUMN `handover_json` TEXT")
+            }
+        }
+
         private val MIGRATIONS = listOf(
             MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
             MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
-            MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15,
+            MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
         )
 
         /// Production, file-backed at the given path. [onOpened] fires from

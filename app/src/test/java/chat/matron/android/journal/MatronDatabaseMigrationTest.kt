@@ -1,6 +1,7 @@
 package chat.matron.android.journal
 
 import chat.matron.android.models.ItemWorking
+import chat.matron.android.models.ItemHandover
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
@@ -755,6 +756,32 @@ class MatronDatabaseMigrationTest {
             assertEquals(Instant.ofEpochMilli(7_000), store.item("it_u")?.lastUserInputAt)
             store.upsertItems(listOf(item.copy(lastUserInputAt = null)))
             assertNull(store.item("it_u")?.lastUserInputAt)
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
+    @Test
+    fun migratesToV16AndPersistsThenClearsPendingHandovers() = runBlocking {
+        val file = File.createTempFile("migration-test-v8-v16", ".sqlite").also { it.delete() }
+        buildV8(file)
+        var database = MatronDatabase.open(context, file)
+        try {
+            var store = JournalStore(database, ownSender = "user:alice")
+            val cached = store.items(chat.matron.android.models.ItemsScope.All)
+            assertTrue(cached.isNotEmpty())
+            assertTrue(cached.all { it.handover == null })
+            val handover = ItemHandover(ItemHandover.State.OFFERED, "c2", "Review changes", Instant.ofEpochMilli(60_000))
+            val item = cached.first().copy(handover = handover)
+            store.upsertItems(listOf(item))
+            database.close()
+            database = MatronDatabase.open(context, file)
+            store = JournalStore(database, ownSender = "user:alice")
+            assertEquals(handover, store.item(item.id)?.handover)
+            assertEquals(item.originConvoID, store.item(item.id)?.originConvoID)
+            store.upsertItems(listOf(item.copy(handover = null)))
+            assertNull(store.item(item.id)?.handover)
         } finally {
             database.close()
             file.delete()

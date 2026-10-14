@@ -11,6 +11,7 @@ import chat.matron.android.journal.parseJsonObjectOrNull
 import chat.matron.android.journal.stringOrNull
 import chat.matron.android.models.ItemAuthor
 import chat.matron.android.models.ItemAwaiting
+import chat.matron.android.models.ItemHandover
 import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.ItemState
@@ -284,6 +285,8 @@ data class ItemEntity(
     /// Done tab; rows cached before v15 read `null` and sort by their close
     /// time until their next refetch.
     @ColumnInfo(name = "last_user_input_at") val lastUserInputAt: Long? = null,
+    /// The pending offer as JSON (v16); null until the first refetch after upgrading.
+    @ColumnInfo(name = "handover_json") val handoverJson: String? = null,
 ) {
     fun toItem(): TrackerItem = TrackerItem(
         id = id, num = num, kind = ItemKind.fromWire(kind) ?: ItemKind.TASK,
@@ -303,6 +306,7 @@ data class ItemEntity(
         chosenAction = chosenAction,
         lastUserInputAt = lastUserInputAt?.let(Instant::ofEpochMilli),
         working = workingJson?.let(::storedItemWorking),
+        handover = ItemHandover.fromJson(handoverJson?.let(::parseJsonObjectOrNull)),
     )
 
     companion object {
@@ -323,6 +327,7 @@ data class ItemEntity(
             originConvoTitle = i.originConvoTitle,
             workingJson = i.working?.let(::storedItemWorkingJson),
             lastUserInputAt = i.lastUserInputAt?.toEpochMilli(),
+            handoverJson = i.handover?.toJson()?.toString(),
         )
     }
 }
