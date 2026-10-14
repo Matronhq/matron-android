@@ -30,6 +30,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -64,6 +67,9 @@ class ItemDetailViewModel(
 
     private val _comments = MutableStateFlow<List<TrackerComment>>(emptyList())
     val comments: StateFlow<List<TrackerComment>> = _comments.asStateFlow()
+
+    private val _openableCommentConvoIDs = MutableStateFlow<Set<String>>(emptySet())
+    val openableCommentConvoIDs: StateFlow<Set<String>> = _openableCommentConvoIDs.asStateFlow()
 
     private val _pendingComments = MutableStateFlow<List<ItemOutboxEntity>>(emptyList())
     val pendingComments: StateFlow<List<ItemOutboxEntity>> = _pendingComments.asStateFlow()
@@ -126,6 +132,16 @@ class ItemDetailViewModel(
             }
         }
         subscribeComments()
+        jobs += scope.launch {
+            _comments.map { comments -> comments.mapNotNull { it.authorConversation?.id }.toSet() }
+                .distinctUntilChanged()
+                .collectLatest { ids ->
+                    // A changed thread must not keep links from an earlier
+                    // subscription while its local rows are being read.
+                    _openableCommentConvoIDs.value = emptySet()
+                    store.knownConversationIDsFlow(ids).collect { _openableCommentConvoIDs.value = it }
+                }
+        }
         jobs += scope.launch { store.itemOutboxFlow(id).collect { _pendingComments.value = it } }
         // Comments only reach the local cache through a refetch — opening the
         // detail screen must trigger one, not just rely on whatever the panel
@@ -145,6 +161,7 @@ class ItemDetailViewModel(
 
     fun stop() {
         jobs.forEach { it.cancel() }; jobs.clear()
+        _openableCommentConvoIDs.value = emptySet()
         commentsJob?.cancel(); commentsJob = null
         refreshJob?.cancel(); refreshJob = null
         ownerSessionJob?.cancel(); ownerSessionJob = null

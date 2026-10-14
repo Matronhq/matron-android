@@ -75,6 +75,49 @@ class JournalStoreItemsTest {
     }
 
     @Test
+    fun commentAuthorsSurviveTheCacheWithAndWithoutOtherMetadata() = runBlocking {
+        val store = makeStore()
+        val named = TrackerComment(
+            "ic_1", "it_1", ItemAuthor.AGENT, body = "Done.", createdAt = Instant.ofEpochMilli(1),
+            deviceName = "box-a", convoID = "c1", convoTitle = "Audit",
+        )
+        val asking = named.copy(id = "ic_2", createdAt = Instant.ofEpochMilli(2), actions = listOf("Go"), chosenAction = "Go")
+        store.replaceComments("it_1", listOf(named, asking))
+        assertEquals(listOf(named, asking), store.comments("it_1"))
+
+        val cached = chat.matron.android.journal.db.ItemCommentEntity.from(named)
+        for (oldMeta in listOf(null, """{"actions":["Go"]}""")) {
+            val old = cached.copy(metaJson = oldMeta).toComment()
+            assertEquals("Agent", old.authorName)
+            assertNull(old.authorConversation)
+            assertNull(old.deviceName)
+        }
+    }
+
+    @Test
+    fun knownCommentConversationsFollowLocalRows() = runBlocking {
+        val db = MatronDatabase.inMemory(context)
+        val store = JournalStore(db, ownSender = "user:alice")
+        try {
+            store.refreshSummaries(listOf(ConvoSummaryDTO("c1", "Audit", "running", 1, "", 0)))
+            store.knownConversationIDsFlow(setOf("c1", "c2")).test {
+                assertEquals(setOf("c1"), awaitItem())
+                store.refreshSummaries(listOf(ConvoSummaryDTO("c2", "Runner", "running", 2, "", 0)))
+                assertEquals(setOf("c1", "c2"), awaitItem())
+                db.conversationDao().deleteAll()
+                assertEquals(emptySet<String>(), awaitItem())
+                cancelAndIgnoreRemainingEvents()
+            }
+            store.knownConversationIDsFlow(emptySet()).test {
+                assertEquals(emptySet<String>(), awaitItem())
+                awaitComplete()
+            }
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
     fun commentsReplaceWholesale() = runBlocking {
         val store = makeStore()
         store.replaceComments("it_1", listOf(TrackerComment("c1", "it_1", ItemAuthor.USER, body = "x", createdAt = Instant.ofEpochMilli(1))))

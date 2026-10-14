@@ -164,6 +164,7 @@ fun ItemDetailScreen(
     val scope = rememberCoroutineScope()
     val item by viewModel.item.collectAsStateWithLifecycle()
     val comments by viewModel.comments.collectAsStateWithLifecycle()
+    val openableCommentConvoIDs by viewModel.openableCommentConvoIDs.collectAsStateWithLifecycle()
     val pending by viewModel.pendingComments.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
     val staged by viewModel.stagedAttachments.collectAsStateWithLifecycle()
@@ -390,6 +391,7 @@ fun ItemDetailScreen(
                                 model = ItemDetailModel(
                                     item = current,
                                     comments = comments,
+                                    openableConvoIDs = openableCommentConvoIDs,
                                     pending = pending.map { row ->
                                         val payload = runCatching { MatronJson.decodeFromString(ItemsSync.CommentPayload.serializer(), row.payloadJson) }.getOrNull()
                                         PendingCommentModel(

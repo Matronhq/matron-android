@@ -168,6 +168,8 @@ dependencies {
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.androidx.test.ext.junit)
     testImplementation(libs.turbine)
+    testImplementation(libs.compose.ui.test.junit4)
+    debugImplementation(libs.compose.ui.test.manifest)
 
     // Marketing screenshot rig only (androidTest never runs in CI — see
     // MarketingScreenshots.kt and tools/screenshots.sh).

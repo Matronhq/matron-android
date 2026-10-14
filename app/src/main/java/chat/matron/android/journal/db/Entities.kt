@@ -330,7 +330,8 @@ data class ItemEntity(
 /// One row of an item's thread. `meta_json` holds the `{from, to}` status
 /// snapshots of a synthetic `status` row, and a comment's action buttons
 /// (`actions`, `chosen`) or the tap it records (`action`, `reply_to`) —
-/// `null` for an ordinary comment with none of those. The buttons ride in
+/// plus its author attribution (`device_name`, `convo_id`, `convo_title`).
+/// `null` for an ordinary comment with none of those. These ride in
 /// this existing column rather than in new ones so they need no migration:
 /// rows cached before this version read as "no buttons" until the thread's
 /// next refetch, which opening the item always runs.
@@ -357,6 +358,9 @@ data class ItemCommentEntity(
         val chosen: String? = null,
         val action: String? = null,
         @SerialName("reply_to") val replyTo: String? = null,
+        @SerialName("device_name") val deviceName: String? = null,
+        @SerialName("convo_id") val convoID: String? = null,
+        @SerialName("convo_title") val convoTitle: String? = null,
     )
 
     fun toComment(): TrackerComment {
@@ -374,6 +378,7 @@ data class ItemCommentEntity(
             statusFrom = snap(meta?.from), statusTo = snap(meta?.to), createdAt = Instant.ofEpochMilli(createdAt),
             actions = meta?.actions ?: emptyList(), chosenAction = meta?.chosen,
             action = meta?.action, replyTo = meta?.replyTo,
+            deviceName = meta?.deviceName, convoID = meta?.convoID, convoTitle = meta?.convoTitle,
         )
     }
 
@@ -382,13 +387,15 @@ data class ItemCommentEntity(
             fun snap(s: TrackerItem.StatusSnapshot?): Snap? =
                 s?.let { Snap(it.state?.wire, it.resolution?.wire, it.awaiting?.wire) }
             val hasButtons = c.actions.isNotEmpty() || c.chosenAction != null || c.action != null || c.replyTo != null
-            val meta = if (c.statusFrom != null || c.statusTo != null || hasButtons) {
+            val hasAuthor = c.deviceName != null || c.convoID != null || c.convoTitle != null
+            val meta = if (c.statusFrom != null || c.statusTo != null || hasButtons || hasAuthor) {
                 MatronJson.encodeToString(
                     Meta.serializer(),
                     Meta(
                         snap(c.statusFrom), snap(c.statusTo),
                         actions = c.actions.takeIf { it.isNotEmpty() }, chosen = c.chosenAction,
                         action = c.action, replyTo = c.replyTo,
+                        deviceName = c.deviceName, convoID = c.convoID, convoTitle = c.convoTitle,
                     ),
                 )
             } else {

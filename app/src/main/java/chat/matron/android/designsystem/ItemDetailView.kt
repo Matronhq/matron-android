@@ -48,6 +48,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -180,6 +182,8 @@ data class ItemDetailModel(
     /// item is busy (`ItemDetailViewModel.workingIndicator`); `null` draws
     /// none.
     val working: ItemWorkingIndicator? = null,
+    /// Conversation rows this device can open from a comment's caption.
+    val openableConvoIDs: Set<String> = emptySet(),
 )
 
 /// The state pill's four values: Needs you / Closed · resolution / With the
@@ -414,7 +418,7 @@ fun ItemDetailView(
                 if (hasBody) {
                     item(key = "body") {
                         ItemCard(mine = item.createdBy == ItemAuthor.USER) {
-                            AuthorCaption(item.createdBy, item.createdAt, now)
+                            AuthorCaption(if (item.createdBy == ItemAuthor.USER) "You" else "Agent", item.createdAt, now)
                             ItemContent(item.body, item.attachments, image, onOpenAttachment, onOpenLink)
                         }
                     }
@@ -427,6 +431,8 @@ fun ItemDetailView(
                         chosen = commentChosenAction(c, model.pendingTaps),
                         actionsEnabled = model.item.state == ItemState.OPEN,
                         onTapAction = { label -> onTapAction(c, label) },
+                        openableConvoIDs = model.openableConvoIDs,
+                        onOpenConversation = onOpenConversation,
                     )
                 }
                 items(model.pending.size, key = { "p-${model.pending[it].id}" }) { i ->
@@ -533,10 +539,35 @@ private fun Meta(item: TrackerItem, onOpenLink: (String) -> Unit) {
 
 /// "You · 5 min ago" / "Agent · 3 Sept 2026" above a card's body.
 @Composable
-private fun AuthorCaption(author: ItemAuthor, date: Instant, now: Instant) {
+internal fun AuthorCaption(
+    name: String,
+    date: Instant,
+    now: Instant,
+    conversation: TrackerComment.AuthorConversation? = null,
+    openableConvoIDs: Set<String> = emptySet(),
+    onOpenConversation: (String) -> Unit = {},
+) {
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(if (author == ItemAuthor.USER) "You" else "Agent", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-        Text("· ${itemRelativeDate(date, now)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(name, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        conversation?.let { convo ->
+            val canOpen = convo.id in openableConvoIDs
+            Text(
+                "· ${convo.title}", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (canOpen) 1f else 0.65f),
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                // Weighted children are measured after the box and date:
+                // only the conversation spends the remaining width.
+                modifier = Modifier.weight(1f, fill = false)
+                    .then(if (canOpen) Modifier.clickable(role = Role.Button, onClickLabel = "Open conversation") {
+                        onOpenConversation(convo.id)
+                    } else Modifier)
+                    .semantics {
+                        contentDescription = "Conversation: ${convo.title}"
+                        if (!canOpen) stateDescription = "Not on this device yet"
+                    },
+            )
+        }
+        Text("· ${itemRelativeDate(date, now)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
     }
 }
 
@@ -616,6 +647,8 @@ private fun CommentView(
     chosen: String? = null,
     actionsEnabled: Boolean = false,
     onTapAction: (String) -> Unit = {},
+    openableConvoIDs: Set<String> = emptySet(),
+    onOpenConversation: (String) -> Unit = {},
 ) {
     if (c.kind == TrackerComment.Kind.STATUS) {
         val row = itemStatusRow(c)
@@ -631,14 +664,14 @@ private fun CommentView(
             }
             row.note?.let { note ->
                 ItemCard(mine = c.author == ItemAuthor.USER) {
-                    AuthorCaption(c.author, c.createdAt, now)
+                    AuthorCaption(c.authorName, c.createdAt, now, c.authorConversation, openableConvoIDs, onOpenConversation)
                     ItemContent(note, c.attachments, image, onOpen, onOpenLink)
                 }
             }
         }
     } else {
         ItemCard(mine = c.author == ItemAuthor.USER) {
-            AuthorCaption(c.author, c.createdAt, now)
+            AuthorCaption(c.authorName, c.createdAt, now, c.authorConversation, openableConvoIDs, onOpenConversation)
             ItemContent(c.body, c.attachments, image, onOpen, onOpenLink)
             ActionButtons(c.actions, chosen, actionsEnabled, onTapAction)
         }

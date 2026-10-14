@@ -83,6 +83,49 @@ class ItemDetailViewModelTest {
     }
 
     private val staging: File = Files.createTempDirectory("staging-").toFile()
+
+    @Test
+    fun commentLinksFollowLocalConversationsAndStopWithTheScreen() = runBlocking {
+        val base = FakeItemsStore()
+        val known = kotlinx.coroutines.flow.MutableStateFlow(setOf("c1"))
+        val requested = mutableListOf<Set<String>>()
+        val store = object : chat.matron.android.journal.ItemsStoreReading by base {
+            override fun knownConversationIDsFlow(ids: Set<String>): kotlinx.coroutines.flow.Flow<Set<String>> {
+                requested += ids
+                return kotlinx.coroutines.flow.flow {
+                    known.collect { emit(it.intersect(ids)) }
+                }
+            }
+        }
+        val first = TrackerComment("ic_1", "it_1", ItemAuthor.AGENT, body = "one", convoID = "c1", convoTitle = "Audit")
+        val second = first.copy(id = "ic_2", convoID = "c2", convoTitle = "Runner")
+        base.storedComments = listOf(first, second, first.copy(id = "ic_3", author = ItemAuthor.USER, convoID = "user-chat"))
+        val vm = ItemDetailViewModel("it_1", store, Api(), Sync(), this, staging)
+        try {
+            vm.start()
+            waitUntil { vm.loadedCommentCount.value == 3 && vm.openableCommentConvoIDs.value == setOf("c1") }
+            assertEquals(setOf("c1", "c2"), requested.last())
+            known.value = setOf("c1", "c2", "unrelated")
+            waitUntil { vm.openableCommentConvoIDs.value == setOf("c1", "c2") }
+            known.value = setOf("c2")
+            waitUntil { vm.openableCommentConvoIDs.value == setOf("c2") }
+            base.comments.emit(listOf(first))
+            waitUntil { requested.last() == setOf("c1") && vm.openableCommentConvoIDs.value.isEmpty() }
+            known.value = setOf("c1")
+            waitUntil { vm.openableCommentConvoIDs.value == setOf("c1") }
+            base.comments.emit(emptyList())
+            waitUntil { vm.openableCommentConvoIDs.value.isEmpty() }
+            vm.stop()
+            waitUntil { known.subscriptionCount.value == 0 }
+            base.storedComments = listOf(second)
+            base.comments.emit(listOf(second))
+            known.value = setOf("c2")
+            vm.start()
+            waitUntil { vm.openableCommentConvoIDs.value == setOf("c2") }
+        } finally {
+            vm.stop()
+        }
+    }
     private fun picked(name: String, bytes: ByteArray = byteArrayOf(1)): File =
         File(Files.createTempDirectory("picked-").toFile(), name).also { it.writeBytes(bytes) }
     private fun tempNote(bytes: ByteArray): File = Files.createTempFile("v-", ".m4a").toFile().also { it.writeBytes(bytes) }
