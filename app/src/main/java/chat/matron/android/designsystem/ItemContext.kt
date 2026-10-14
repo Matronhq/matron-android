@@ -12,14 +12,23 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import chat.matron.android.models.ItemHandover
 import chat.matron.android.models.Mission
 import chat.matron.android.models.TrackerItem
+import java.time.Duration
+import java.time.Instant
+import kotlinx.coroutines.delay
 
 // The item detail's context block (so the reader can see which
 // conversation an item is connected to): under the "#N · Kind" line, the
@@ -38,8 +47,9 @@ data class ItemContext(
     val missionID: String?,
     val missionLabel: String?,
     val owner: ItemContextConversation?,
+    val handover: ItemHandover? = null,
 ) {
-    val isEmpty: Boolean get() = missionLabel == null && owner == null
+    val isEmpty: Boolean get() = missionLabel == null && owner == null && handover == null
 }
 
 /// The label of a conversation nobody could name: not cached on this device
@@ -75,19 +85,27 @@ fun itemContext(
     } else {
         ItemContextConversation(originID, originLocalLabel ?: item.originConvoTitle ?: ITEM_CONTEXT_GENERIC_CONVERSATION)
     }
-    return ItemContext(missionID = missionID, missionLabel = missionLabel, owner = owner)
+    return ItemContext(missionID = missionID, missionLabel = missionLabel, owner = owner, handover = item.handover)
 }
 
-/// The block itself: one caption-style line per row, each truncating, in the
-/// header's secondary colour. The mission row (checkered flag), then the
-/// owner conversation (speech bubbles).
+/// The mission and owner rows truncate; the pending offer wraps so its
+/// waiting state stays readable on narrow screens.
 @Composable
 internal fun ItemContextBlock(
     context: ItemContext,
     onOpenMission: (String) -> Unit,
     onOpenConversation: (String) -> Unit,
 ) {
-    if (context.isEmpty) return
+    val handover = context.handover
+    var now by remember(handover) { mutableStateOf(Instant.now()) }
+    LaunchedEffect(handover) {
+        val expiresAt = handover?.expiresAt ?: return@LaunchedEffect
+        // Round up: Instant has finer precision than delay's milliseconds.
+        delay((Duration.between(Instant.now(), expiresAt).toMillis() + 1).coerceAtLeast(0))
+        now = Instant.now()
+    }
+    val handoverCaption = handover?.caption(now)
+    if (context.missionLabel == null && context.owner == null && handoverCaption == null) return
     val missionID = context.missionID
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         context.missionLabel?.let { label ->
@@ -100,6 +118,9 @@ internal fun ItemContextBlock(
             ItemContextRow(icon = Icons.Outlined.Forum, text = owner.label, clickLabel = "Open conversation") {
                 onOpenConversation(owner.convoID)
             }
+        }
+        handoverCaption?.let { caption ->
+            Text(caption, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

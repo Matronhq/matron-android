@@ -211,6 +211,49 @@ enum class ItemWorkingIndicator(val label: String) {
     WORKING("Working…"),
 }
 
+/// A pending offer to move an item. Its current owner stays in place until acceptance.
+data class ItemHandover(
+    val state: State,
+    val toConvoID: String,
+    val toConvoTitle: String?,
+    val expiresAt: Instant,
+) {
+    enum class State(val wire: String) {
+        AWAITING_USER("awaiting_user"), OFFERED("offered");
+
+        companion object {
+            fun fromWire(raw: String?): State? = entries.firstOrNull { it.wire == raw }
+        }
+    }
+
+    fun caption(now: Instant): String? {
+        if (!now.isBefore(expiresAt)) return null
+        val target = toConvoTitle?.trim()?.takeIf(String::isNotEmpty) ?: "Conversation"
+        val waiting = when (state) {
+            State.AWAITING_USER -> "waiting for your OK"
+            State.OFFERED -> "waiting for them to accept"
+        }
+        return "Offered to $target · $waiting"
+    }
+
+    fun toJson(): JsonObject = buildJsonObject {
+        put("state", state.wire)
+        put("to_convo_id", toConvoID)
+        put("to_convo_title", toConvoTitle)
+        put("expires_at", expiresAt.toEpochMilli())
+    }
+
+    companion object {
+        fun fromJson(json: JsonObject?): ItemHandover? {
+            if (json == null) return null
+            val state = State.fromWire(json.stringOrNull("state")) ?: return null
+            val target = json.stringOrNull("to_convo_id")?.takeIf(String::isNotBlank) ?: return null
+            val expiresAt = msInstant(json.longOrNull("expires_at")) ?: return null
+            return ItemHandover(state, target, json.stringOrNull("to_convo_title"), expiresAt)
+        }
+    }
+}
+
 /// One tracker item — a task, a question or a decision (spec: Data model).
 data class TrackerItem(
     val id: String,
@@ -263,6 +306,8 @@ data class TrackerItem(
     /// an item another person shares, and on a journal that predates the
     /// field.
     val working: ItemWorking? = null,
+    /// Null when no handover waits, and on journals that predate handovers.
+    val handover: ItemHandover? = null,
 ) {
     /// The `from`/`to` halves of a status comment's `meta`.
     data class StatusSnapshot(
@@ -336,6 +381,7 @@ data class TrackerItem(
                 chosenAction = json.stringOrNull("chosen_action"),
                 lastUserInputAt = msInstant(json.longOrNull("last_user_input_at")),
                 working = ItemWorking.fromJson(json.objectOrNull("working")),
+                handover = ItemHandover.fromJson(json.objectOrNull("handover")),
             )
         }
     }

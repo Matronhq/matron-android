@@ -29,6 +29,33 @@ class TrackerItemTest {
     private fun obj(text: String) = parseJsonObjectOrNull(text)!!
 
     @Test
+    fun pendingHandoverDecodesWithoutChangingTheOwner() {
+        for (state in ItemHandover.State.entries) {
+            val wire = """{"state":"${state.wire}","to_convo_id":"c2","to_convo_title":"Review changes","expires_at":1700000060000}"""
+            val item = TrackerItem.fromJson(obj(ITEM_JSON.replace("\"has_image\":1", "\"has_image\":1,\"handover\":$wire")))!!
+            val handover = item.handover!!
+            assertEquals("c1", item.originConvoID)
+            assertEquals(state, handover.state)
+            assertEquals("c2", handover.toConvoID)
+            assertEquals("Review changes", handover.toConvoTitle)
+            val waiting = if (state == ItemHandover.State.OFFERED) "waiting for them to accept" else "waiting for your OK"
+            assertEquals("Offered to Review changes · $waiting", handover.caption(Instant.ofEpochMilli(1_700_000_000_000)))
+            assertNull(handover.caption(handover.expiresAt))
+        }
+    }
+
+    @Test
+    fun missingSettledAndMalformedHandoversLeaveTheItemReadable() {
+        assertNull(TrackerItem.fromJson(obj(ITEM_JSON))!!.handover)
+        for (wire in listOf("null", "{}", """{"state":"accepted","to_convo_id":"c2","expires_at":1700000060000}""")) {
+            val item = TrackerItem.fromJson(obj(ITEM_JSON.replace("\"has_image\":1", "\"has_image\":1,\"handover\":$wire")))!!
+            assertNull(item.handover)
+        }
+        val unnamed = ItemHandover(ItemHandover.State.OFFERED, "c2", "  ", Instant.ofEpochMilli(60_000))
+        assertEquals("Offered to Conversation · waiting for them to accept", unnamed.caption(Instant.EPOCH))
+    }
+
+    @Test
     fun trackerItemDecodes() {
         val item = TrackerItem.fromJson(obj(ITEM_JSON))
         assertNotNull(item); item!!
