@@ -20,6 +20,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SportsScore
 import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -41,6 +42,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import chat.matron.android.models.Mission
+import chat.matron.android.models.MissionsFilter
 
 /// Everything the Missions list renders, mapped by the host from
 /// `MissionsListViewModel` (the Swift `MissionsListView.Model`).
@@ -51,17 +53,26 @@ data class MissionsListModel(
     /// `null` (not yet known) and `true` both show the list.
     val isSupported: Boolean?,
     val isRefreshing: Boolean,
+    val filterQuery: String = "",
 ) {
     val isEmpty: Boolean get() = open.isEmpty() && closed.isEmpty()
+    private val filter = MissionsFilter(filterQuery)
+    val isFiltering: Boolean get() = filter.isActive
+    val visibleOpen: List<Mission> = filter.apply(open)
+    val visibleClosed: List<Mission> = filter.apply(closed)
+
+    // Filtering reveals closed results without changing the user's saved fold.
+    fun showsClosed(expanded: Boolean): Boolean = isFiltering || expanded
 }
 
 /// Which body the list shows. Pure so the precedence (unsupported wins over
 /// empty; an unknown support state shows the list) is unit-tested.
-enum class MissionsListState { UNSUPPORTED, EMPTY, POPULATED }
+enum class MissionsListState { UNSUPPORTED, EMPTY, NO_MATCHES, POPULATED }
 
 fun missionsListState(model: MissionsListModel): MissionsListState = when {
     model.isSupported == false -> MissionsListState.UNSUPPORTED
     model.isEmpty -> MissionsListState.EMPTY
+    model.visibleOpen.isEmpty() && model.visibleClosed.isEmpty() -> MissionsListState.NO_MATCHES
     else -> MissionsListState.POPULATED
 }
 
@@ -84,6 +95,7 @@ fun MissionsListView(
     modifier: Modifier = Modifier,
 ) {
     var showClosed by remember { mutableStateOf(false) }
+    val closedExpanded = model.showsClosed(showClosed)
     PullToRefreshBox(isRefreshing = model.isRefreshing, onRefresh = onRefresh, modifier = modifier.fillMaxSize()) {
         when (missionsListState(model)) {
             MissionsListState.UNSUPPORTED -> MissionsPlaceholder(
@@ -98,35 +110,44 @@ fun MissionsListView(
                 title = "No missions yet",
                 description = "An agent starts one with mission_start, then posts milestones as the work goes.",
             )
+            MissionsListState.NO_MATCHES -> MissionsPlaceholder(
+                icon = { Icon(Icons.Outlined.Search, contentDescription = null, modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                title = "No matching missions",
+                description = "Try another title, short name or number, or clear the filter.",
+            )
             MissionsListState.POPULATED -> LazyColumn(Modifier.fillMaxSize().animateContentSize()) {
-                if (model.open.isNotEmpty()) {
+                if (model.visibleOpen.isNotEmpty()) {
                     item(key = "header:open") { SectionHeader("Open") }
-                    inboxRows(model.open, onSelect)
+                    inboxRows(model.visibleOpen, onSelect)
                 }
-                if (model.closed.isNotEmpty()) {
+                if (model.visibleClosed.isNotEmpty()) {
                     item(key = "header:closed") {
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clickable(onClickLabel = missionsClosedToggleLabel(showClosed)) { showClosed = !showClosed }
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                missionsClosedHeaderText(model.closed.size),
-                                style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Icon(
-                                if (showClosed) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                        if (model.isFiltering) {
+                            SectionHeader(missionsClosedHeaderText(model.visibleClosed.size))
+                        } else {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable(onClickLabel = missionsClosedToggleLabel(closedExpanded)) { showClosed = !showClosed }
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    missionsClosedHeaderText(model.visibleClosed.size),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Icon(
+                                    if (closedExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            HorizontalDivider()
                         }
-                        HorizontalDivider()
                     }
-                    if (showClosed) inboxRows(model.closed, onSelect)
+                    if (closedExpanded) inboxRows(model.visibleClosed, onSelect)
                 }
             }
         }

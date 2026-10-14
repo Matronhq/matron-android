@@ -169,8 +169,8 @@ dependencies {
     testImplementation(libs.androidx.test.ext.junit)
     testImplementation(libs.turbine)
 
-    // Marketing screenshot rig only (androidTest never runs in CI — see
-    // MarketingScreenshots.kt and tools/screenshots.sh).
+    // Instrumented screen checks and marketing screenshots (device/emulator
+    // only; androidTest does not run in CI).
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.uiautomator)
