@@ -13,6 +13,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- A tracker link this app cannot show is handed to a browser by
+         package (BrowserHandoff), never by a plain VIEW the system could
+         route straight back here; finding that browser needs visibility of
+         the apps that view https links. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
+
     <application
         android:name=".MatronApplication"
         android:label="Matron"
@@ -23,12 +35,18 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Shareable tracker links (App Links) are claimed in
+                 src/appLinks/AndroidManifest.xml when the build names a
+                 journal host. singleTop: a link opened while the app is in
+                 front arrives in onNewIntent rather than stacking a second
+                 copy of the app. -->
         </activity>
 
         <!-- Microphone foreground session for a live voice note; started when

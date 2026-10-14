@@ -8,15 +8,15 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
-// Resolve a signing property from local.properties first, then the environment
-// (so CI can inject secrets without a local.properties file). Returns null when
-// unset or blank — a blank local.properties entry falls through to the env
-// rather than masking it.
+// Resolve a build property (signing, App Links) from local.properties first,
+// then the environment (so CI can inject secrets without a local.properties
+// file). Returns null when unset or blank — a blank local.properties entry
+// falls through to the env rather than masking it.
 val localProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
-fun signingProp(name: String): String? =
+fun buildProp(name: String): String? =
     localProps.getProperty(name)?.takeIf { it.isNotBlank() }
         ?: System.getenv(name)?.takeIf { it.isNotBlank() }
 
@@ -31,7 +31,7 @@ val releaseSigningReady: Boolean = run {
         "MATRON_UPLOAD_KEY_ALIAS",
         "MATRON_UPLOAD_KEY_PASSWORD",
     )
-    val values = names.associateWith { signingProp(it) }
+    val values = names.associateWith { buildProp(it) }
     val storeFile = values["MATRON_UPLOAD_STORE_FILE"]
     when {
         values.values.all { it == null } -> false // signing simply not configured
@@ -54,6 +54,18 @@ val releaseSigningReady: Boolean = run {
     }
 }
 
+// The journal host whose shareable tracker links (https://<host>/u/…) open
+// in the app as verified App Links. The journal is self-hosted and the
+// server URL is typed at sign-in, so there is no host the app could know at
+// build time: a build that names none claims no links (in-app taps on a
+// tracker link still open in-app, on any journal). A bare host name, e.g.
+// journal.example.com.
+val appLinkHost: String? = buildProp("MATRON_APP_LINK_HOST")?.trim()?.also { host ->
+    require(Regex("^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$").matches(host)) {
+        "MATRON_APP_LINK_HOST must be a bare host name (no scheme, port or path), got '$host'"
+    }
+}
+
 android {
     namespace = "chat.matron.android"
     compileSdk = 36
@@ -66,15 +78,25 @@ android {
         versionName = "0.1.12"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        manifestPlaceholders["matronAppLinkHost"] = appLinkHost ?: ""
+    }
+
+    // The App Links intent filter lives in its own manifest, merged into
+    // every build type only when a host is configured: an empty host would
+    // make the filter claim https links on every host.
+    if (appLinkHost != null) {
+        sourceSets.getByName("debug").manifest.srcFile("src/appLinks/AndroidManifest.xml")
+        sourceSets.getByName("release").manifest.srcFile("src/appLinks/AndroidManifest.xml")
     }
 
     signingConfigs {
         create("release") {
             if (releaseSigningReady) {
-                storeFile = rootProject.file(signingProp("MATRON_UPLOAD_STORE_FILE")!!)
-                storePassword = signingProp("MATRON_UPLOAD_STORE_PASSWORD")
-                keyAlias = signingProp("MATRON_UPLOAD_KEY_ALIAS")
-                keyPassword = signingProp("MATRON_UPLOAD_KEY_PASSWORD")
+                storeFile = rootProject.file(buildProp("MATRON_UPLOAD_STORE_FILE")!!)
+                storePassword = buildProp("MATRON_UPLOAD_STORE_PASSWORD")
+                keyAlias = buildProp("MATRON_UPLOAD_KEY_ALIAS")
+                keyPassword = buildProp("MATRON_UPLOAD_KEY_PASSWORD")
             }
         }
     }

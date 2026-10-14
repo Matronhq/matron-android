@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Merged in only when the build names a journal host for App Links
+     (MATRON_APP_LINK_HOST, see app/build.gradle.kts). Claims that host's
+     shareable tracker links, https://<host>/u/<user>/<num>; the journal
+     serves the matching /.well-known/assetlinks.json once it is configured
+     with this app's package name and signing certificate. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity android:name="chat.matron.android.MainActivity">
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:host="${matronAppLinkHost}" />
+                <data android:pathPrefix="/u/" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

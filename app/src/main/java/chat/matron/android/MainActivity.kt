@@ -1,5 +1,6 @@
 package chat.matron.android
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -39,6 +40,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -122,7 +124,13 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import chat.matron.android.viewmodels.RendezvousSignInViewModel
 import chat.matron.android.viewmodels.SearchViewModel
 import chat.matron.android.viewmodels.SignInViewModel
+import chat.matron.android.platform.BrowserHandoff
+import chat.matron.android.platform.TrackerLinkUriHandler
+import chat.matron.android.platform.incomingViewLink
+import chat.matron.android.viewmodels.TrackerLinkRouter
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 /**
@@ -146,8 +154,15 @@ class MainActivity : FragmentActivity() {
      */
     private lateinit var appLock: AppLockController
 
+    /// A shareable tracker link the system routed here (an App Link), until
+    /// the signed-in shell takes it.
+    private val incomingLinks = MutableStateFlow<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // A restored activity's intent is the one it was first started with,
+        // already handled then.
+        if (savedInstanceState == null) incomingLinks.value = incomingViewLink(intent?.action, intent?.dataString)
         // Android 15 (targetSdk 35) enforces edge-to-edge, which disables the
         // manifest's adjustResize; opting in on every version keeps inset
         // behaviour uniform so screens can rely on imePadding() for the IME.
@@ -161,7 +176,7 @@ class MainActivity : FragmentActivity() {
             // Read lazily by dispose handlers that must tell the lock shield's
             // teardown from the user's (see LocalAppLockActive).
             CompositionLocalProvider(LocalAppLockActive provides { appLock.isLocked.value }) {
-                MatronApp(deps, appLock)
+                MatronApp(deps, appLock, incomingLinks)
             }
         }
     }
@@ -170,6 +185,12 @@ class MainActivity : FragmentActivity() {
     // single-activity app, so the two coincide, and ON_START/ON_STOP need no
     // extra dependency. The controller's own guards absorb the churn from the
     // credential prompt, which runs in a system activity that stops ours.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        incomingViewLink(intent.action, intent.dataString)?.let { incomingLinks.value = it }
+    }
+
     override fun onStart() {
         super.onStart()
         appLock.noteForegrounded()
@@ -182,7 +203,7 @@ class MainActivity : FragmentActivity() {
 }
 
 @Composable
-private fun MatronApp(deps: AppDependencies, appLock: AppLockController) {
+private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomingLinks: MutableStateFlow<String?>) {
     val context = deps.context
     val prefs = remember { context.getSharedPreferences("matron-kv", android.content.Context.MODE_PRIVATE) }
     var appearance by remember {
@@ -262,6 +283,7 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController) {
                 else -> SignedInApp(
                     deps = deps,
                     session = session!!,
+                    incomingLinks = incomingLinks,
                     appearance = appearance,
                     appLock = appLock,
                     onAppearanceChange = { next ->
@@ -429,6 +451,10 @@ private class NavControllerShellHost(private val nav: NavHostController) : AppSh
         nav.pushItem(AppTab.MISSIONS.routePrefix, itemID)
     }
 
+    override fun pushItem(tab: AppTab, itemID: String) {
+        nav.pushItem(tab.routePrefix, itemID)
+    }
+
     override fun pushMemories() {
         nav.navigate("${AppTab.MISSIONS.routePrefix}${AppShellNavigation.MEMORIES_ROUTE}")
     }
@@ -470,6 +496,7 @@ private class NavControllerShellHost(private val nav: NavHostController) : AppSh
 private fun SignedInApp(
     deps: AppDependencies,
     session: UserSession,
+    incomingLinks: MutableStateFlow<String?>,
     appearance: MatronAppearance,
     appLock: AppLockController,
     onAppearanceChange: (MatronAppearance) -> Unit,
@@ -510,6 +537,43 @@ private fun SignedInApp(
     // pushed on THAT tab's stack where the tab can host it.
     var goToNumberFrom by remember { mutableStateOf<AppTab?>(null) }
     val goToResolver = remember(session.userID, shell) { deps.goToNumberResolver(session) { shell.missionsSupported } }
+
+    // Shareable tracker links (`https://<journal>/u/<user>/<num>`), tapped
+    // in-app or arriving as an App Link: resolved like a typed number and
+    // opened on the selected tab; what the app cannot show goes to a
+    // browser. The latest link wins: a new one cancels one still resolving.
+    val trackerLinks = remember(session.userID, goToResolver) {
+        TrackerLinkRouter(journalBaseURL = session.homeserverURL, sessionUser = session.userID, resolver = goToResolver)
+    }
+    var trackerLinkMessage by remember { mutableStateOf<String?>(null) }
+    val trackerLinkJob = remember(trackerLinks) { arrayOfNulls<Job>(1) }
+    val openTrackerLink: (String) -> Unit = remember(trackerLinks, shell) {
+        { url ->
+            trackerLinkJob[0]?.cancel()
+            trackerLinkJob[0] = sessionScope.launch {
+                when (val route = trackerLinks.route(url)) {
+                    is TrackerLinkRouter.Route.Open -> when (val target = route.target) {
+                        is GoToTarget.Item -> shell.openItem(target.itemID)
+                        is GoToTarget.Mission -> shell.pushMission(target.missionID)
+                    }
+                    is TrackerLinkRouter.Route.Explain -> trackerLinkMessage = route.message
+                    is TrackerLinkRouter.Route.Browser -> BrowserHandoff.open(deps.context, route.url)
+                }
+            }
+        }
+    }
+    val platformUriHandler = LocalUriHandler.current
+    val trackerLinkUriHandler = remember(platformUriHandler, trackerLinks, openTrackerLink) {
+        TrackerLinkUriHandler(platformUriHandler, isTrackerLink = { trackerLinks.link(it) != null }, openTrackerLink = openTrackerLink)
+    }
+    // An App Link that started or resumed the activity. It waits in the
+    // activity while signed out or locked, and is taken once the shell is up.
+    val pendingLink by incomingLinks.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingLink, openTrackerLink) {
+        val url = pendingLink ?: return@LaunchedEffect
+        incomingLinks.compareAndSet(url, null)
+        openTrackerLink(url)
+    }
 
     val groups by chatListVM.groups.collectAsStateWithLifecycle()
     val allChats = remember(groups) { groups.flatMap { it.summaries } }
@@ -788,303 +852,307 @@ private fun SignedInApp(
         }
     }
 
-    Scaffold(
-        // Only the bottom bar contributes padding; each screen keeps its own
-        // Scaffold and its own status-bar / IME handling.
-        contentWindowInsets = WindowInsets(0),
-        bottomBar = {
-            if (atTabRoot) {
-                AppTabBar(
-                    selected = selectedTab,
-                    awaitingYouCount = awaitingYouCount,
-                    coordinatorHasUnread = coordinatorHasUnread,
-                    coordinatorNeedsYou = coordinatorNeedsYou,
-                    missionsSupported = AppShellNavigation.missionsTabShown(missionsSupported),
-                    missionsNeedsYou = missionsNeedsYou,
-                    onSelect = { shell.selectTab(it) },
-                )
-            }
-        },
-    ) { padding ->
-        NavHost(
-            navController = nav,
-            startDestination = AppTab.CONVERSATIONS.route,
-            // consumeWindowInsets: the bar already sits above the system
-            // navigation bar, so the screens beneath must not pad for it again.
-            modifier = Modifier.padding(padding).consumeWindowInsets(padding),
-        ) {
-            // The Coordinator tab (spec §3, §5b): its own graph, rooted at the
-            // setup view or the coordinator chat — full screen, no back
-            // button, the bar visible (it is the only way out of the tab).
-            // Sub-chats, the tasks page and items opened from it push here.
-            navigation(route = AppTab.COORDINATOR.route, startDestination = AppTab.COORDINATOR.rootRoute) {
-                composable(AppTab.COORDINATOR.rootRoute) {
-                    when (val root = coordinatorRoot(coordinatorConvoID)) {
-                        CoordinatorRoot.Setup -> CoordinatorSetupView(onChoose = { showCoordinatorChooser = true }, modifier = rootSwipe)
-                        is CoordinatorRoot.Chat -> {
-                            val convoID = root.convoID
-                            ChatRoute(
-                                deps = deps,
-                                session = session,
-                                convoID = convoID,
-                                vmCache = vmCache,
-                                title = currentSummary(groups, convoID)?.title ?: "",
-                                boxName = currentSummary(groups, convoID)?.boxName,
-                                sessionShort = currentSummary(groups, convoID)?.sessionShort,
-                                boxShort = currentSummary(groups, convoID)?.boxShort,
-                                roomBoxNames = currentSummary(groups, convoID)?.roomBoxNames ?: emptyList(),
-                                roomBoxShorts = currentSummary(groups, convoID)?.roomBoxShorts ?: emptyList(),
-                                onBack = {},
-                                showsBackButton = false,
-                                onOpenChild = { shell.pushChat(it) },
-                                // The root cannot be replaced: the sibling
-                                // is pushed once, later switches replace it.
-                                onSwitchTo = { sibling -> shell.switchSubChat(convoID, sibling) },
-                                onOpenConversation = onOpenConversation,
-                                onOpenItems = { nav.navigate("${AppTab.COORDINATOR.routePrefix}items/$convoID") },
-                                onOpenItem = { nav.pushItem(AppTab.COORDINATOR.routePrefix, it) },
-                                onOpenMission = { shell.pushMission(it) },
+    // Shareable tracker links stay in the app wherever they are tapped:
+    // every link opener under the shell reads this handler.
+    CompositionLocalProvider(LocalUriHandler provides trackerLinkUriHandler) {
+        Scaffold(
+            // Only the bottom bar contributes padding; each screen keeps its own
+            // Scaffold and its own status-bar / IME handling.
+            contentWindowInsets = WindowInsets(0),
+            bottomBar = {
+                if (atTabRoot) {
+                    AppTabBar(
+                        selected = selectedTab,
+                        awaitingYouCount = awaitingYouCount,
+                        coordinatorHasUnread = coordinatorHasUnread,
+                        coordinatorNeedsYou = coordinatorNeedsYou,
+                        missionsSupported = AppShellNavigation.missionsTabShown(missionsSupported),
+                        missionsNeedsYou = missionsNeedsYou,
+                        onSelect = { shell.selectTab(it) },
+                    )
+                }
+            },
+        ) { padding ->
+            NavHost(
+                navController = nav,
+                startDestination = AppTab.CONVERSATIONS.route,
+                // consumeWindowInsets: the bar already sits above the system
+                // navigation bar, so the screens beneath must not pad for it again.
+                modifier = Modifier.padding(padding).consumeWindowInsets(padding),
+            ) {
+                // The Coordinator tab (spec §3, §5b): its own graph, rooted at the
+                // setup view or the coordinator chat — full screen, no back
+                // button, the bar visible (it is the only way out of the tab).
+                // Sub-chats, the tasks page and items opened from it push here.
+                navigation(route = AppTab.COORDINATOR.route, startDestination = AppTab.COORDINATOR.rootRoute) {
+                    composable(AppTab.COORDINATOR.rootRoute) {
+                        when (val root = coordinatorRoot(coordinatorConvoID)) {
+                            CoordinatorRoot.Setup -> CoordinatorSetupView(onChoose = { showCoordinatorChooser = true }, modifier = rootSwipe)
+                            is CoordinatorRoot.Chat -> {
+                                val convoID = root.convoID
+                                ChatRoute(
+                                    deps = deps,
+                                    session = session,
+                                    convoID = convoID,
+                                    vmCache = vmCache,
+                                    title = currentSummary(groups, convoID)?.title ?: "",
+                                    boxName = currentSummary(groups, convoID)?.boxName,
+                                    sessionShort = currentSummary(groups, convoID)?.sessionShort,
+                                    boxShort = currentSummary(groups, convoID)?.boxShort,
+                                    roomBoxNames = currentSummary(groups, convoID)?.roomBoxNames ?: emptyList(),
+                                    roomBoxShorts = currentSummary(groups, convoID)?.roomBoxShorts ?: emptyList(),
+                                    onBack = {},
+                                    showsBackButton = false,
+                                    onOpenChild = { shell.pushChat(it) },
+                                    // The root cannot be replaced: the sibling
+                                    // is pushed once, later switches replace it.
+                                    onSwitchTo = { sibling -> shell.switchSubChat(convoID, sibling) },
+                                    onOpenConversation = onOpenConversation,
+                                    onOpenItems = { nav.navigate("${AppTab.COORDINATOR.routePrefix}items/$convoID") },
+                                    onOpenItem = { nav.pushItem(AppTab.COORDINATOR.routePrefix, it) },
+                                    onOpenMission = { shell.pushMission(it) },
+                                )
+                            }
+                        }
+                    }
+                    chatDestinations(AppTab.COORDINATOR)
+                }
+
+                navigation(route = AppTab.CONVERSATIONS.route, startDestination = AppTab.CONVERSATIONS.rootRoute) {
+                    composable(AppTab.CONVERSATIONS.rootRoute) {
+                        ChatListScreen(
+                            viewModel = chatListVM,
+                            connectionState = connectionState,
+                            hasEverConnected = hasEverConnected,
+                            searchAvailable = deps.search != null,
+                            chat = deps.chatService(session),
+                            onOpenChat = { shell.openChat(it) },
+                            onNewChat = { newChatTarget = NewChatTarget.CONVERSATIONS },
+                            onOpenSearch = { nav.navigate("search") },
+                            onOpenSettings = { nav.navigate("settings") },
+                            onSignOut = onSignOut,
+                            rootGesture = rootSwipe,
+                            pins = pins,
+                            boxNames = boxNames,
+                            pinActions = pinsController,
+                        )
+                    }
+
+                    chatDestinations(AppTab.CONVERSATIONS)
+
+                    composable("search") {
+                        val searchService = deps.search
+                        if (searchService == null) {
+                            // Navigation is a side effect — never call it straight from
+                            // the composable body (bugbot "Search route pops during
+                            // composition").
+                            LaunchedEffect(Unit) { nav.popBackStack() }
+                        } else {
+                            val searchVM = remember {
+                                SearchViewModel(searchService, allChats) { num ->
+                                    (goToResolver.find(num) as? GoToNumberResolver.Found.Hit)?.hit
+                                }
+                            }
+                            SearchScreen(
+                                viewModel = searchVM,
+                                // A result REPLACES the Conversations path (the shell's
+                                // openChat pops search along with anything else over
+                                // the list).
+                                onSelectChat = { chat -> shell.openChat(chat.id) },
+                                onSelectMessage = { hit ->
+                                    // Arm the (cached) chat VM's in-conversation search
+                                    // with the query, then navigate: a cold VM parks the
+                                    // jump until its first snapshot lands (apple #172).
+                                    val query = searchVM.trimmedQuery
+                                    val (chatVM, _) = vmCache.viewModels(hit.roomID)
+                                    // sessionScope, not this route's composition scope:
+                                    // the navigation below cancels the latter before the
+                                    // query's first suspend (Bugbot, #56).
+                                    sessionScope.launch { chatVM.beginChatSearch(query) }
+                                    shell.openChat(hit.roomID)
+                                },
+                                // A number hit: the item is pushed over the
+                                // search (back returns to the results); a mission
+                                // or a milestone's mission opens on its own tab.
+                                onSelectNumber = { hit ->
+                                    when (val opened = goToResolver.open(hit)) {
+                                        is GoToNumberResolver.Opened.Message -> opened.text
+                                        is GoToNumberResolver.Opened.Target -> {
+                                            when (val target = opened.target) {
+                                                is GoToTarget.Item -> nav.pushItem(AppTab.CONVERSATIONS.routePrefix, target.itemID)
+                                                is GoToTarget.Mission -> shell.openMission(target.missionID)
+                                            }
+                                            null
+                                        }
+                                    }
+                                },
+                                onBack = { nav.popBackStack() },
+                                liveChats = allChats,
                             )
                         }
                     }
-                }
-                chatDestinations(AppTab.COORDINATOR)
-            }
 
-            navigation(route = AppTab.CONVERSATIONS.route, startDestination = AppTab.CONVERSATIONS.rootRoute) {
-                composable(AppTab.CONVERSATIONS.rootRoute) {
-                    ChatListScreen(
-                        viewModel = chatListVM,
-                        connectionState = connectionState,
-                        hasEverConnected = hasEverConnected,
-                        searchAvailable = deps.search != null,
-                        chat = deps.chatService(session),
-                        onOpenChat = { shell.openChat(it) },
-                        onNewChat = { newChatTarget = NewChatTarget.CONVERSATIONS },
-                        onOpenSearch = { nav.navigate("search") },
-                        onOpenSettings = { nav.navigate("settings") },
-                        onSignOut = onSignOut,
-                        rootGesture = rootSwipe,
-                        pins = pins,
-                        boxNames = boxNames,
-                        pinActions = pinsController,
-                    )
-                }
-
-                chatDestinations(AppTab.CONVERSATIONS)
-
-                composable("search") {
-                    val searchService = deps.search
-                    if (searchService == null) {
-                        // Navigation is a side effect — never call it straight from
-                        // the composable body (bugbot "Search route pops during
-                        // composition").
-                        LaunchedEffect(Unit) { nav.popBackStack() }
-                    } else {
-                        val searchVM = remember {
-                            SearchViewModel(searchService, allChats) { num ->
-                                (goToResolver.find(num) as? GoToNumberResolver.Found.Hit)?.hit
-                            }
-                        }
-                        SearchScreen(
-                            viewModel = searchVM,
-                            // A result REPLACES the Conversations path (the shell's
-                            // openChat pops search along with anything else over
-                            // the list).
-                            onSelectChat = { chat -> shell.openChat(chat.id) },
-                            onSelectMessage = { hit ->
-                                // Arm the (cached) chat VM's in-conversation search
-                                // with the query, then navigate: a cold VM parks the
-                                // jump until its first snapshot lands (apple #172).
-                                val query = searchVM.trimmedQuery
-                                val (chatVM, _) = vmCache.viewModels(hit.roomID)
-                                // sessionScope, not this route's composition scope:
-                                // the navigation below cancels the latter before the
-                                // query's first suspend (Bugbot, #56).
-                                sessionScope.launch { chatVM.beginChatSearch(query) }
-                                shell.openChat(hit.roomID)
-                            },
-                            // A number hit: the item is pushed over the
-                            // search (back returns to the results); a mission
-                            // or a milestone's mission opens on its own tab.
-                            onSelectNumber = { hit ->
-                                when (val opened = goToResolver.open(hit)) {
-                                    is GoToNumberResolver.Opened.Message -> opened.text
-                                    is GoToNumberResolver.Opened.Target -> {
-                                        when (val target = opened.target) {
-                                            is GoToTarget.Item -> nav.pushItem(AppTab.CONVERSATIONS.routePrefix, target.itemID)
-                                            is GoToTarget.Mission -> shell.openMission(target.missionID)
-                                        }
-                                        null
-                                    }
-                                }
-                            },
+                    composable("settings") {
+                        val noticesSetting = remember(session.userID) { deps.makeNoticesSettingViewModel(session, sessionScope) }
+                        DeviceSettingsScreen(
+                            session = session,
+                            devicesApi = deps.devicesService(session),
+                            appearance = appearance,
+                            onAppearanceChange = onAppearanceChange,
+                            onManageDevices = { nav.navigate("devices") },
+                            onLinkDevice = { nav.navigate("link-device") },
+                            onAgentChats = { nav.navigate("agent-chats") },
+                            appLock = appLock,
+                            loadStorage = { storageSettingsModel(deps, session) },
+                            coordinator = CoordinatorSettingRowModel(
+                                title = coordinatorTitle,
+                                onChoose = { showCoordinatorChooser = true },
+                                onClear = { shell.assignCoordinator(null, persistCoordinator) },
+                            ),
+                            onPinnedChats = if (pins != null) ({ nav.navigate("pinned-chats") }) else null,
+                            notices = noticesSetting,
                             onBack = { nav.popBackStack() },
-                            liveChats = allChats,
+                        )
+                    }
+
+                    composable("pinned-chats") {
+                        PinnedChatsScreen(
+                            sync = pinsController.sync,
+                            chats = allChats,
+                            actions = pinsController,
+                            onBack = { nav.popBackStack() },
+                        )
+                    }
+
+                    composable("devices") {
+                        DevicesScreen(
+                            api = deps.devicesService(session),
+                            accountServerURL = session.homeserverURL,
+                            onSelfRevoked = onSignOut,
+                            onBack = { nav.popBackStack() },
+                        )
+                    }
+
+                    composable("agent-chats") {
+                        AgentChatScreen(
+                            api = deps.agentChatService(session),
+                            onBack = { nav.popBackStack() },
+                        )
+                    }
+
+                    composable("link-device") {
+                        DeviceLinkScreen(
+                            api = deps.deviceLinkService(session),
+                            serverURL = session.homeserverURL,
+                            relay = RelayApi(client = deps.sharedClient),
+                            haptics = deps.haptics,
+                            onBack = { nav.popBackStack() },
                         )
                     }
                 }
 
-                composable("settings") {
-                    val noticesSetting = remember(session.userID) { deps.makeNoticesSettingViewModel(session, sessionScope) }
-                    DeviceSettingsScreen(
-                        session = session,
-                        devicesApi = deps.devicesService(session),
-                        appearance = appearance,
-                        onAppearanceChange = onAppearanceChange,
-                        onManageDevices = { nav.navigate("devices") },
-                        onLinkDevice = { nav.navigate("link-device") },
-                        onAgentChats = { nav.navigate("agent-chats") },
-                        appLock = appLock,
-                        loadStorage = { storageSettingsModel(deps, session) },
-                        coordinator = CoordinatorSettingRowModel(
-                            title = coordinatorTitle,
-                            onChoose = { showCoordinatorChooser = true },
-                            onClear = { shell.assignCoordinator(null, persistCoordinator) },
-                        ),
-                        onPinnedChats = if (pins != null) ({ nav.navigate("pinned-chats") }) else null,
-                        notices = noticesSetting,
-                        onBack = { nav.popBackStack() },
-                    )
-                }
-
-                composable("pinned-chats") {
-                    PinnedChatsScreen(
-                        sync = pinsController.sync,
-                        chats = allChats,
-                        actions = pinsController,
-                        onBack = { nav.popBackStack() },
-                    )
-                }
-
-                composable("devices") {
-                    DevicesScreen(
-                        api = deps.devicesService(session),
-                        accountServerURL = session.homeserverURL,
-                        onSelfRevoked = onSignOut,
-                        onBack = { nav.popBackStack() },
-                    )
-                }
-
-                composable("agent-chats") {
-                    AgentChatScreen(
-                        api = deps.agentChatService(session),
-                        onBack = { nav.popBackStack() },
-                    )
-                }
-
-                composable("link-device") {
-                    DeviceLinkScreen(
-                        api = deps.deviceLinkService(session),
-                        serverURL = session.homeserverURL,
-                        relay = RelayApi(client = deps.sharedClient),
-                        haptics = deps.haptics,
-                        onBack = { nav.popBackStack() },
-                    )
-                }
-            }
-
-            // The Missions tab (apple #209): its own graph, rooted at the
-            // list; a mission page and the items opened from it push WITHIN
-            // this tab, while conversations hand off to Conversations the
-            // way Decisions does. Stays in the graph once an old journal
-            // hides it from the bar — the shell never selects it while
-            // unsupported.
-            navigation(route = AppTab.MISSIONS.route, startDestination = AppTab.MISSIONS.rootRoute) {
-                composable(AppTab.MISSIONS.rootRoute) {
-                    MissionsScreen(
-                        viewModel = missionsVM,
-                        onSelect = { shell.pushMission(it) },
-                        onOpenMemories = { shell.openMemories() },
-                        onGoToNumber = { goToNumberFrom = AppTab.MISSIONS },
-                        rootGesture = rootSwipe,
-                    )
-                }
-                // Memories (spec 2026-09-27): the list and the editor, pushed
-                // within the Missions tab from its toolbar entry.
-                composable("${AppTab.MISSIONS.routePrefix}${AppShellNavigation.MEMORIES_ROUTE}") {
-                    val memoriesVM = remember(session.userID) { deps.makeMemoriesListViewModel(session, sessionScope) }
-                    MemoriesScreen(
-                        viewModel = memoriesVM,
-                        onSelect = { shell.pushMemory(it) },
-                        onNew = { shell.pushMemory(null) },
-                        onBack = { nav.popBackStack() },
-                    )
-                }
-                composable(
-                    route = "${AppTab.MISSIONS.routePrefix}memory/{name}",
-                    arguments = listOf(navArgument("name") { type = NavType.StringType }),
-                ) { entry ->
-                    val raw = entry.arguments?.getString("name") ?: return@composable
-                    val name = raw.takeUnless { it == AppShellNavigation.NEW_MEMORY_SEGMENT }
-                    val editorVM = remember(raw) { deps.makeMemoryEditorViewModel(session, name, sessionScope) }
-                    MemoryEditorScreen(viewModel = editorVM, onBack = { nav.popBackStack() })
-                }
-                composable(
-                    route = "${AppTab.MISSIONS.routePrefix}mission/{missionID}",
-                    arguments = listOf(navArgument("missionID") { type = NavType.StringType }),
-                ) { entry ->
-                    val missionID = entry.arguments?.getString("missionID") ?: return@composable
-                    MissionDetailRoute(
-                        vmCache = vmCache, missionID = missionID,
-                        onBack = { nav.popBackStack() },
-                        onOpenMilestone = { convoID, seq -> onOpenConversationFromMissions(convoID); jumpToMilestone(convoID, seq) },
-                        onOpenItem = { shell.pushMissionItem(it) },
-                        onOpenConversation = onOpenConversationFromMissions,
-                    )
-                }
-                composable(
-                    route = "${AppTab.MISSIONS.routePrefix}item/{itemID}",
-                    arguments = listOf(navArgument("itemID") { type = NavType.StringType }),
-                ) { entry ->
-                    val itemID = entry.arguments?.getString("itemID") ?: return@composable
-                    // Read once, while this page is the top of the stack.
-                    val hostMissionID = remember(entry) {
-                        val beneath = nav.previousBackStackEntry
-                        itemDetailHostMissionID(beneath?.destination?.route, beneath?.arguments?.getString("missionID"))
+                // The Missions tab (apple #209): its own graph, rooted at the
+                // list; a mission page and the items opened from it push WITHIN
+                // this tab, while conversations hand off to Conversations the
+                // way Decisions does. Stays in the graph once an old journal
+                // hides it from the bar — the shell never selects it while
+                // unsupported.
+                navigation(route = AppTab.MISSIONS.route, startDestination = AppTab.MISSIONS.rootRoute) {
+                    composable(AppTab.MISSIONS.rootRoute) {
+                        MissionsScreen(
+                            viewModel = missionsVM,
+                            onSelect = { shell.pushMission(it) },
+                            onOpenMemories = { shell.openMemories() },
+                            onGoToNumber = { goToNumberFrom = AppTab.MISSIONS },
+                            rootGesture = rootSwipe,
+                        )
                     }
-                    ItemDetailRoute(
-                        deps = deps, session = session, vmCache = vmCache, itemID = itemID,
-                        onBack = { nav.popBackStack() },
-                        onOpenConversation = onOpenConversationFromMissions,
-                        resolveItemLink = { num -> deps.trackerItemLinkOutcome(num, session) },
-                        onOpenItem = { nav.pushItem(AppTab.MISSIONS.routePrefix, it) },
-                        onOpenMission = { shell.pushMission(it) },
-                        currentMissionID = hostMissionID,
-                    )
+                    // Memories (spec 2026-09-27): the list and the editor, pushed
+                    // within the Missions tab from its toolbar entry.
+                    composable("${AppTab.MISSIONS.routePrefix}${AppShellNavigation.MEMORIES_ROUTE}") {
+                        val memoriesVM = remember(session.userID) { deps.makeMemoriesListViewModel(session, sessionScope) }
+                        MemoriesScreen(
+                            viewModel = memoriesVM,
+                            onSelect = { shell.pushMemory(it) },
+                            onNew = { shell.pushMemory(null) },
+                            onBack = { nav.popBackStack() },
+                        )
+                    }
+                    composable(
+                        route = "${AppTab.MISSIONS.routePrefix}memory/{name}",
+                        arguments = listOf(navArgument("name") { type = NavType.StringType }),
+                    ) { entry ->
+                        val raw = entry.arguments?.getString("name") ?: return@composable
+                        val name = raw.takeUnless { it == AppShellNavigation.NEW_MEMORY_SEGMENT }
+                        val editorVM = remember(raw) { deps.makeMemoryEditorViewModel(session, name, sessionScope) }
+                        MemoryEditorScreen(viewModel = editorVM, onBack = { nav.popBackStack() })
+                    }
+                    composable(
+                        route = "${AppTab.MISSIONS.routePrefix}mission/{missionID}",
+                        arguments = listOf(navArgument("missionID") { type = NavType.StringType }),
+                    ) { entry ->
+                        val missionID = entry.arguments?.getString("missionID") ?: return@composable
+                        MissionDetailRoute(
+                            vmCache = vmCache, missionID = missionID,
+                            onBack = { nav.popBackStack() },
+                            onOpenMilestone = { convoID, seq -> onOpenConversationFromMissions(convoID); jumpToMilestone(convoID, seq) },
+                            onOpenItem = { shell.pushMissionItem(it) },
+                            onOpenConversation = onOpenConversationFromMissions,
+                        )
+                    }
+                    composable(
+                        route = "${AppTab.MISSIONS.routePrefix}item/{itemID}",
+                        arguments = listOf(navArgument("itemID") { type = NavType.StringType }),
+                    ) { entry ->
+                        val itemID = entry.arguments?.getString("itemID") ?: return@composable
+                        // Read once, while this page is the top of the stack.
+                        val hostMissionID = remember(entry) {
+                            val beneath = nav.previousBackStackEntry
+                            itemDetailHostMissionID(beneath?.destination?.route, beneath?.arguments?.getString("missionID"))
+                        }
+                        ItemDetailRoute(
+                            deps = deps, session = session, vmCache = vmCache, itemID = itemID,
+                            onBack = { nav.popBackStack() },
+                            onOpenConversation = onOpenConversationFromMissions,
+                            resolveItemLink = { num -> deps.trackerItemLinkOutcome(num, session) },
+                            onOpenItem = { nav.pushItem(AppTab.MISSIONS.routePrefix, it) },
+                            onOpenMission = { shell.pushMission(it) },
+                            currentMissionID = hostMissionID,
+                        )
+                    }
                 }
-            }
 
-            // The Decisions tab (spec §3): its own graph, rooted at the list;
-            // a tapped decision pushes item detail WITHIN this tab.
-            navigation(route = AppTab.DECISIONS.route, startDestination = AppTab.DECISIONS.rootRoute) {
-                composable(AppTab.DECISIONS.rootRoute) {
-                    DecisionsScreen(
-                        viewModel = decisionsVM,
-                        originLabels = { deps.journalStore(session).conversationOriginLabels() },
-                        onSelect = { shell.pushDecision(it) },
-                        onOpenConversation = onOpenConversationFromDecisions,
-                        onGoToNumber = { goToNumberFrom = AppTab.DECISIONS },
-                        rootGesture = rootSwipe,
-                    )
-                }
-                composable(
-                    route = "${AppTab.DECISIONS.routePrefix}item/{itemID}",
-                    arguments = listOf(navArgument("itemID") { type = NavType.StringType }),
-                ) { entry ->
-                    val itemID = entry.arguments?.getString("itemID") ?: return@composable
-                    ItemDetailRoute(
-                        deps = deps, session = session, vmCache = vmCache, itemID = itemID,
-                        onBack = { nav.popBackStack() },
-                        onOpenConversation = onOpenConversationFromDecisions,
-                        // A linked item pushes within the Decisions tab too, so
-                        // Back returns to the decision the link was tapped in.
-                        resolveItemLink = { num -> deps.trackerItemLinkOutcome(num, session) },
-                        onOpenItem = { nav.pushItem(AppTab.DECISIONS.routePrefix, it) },
-                        // For you hosts no mission page: the shell opens it on
-                        // the Missions tab.
-                        onOpenMission = { shell.pushMission(it) },
-                    )
+                // The Decisions tab (spec §3): its own graph, rooted at the list;
+                // a tapped decision pushes item detail WITHIN this tab.
+                navigation(route = AppTab.DECISIONS.route, startDestination = AppTab.DECISIONS.rootRoute) {
+                    composable(AppTab.DECISIONS.rootRoute) {
+                        DecisionsScreen(
+                            viewModel = decisionsVM,
+                            originLabels = { deps.journalStore(session).conversationOriginLabels() },
+                            onSelect = { shell.pushDecision(it) },
+                            onOpenConversation = onOpenConversationFromDecisions,
+                            onGoToNumber = { goToNumberFrom = AppTab.DECISIONS },
+                            rootGesture = rootSwipe,
+                        )
+                    }
+                    composable(
+                        route = "${AppTab.DECISIONS.routePrefix}item/{itemID}",
+                        arguments = listOf(navArgument("itemID") { type = NavType.StringType }),
+                    ) { entry ->
+                        val itemID = entry.arguments?.getString("itemID") ?: return@composable
+                        ItemDetailRoute(
+                            deps = deps, session = session, vmCache = vmCache, itemID = itemID,
+                            onBack = { nav.popBackStack() },
+                            onOpenConversation = onOpenConversationFromDecisions,
+                            // A linked item pushes within the Decisions tab too, so
+                            // Back returns to the decision the link was tapped in.
+                            resolveItemLink = { num -> deps.trackerItemLinkOutcome(num, session) },
+                            onOpenItem = { nav.pushItem(AppTab.DECISIONS.routePrefix, it) },
+                            // For you hosts no mission page: the shell opens it on
+                            // the Missions tab.
+                            onOpenMission = { shell.pushMission(it) },
+                        )
+                    }
                 }
             }
         }
@@ -1129,6 +1197,15 @@ private fun SignedInApp(
     }
 
     PinDialogsHost(pinsController, chats = allChats, isLoading = chatListVM.isLoading.collectAsStateWithLifecycle().value)
+
+    trackerLinkMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { trackerLinkMessage = null },
+            title = { Text("Tracker") },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { trackerLinkMessage = null }) { Text("OK") } },
+        )
+    }
 
     coordinatorError?.let { message ->
         AlertDialog(

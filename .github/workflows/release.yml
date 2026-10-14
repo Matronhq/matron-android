@@ -9,6 +9,12 @@ name: Release AAB
 #   MATRON_UPLOAD_STORE_PASSWORD   keystore password
 #   MATRON_UPLOAD_KEY_ALIAS        key alias (matron-upload)
 #   MATRON_UPLOAD_KEY_PASSWORD     key password
+#
+# Optional repository variable (Settings -> Secrets and variables -> Actions
+# -> Variables):
+#   MATRON_APP_LINK_HOST           journal host whose https://<host>/u/... tracker
+#                                  links open in the app (App Links). Unset:
+#                                  the bundle claims no links.
 
 on:
   push:
@@ -47,7 +53,12 @@ jobs:
           MATRON_UPLOAD_STORE_PASSWORD: ${{ secrets.MATRON_UPLOAD_STORE_PASSWORD }}
           MATRON_UPLOAD_KEY_ALIAS: ${{ secrets.MATRON_UPLOAD_KEY_ALIAS }}
           MATRON_UPLOAD_KEY_PASSWORD: ${{ secrets.MATRON_UPLOAD_KEY_PASSWORD }}
-        run: ./gradlew :app:bundleRelease
+          MATRON_APP_LINK_HOST: ${{ vars.MATRON_APP_LINK_HOST }}
+        run: |
+          if [ -z "$MATRON_APP_LINK_HOST" ]; then
+            echo "::warning::MATRON_APP_LINK_HOST is not set; this bundle claims no tracker links."
+          fi
+          ./gradlew :app:bundleRelease
 
       - name: Remove decoded keystore
         if: always()
