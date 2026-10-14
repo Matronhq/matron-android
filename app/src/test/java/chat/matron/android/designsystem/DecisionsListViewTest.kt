@@ -1,11 +1,13 @@
 package chat.matron.android.designsystem
 
+import chat.matron.android.models.ForYouTab
 import chat.matron.android.models.ItemAwaiting
 import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.ItemState
 import chat.matron.android.models.TrackerItem
 import androidx.compose.material.icons.outlined.Visibility
+import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -36,6 +38,55 @@ class DecisionsListViewTest {
         assertEquals("unsupported hides rows too", DecisionsListState.UNSUPPORTED, decisionsListState(populated.copy(isSupported = false)))
     }
 
+    private fun closed(id: String, num: Int, kind: ItemKind, resolution: ItemResolution? = ItemResolution.DONE) =
+        t(id, num, kind, "c1").copy(state = ItemState.CLOSED, resolution = resolution, awaiting = null)
+
+    @Test
+    fun theListOpensOnNeedsYou() {
+        val model = DecisionsListModel(rows = emptyList(), isSupported = true, isRefreshing = false)
+        assertEquals(ForYouTab.OPEN, model.tab)
+        assertEquals(listOf("Needs you", "Done"), ForYouTab.entries.map { it.title })
+        assertTrue(decisionsShowsTabs(model))
+        assertTrue("an unknown support state shows the tabs", decisionsShowsTabs(model.copy(isSupported = null)))
+        assertFalse("nothing to switch between without a tracker", decisionsShowsTabs(model.copy(isSupported = false)))
+    }
+
+    @Test
+    fun doneTabStatePrecedence() {
+        val open = DecisionsRow(t("q1", 12, ItemKind.QUESTION, "c1"), "auth refactor")
+        val done = DecisionsRow(closed("q2", 13, ItemKind.QUESTION), null)
+        val model = DecisionsListModel(rows = listOf(open), isSupported = true, isRefreshing = false, tab = ForYouTab.CLOSED)
+        assertEquals("open rows do not fill the Done tab", DecisionsListState.CLOSED_EMPTY, decisionsListState(model))
+        val populated = model.copy(closed = listOf(done), closedTotalCount = 1)
+        assertEquals(DecisionsListState.CLOSED_POPULATED, decisionsListState(populated))
+        assertEquals("unsupported wins on the Done tab too", DecisionsListState.UNSUPPORTED, decisionsListState(populated.copy(isSupported = false)))
+        assertEquals("closed rows do not fill Needs you", DecisionsListState.EMPTY, decisionsListState(populated.copy(tab = ForYouTab.OPEN, rows = emptyList())))
+        assertEquals(DecisionsListState.POPULATED, decisionsListState(populated.copy(tab = ForYouTab.OPEN)))
+    }
+
+    @Test
+    fun showMoreOnlyWhileRowsStayHidden() {
+        val rows = (1..3).map { DecisionsRow(closed("q$it", it, ItemKind.QUESTION), null) }
+        val model = DecisionsListModel(
+            rows = emptyList(), isSupported = true, isRefreshing = false, tab = ForYouTab.CLOSED, closed = rows.take(2), closedTotalCount = 3,
+        )
+        assertTrue(model.hasMoreClosed)
+        assertFalse(model.copy(closed = rows).hasMoreClosed)
+    }
+
+    @Test
+    fun closedRowsCaptionTheResolutionAtTheSortTime() {
+        val now = Instant.parse("2026-09-21T12:00:00Z")
+        val question = closed("q1", 1, ItemKind.QUESTION, ItemResolution.ANSWERED)
+            .copy(closedAt = now.minusSeconds(60), lastUserInputAt = now.minusSeconds(2 * 3600))
+        assertEquals("the user's last input, not the later close", "Answered · 2 hr ago", decisionsClosedRowCaption(DecisionsRow(question, null), now))
+        assertEquals("Answered · 1 min ago", decisionsClosedRowCaption(DecisionsRow(question.copy(lastUserInputAt = null), null), now))
+        assertEquals("Closed · 1 min ago", decisionsClosedRowCaption(DecisionsRow(question.copy(lastUserInputAt = null, resolution = null), null), now))
+        val notice = closed("n1", 2, ItemKind.NOTICE).copy(closedAt = now.minusSeconds(300), chosenAction = "seen")
+        assertEquals("Seen · 5 min ago", decisionsClosedRowCaption(DecisionsRow(notice, null), now))
+        assertFalse("a closed row offers no Seen button or swipe", decisionsRowOffersSeen(DecisionsRow(notice, null)))
+    }
+
     @Test
     fun originCaptionAlwaysShowsWithTheTrackerFallback() {
         assertEquals("auth refactor", decisionsRowOrigin(DecisionsRow(t("q1", 1, ItemKind.QUESTION, "c1"), "auth refactor")))
@@ -51,6 +102,13 @@ class DecisionsListViewTest {
             "Questions, things to read and secret requests from every conversation appear here.",
             ForYouCopy.EMPTY_DESCRIPTION,
         )
+        assertEquals("Nothing done yet", ForYouCopy.CLOSED_EMPTY_TITLE)
+        assertEquals(
+            "Questions and decisions move here once they are closed, and notices once you have seen them. " +
+                "Newest first by your last reply.",
+            ForYouCopy.CLOSED_EMPTY_DESCRIPTION,
+        )
+        assertEquals("Show more", ForYouCopy.SHOW_MORE)
     }
 
     @Test

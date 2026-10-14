@@ -65,6 +65,20 @@ class TrackerItemTest {
     }
 
     @Test
+    fun closedSortDatePrefersTheUsersLastInput() {
+        val plain = TrackerItem.fromJson(obj(ITEM_JSON))!!
+        assertNull("a journal that predates the field", plain.lastUserInputAt)
+        assertEquals("neither input nor close: the last update", plain.updatedAt, plain.closedSortDate)
+        val closed = plain.copy(state = ItemState.CLOSED, closedAt = Instant.ofEpochMilli(1_700_000_005_000))
+        assertEquals(closed.closedAt, closed.closedSortDate)
+        val answered = TrackerItem.fromJson(
+            obj(ITEM_JSON.replace("\"has_image\":1", "\"has_image\":1,\"last_user_input_at\":1700000003000")),
+        )!!.copy(state = ItemState.CLOSED, closedAt = Instant.ofEpochMilli(1_700_000_005_000))
+        assertEquals(Instant.ofEpochMilli(1_700_000_003_000), answered.lastUserInputAt)
+        assertEquals("the user's input wins over a later close", answered.lastUserInputAt, answered.closedSortDate)
+    }
+
+    @Test
     fun itemActionsDefaultToNoneAndCarryTheLatestTap() {
         val plain = TrackerItem.fromJson(obj(ITEM_JSON))!!
         assertEquals(emptyList<String>(), plain.actions); assertNull(plain.chosenAction)

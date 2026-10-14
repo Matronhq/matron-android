@@ -9,6 +9,7 @@ import chat.matron.android.journal.ItemsSyncing
 import chat.matron.android.journal.MatronJson
 import chat.matron.android.journal.NewItem
 import chat.matron.android.journal.db.ItemOutboxEntity
+import chat.matron.android.models.ForYouTab
 import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemState
 import chat.matron.android.models.ItemsScope
@@ -86,6 +87,29 @@ class ItemsPanelViewModel(
     /// would pin a collector to [scope] for the VM's lifetime).
     private val _awaitingYouCount = MutableStateFlow(0)
     val awaitingYouCount: StateFlow<Int> = _awaitingYouCount.asStateFlow()
+
+    /// Every locally known closed question, decision and notice, in
+    /// [decided] order — backs For you's Done tab, so an item stays findable
+    /// once it is closed instead of vanishing. Purely local: the store
+    /// already mirrors closed items, so there is no server page to reach
+    /// for. Only the app-wide instance (`convoID == null`) fills it.
+    private val _decided = MutableStateFlow<List<TrackerItem>>(emptyList())
+    val decided: StateFlow<List<TrackerItem>> = _decided.asStateFlow()
+    /// How many of [decided], from the front, the Done tab shows. Grown by
+    /// [showMoreDecided] and otherwise re-derived from
+    /// [desiredDecidedVisibleCount] on every store emission, so an unrelated
+    /// item changing elsewhere never resets how far the user has expanded.
+    private val _decidedVisibleCount = MutableStateFlow(0)
+    val decidedVisibleCount: StateFlow<Int> = _decidedVisibleCount.asStateFlow()
+    /// Whether there is more of [decided] beyond the current window.
+    val hasMoreDecided: Boolean get() = _decidedVisibleCount.value < _decided.value.size
+    /// The user's intent for how many [decided] rows to show;
+    /// [decidedVisibleCount] is this capped at what exists.
+    private var desiredDecidedVisibleCount = 0
+    /// Which For you tab is showing. The host maps [decided] into rows only
+    /// while it is [ForYouTab.CLOSED], so the open list never pays for it.
+    private val _forYouTab = MutableStateFlow(ForYouTab.OPEN)
+    val forYouTab: StateFlow<ForYouTab> = _forYouTab.asStateFlow()
 
     /// Notices the user has marked seen whose closed copy has not come back
     /// yet. Kept out of [awaitingYou] so a swiped row stays gone while the
@@ -186,6 +210,10 @@ class ItemsPanelViewModel(
                 val s = sections(items)
                 _sections.value = s
                 _needsYouCount.value = if (home == null) 0 else s.needsYou.count { it.originConvoID == home }
+                // Only the app-wide For you instance ever shows `decided`; a
+                // conversation's tasks page would redo this work on every
+                // emission of its own flow for a list nothing reads.
+                if (home == null && current is ItemsScope.All) updateDecided(decided(items))
             }
         }
         pendingCreatesJob?.cancel()
@@ -294,6 +322,27 @@ class ItemsPanelViewModel(
         _error.value = null
     }
 
+    fun selectForYouTab(tab: ForYouTab) {
+        _forYouTab.value = tab
+    }
+
+    /// Takes a fresh [decided] list from the store. The desired window only
+    /// ever grows: it is raised to [defaultDecidedWindow] on every emission
+    /// (not just seeded once), so an item closed after this view model
+    /// started with none still shows, while an unrelated change never
+    /// shrinks a window the user has expanded with [showMoreDecided].
+    private fun updateDecided(decided: List<TrackerItem>) {
+        _decided.value = decided
+        desiredDecidedVisibleCount = maxOf(desiredDecidedVisibleCount, defaultDecidedWindow(decided))
+        _decidedVisibleCount.value = minOf(desiredDecidedVisibleCount, decided.size)
+    }
+
+    /// The Done tab's "Show more": grows the visible window from local data.
+    fun showMoreDecided() {
+        desiredDecidedVisibleCount += DECIDED_PAGE_SIZE
+        _decidedVisibleCount.value = minOf(desiredDecidedVisibleCount, _decided.value.size)
+    }
+
     private fun publishAwaitingYou() {
         val stillWaiting = lastNeedsUserItems.filter { it.needsUser }.map { it.id }.toSet()
         seenPending = seenPending intersect stillWaiting
@@ -337,6 +386,33 @@ class ItemsPanelViewModel(
             rows.groupBy { it.itemID }
                 .filter { (id, itemRows) -> id != null && ItemDetailViewModel.pendingItemTap(itemRows) == TrackerItem.SEEN_ACTION }
                 .keys.filterNotNull().toSet()
+
+        /// How many more rows one "Show more" reveals, and the default window.
+        const val DECIDED_PAGE_SIZE = 50
+
+        /// Whether a closed item belongs on For you's Done tab: any closed
+        /// question or decision, WHATEVER its resolution, and never a task.
+        /// The journal does not pair kinds with resolutions, so a question
+        /// closed as done or cancelled (an agent abandoning it rather than
+        /// answering it) is still a closed question that must stay findable.
+        /// A closed notice counts too: nothing about it was decided, but its
+        /// Seen tap is the user saying they have read it, and they sometimes
+        /// want to find it again.
+        fun isDecided(item: TrackerItem): Boolean =
+            item.state == ItemState.CLOSED &&
+                (item.kind == ItemKind.QUESTION || item.kind == ItemKind.DECISION || item.kind == ItemKind.NOTICE)
+
+        /// The Done tab's rows: [isDecided] items, newest
+        /// [TrackerItem.closedSortDate] first, `num` descending on a tie.
+        fun decided(items: List<TrackerItem>): List<TrackerItem> =
+            items.filter(::isDecided)
+                .sortedWith(compareByDescending<TrackerItem> { it.closedSortDate }.thenByDescending { it.num })
+
+        /// The Done tab's default visible row count: the latest [latest]
+        /// closed items. A window by age would grow with the tracker, and
+        /// every row in it is rebuilt on each item change.
+        fun defaultDecidedWindow(decided: List<TrackerItem>, latest: Int = DECIDED_PAGE_SIZE): Int =
+            minOf(latest, decided.size)
 
         /// The Decisions rule (spec §1): `needsUser` only, every conversation,
         /// newest `updatedAt` first.

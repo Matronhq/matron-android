@@ -46,6 +46,7 @@ class ItemsViewsTest {
         assertEquals("Reversed", itemRowStatusCaption(item(state = ItemState.CLOSED, awaiting = null, resolution = ItemResolution.REVERSED)))
         assertNull(itemRowStatusCaption(item(kind = ItemKind.DECISION, awaiting = null)))
         assertEquals("Task 12, Which auth?", itemRowAccessibilityLabel(item()))
+        assertEquals("Task 12, Which auth?, Answered, 2 hr ago", itemRowAccessibilityLabel(item(), "Answered · 2 hr ago"))
         assertEquals("Question 12, Which auth?, needs you, mission #61", itemRowAccessibilityLabel(item(kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, missionNum = 61)))
         assertEquals("#61", itemMissionChipText(item(missionNum = 61)))
         assertNull(itemMissionChipText(item()))
@@ -67,6 +68,37 @@ class ItemsViewsTest {
     fun glyphLabels() {
         assertEquals(listOf("Task", "Question", "Decision"), listOf(ItemKind.TASK, ItemKind.QUESTION, ItemKind.DECISION).map(ItemGlyph::label))
         assertEquals(listOf("Done", "Answered", "Decided", "Reversed", "Cancelled"), ItemResolution.entries.map(ItemGlyph::label))
+    }
+
+    @Test
+    fun closedCaptionNamesTheResolutionAndWhen() {
+        val now = Instant.parse("2026-09-21T12:00:00Z")
+        val closedAt = now.minusSeconds(2 * 3600)
+        val question = TrackerItem(
+            id = "q", num = 1, kind = ItemKind.QUESTION, state = ItemState.CLOSED, resolution = ItemResolution.ANSWERED,
+            title = "Ship?", originConvoID = "c1", updatedAt = now.minusSeconds(60), closedAt = closedAt,
+        )
+        assertEquals("Answered · 2 hr ago", ItemGlyph.closedCaption(question, now = now))
+        assertEquals("the given time wins over the close time", "Answered · 5 min ago", ItemGlyph.closedCaption(question, at = now.minusSeconds(300), now = now))
+        assertEquals("no close time: the last update", "Answered · 1 min ago", ItemGlyph.closedCaption(question.copy(closedAt = null), now = now))
+        assertEquals("Cancelled · 2 hr ago", ItemGlyph.closedCaption(question.copy(resolution = ItemResolution.CANCELLED), now = now))
+        assertEquals("no resolution still reads as closed", "Closed · 2 hr ago", ItemGlyph.closedCaption(question.copy(resolution = null), now = now))
+        assertNull("an open item has no closed caption", ItemGlyph.closedCaption(question.copy(state = ItemState.OPEN), now = now))
+        assertEquals(
+            "3 Sep 2026 after a week", "Decided · 3 Sep 2026",
+            ItemGlyph.closedCaption(
+                question.copy(kind = ItemKind.DECISION, resolution = ItemResolution.DECIDED, closedAt = now.minusSeconds(18 * 86_400)),
+                now = now, zone = ZoneOffset.UTC, locale = Locale.US,
+            ),
+        )
+
+        // A notice the user closed with its own button was read, not done.
+        val notice = question.copy(kind = ItemKind.NOTICE, resolution = ItemResolution.DONE)
+        assertEquals("Seen · 2 hr ago", ItemGlyph.closedCaption(notice.copy(chosenAction = "Seen"), now = now))
+        assertEquals("the label is matched whatever its case", "Seen · 2 hr ago", ItemGlyph.closedCaption(notice.copy(chosenAction = "seen"), now = now))
+        assertEquals("a notice closed any other way", "Done · 2 hr ago", ItemGlyph.closedCaption(notice, now = now))
+        assertEquals("another button's tap", "Done · 2 hr ago", ItemGlyph.closedCaption(notice.copy(chosenAction = "Go"), now = now))
+        assertEquals("only a notice is ever seen", "Done · 2 hr ago", ItemGlyph.closedCaption(notice.copy(kind = ItemKind.QUESTION, chosenAction = "Seen"), now = now))
     }
 
     @Test

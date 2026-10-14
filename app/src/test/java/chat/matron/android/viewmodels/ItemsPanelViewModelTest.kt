@@ -13,6 +13,7 @@ import chat.matron.android.journal.ItemsSyncing
 import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.NewItem
 import chat.matron.android.journal.db.ItemOutboxEntity
+import chat.matron.android.models.ForYouTab
 import chat.matron.android.models.ItemAwaiting
 import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemResolution
@@ -562,5 +563,120 @@ class ItemsPanelViewModelTest {
         waitUntil { vm.awaitingYouCount.value == 2 }
         assertEquals(listOf("n", "q"), vm.awaitingYou.value.map { it.id })
         vm.stop()
+    }
+
+    // MARK: - For you's Done tab
+
+    private fun closed(id: String, num: Int, kind: ItemKind, closedSec: Long?, resolution: ItemResolution? = ItemResolution.DONE) =
+        t(id, num, kind = kind, awaiting = null, state = ItemState.CLOSED, rank = 0.0, closedMs = closedSec).copy(resolution = resolution)
+
+    @Test
+    fun decidedListsClosedQuestionsDecisionsAndNoticesNeverTasks() {
+        val items = listOf(
+            closed("q", 1, ItemKind.QUESTION, 10, ItemResolution.ANSWERED),
+            closed("d", 2, ItemKind.DECISION, 20, ItemResolution.DECIDED),
+            closed("n", 3, ItemKind.NOTICE, 30),
+            closed("task", 4, ItemKind.TASK, 40),
+            closed("cancelled", 5, ItemKind.QUESTION, 50, ItemResolution.CANCELLED),
+            closed("bare", 6, ItemKind.DECISION, 60, resolution = null),
+            t("open-q", 7, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 1.0),
+            t("open-n", 8, kind = ItemKind.NOTICE, awaiting = ItemAwaiting.USER, rank = 1.0),
+            t("open-d", 9, kind = ItemKind.DECISION, awaiting = null, rank = 1.0),
+        )
+        assertEquals(
+            "whatever the resolution, newest close first; no tasks, nothing open",
+            listOf("bare", "cancelled", "n", "d", "q"), ItemsPanelViewModel.decided(items).map { it.id },
+        )
+        assertFalse(ItemsPanelViewModel.isDecided(items.first { it.id == "task" }))
+        assertFalse(ItemsPanelViewModel.isDecided(items.first { it.id == "open-q" }))
+        assertEquals("the tasks page's Done section is untouched", 6, ItemsPanelViewModel.sections(items).done.size)
+    }
+
+    @Test
+    fun decidedOrdersByTheUsersLastInputThenCloseThenUpdate() {
+        val answeredLate = closed("answered-late", 1, ItemKind.QUESTION, 10).copy(lastUserInputAt = Instant.ofEpochSecond(90))
+        val closedLate = closed("closed-late", 2, ItemKind.QUESTION, 80)
+        // Answered before `closed-late` closed, though its own close came after.
+        val answeredEarly = closed("answered-early", 3, ItemKind.DECISION, 99).copy(lastUserInputAt = Instant.ofEpochSecond(70))
+        // No close time: its last update (`t` sets it to the number) stands in.
+        val neverStamped = closed("never-stamped", 60, ItemKind.NOTICE, null)
+        val tieLow = closed("tie-low", 4, ItemKind.QUESTION, 50)
+        val tieHigh = closed("tie-high", 5, ItemKind.NOTICE, 50)
+        assertEquals(
+            listOf("answered-late", "closed-late", "answered-early", "never-stamped", "tie-high", "tie-low"),
+            ItemsPanelViewModel.decided(listOf(tieLow, neverStamped, answeredEarly, tieHigh, closedLate, answeredLate)).map { it.id },
+        )
+    }
+
+    @Test
+    fun forYouOpensOnNeedsYouAndTheTabIsNotStored() = runBlocking {
+        val store = FakeItemsStore()
+        val vm = ItemsPanelViewModel(null, store, FakeItemsApi(), FakeItemsSync(), this)
+        assertEquals(ForYouTab.OPEN, vm.forYouTab.value)
+        vm.selectForYouTab(ForYouTab.CLOSED)
+        assertEquals(ForYouTab.CLOSED, vm.forYouTab.value)
+        assertEquals(
+            "a fresh launch's view model starts on Needs you again",
+            ForYouTab.OPEN, ItemsPanelViewModel(null, store, FakeItemsApi(), FakeItemsSync(), this).forYouTab.value,
+        )
+    }
+
+    @Test
+    fun decidedShowsTheLatestFiftyAndShowMoreRevealsFiftyMore() = runBlocking {
+        val store = FakeItemsStore()
+        val vm = ItemsPanelViewModel(null, store, FakeItemsApi(), FakeItemsSync(), this)
+        vm.start()
+        waitUntil { store.itemsSubscriptions == 1 }
+        assertEquals(0, vm.decidedVisibleCount.value); assertFalse(vm.hasMoreDecided)
+
+        // 120 closed questions; a larger number closed later.
+        val all = (1..120).map { closed("q$it", it, ItemKind.QUESTION, it.toLong()) }
+        val awaiting = t("open", 121, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 1.0)
+        store.items.emit(all + awaiting)
+        waitUntil { vm.decided.value.size == 120 }
+        assertEquals("newest first", "q120", vm.decided.value.first().id)
+        assertEquals(50, vm.decidedVisibleCount.value); assertTrue(vm.hasMoreDecided)
+
+        vm.showMoreDecided()
+        assertEquals(100, vm.decidedVisibleCount.value); assertTrue(vm.hasMoreDecided)
+
+        // An unrelated emission (the open item changes) keeps the window.
+        store.items.emit(all + awaiting.copy(title = "Edited"))
+        waitUntil { vm.sections.value.needsYou.singleOrNull()?.title == "Edited" }
+        assertEquals("an unrelated store emission keeps the expanded window", 100, vm.decidedVisibleCount.value)
+
+        vm.showMoreDecided()
+        assertEquals("capped at what exists", 120, vm.decidedVisibleCount.value); assertFalse(vm.hasMoreDecided)
+
+        // The spare the last tap asked for is used when more close.
+        store.items.emit(all + awaiting + closed("late", 122, closedSec = 500, kind = ItemKind.NOTICE))
+        waitUntil { vm.decided.value.size == 121 }
+        assertEquals("late", vm.decided.value.first().id)
+        assertEquals(121, vm.decidedVisibleCount.value)
+        vm.stop()
+    }
+
+    @Test
+    fun decidedGrowsFromEmptyAndOnlyTheAppWideInstanceFillsIt() = runBlocking {
+        val store = FakeItemsStore()
+        val vm = ItemsPanelViewModel(null, store, FakeItemsApi(), FakeItemsSync(), this)
+        vm.start()
+        waitUntil { store.itemsSubscriptions == 1 }
+        store.items.emit(emptyList())
+        waitUntil(200) { false }
+        assertEquals(0, vm.decidedVisibleCount.value)
+        store.items.emit(listOf(closed("n", 1, ItemKind.NOTICE, 10)))
+        waitUntil { vm.decided.value.size == 1 }
+        assertEquals("an item closed after an empty start still shows", 1, vm.decidedVisibleCount.value)
+        vm.stop()
+
+        val chatStore = FakeItemsStore()
+        val chat = ItemsPanelViewModel("c1", chatStore, FakeItemsApi(), FakeItemsSync(), this)
+        chat.start()
+        waitUntil { chatStore.itemsSubscriptions == 1 }
+        chatStore.items.emit(listOf(closed("q", 1, ItemKind.QUESTION, 10)))
+        waitUntil { chat.sections.value.done.size == 1 }
+        assertTrue("a conversation's tasks page never builds the Done tab", chat.decided.value.isEmpty())
+        chat.stop()
     }
 }
