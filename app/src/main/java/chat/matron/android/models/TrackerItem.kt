@@ -8,6 +8,7 @@ import chat.matron.android.journal.doubleOrNull
 import chat.matron.android.journal.objectOrNull
 import chat.matron.android.journal.objects
 import chat.matron.android.journal.stringOrNull
+import java.net.URI
 import java.time.Instant
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -144,6 +145,20 @@ data class TrackerLink(val url: String, val title: String? = null) {
         put("url", url)
         title?.let { put("title", it) }
     }
+
+    /// Whether this is the link the journal puts on a consent ask's mirror
+    /// item: `matron://consent/<kind>/…` (spawn, chat, contact, share).
+    /// Scheme and host compare case-insensitively; anything after the host
+    /// must be a non-empty path with no query or fragment.
+    val isConsentLink: Boolean
+        get() {
+            val uri = runCatching { URI(url) }.getOrNull() ?: return false
+            if (!uri.scheme.equals("matron", ignoreCase = true)) return false
+            if (!uri.host.equals("consent", ignoreCase = true)) return false
+            if (uri.rawQuery != null || uri.rawFragment != null) return false
+            val path = uri.rawPath ?: return false
+            return path.length > 1 && path.startsWith("/")
+        }
 
     companion object {
         fun fromJson(json: JsonObject): TrackerLink? {
@@ -326,6 +341,13 @@ data class TrackerItem(
             }
         }
     }
+
+    /// Whether this item is the journal's mirror of a consent card, decided
+    /// by its link, never by the `consent` label (which an agent could put on
+    /// any item). The journal refuses to reopen one: the card it mirrors has
+    /// been answered or has expired, and reopening cannot undo that.
+    val isConsentAsk: Boolean
+        get() = links.any { it.isConsentLink }
 
     /// `awaiting='user'` on an open item is the "Needs you" set across all kinds.
     val needsUser: Boolean get() = state == ItemState.OPEN && awaiting == ItemAwaiting.USER

@@ -237,6 +237,12 @@ class ItemDetailViewModel(
         commentsJob = scope.launch { store.commentsFlow(id).collect { _comments.value = it } }
     }
 
+    /// Whether a closed item offers Reopen. Not on a consent ask's mirror:
+    /// the journal answers that reopen with 409, because the ask itself is
+    /// settled.
+    val canReopen: Boolean
+        get() = _item.value?.isConsentAsk != true
+
     /// The resolutions the person can close this item with, primary first.
     /// Only outcomes they can honestly claim: a question is answered by
     /// *replying* (the journal hands it back to the agent, which closes it as
