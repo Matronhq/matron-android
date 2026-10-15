@@ -28,10 +28,20 @@ data class ConsentDecisionEvent(
             val icon = if (decision == Decision.APPROVE) "✅" else "🚫"
             val verb = if (decision == Decision.APPROVE) "approved" else "declined"
             val what = if (kind == Kind.SPAWN) "spawn request" else "chat request"
-            val oneLine = (reason ?: "").lines().joinToString(" ").trim()
             val line = "$icon Coordinator $verb the $what"
-            return if (oneLine.isEmpty()) line else "$line — $oneLine"
+            return oneLineReason?.let { "$line — $it" } ?: line
         }
+
+    /// The card's badge: "Approved by the Coordinator — <reason>" /
+    /// "Declined by the Coordinator".
+    val badgeText: String
+        get() {
+            val line = if (decision == Decision.APPROVE) "Approved by the Coordinator" else "Declined by the Coordinator"
+            return oneLineReason?.let { "$line — $it" } ?: line
+        }
+
+    private val oneLineReason: String?
+        get() = (reason ?: "").lines().joinToString(" ").trim().takeIf { it.isNotEmpty() }
 
     companion object {
         fun parse(payload: JsonObject): ConsentDecisionEvent? {
@@ -48,4 +58,28 @@ data class ConsentDecisionEvent(
             return ConsentDecisionEvent(kind, decision, payload.stringOrNull("reason"), askID)
         }
     }
+}
+
+/// The "Approved by the Coordinator" badge on a consent card the
+/// Coordinator answered, and the one tap that overrules it. Spawn cards get
+/// **Stop session** once the session has started; chat cards carry the
+/// badge alone. Ported from matron-apple's `CoordinatorConsentBadge`.
+data class CoordinatorConsentBadge(
+    val decision: ConsentDecisionEvent,
+    /// The spawned session's conversation, which Stop session stops. Null
+    /// until the journal reports the session started, and for a chat.
+    val stoppableConvoID: String? = null,
+    val stop: SessionStopState = SessionStopState.Idle,
+) {
+    val text: String get() = decision.badgeText
+}
+
+/// Where a Stop session tap is: not tapped, sending `/stop`, sent, or failed
+/// with a message to show. In memory only: the stopped session's own chat is
+/// the durable record.
+sealed interface SessionStopState {
+    data object Idle : SessionStopState
+    data object Sending : SessionStopState
+    data object Sent : SessionStopState
+    data class Failed(val message: String) : SessionStopState
 }

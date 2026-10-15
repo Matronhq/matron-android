@@ -6,13 +6,19 @@ import chat.matron.android.chat.JournalTimelineMapper
 import chat.matron.android.chat.TimelineItem
 import chat.matron.android.chat.TimelineService
 import chat.matron.android.events.AgentChatCardState
+import chat.matron.android.events.AgentSpawnCardState
+import chat.matron.android.events.ConsentDecisionEvent
 import chat.matron.android.events.ItemMarkerEvent
+import chat.matron.android.events.SessionStopState
 import chat.matron.android.journal.AgentChatDecision
+import chat.matron.android.journal.AgentSpawnAnswering
+import chat.matron.android.journal.AgentSpawnDecision
 import chat.matron.android.journal.JournalEvent
+import chat.matron.android.journal.SessionStopping
 import java.time.Instant
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -22,6 +28,7 @@ import kotlinx.serialization.json.putJsonObject
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Exercises wire parsing through the view model's actual render rows. */
@@ -286,5 +293,137 @@ class ChatConsentTimelineTest {
         val shown = (rows[0].kind as TimelineItem.Kind.ItemMarker).marker
         assertEquals(ItemMarkerEvent.Action.CLOSED, shown.action)
         assertEquals("Use A", shown.comment?.body)
+    }
+
+    // MARK: Coordinator badge and Stop session
+
+    private fun spawnCard(seq: Long = 30, requestID: String = "spawn-1") = event(seq, "permission_request", buildJsonObject {
+        put("kind", "agent_spawn"); put("request_id", requestID)
+        put("from_device_id", 4); put("target_device_id", 7)
+        put("from_name", "box-a"); put("target_name", "box-b")
+        put("workdir", "/srv/project"); put("task", "Fix the failing build")
+    })
+
+    private fun spawnDecision(seq: Long, requestID: String = "spawn-1", approve: Boolean = true) =
+        event(seq, "consent_decision", buildJsonObject {
+            put("kind", "spawn"); put("decision", if (approve) "approve" else "decline")
+            put("request_id", requestID); put("by", "coordinator")
+            put("reason", "Same repo as the\nparent")
+        })
+
+    private fun started(seq: Long, requestID: String = "spawn-1", child: String? = "child-1") =
+        event(seq, "spawn_outcome", buildJsonObject {
+            put("request_id", requestID); put("outcome", "started"); put("room_id", "room-9")
+            child?.let { put("child_convo_id", it) }
+        })
+
+    private class SpawnAnswerer : AgentSpawnAnswering {
+        override suspend fun answerAgentSpawn(requestId: String, decision: AgentSpawnDecision) = Unit
+    }
+
+    private class Stopper : SessionStopping {
+        val stopped = mutableListOf<String>()
+        var error: Throwable? = null
+        override suspend fun stopSession(convoID: String) {
+            stopped += convoID
+            error?.let { throw it }
+        }
+    }
+
+    private suspend fun TestScope.startSpawnVM(
+        items: List<TimelineItem>, stopper: Stopper? = Stopper(),
+    ): Pair<ChatViewModel, MutableStateFlow<List<TimelineItem>>> {
+        val snapshots = MutableStateFlow(items)
+        val timeline = object : TimelineService by FakeTimelineService() {
+            override fun items() = snapshots
+        }
+        val vm = ChatViewModel(
+            "room-1", timeline, FakeMediaService(), backgroundScope, InMemoryKeyValueStore(),
+            agentChat = Answerer(), agentSpawn = SpawnAnswerer(), sessionStopper = stopper,
+        )
+        vm.start()
+        runCurrent()
+        return vm to snapshots
+    }
+
+    @Test fun badgeTextCarriesTheReasonOnOneLine() {
+        val decision = (spawnDecision(31).kind as TimelineItem.Kind.ConsentDecision).decision
+        assertEquals("Approved by the Coordinator — Same repo as the parent", decision.badgeText)
+        assertEquals(
+            "Declined by the Coordinator",
+            decision.copy(decision = ConsentDecisionEvent.Decision.DECLINE, reason = " ").badgeText,
+        )
+    }
+
+    @Test fun aSpawnCardTheCoordinatorAnsweredIsNotAnswerableBeforeTheOutcome() = runTest {
+        val request = (spawnCard().kind as TimelineItem.Kind.AgentSpawnRequestCard).request
+        val (vm, snapshots) = startSpawnVM(listOf(spawnCard()))
+        assertEquals(AgentSpawnCardState.Idle, vm.agentSpawnState("30", request))
+        assertNull(vm.coordinatorBadge("30", request))
+
+        snapshots.value += spawnDecision(31)
+        runCurrent()
+        assertEquals(AgentSpawnCardState.AnsweredByCoordinator(approved = true), vm.agentSpawnState("30", request))
+        val badge = vm.coordinatorBadge("30", request)!!
+        assertEquals("Approved by the Coordinator — Same repo as the parent", badge.text)
+        assertNull("nothing to stop before the session starts", badge.stoppableConvoID)
+    }
+
+    @Test fun aDecisionBadgesOnlyTheLatestCardForItsRequest() = runTest {
+        val (vm) = startSpawnVM(listOf(spawnCard(30), spawnCard(32), spawnDecision(33)))
+        val request = (spawnCard().kind as TimelineItem.Kind.AgentSpawnRequestCard).request
+        assertNull(vm.coordinatorBadge("30", request))
+        assertEquals(ConsentDecisionEvent.Kind.SPAWN, vm.coordinatorBadge("32", request)!!.decision.kind)
+    }
+
+    @Test fun stopSessionOnceStartedSendsOnceAndSettles() = runTest {
+        val request = (spawnCard().kind as TimelineItem.Kind.AgentSpawnRequestCard).request
+        val stopper = Stopper()
+        val (vm) = startSpawnVM(listOf(spawnCard(), spawnDecision(31), started(32)), stopper)
+        assertTrue(vm.agentSpawnState("30", request) is AgentSpawnCardState.Resolved)
+        val badge = vm.coordinatorBadge("30", request)!!
+        assertEquals("child-1", badge.stoppableConvoID)
+        assertEquals(SessionStopState.Idle, badge.stop)
+
+        vm.stopSpawnedSession("child-1")
+        runCurrent()
+        vm.stopSpawnedSession("child-1")
+        runCurrent()
+        assertEquals(listOf("child-1"), stopper.stopped)
+        assertEquals(SessionStopState.Sent, vm.coordinatorBadge("30", request)!!.stop)
+    }
+
+    @Test fun aFailedStopCanBeTappedAgain() = runTest {
+        val request = (spawnCard().kind as TimelineItem.Kind.AgentSpawnRequestCard).request
+        val stopper = Stopper().apply { error = IllegalStateException("disk full") }
+        val (vm) = startSpawnVM(listOf(spawnCard(), spawnDecision(31), started(32)), stopper)
+        vm.stopSpawnedSession("child-1")
+        runCurrent()
+        assertTrue(vm.coordinatorBadge("30", request)!!.stop is SessionStopState.Failed)
+
+        stopper.error = null
+        vm.stopSpawnedSession("child-1")
+        runCurrent()
+        assertEquals(listOf("child-1", "child-1"), stopper.stopped)
+        assertEquals(SessionStopState.Sent, vm.coordinatorBadge("30", request)!!.stop)
+    }
+
+    @Test fun noStopWithoutAChildAStopperOrAnApproval() = runTest {
+        val request = (spawnCard().kind as TimelineItem.Kind.AgentSpawnRequestCard).request
+        val (noChild) = startSpawnVM(listOf(spawnCard(), spawnDecision(31), started(32, child = null)))
+        assertNull(noChild.coordinatorBadge("30", request)!!.stoppableConvoID)
+        val (noStopper) = startSpawnVM(listOf(spawnCard(), spawnDecision(31), started(32)), stopper = null)
+        assertNull(noStopper.coordinatorBadge("30", request)!!.stoppableConvoID)
+        val (declined) = startSpawnVM(listOf(spawnCard(), spawnDecision(31, approve = false)))
+        assertEquals(AgentSpawnCardState.AnsweredByCoordinator(approved = false), declined.agentSpawnState("30", request))
+        assertNull(declined.coordinatorBadge("30", request)!!.stoppableConvoID)
+    }
+
+    @Test fun aChatCardTheCoordinatorAnsweredCarriesTheBadge() = runTest {
+        val (vm) = startSpawnVM(listOf(card(), coordinatorDecision(11)))
+        val badge = vm.coordinatorBadge("10")!!
+        assertEquals("Approved by the Coordinator — Matches the request", badge.text)
+        assertNull(badge.stoppableConvoID)
+        assertNull("a card the Coordinator did not answer has no badge", startSpawnVM(listOf(card(20, 8), coordinatorDecision(21))).first.coordinatorBadge("20"))
     }
 }

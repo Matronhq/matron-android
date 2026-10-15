@@ -40,6 +40,7 @@ import chat.matron.android.models.UserSession
 import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.AppLockTimeout
 import chat.matron.android.viewmodels.DevicesProviding
+import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
 import kotlinx.coroutines.launch
 
@@ -323,10 +324,13 @@ data class CoordinatorSettingRowModel(
     val title: String?,
     val onChoose: () -> Unit,
     val onClear: () -> Unit,
+    /// The journal's consent-approval switch, under the picker. Null in
+    /// hosts without one.
+    val consent: CoordinatorConsentSettingViewModel? = null,
 )
 
 @Composable
-private fun CoordinatorSection(model: CoordinatorSettingRowModel) {
+internal fun CoordinatorSection(model: CoordinatorSettingRowModel) {
     SettingsSection("Coordinator") {
         if (model.title != null) {
             LabeledRow("Conversation", model.title)
@@ -346,6 +350,56 @@ private fun CoordinatorSection(model: CoordinatorSettingRowModel) {
             )
             TextButton(onClick = model.onChoose) { Text("Choose…") }
         }
+        model.consent?.let { CoordinatorConsentSwitch(it) }
+    }
+}
+
+/**
+ * The journal's consent-approval switch, under the Coordinator picker: on,
+ * the Coordinator may answer chat and spawn cards for the user (each card
+ * then says so, with its reason). Hidden until the journal answers, and for
+ * a journal without the switch.
+ */
+@Composable
+private fun CoordinatorConsentSwitch(model: CoordinatorConsentSettingViewModel) {
+    DisposableEffect(model) {
+        model.start()
+        onDispose { model.stop() }
+    }
+    val enabled by model.enabled.collectAsStateWithLifecycle()
+    val saving by model.isSaving.collectAsStateWithLifecycle()
+    val error by model.error.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    val on = enabled ?: return
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(CoordinatorConsentSettingViewModel.TITLE, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                CoordinatorConsentSettingViewModel.HELP,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = on,
+            enabled = !saving,
+            onCheckedChange = { wanted -> scope.launch { model.setEnabled(wanted) } },
+        )
+    }
+    error?.let {
+        Text(
+            it,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(bottom = 8.dp),
+        )
     }
 }
 

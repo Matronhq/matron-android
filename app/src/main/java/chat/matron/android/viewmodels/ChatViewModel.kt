@@ -10,10 +10,14 @@ import chat.matron.android.events.AgentChatRequest
 import chat.matron.android.events.AgentSpawnCardState
 import chat.matron.android.events.AgentSpawnRequest
 import chat.matron.android.events.AskUserEvent
+import chat.matron.android.events.ConsentDecisionEvent
+import chat.matron.android.events.CoordinatorConsentBadge
+import chat.matron.android.events.SessionStopState
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.journal.AgentChatDecision
 import chat.matron.android.journal.AgentSpawnAnswering
+import chat.matron.android.journal.SessionStopping
 import chat.matron.android.journal.AgentSpawnDecision
 import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.SessionState
@@ -95,6 +99,10 @@ class ChatViewModel(
     /// failed index open leave the entry point a no-op — the bar must not
     /// come up reporting bogus emptiness.
     private val search: SearchService? = null,
+    /// Stops a session the Coordinator let start, from its spawn card's
+    /// badge. Null (previews, tests) leaves the badge without its Stop
+    /// session button.
+    private val sessionStopper: SessionStopping? = null,
 ) {
     // MARK: - In-conversation search (apple #172)
 
@@ -600,6 +608,11 @@ class ChatViewModel(
     /// no answerer must not offer buttons that do nothing.
     fun agentSpawnState(eventID: String, request: AgentSpawnRequest): AgentSpawnCardState {
         _spawnOutcomes.value[request.requestId]?.let { return AgentSpawnCardState.Resolved(it) }
+        // Answered by the Coordinator, the session not started yet: the card
+        // is answered, so it must not offer Approve / Decline again.
+        _coordinatorDecisions.value[eventID]?.let {
+            return AgentSpawnCardState.AnsweredByCoordinator(it.decision == ConsentDecisionEvent.Decision.APPROVE)
+        }
         _agentSpawnStates.value[eventID]?.let { return it }
         return if (agentSpawn == null) AgentSpawnCardState.Unavailable else AgentSpawnCardState.Idle
     }
@@ -625,7 +638,7 @@ class ChatViewModel(
         val answerer = agentSpawn ?: return
         when (agentSpawnState(eventID, request)) {
             is AgentSpawnCardState.Resolved, is AgentSpawnCardState.Sending,
-            AgentSpawnCardState.Unavailable,
+            is AgentSpawnCardState.AnsweredByCoordinator, AgentSpawnCardState.Unavailable,
             -> return
             else -> {}
         }
@@ -657,6 +670,62 @@ class ChatViewModel(
         _agentSpawnStates.value = _agentSpawnStates.value + (eventID to state)
     }
 
+    // MARK: - Coordinator badge
+
+    /// The Coordinator's answers to this conversation's consent cards, keyed
+    /// by the card's event id — read from the timeline's `consent_decision`
+    /// events ([TimelineConsentFold]), like [agentChatResolutions].
+    private val _coordinatorDecisions = MutableStateFlow<Map<String, ConsentDecisionEvent>>(emptyMap())
+    val coordinatorDecisions: StateFlow<Map<String, ConsentDecisionEvent>> = _coordinatorDecisions.asStateFlow()
+
+    /// Stop session taps, keyed by the stopped conversation's id. In memory
+    /// only, like the spawn card's transient states.
+    private val _sessionStopStates = MutableStateFlow<Map<String, SessionStopState>>(emptyMap())
+    val sessionStopStates: StateFlow<Map<String, SessionStopState>> = _sessionStopStates.asStateFlow()
+
+    /// The "Approved by the Coordinator" badge for a consent card, or null
+    /// when the Coordinator did not answer it. A spawn card's badge offers
+    /// Stop session once the journal reports the session started (its
+    /// `spawn_outcome` names the child conversation) and a stopper is wired.
+    fun coordinatorBadge(eventID: String, spawnRequest: AgentSpawnRequest? = null): CoordinatorConsentBadge? {
+        val decision = _coordinatorDecisions.value[eventID] ?: return null
+        val outcome = spawnRequest?.let { _spawnOutcomes.value[it.requestId] }
+        val child = outcome?.childConvoId?.takeIf { outcome.outcome == "started" }
+        if (decision.decision != ConsentDecisionEvent.Decision.APPROVE || sessionStopper == null || child == null) {
+            return CoordinatorConsentBadge(decision)
+        }
+        return CoordinatorConsentBadge(decision, child, _sessionStopStates.value[child] ?: SessionStopState.Idle)
+    }
+
+    /// Stop session: `/stop` into the spawned session's conversation. Once
+    /// sent the button stays settled — the session's own chat says it
+    /// stopped — and a failure can be tapped again. Runs on [scope] for the
+    /// same reason as [answerAgentSpawn]: scrolling the card away must not
+    /// cancel it mid-send.
+    fun stopSpawnedSession(convoID: String) {
+        val stopper = sessionStopper ?: return
+        when (_sessionStopStates.value[convoID]) {
+            SessionStopState.Sending, SessionStopState.Sent -> return
+            else -> {}
+        }
+        setSessionStopState(convoID, SessionStopState.Sending)
+        scope.launch {
+            try {
+                stopper.stopSession(convoID)
+                setSessionStopState(convoID, SessionStopState.Sent)
+            } catch (cancel: CancellationException) {
+                _sessionStopStates.value = _sessionStopStates.value - convoID
+                throw cancel
+            } catch (error: Throwable) {
+                setSessionStopState(convoID, SessionStopState.Failed("Couldn't stop the session: ${error.message ?: error}"))
+            }
+        }
+    }
+
+    private fun setSessionStopState(convoID: String, state: SessionStopState) {
+        _sessionStopStates.value = _sessionStopStates.value + (convoID to state)
+    }
+
     // MARK: - Snapshot → derived state
 
     private fun applySnapshot(snapshot: List<TimelineItem>) {
@@ -672,6 +741,7 @@ class ChatViewModel(
     private fun applyDerivedRecompute() {
         val consentFold = TimelineConsentFold.read(_items.value)
         _agentChatResolutions.value = consentFold.chatResolutions
+        _coordinatorDecisions.value = consentFold.coordinatorDecisions
         val nextRows = ArrayList<TimelineRow>(_items.value.size + 4)
         var first: String? = null
         var last: String? = null

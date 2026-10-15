@@ -92,6 +92,19 @@ interface CoordinatorProviding {
     suspend fun setCoordinator(convoID: String?): String?
 }
 
+/// The Coordinator's consent-approval switch (protocol: "Coordinator →
+/// Consent approval → Off switch"): `consent` on `GET` / `PUT /coordinator`,
+/// on by default. Off, the Coordinator cannot answer chat or spawn cards; the
+/// user's own taps are unaffected. Its own slice so the settings switch does
+/// not need the whole Coordinator contract. Ported from matron-apple's
+/// `CoordinatorConsentProviding`.
+interface CoordinatorConsentProviding {
+    /// Null from a journal that predates the switch (no `consent` key).
+    suspend fun coordinatorConsent(): Boolean?
+    /// Returns what the journal stored.
+    suspend fun setCoordinatorConsent(enabled: Boolean): Boolean?
+}
+
 /// The narrow slice of [JournalApi] the sync engine depends on: the WebSocket
 /// URL and the cold-start / refresh snapshot fetch. Extracted as an interface
 /// so engine tests can supply a scriptable fake (with request gating) instead
@@ -301,7 +314,7 @@ class JournalApi(
     private val client: OkHttpClient = OkHttpClient(),
     token: String? = null,
 ) : SnapshotSource, AgentSpawnAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
-    PinsProviding, CoordinatorProviding, UserSettingsProviding, NumberLookupProviding {
+    PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -948,6 +961,18 @@ class JournalApi(
         )
 
     private fun decodeCoordinator(obj: JsonObject): String? = obj.stringOrNull("convo_id")?.takeIf { it.isNotEmpty() }
+
+    override suspend fun coordinatorConsent(): Boolean? = decodeCoordinatorConsent(request(path = "/coordinator"))
+
+    override suspend fun setCoordinatorConsent(enabled: Boolean): Boolean? =
+        decodeCoordinatorConsent(
+            request(
+                path = "/coordinator", method = "PUT",
+                jsonBody = buildJsonObject { put("consent", JsonPrimitive(enabled)) },
+            ),
+        )
+
+    private fun decodeCoordinatorConsent(obj: JsonObject): Boolean? = obj.boolOrNull("consent")
 
     // MARK: Internals
 

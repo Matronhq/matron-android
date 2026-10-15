@@ -26,6 +26,7 @@ import chat.matron.android.events.AgentChatCardState
 import chat.matron.android.events.AgentChatRequest
 import chat.matron.android.events.AgentSpawnCardState
 import chat.matron.android.events.AgentSpawnRequest
+import chat.matron.android.events.CoordinatorConsentBadge
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.journal.AgentSpawnDecision
 import chat.matron.android.designsystem.ActivityIndicatorRow
@@ -107,6 +108,12 @@ fun TimelineItemView(
     /// (agent-spawn-card plan Task 3). Required, not defaulted: a caller that
     /// forgets to wire it should fail to compile, not fail silently.
     onOpenSpawnedRoom: (roomId: String) -> Unit,
+    /// The "Approved by the Coordinator" badge for a consent card, null when
+    /// the Coordinator did not answer it. The spawn request rides along for
+    /// the spawn card's Stop session. Null (previews, tests) draws no badge.
+    coordinatorBadge: ((eventID: String, spawnRequest: AgentSpawnRequest?) -> CoordinatorConsentBadge?)? = null,
+    /// The badge's Stop session: stops the named spawned conversation.
+    onStopSession: ((convoID: String) -> Unit)? = null,
     /// Opens the tracker item a tapped [TimelineItem.Kind.ItemMarker] card
     /// names (the `item/{itemID}` route) — same "fixed per screen, `null`
     /// where there's nowhere to navigate" convention as [onOpenSpawnedRoom]
@@ -129,7 +136,8 @@ fun TimelineItemView(
             RenderedBody(
                 item, resolveImage, onTapImage, onTapFile, isDownloadingFile, isMediaUnavailable,
                 askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
-                agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, onOpenItem, onOpenMission, hasMultipleSenders,
+                agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, coordinatorBadge, onStopSession,
+                onOpenItem, onOpenMission, hasMultipleSenders,
             )
             SendStateIndicator(
                 state = sendStateGlyphFrom(item.sendState),
@@ -141,7 +149,8 @@ fun TimelineItemView(
         RenderedBody(
             item, resolveImage, onTapImage, onTapFile, isDownloadingFile, isMediaUnavailable,
             askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
-            agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, onOpenItem, onOpenMission, hasMultipleSenders,
+            agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, coordinatorBadge, onStopSession,
+                onOpenItem, onOpenMission, hasMultipleSenders,
         )
     }
 }
@@ -170,6 +179,8 @@ private fun RenderedBody(
         decision: AgentSpawnDecision,
     ) -> Unit)?,
     onOpenSpawnedRoom: (roomId: String) -> Unit,
+    coordinatorBadge: ((eventID: String, spawnRequest: AgentSpawnRequest?) -> CoordinatorConsentBadge?)?,
+    onStopSession: ((convoID: String) -> Unit)?,
     onOpenItem: ((itemID: String) -> Unit)?,
     onOpenMission: ((missionID: String) -> Unit)?,
     hasMultipleSenders: Boolean,
@@ -258,6 +269,7 @@ private fun RenderedBody(
                     state = agentChatState?.invoke(kind.eventID) ?: AgentChatCardState.Expired,
                     onApprove = { onAnswerAgentChat?.invoke(kind.eventID, kind.request, true) },
                     onDeny = { onAnswerAgentChat?.invoke(kind.eventID, kind.request, false) },
+                    coordinatorBadge = coordinatorBadge?.invoke(kind.eventID, null),
                 )
             }
 
@@ -271,6 +283,8 @@ private fun RenderedBody(
                     onApprove = { onAnswerAgentSpawn?.invoke(kind.eventID, kind.request, AgentSpawnDecision.APPROVE) },
                     onDeny = { onAnswerAgentSpawn?.invoke(kind.eventID, kind.request, AgentSpawnDecision.DENY) },
                     onOpen = onOpenSpawnedRoom,
+                    coordinatorBadge = coordinatorBadge?.invoke(kind.eventID, kind.request),
+                    onStopSession = onStopSession,
                 )
             }
 

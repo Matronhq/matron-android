@@ -800,6 +800,10 @@ private fun TimelineRowView(
     // transient in-flight/failed state (an HTTP call, no journal event).
     val spawnOutcomes by chatVM.spawnOutcomes.collectAsStateWithLifecycle()
     val agentSpawnStates by chatVM.agentSpawnStates.collectAsStateWithLifecycle()
+    // The Coordinator's answers and Stop session taps redraw the cards'
+    // badges; neither is a change to the card's own row.
+    val coordinatorDecisions by chatVM.coordinatorDecisions.collectAsStateWithLifecycle()
+    val sessionStopStates by chatVM.sessionStopStates.collectAsStateWithLifecycle()
     // A bridge queued_release lands as a hidden row, so no visible row changes;
     // collecting the memo is what recomposes the sibling queue cards' buttons
     // (apple #162; Bugbot #48).
@@ -863,6 +867,13 @@ private fun TimelineRowView(
                         chatVM.answerAgentSpawn(eventID = eventID, request = request, decision = decision)
                     },
                     onOpenSpawnedRoom = onOpenConversation,
+                    coordinatorBadge = { eventID, request ->
+                        // Read through the view model; the flows above are
+                        // what make this recompose.
+                        coordinatorDecisions.let { sessionStopStates }.let { spawnOutcomes }
+                            .let { chatVM.coordinatorBadge(eventID, request) }
+                    },
+                    onStopSession = { convoID -> chatVM.stopSpawnedSession(convoID) },
                     onOpenItem = onOpenItem,
                     onOpenMission = onOpenMission,
                     hasMultipleSenders = hasMultipleSenders,
