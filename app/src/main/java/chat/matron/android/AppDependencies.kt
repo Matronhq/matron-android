@@ -15,6 +15,8 @@ import chat.matron.android.chat.JournalTimelineService
 import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineService
 import chat.matron.android.journal.AgentSpawnAnswering
+import chat.matron.android.journal.OutboxSessionStopper
+import chat.matron.android.journal.SessionStopping
 import chat.matron.android.journal.ItemsProviding
 import chat.matron.android.designsystem.TrackerItemLinkOutcome
 import chat.matron.android.journal.ItemsSync
@@ -25,6 +27,7 @@ import chat.matron.android.journal.MissionsSyncing
 import chat.matron.android.journal.CoordinatorSync
 import chat.matron.android.journal.PinsSync
 import chat.matron.android.journal.PinsSyncing
+import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
 import chat.matron.android.viewmodels.CoordinatorSetting
 import chat.matron.android.viewmodels.MemoriesListViewModel
 import chat.matron.android.viewmodels.MemoryEditorViewModel
@@ -622,6 +625,15 @@ class AppDependencies(
      * just the session's existing API client.
      */
     fun agentSpawnService(session: UserSession): AgentSpawnAnswering = core(session).api
+
+    /** Stops a session the Coordinator let start, from its spawn card. */
+    fun sessionStopper(session: UserSession): SessionStopping = OutboxSessionStopper(core(session).engine)
+
+    /** Settings → Coordinator's consent-approval switch. */
+    fun makeCoordinatorConsentSettingViewModel(
+        session: UserSession,
+        scope: CoroutineScope,
+    ): CoordinatorConsentSettingViewModel = CoordinatorConsentSettingViewModel(api = core(session).api, scope = scope)
 
     /** Show-QR surface (Settings → Link a Device). */
     fun deviceLinkService(session: UserSession): DeviceLinking =

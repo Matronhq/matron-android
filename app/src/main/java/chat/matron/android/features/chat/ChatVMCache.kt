@@ -50,6 +50,7 @@ class ChatVMCache(
             agentChat = deps.agentChatService(session),
             agentSpawn = deps.agentSpawnService(session),
             search = deps.search,
+            sessionStopper = deps.sessionStopper(session),
         )
         val pair = chat to ComposerViewModel(
             roomID = roomID,

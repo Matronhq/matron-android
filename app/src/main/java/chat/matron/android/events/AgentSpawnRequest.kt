@@ -195,4 +195,10 @@ sealed class AgentSpawnCardState {
     /// `expired` outcome and calls for "request no longer waiting" here
     /// instead (matching agent-chat's `AgentChatCardState.Expired`).
     data object Unavailable : AgentSpawnCardState()
+
+    /// The Coordinator answered the card and the journal has not reported
+    /// the outcome yet: the card must not offer Approve / Decline again. The
+    /// card's badge says who decided and why; the real `spawn_outcome`
+    /// event supersedes this once it lands.
+    data class AnsweredByCoordinator(val approved: Boolean) : AgentSpawnCardState()
 }

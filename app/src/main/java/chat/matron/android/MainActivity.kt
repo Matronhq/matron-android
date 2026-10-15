@@ -1010,6 +1010,9 @@ private fun SignedInApp(
 
                     composable("settings") {
                         val noticesSetting = remember(session.userID) { deps.makeNoticesSettingViewModel(session, sessionScope) }
+                        val coordinatorConsent = remember(session.userID) {
+                            deps.makeCoordinatorConsentSettingViewModel(session, sessionScope)
+                        }
                         DeviceSettingsScreen(
                             session = session,
                             devicesApi = deps.devicesService(session),
@@ -1024,6 +1027,7 @@ private fun SignedInApp(
                                 title = coordinatorTitle,
                                 onChoose = { showCoordinatorChooser = true },
                                 onClear = { shell.assignCoordinator(null, persistCoordinator) },
+                                consent = coordinatorConsent,
                             ),
                             onPinnedChats = if (pins != null) ({ nav.navigate("pinned-chats") }) else null,
                             notices = noticesSetting,

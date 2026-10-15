@@ -13,14 +13,22 @@ import chat.matron.android.events.ItemMarkerEvent
  */
 internal data class TimelineConsentFold(
     val chatResolutions: Map<String, AgentChatCardState>,
+    /// The Coordinator's answer to a chat or spawn card, keyed by the card's
+    /// event id: what the card's "Approved by the Coordinator — <reason>"
+    /// badge reads.
+    val coordinatorDecisions: Map<String, ConsentDecisionEvent>,
     val hiddenItemRows: Set<String>,
     val restatedItemMarkers: Map<String, ItemMarkerEvent>,
 ) {
     companion object {
         fun read(items: List<TimelineItem>): TimelineConsentFold {
             val resolutions = mutableMapOf<String, AgentChatCardState>()
+            val coordinatorDecisions = mutableMapOf<String, ConsentDecisionEvent>()
             val hidden = mutableSetOf<String>()
             val latestChatCard = mutableMapOf<String, String>()
+            // The latest spawn card per request id, for the same reason as
+            // latestChatCard: a decision is always about the newest card.
+            val latestSpawnCard = mutableMapOf<String, String>()
             val unpaired = linkedSetOf<String>()
             val cardForItem = mutableMapOf<String, String>()
             val itemsNamingTheirAsk = mutableSetOf<String>()
@@ -33,14 +41,21 @@ internal data class TimelineConsentFold(
                         latestChatCard[kind.request.askID] = kind.eventID
                         unpaired.add(kind.eventID)
                     }
+                    is TimelineItem.Kind.AgentSpawnRequestCard -> {
+                        latestSpawnCard[kind.request.requestId] = kind.eventID
+                    }
                     is TimelineItem.Kind.ConsentDecision -> {
                         val decision = kind.decision
-                        if (decision.kind == ConsentDecisionEvent.Kind.CHAT) {
-                            latestChatCard[decision.askID]?.let { card ->
+                        when (decision.kind) {
+                            ConsentDecisionEvent.Kind.CHAT -> latestChatCard[decision.askID]?.let { card ->
                                 resolutions[card] = AgentChatCardState.Answered(
                                     decision.decision == ConsentDecisionEvent.Decision.APPROVE,
                                     byCoordinator = true,
                                 )
+                                coordinatorDecisions[card] = decision
+                            }
+                            ConsentDecisionEvent.Kind.SPAWN -> latestSpawnCard[decision.askID]?.let { card ->
+                                coordinatorDecisions[card] = decision
                             }
                         }
                     }
@@ -100,7 +115,7 @@ internal data class TimelineConsentFold(
                 val updated = card.second.restated(latest)
                 if (updated != card.second) restated[card.first] = updated
             }
-            return TimelineConsentFold(resolutions, hidden, restated)
+            return TimelineConsentFold(resolutions, coordinatorDecisions, hidden, restated)
         }
 
         private fun chatResolution(marker: ItemMarkerEvent): AgentChatCardState? {

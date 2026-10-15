@@ -24,6 +24,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.unit.dp
 import chat.matron.android.events.AgentChatCardState
 import chat.matron.android.events.AgentChatRequest
+import chat.matron.android.events.CoordinatorConsentBadge
 
 /// The agent-chat consent card, inline in the timeline — one agent asking to
 /// talk to another, and the two buttons that answer it.
@@ -42,6 +43,9 @@ fun AgentChatRequestCard(
     onApprove: () -> Unit,
     onDeny: () -> Unit,
     modifier: Modifier = Modifier,
+    /// The Coordinator's answer, when it gave one: its reason goes on the
+    /// outcome line.
+    coordinatorBadge: CoordinatorConsentBadge? = null,
 ) {
     val busy = state is AgentChatCardState.Sending
 
@@ -84,8 +88,9 @@ fun AgentChatRequestCard(
                     modifier = Modifier.size(18.dp),
                 )
                 Text(
-                    (if (state.approved) "Approved" else "Declined") +
-                        (if (state.byCoordinator) " by the Coordinator" else ""),
+                    coordinatorBadge?.text?.takeIf { state.byCoordinator }
+                        ?: ((if (state.approved) "Approved" else "Declined") +
+                            (if (state.byCoordinator) " by the Coordinator" else "")),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

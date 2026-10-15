@@ -28,6 +28,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.unit.dp
 import chat.matron.android.events.AgentSpawnCardState
 import chat.matron.android.events.AgentSpawnRequest
+import chat.matron.android.events.CoordinatorConsentBadge
 import chat.matron.android.events.SpawnOutcome
 
 /// The agent-spawn consent card, inline in the timeline — one agent asking
@@ -52,6 +53,10 @@ fun AgentSpawnRequestCard(
     /// plan Task 3; see `MainActivity.openConversationCallback`).
     onOpen: (roomId: String) -> Unit,
     modifier: Modifier = Modifier,
+    /// The Coordinator's answer, when it gave one, and its Stop session.
+    coordinatorBadge: CoordinatorConsentBadge? = null,
+    /// Stops the spawned session the badge names. Null omits the button.
+    onStopSession: ((convoID: String) -> Unit)? = null,
 ) {
     val busy = state is AgentSpawnCardState.Sending
 
@@ -91,7 +96,17 @@ fun AgentSpawnRequestCard(
             color = MaterialTheme.colorScheme.onSurface,
         )
 
+        coordinatorBadge?.let { CoordinatorConsentBadgeView(badge = it, onStopSession = onStopSession) }
+
         when (state) {
+            // The badge above says who decided and why; until the journal
+            // reports the outcome there is nothing left to press.
+            is AgentSpawnCardState.AnsweredByCoordinator -> if (state.approved) Text(
+                "Waiting for the session to start…",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
             is AgentSpawnCardState.Resolved -> ResolvedRow(outcome = state.outcome, onOpen = onOpen)
 
             // Stopped waiting with no durable outcome behind it (a 409, or no

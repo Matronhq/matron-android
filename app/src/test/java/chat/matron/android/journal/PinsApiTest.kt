@@ -165,4 +165,22 @@ class PinsApiTest {
         assertNull(api().setCoordinator(null))
         assertEquals(JsonNull, body(server.takeRequest())["convo_id"])
     }
+
+    @Test
+    fun coordinatorConsentGetAndPut() = runBlocking {
+        server.enqueue(json(200, """{"convo_id":"c9","consent":true}"""))
+        assertEquals(true, api().coordinatorConsent())
+        assertEquals("/coordinator", server.takeRequest().requestUrl!!.encodedPath)
+
+        server.enqueue(json(200, """{"convo_id":"c9","consent":false}"""))
+        assertEquals(false, api().setCoordinatorConsent(false))
+        val put = server.takeRequest()
+        assertEquals("PUT", put.method)
+        val sent = body(put)
+        assertEquals("only the switch is sent", setOf("consent"), sent.keys)
+        assertEquals(false, sent.boolOrNull("consent"))
+
+        server.enqueue(json(200, """{"convo_id":"c9"}"""))
+        assertNull("a journal without the switch", api().coordinatorConsent())
+    }
 }
