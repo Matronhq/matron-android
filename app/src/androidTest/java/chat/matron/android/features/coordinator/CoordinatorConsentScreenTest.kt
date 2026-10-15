@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -113,7 +114,7 @@ class CoordinatorConsentScreenTest {
                             MatronTheme(appearance) {
                                 var stop by remember { mutableStateOf<SessionStopState>(SessionStopState.Idle) }
                                 Column(
-                                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
+                                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).systemBarsPadding()
                                         .verticalScroll(rememberScrollState()).padding(16.dp),
                                     verticalArrangement = Arrangement.spacedBy(16.dp),
                                 ) {
