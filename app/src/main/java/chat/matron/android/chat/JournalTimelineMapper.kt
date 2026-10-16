@@ -175,8 +175,12 @@ object JournalTimelineMapper {
 
                     // The other person-to-person cards (and a share or
                     // hand-over with no grant id) are answered on their
-                    // tracker item or over HTTP, never by `prompt_reply`: an
-                    // inert notice, not Allow/Deny buttons that do nothing.
+                    // tracker item or over HTTP, never by `prompt_reply`, so
+                    // they must not become Allow/Deny buttons that do
+                    // nothing. A state-change row, which the chat view
+                    // currently leaves out (like the malformed agent-spawn
+                    // case above): the tracker item's own card in this
+                    // conversation is where the user answers.
                     PersonGrantRequest.isPersonKind(payload) ->
                         TimelineItem.Kind.StateChange("Request from a contact — answer it on its tracker item")
 
