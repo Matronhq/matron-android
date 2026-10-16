@@ -10,7 +10,7 @@ Matron is a chat system for talking to [Claude Code](https://claude.com/claude-c
 
 ## Status
 
-Closed testing on Google Play (v0.1.6) — not yet publicly downloadable. Build from source with the steps below, or ask for a tester invite via [matron.chat](https://matron.chat).
+Available on [Google Play](https://play.google.com/store/apps/details?id=chat.matron.android). You can also build it from source with the steps below.
 
 Push notifications aren't wired up on Android yet (no Firebase project) — the app live-updates while open.
 
