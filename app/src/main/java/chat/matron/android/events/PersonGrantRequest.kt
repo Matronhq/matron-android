@@ -41,6 +41,9 @@ data class PersonGrantRequest(
     val preview: Preview = Preview(),
     /// The asking agent's device name, on the owner's card only.
     val fromName: String? = null,
+    /// On a hand-over, what the owner keeps on the recipient's copy
+    /// afterwards. [KeepLevel.READ] when the payload does not say.
+    val keepLevel: KeepLevel = KeepLevel.READ,
 ) {
     enum class Kind(val wire: String) {
         SHARE("mission_share"),
@@ -142,6 +145,18 @@ data class PersonGrantRequest(
     /// The approving button's label: the owner approves, the recipient accepts.
     val approveLabel: String get() = if (direction == Direction.OUT) "Approve" else "Accept"
 
+    /// Whether answering this card carries a keep level: only the owner's
+    /// hand-over card has the switch (the journal ignores it elsewhere).
+    val sendsKeepLevel: Boolean get() = isHandover && direction == Direction.OUT
+
+    /// The recipient's line saying what the owner keeps after the
+    /// hand-over; null on every other card.
+    val recipientKeepLine: String?
+        get() = if (!isHandover || direction != Direction.IN) null else when (keepLevel) {
+            KeepLevel.CONTRIBUTE -> "$ownerLabel stays on as a contributor; you can end that any time."
+            KeepLevel.READ -> "$ownerLabel keeps read access."
+        }
+
     /// Media ids of the listed files, in card order.
     val attachmentIds: List<String> get() = preview.attachments.map { it.mediaId }
 
@@ -201,6 +216,7 @@ data class PersonGrantRequest(
                     attachments = attachments,
                 ),
                 fromName = nonEmpty(payload.stringOrNull("from_name")),
+                keepLevel = KeepLevel.parse(payload.stringOrNull("keep_level")),
             )
         }
 
@@ -234,13 +250,43 @@ enum class GrantDecision(val wire: String) {
     DECLINE("decline"),
 }
 
+/// What the owner keeps on the recipient's copy after a hand-over: read
+/// access, or the right to keep contributing.
+enum class KeepLevel(val wire: String) {
+    READ("read"),
+    CONTRIBUTE("contribute"),
+    ;
+
+    companion object {
+        /// Anything but `contribute` (including a missing value) is [READ].
+        fun parse(raw: String?): KeepLevel = if (raw == CONTRIBUTE.wire) CONTRIBUTE else READ
+    }
+}
+
+/// The switch on the owner's hand-over card.
+const val KEEP_CONTRIBUTING_LABEL = "Keep contributing after the hand-over"
+
+/// The one-line hint under the switch.
+fun keepLevelHint(level: KeepLevel): String = when (level) {
+    KeepLevel.READ -> "You keep read access to their copy"
+    KeepLevel.CONTRIBUTE -> "You can keep adding milestones, items and comments"
+}
+
 /// The body of `POST /grants/:id/answer`. [excludeMedia] — the files the
 /// owner unticked on a hand-over — rides only on an approval, and only when
-/// it names at least one file.
-fun grantAnswerBody(decision: GrantDecision, excludeMedia: List<String> = emptyList()): JsonObject = buildJsonObject {
+/// it names at least one file. [keepLevel] — the owner's switch — rides on
+/// every approval that passes one, and never on a decline.
+fun grantAnswerBody(
+    decision: GrantDecision,
+    excludeMedia: List<String> = emptyList(),
+    keepLevel: KeepLevel? = null,
+): JsonObject = buildJsonObject {
     put("decision", decision.wire)
     if (decision == GrantDecision.APPROVE && excludeMedia.isNotEmpty()) {
         put("exclude_media", buildJsonArray { excludeMedia.forEach { add(JsonPrimitive(it)) } })
+    }
+    if (decision == GrantDecision.APPROVE && keepLevel != null) {
+        put("keep_level", keepLevel.wire)
     }
 }
 

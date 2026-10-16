@@ -35,6 +35,7 @@ import chat.matron.android.designsystem.AgentSpawnRequestCard
 import chat.matron.android.designsystem.PersonGrantCard
 import chat.matron.android.events.GrantCardState
 import chat.matron.android.events.GrantDecision
+import chat.matron.android.events.KeepLevel
 import chat.matron.android.events.PersonGrantRequest
 import chat.matron.android.designsystem.AskUserCard
 import chat.matron.android.designsystem.AttachmentFile
@@ -145,6 +146,11 @@ fun TimelineItemView(
         decision: GrantDecision,
         excludeMedia: List<String>,
     ) -> Unit)? = null,
+    /// The owner's "Keep contributing" switch on a hand-over card, held by
+    /// the view model so a rebuilt row keeps it. `null` (previews, tests)
+    /// shows the payload's value.
+    grantKeepLevel: ((eventID: String, request: PersonGrantRequest) -> KeepLevel)? = null,
+    onGrantKeepLevelChange: ((eventID: String, level: KeepLevel) -> Unit)? = null,
 ) {
     if (item.isOwn && item.sendState != TimelineSendState.Sent) {
         Column(horizontalAlignment = Alignment.End) {
@@ -153,6 +159,7 @@ fun TimelineItemView(
                 askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
                 agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, coordinatorBadge, onStopSession,
                 onOpenItem, onOpenMission, hasMultipleSenders, grantState, onAnswerGrant,
+                grantKeepLevel, onGrantKeepLevelChange,
             )
             SendStateIndicator(
                 state = sendStateGlyphFrom(item.sendState),
@@ -166,6 +173,7 @@ fun TimelineItemView(
             askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
             agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, coordinatorBadge, onStopSession,
                 onOpenItem, onOpenMission, hasMultipleSenders, grantState, onAnswerGrant,
+                grantKeepLevel, onGrantKeepLevelChange,
         )
     }
 }
@@ -206,6 +214,8 @@ private fun RenderedBody(
         decision: GrantDecision,
         excludeMedia: List<String>,
     ) -> Unit)?,
+    grantKeepLevel: ((eventID: String, request: PersonGrantRequest) -> KeepLevel)?,
+    onGrantKeepLevelChange: ((eventID: String, level: KeepLevel) -> Unit)?,
 ) {
     val style = if (item.isOwn) MessageAuthorStyle.Me else MessageAuthorStyle.Bot
     val avatarSender = timelineAvatarSender(item, hasMultipleSenders)
@@ -319,6 +329,8 @@ private fun RenderedBody(
                         onAnswerGrant?.invoke(kind.eventID, kind.request, GrantDecision.APPROVE, excluded)
                     },
                     onDecline = { onAnswerGrant?.invoke(kind.eventID, kind.request, GrantDecision.DECLINE, emptyList()) },
+                    keepLevel = grantKeepLevel?.invoke(kind.eventID, kind.request) ?: kind.request.keepLevel,
+                    onKeepLevelChange = { level -> onGrantKeepLevelChange?.invoke(kind.eventID, level) },
                 )
             }
 

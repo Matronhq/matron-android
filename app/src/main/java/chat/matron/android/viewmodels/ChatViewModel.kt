@@ -20,6 +20,7 @@ import chat.matron.android.journal.AgentSpawnAnswering
 import chat.matron.android.journal.GrantAnswering
 import chat.matron.android.events.GrantCardState
 import chat.matron.android.events.GrantDecision
+import chat.matron.android.events.KeepLevel
 import chat.matron.android.events.PersonGrantRequest
 import chat.matron.android.journal.SessionStopping
 import chat.matron.android.journal.AgentSpawnDecision
@@ -708,9 +709,25 @@ class ChatViewModel(
         return if (grants == null) GrantCardState.Unavailable else GrantCardState.Idle
     }
 
+    /// The owner's "Keep contributing" switch on hand-over cards, keyed by
+    /// event id: only the ones the user has flipped. Held here, not in the
+    /// card, so a row that is recomposed or rebuilt keeps the choice.
+    private val _grantKeepLevels = MutableStateFlow<Map<String, KeepLevel>>(emptyMap())
+    val grantKeepLevels: StateFlow<Map<String, KeepLevel>> = _grantKeepLevels.asStateFlow()
+
+    /// The switch value for one card: the user's choice, else the payload's.
+    fun grantKeepLevel(eventID: String, request: PersonGrantRequest): KeepLevel =
+        _grantKeepLevels.value[eventID] ?: request.keepLevel
+
+    fun setGrantKeepLevel(eventID: String, level: KeepLevel) {
+        _grantKeepLevels.value = _grantKeepLevels.value + (eventID to level)
+    }
+
     /// Answers a grant card: `POST /grants/:id/answer`. [excludeMedia] is
     /// the files the owner unticked on a hand-over (sent only with an
-    /// approval). Runs on [scope] for the same reason as [answerAgentChat].
+    /// approval); an approval of the owner's hand-over card always carries
+    /// the keep level ([grantKeepLevel]). Runs on [scope] for the same
+    /// reason as [answerAgentChat].
     fun answerGrant(
         eventID: String,
         request: PersonGrantRequest,
@@ -722,10 +739,11 @@ class ChatViewModel(
             GrantCardState.Idle, is GrantCardState.Failed -> {}
             else -> return
         }
+        val keepLevel = if (decision == GrantDecision.APPROVE && request.sendsKeepLevel) grantKeepLevel(eventID, request) else null
         setGrantState(eventID, GrantCardState.Sending)
         scope.launch {
             try {
-                answerer.answerGrant(request.grantId, decision, excludeMedia)
+                answerer.answerGrant(request.grantId, decision, excludeMedia, keepLevel)
                 rememberGrantAnswer(eventID, decision.wire)
             } catch (cancel: CancellationException) {
                 _grantStates.value = _grantStates.value - eventID

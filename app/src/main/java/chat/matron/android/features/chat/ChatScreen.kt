@@ -807,6 +807,9 @@ private fun TimelineRowView(
     // Grant cards answer over HTTP, not with a timeline event: the transient
     // states are what redraw the card while an answer is in flight.
     val grantStates by chatVM.grantStates.collectAsStateWithLifecycle()
+    // The owner's "Keep contributing" switches live in the view model; a
+    // flip redraws the card through this.
+    val grantKeepLevels by chatVM.grantKeepLevels.collectAsStateWithLifecycle()
     // A bridge queued_release lands as a hidden row, so no visible row changes;
     // collecting the memo is what recomposes the sibling queue cards' buttons
     // (apple #162; Bugbot #48).
@@ -885,6 +888,8 @@ private fun TimelineRowView(
                         // The view model's scope, so scrolling away can't cancel it.
                         chatVM.answerGrant(eventID, request, decision, excludeMedia)
                     },
+                    grantKeepLevel = { eventID, request -> grantKeepLevels.let { chatVM.grantKeepLevel(eventID, request) } },
+                    onGrantKeepLevelChange = { eventID, level -> chatVM.setGrantKeepLevel(eventID, level) },
                 )
             }
         }

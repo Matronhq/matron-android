@@ -388,6 +388,27 @@ class JournalApiTest {
     }
 
     @Test
+    fun answerGrantApprovePostsKeepLevel() = runBlocking {
+        server.enqueue(json(200, """{"grant":{"id":"gr_1"}}"""))
+        api(token = "t").answerGrant(
+            "gr_1", chat.matron.android.events.GrantDecision.APPROVE, emptyList(), chat.matron.android.events.KeepLevel.CONTRIBUTE,
+        )
+        val obj = parseJsonObjectOrNull(server.takeRequest().body.readUtf8())!!
+        assertEquals(setOf("decision", "keep_level"), obj.keys)
+        assertEquals("contribute", obj.stringOrNull("keep_level"))
+    }
+
+    @Test
+    fun answerGrantDeclineLeavesKeepLevelOut() = runBlocking {
+        server.enqueue(json(200, """{"grant":{"id":"gr_1"}}"""))
+        api(token = "t").answerGrant(
+            "gr_1", chat.matron.android.events.GrantDecision.DECLINE, emptyList(), chat.matron.android.events.KeepLevel.CONTRIBUTE,
+        )
+        val obj = parseJsonObjectOrNull(server.takeRequest().body.readUtf8())!!
+        assertEquals(setOf("decision"), obj.keys)
+    }
+
+    @Test
     fun answerGrantMapsConflict() = runBlocking {
         server.enqueue(json(409, """{"error":"conflict"}"""))
         try {

@@ -206,6 +206,9 @@ interface GrantAnswering {
         grantId: String,
         decision: chat.matron.android.events.GrantDecision,
         excludeMedia: List<String> = emptyList(),
+        /// The owner's "Keep contributing" switch, on their hand-over
+        /// approval only; null leaves it out.
+        keepLevel: chat.matron.android.events.KeepLevel? = null,
     )
 }
 
@@ -641,14 +644,16 @@ class JournalApi(
     /// Answers a mission share or hand-over card. Only a client device may
     /// (an agent gets 403). [excludeMedia] is the owner's unticked files on a
     /// hand-over; it is sent only with an approval that leaves files behind.
+    /// [keepLevel] is sent with an approval that passes one.
     override suspend fun answerGrant(
         grantId: String,
         decision: chat.matron.android.events.GrantDecision,
         excludeMedia: List<String>,
+        keepLevel: chat.matron.android.events.KeepLevel?,
     ) {
         request(
             path = "/grants/${pathSegment(grantId)}/answer", method = "POST",
-            jsonBody = chat.matron.android.events.grantAnswerBody(decision, excludeMedia),
+            jsonBody = chat.matron.android.events.grantAnswerBody(decision, excludeMedia, keepLevel),
         )
     }
 
