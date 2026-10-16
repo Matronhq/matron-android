@@ -164,6 +164,67 @@ class PersonGrantRequestTest {
     }
 
     @Test
+    fun parsesKeepLevelOnBothSidesOfAHandover() {
+        val contribute = PersonGrantRequest.parse(payload(handoverOut.replace("\"level\":\"owner\",", "\"level\":\"owner\",\"keep_level\":\"contribute\",")))!!
+        assertEquals(KeepLevel.CONTRIBUTE, contribute.keepLevel)
+        val read = PersonGrantRequest.parse(payload(handoverIn.replace("\"level\":\"owner\",", "\"level\":\"owner\",\"keep_level\":\"read\",")))!!
+        assertEquals(KeepLevel.READ, read.keepLevel)
+        val readOut = PersonGrantRequest.parse(payload(handoverOut.replace("\"level\":\"owner\",", "\"level\":\"owner\",\"keep_level\":\"read\",")))!!
+        assertEquals(KeepLevel.READ, readOut.keepLevel)
+    }
+
+    @Test
+    fun aMissingOrUnknownKeepLevelReadsAsRead() {
+        assertEquals(KeepLevel.READ, PersonGrantRequest.parse(payload(handoverOut))!!.keepLevel)
+        assertEquals(KeepLevel.READ, PersonGrantRequest.parse(payload(handoverIn))!!.keepLevel)
+        val odd = PersonGrantRequest.parse(payload(handoverIn.replace("\"level\":\"owner\",", "\"level\":\"owner\",\"keep_level\":\"owner\",")))!!
+        assertEquals(KeepLevel.READ, odd.keepLevel)
+        assertEquals(KeepLevel.READ, KeepLevel.parse(null))
+        assertEquals(KeepLevel.CONTRIBUTE, KeepLevel.parse("contribute"))
+    }
+
+    @Test
+    fun onlyTheOwnersHandoverCardSendsAKeepLevel() {
+        assertTrue(PersonGrantRequest.parse(payload(handoverOut))!!.sendsKeepLevel)
+        assertFalse(PersonGrantRequest.parse(payload(handoverIn))!!.sendsKeepLevel)
+        val share = PersonGrantRequest(PersonGrantRequest.Kind.SHARE, PersonGrantRequest.Direction.OUT, "gr_2", level = "read")
+        assertFalse(share.sendsKeepLevel)
+    }
+
+    @Test
+    fun keepSwitchLabelAndHint() {
+        assertEquals("Keep contributing after the hand-over", KEEP_CONTRIBUTING_LABEL)
+        assertEquals("You keep read access to their copy", keepLevelHint(KeepLevel.READ))
+        assertEquals("You can keep adding milestones, items and comments", keepLevelHint(KeepLevel.CONTRIBUTE))
+    }
+
+    @Test
+    fun recipientLineSaysWhatTheOwnerKeeps() {
+        val read = PersonGrantRequest.parse(payload(handoverIn))!!
+        assertEquals("alice keeps read access.", read.recipientKeepLine)
+        val contribute = read.copy(keepLevel = KeepLevel.CONTRIBUTE)
+        assertEquals("alice stays on as a contributor; you can end that any time.", contribute.recipientKeepLine)
+        // Not on the owner's card, nor on a share.
+        assertNull(PersonGrantRequest.parse(payload(handoverOut))!!.recipientKeepLine)
+        val share = PersonGrantRequest(PersonGrantRequest.Kind.SHARE, PersonGrantRequest.Direction.IN, "gr_2", ownerName = "alice")
+        assertNull(share.recipientKeepLine)
+    }
+
+    @Test
+    fun answerBodyCarriesKeepLevelOnApprovalOnly() {
+        assertEquals(
+            """{"decision":"approve","keep_level":"contribute"}""",
+            grantAnswerBody(GrantDecision.APPROVE, keepLevel = KeepLevel.CONTRIBUTE).toString(),
+        )
+        assertEquals(
+            """{"decision":"approve","exclude_media":["md_2"],"keep_level":"read"}""",
+            grantAnswerBody(GrantDecision.APPROVE, listOf("md_2"), KeepLevel.READ).toString(),
+        )
+        // Declining sends only the decision, as it already does for the ticks.
+        assertEquals("""{"decision":"decline"}""", grantAnswerBody(GrantDecision.DECLINE, listOf("md_2"), KeepLevel.CONTRIBUTE).toString())
+    }
+
+    @Test
     fun answeredWording() {
         val out = PersonGrantRequest.parse(payload(handoverOut))!!
         val incoming = PersonGrantRequest.parse(payload(handoverIn))!!

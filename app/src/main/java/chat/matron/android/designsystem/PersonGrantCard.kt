@@ -23,6 +23,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -38,8 +39,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import chat.matron.android.events.GrantCardState
+import chat.matron.android.events.KEEP_CONTRIBUTING_LABEL
+import chat.matron.android.events.KeepLevel
 import chat.matron.android.events.PersonGrantRequest
 import chat.matron.android.events.grantAnsweredText
+import chat.matron.android.events.keepLevelHint
 
 /// A person-to-person grant card inline in the timeline: a mission share or
 /// a hand-over, on the owner's side (Approve / Decline, and on a hand-over a
@@ -47,6 +51,11 @@ import chat.matron.android.events.grantAnsweredText
 ///
 /// [onApprove] receives the media ids the owner unticked — always empty on
 /// the recipient's card and on a share.
+///
+/// The owner's hand-over card also has a "Keep contributing" switch. Its
+/// value is [keepLevel] and a flip goes to [onKeepLevelChange]: the caller
+/// holds it (the chat view model, keyed by event id), so a rebuilt row keeps
+/// the choice and Approve can send it.
 @Composable
 fun PersonGrantCard(
     request: PersonGrantRequest,
@@ -57,6 +66,8 @@ fun PersonGrantCard(
     /// The files unticked when the card first draws — previews and
     /// screenshots only; the user starts with every file ticked.
     initiallyExcluded: List<String> = emptyList(),
+    keepLevel: KeepLevel = request.keepLevel,
+    onKeepLevelChange: (KeepLevel) -> Unit = {},
 ) {
     val answerable = state is GrantCardState.Idle || state is GrantCardState.Failed
     val busy = state is GrantCardState.Sending
@@ -136,6 +147,40 @@ fun PersonGrantCard(
                     }
                 }
             }
+        }
+
+        if (request.sendsKeepLevel) {
+            val on = keepLevel == KeepLevel.CONTRIBUTE
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .toggleable(
+                            value = on,
+                            enabled = answerable,
+                            role = Role.Switch,
+                            onValueChange = { onKeepLevelChange(if (it) KeepLevel.CONTRIBUTE else KeepLevel.READ) },
+                        ),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        KEEP_CONTRIBUTING_LABEL,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f).padding(end = 8.dp),
+                    )
+                    Switch(checked = on, onCheckedChange = null, enabled = answerable)
+                }
+                Text(
+                    keepLevelHint(keepLevel),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        request.recipientKeepLine?.let { line ->
+            Text(line, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
         }
 
         if (request.isHandover && request.direction == PersonGrantRequest.Direction.OUT) {

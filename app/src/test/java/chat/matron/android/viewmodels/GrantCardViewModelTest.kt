@@ -4,6 +4,7 @@ import chat.matron.android.chat.FakeMediaService
 import chat.matron.android.chat.FakeTimelineService
 import chat.matron.android.events.GrantCardState
 import chat.matron.android.events.GrantDecision
+import chat.matron.android.events.KeepLevel
 import chat.matron.android.events.PersonGrantRequest
 import chat.matron.android.journal.GrantAnswering
 import chat.matron.android.journal.JournalApiError
@@ -38,8 +39,10 @@ class GrantCardViewModelTest {
         private val gate: CompletableDeferred<Unit>? = null,
     ) : GrantAnswering {
         val calls = mutableListOf<Triple<String, GrantDecision, List<String>>>()
-        override suspend fun answerGrant(grantId: String, decision: GrantDecision, excludeMedia: List<String>) {
+        val keepLevels = mutableListOf<KeepLevel?>()
+        override suspend fun answerGrant(grantId: String, decision: GrantDecision, excludeMedia: List<String>, keepLevel: KeepLevel?) {
             calls.add(Triple(grantId, decision, excludeMedia))
+            keepLevels.add(keepLevel)
             gate?.await()
             error?.let { throw it }
         }
@@ -102,5 +105,49 @@ class GrantCardViewModelTest {
         assertTrue((model.grantState("10") as GrantCardState.Failed).message.isNotEmpty())
         model.answerGrant("10", request, GrantDecision.APPROVE)
         waitUntil { answerer.calls.size == 2 }
+    }
+
+    @Test
+    fun keepLevelStartsFromThePayloadAndSurvivesARebuiltRow() = vmTest { scope ->
+        val model = vm(scope, InMemoryKeyValueStore(), Recorder())
+        val contribute = request.copy(keepLevel = KeepLevel.CONTRIBUTE)
+        assertEquals(KeepLevel.READ, model.grantKeepLevel("10", request))
+        assertEquals(KeepLevel.CONTRIBUTE, model.grantKeepLevel("11", contribute))
+
+        model.setGrantKeepLevel("10", KeepLevel.CONTRIBUTE)
+        model.setGrantKeepLevel("11", KeepLevel.READ)
+        // A rebuilt row asks again with the same (unchanged) payload and
+        // gets the user's choice, not the payload's.
+        assertEquals(KeepLevel.CONTRIBUTE, model.grantKeepLevel("10", request))
+        assertEquals(KeepLevel.READ, model.grantKeepLevel("11", contribute))
+        assertEquals(mapOf("10" to KeepLevel.CONTRIBUTE, "11" to KeepLevel.READ), model.grantKeepLevels.value)
+    }
+
+    @Test
+    fun approveAlwaysSendsTheSwitchValue() = vmTest { scope ->
+        val answerer = Recorder()
+        val model = vm(scope, InMemoryKeyValueStore(), answerer)
+        // Untouched: the payload's value.
+        model.answerGrant("10", request, GrantDecision.APPROVE)
+        waitUntil { answerer.calls.size == 1 }
+        // Switched on.
+        model.setGrantKeepLevel("11", KeepLevel.CONTRIBUTE)
+        model.answerGrant("11", request, GrantDecision.APPROVE, listOf("md_2"))
+        waitUntil { answerer.calls.size == 2 }
+        assertEquals(listOf(KeepLevel.READ, KeepLevel.CONTRIBUTE), answerer.keepLevels)
+        assertEquals(listOf("md_2"), answerer.calls[1].third)
+    }
+
+    @Test
+    fun declineAndTheRecipientsAcceptSendNoKeepLevel() = vmTest { scope ->
+        val answerer = Recorder()
+        val model = vm(scope, InMemoryKeyValueStore(), answerer)
+        model.setGrantKeepLevel("10", KeepLevel.CONTRIBUTE)
+        model.answerGrant("10", request, GrantDecision.DECLINE)
+        waitUntil { answerer.calls.size == 1 }
+        val incoming = request.copy(direction = PersonGrantRequest.Direction.IN, keepLevel = KeepLevel.CONTRIBUTE)
+        model.answerGrant("11", incoming, GrantDecision.APPROVE)
+        waitUntil { answerer.calls.size == 2 }
+        assertEquals(listOf<KeepLevel?>(null, null), answerer.keepLevels)
     }
 }

@@ -34,6 +34,7 @@ import chat.matron.android.designsystem.MissionDetailView
 import chat.matron.android.designsystem.MissionNotice
 import chat.matron.android.designsystem.PersonGrantCard
 import chat.matron.android.events.GrantCardState
+import chat.matron.android.events.KeepLevel
 import chat.matron.android.events.MissionMarkerEvent
 import chat.matron.android.events.PersonGrantRequest
 import chat.matron.android.models.Milestone
@@ -163,6 +164,72 @@ class HandoverCardsScreenTest {
             node(By.text("Accept"))
             node(By.text("Can contribute"))
             screenshot("handover-in")
+        }
+    }
+
+    // A shorter hand-over, so two cards fit on one screen.
+    private val shortOut = PersonGrantRequest.parse(json(
+        """{"kind":"mission_handover","direction":"out","grant_id":"gr_3","level":"owner","keep_level":"read",
+           "owner":{"user_id":"u_a","name":"alice"},"grantee":{"name":"bob","address":"bob"},
+           "subject":{"kind":"mission","id":"ms_1","num":7,"title":"Checkout redesign"},
+           "brief":"The cart is done; the payment step is next.",
+           "preview":{"missions":1,"milestones":4,"items":6,"comments":12,"attachments":[]},
+           "from_device_id":3,"from_name":"box-a","from_convo_id":"c1"}""",
+    ))!!
+
+    private val shortIn = PersonGrantRequest.parse(json(
+        """{"kind":"mission_handover","direction":"in","grant_id":"gr_3","level":"owner","keep_level":"contribute",
+           "owner":{"user_id":"u_a","name":"alice"},"grantee":{"name":"bob","address":"bob"},
+           "subject":{"kind":"mission","title":"Checkout redesign"},
+           "brief":"The cart is done; the payment step is next.",
+           "preview":{"missions":1,"milestones":4,"items":6,"comments":12,"attachments":0}}""",
+    ))!!
+
+    @Test
+    fun ownersKeepContributingSwitchOffAndOn() {
+        show(MatronAppearance.Light) {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                PersonGrantCard(
+                    request = shortOut, state = GrantCardState.Idle, onApprove = {}, onDecline = {},
+                    modifier = Modifier.widthIn(max = 360.dp),
+                )
+                PersonGrantCard(
+                    request = shortOut, state = GrantCardState.Idle, onApprove = {}, onDecline = {},
+                    modifier = Modifier.widthIn(max = 360.dp),
+                    keepLevel = KeepLevel.CONTRIBUTE,
+                )
+            }
+        }.use {
+            node(By.text("You keep read access to their copy"))
+            node(By.text("You can keep adding milestones, items and comments"))
+            screenshot("handover-keep-out")
+        }
+    }
+
+    @Test
+    fun recipientsLineForBothKeepLevels() {
+        show(MatronAppearance.Light) {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                PersonGrantCard(
+                    request = shortIn, state = GrantCardState.Idle, onApprove = {}, onDecline = {},
+                    modifier = Modifier.widthIn(max = 360.dp),
+                )
+                PersonGrantCard(
+                    request = shortIn.copy(keepLevel = KeepLevel.READ), state = GrantCardState.Idle,
+                    onApprove = {}, onDecline = {},
+                    modifier = Modifier.widthIn(max = 360.dp),
+                )
+            }
+        }.use {
+            node(By.text("alice stays on as a contributor; you can end that any time."))
+            node(By.text("alice keeps read access."))
+            screenshot("handover-keep-in")
         }
     }
 
