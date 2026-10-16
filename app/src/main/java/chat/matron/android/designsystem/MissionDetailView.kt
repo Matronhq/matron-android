@@ -54,6 +54,7 @@ import chat.matron.android.models.MissionConversation
 import chat.matron.android.models.MissionState
 import chat.matron.android.models.SessionTagInputs
 import chat.matron.android.models.TrackerItem
+import chat.matron.android.models.missionStatusByline
 
 /// One milestone as the page draws it: the record, plus the `A:bc` tag of
 /// the conversation it was posted in — a mission spans several sessions, so
@@ -152,6 +153,7 @@ fun missionMilestonesEmptyText(showOnlyUserInput: Boolean): String =
 /// single-letter glyphs (apple #216, `SessionTagText.plainLabel`).
 fun milestoneRowAccessibilityLabel(row: MilestoneRow): String =
     "${MissionGlyph.label(row.milestone.kind)} ${row.milestone.num}, ${row.milestone.title}" +
+        (row.milestone.attributionText?.let { ", $it" } ?: "") +
         (row.sessionTag?.let { SessionTagText.plainLabel(it.boxName, it.sessionShort, it.roomBoxNames) }?.let { ", $it" } ?: "") +
         ". Opens the conversation at this point"
 
@@ -290,6 +292,15 @@ private fun MissionHeader(mission: Mission) {
             )
         }
         if (mission.body.isNotEmpty()) MarkdownText(mission.body, textStyle = MaterialTheme.typography.bodyMedium)
+        mission.status?.let { status ->
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            Text(
+                missionStatusByline(mission.statusContributor) ?: "Status",
+                style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(status, style = MaterialTheme.typography.bodyMedium)
+        }
         val summary = mission.closeSummary
         if (!summary.isNullOrEmpty()) {
             HorizontalDivider(Modifier.padding(vertical = 4.dp))
@@ -325,6 +336,9 @@ private fun MilestoneRowView(row: MilestoneRow, modifier: Modifier = Modifier) {
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 RelativeMinuteTimeView(milestone.createdAt, style = MaterialTheme.typography.labelSmall.copy(color = tertiary))
+                milestone.attributionText?.let { by ->
+                    Text(by, style = MaterialTheme.typography.labelSmall, color = tertiary, maxLines = 1)
+                }
                 val tag = row.sessionTag
                 if (tag != null) {
                     val darkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f

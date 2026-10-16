@@ -366,6 +366,38 @@ class JournalApiTest {
     }
 
     @Test
+    fun answerGrantApprovePostsExcludedMedia() = runBlocking {
+        server.enqueue(json(200, """{"grant":{"id":"gr_1"}}"""))
+        api(token = "t").answerGrant("gr_1", chat.matron.android.events.GrantDecision.APPROVE, listOf("md_2"))
+        val req = server.takeRequest()
+        assertEquals("/grants/gr_1/answer", req.path)
+        assertEquals("POST", req.method)
+        val obj = parseJsonObjectOrNull(req.body.readUtf8())!!
+        assertEquals(setOf("decision", "exclude_media"), obj.keys)
+        assertEquals("approve", obj.stringOrNull("decision"))
+        assertEquals("[\"md_2\"]", obj["exclude_media"].toString())
+    }
+
+    @Test
+    fun answerGrantDeclineSendsOnlyTheDecision() = runBlocking {
+        server.enqueue(json(200, """{"grant":{"id":"gr_1"}}"""))
+        api(token = "t").answerGrant("gr_1", chat.matron.android.events.GrantDecision.DECLINE, listOf("md_2"))
+        val obj = parseJsonObjectOrNull(server.takeRequest().body.readUtf8())!!
+        assertEquals(setOf("decision"), obj.keys)
+        assertEquals("decline", obj.stringOrNull("decision"))
+    }
+
+    @Test
+    fun answerGrantMapsConflict() = runBlocking {
+        server.enqueue(json(409, """{"error":"conflict"}"""))
+        try {
+            api(token = "t").answerGrant("gr_1", chat.matron.android.events.GrantDecision.APPROVE); fail("expected throw")
+        } catch (e: JournalApiError) {
+            assertEquals(JournalApiError.Conflict, e)
+        }
+    }
+
+    @Test
     fun serverPathPrefixIsPreservedOnRequests() = runBlocking {
         server.enqueue(json(200, """{"conversations":[],"seq":0}"""))
         JournalApi(server.url("/matron").toString(), token = "t").snapshot()

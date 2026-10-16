@@ -32,6 +32,10 @@ import chat.matron.android.journal.AgentSpawnDecision
 import chat.matron.android.designsystem.ActivityIndicatorRow
 import chat.matron.android.designsystem.AgentChatRequestCard
 import chat.matron.android.designsystem.AgentSpawnRequestCard
+import chat.matron.android.designsystem.PersonGrantCard
+import chat.matron.android.events.GrantCardState
+import chat.matron.android.events.GrantDecision
+import chat.matron.android.events.PersonGrantRequest
 import chat.matron.android.designsystem.AskUserCard
 import chat.matron.android.designsystem.AttachmentFile
 import chat.matron.android.designsystem.AttachmentImage
@@ -130,6 +134,17 @@ fun TimelineItemView(
     /// `false` keeps every existing preview/test/1:1-chat call site
     /// rendering exactly as before (no avatar).
     hasMultipleSenders: Boolean = false,
+    /// Render state for a mission share or hand-over card. `null` (previews,
+    /// tests) renders it read-only.
+    grantState: ((eventID: String) -> GrantCardState)? = null,
+    /// Answers a grant card over `POST /grants/:id/answer`; `excludeMedia`
+    /// is the files the owner unticked (empty unless approving a hand-over).
+    onAnswerGrant: ((
+        eventID: String,
+        request: PersonGrantRequest,
+        decision: GrantDecision,
+        excludeMedia: List<String>,
+    ) -> Unit)? = null,
 ) {
     if (item.isOwn && item.sendState != TimelineSendState.Sent) {
         Column(horizontalAlignment = Alignment.End) {
@@ -137,7 +152,7 @@ fun TimelineItemView(
                 item, resolveImage, onTapImage, onTapFile, isDownloadingFile, isMediaUnavailable,
                 askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
                 agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, coordinatorBadge, onStopSession,
-                onOpenItem, onOpenMission, hasMultipleSenders,
+                onOpenItem, onOpenMission, hasMultipleSenders, grantState, onAnswerGrant,
             )
             SendStateIndicator(
                 state = sendStateGlyphFrom(item.sendState),
@@ -150,7 +165,7 @@ fun TimelineItemView(
             item, resolveImage, onTapImage, onTapFile, isDownloadingFile, isMediaUnavailable,
             askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
             agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, coordinatorBadge, onStopSession,
-                onOpenItem, onOpenMission, hasMultipleSenders,
+                onOpenItem, onOpenMission, hasMultipleSenders, grantState, onAnswerGrant,
         )
     }
 }
@@ -184,6 +199,13 @@ private fun RenderedBody(
     onOpenItem: ((itemID: String) -> Unit)?,
     onOpenMission: ((missionID: String) -> Unit)?,
     hasMultipleSenders: Boolean,
+    grantState: ((eventID: String) -> GrantCardState)?,
+    onAnswerGrant: ((
+        eventID: String,
+        request: PersonGrantRequest,
+        decision: GrantDecision,
+        excludeMedia: List<String>,
+    ) -> Unit)?,
 ) {
     val style = if (item.isOwn) MessageAuthorStyle.Me else MessageAuthorStyle.Bot
     val avatarSender = timelineAvatarSender(item, hasMultipleSenders)
@@ -285,6 +307,18 @@ private fun RenderedBody(
                     onOpen = onOpenSpawnedRoom,
                     coordinatorBadge = coordinatorBadge?.invoke(kind.eventID, kind.request),
                     onStopSession = onStopSession,
+                )
+            }
+
+        is TimelineItem.Kind.PersonGrantCard ->
+            CappedCard(maxWidth = 360.dp) {
+                PersonGrantCard(
+                    request = kind.request,
+                    state = grantState?.invoke(kind.eventID) ?: GrantCardState.Unavailable,
+                    onApprove = { excluded ->
+                        onAnswerGrant?.invoke(kind.eventID, kind.request, GrantDecision.APPROVE, excluded)
+                    },
+                    onDecline = { onAnswerGrant?.invoke(kind.eventID, kind.request, GrantDecision.DECLINE, emptyList()) },
                 )
             }
 

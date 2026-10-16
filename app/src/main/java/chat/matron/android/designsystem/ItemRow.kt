@@ -65,7 +65,8 @@ fun itemRowAccessibilityLabel(item: TrackerItem, closedCaption: String? = null):
     "${ItemGlyph.label(item.kind)} ${item.num}, ${item.title}" +
         (if (item.needsUser) (if (item.kind == ItemKind.NOTICE) ", to read" else ", needs you") else "") +
         (closedCaption?.let { ", ${it.replace(" · ", ", ")}" } ?: "") +
-        (itemMissionChipText(item)?.let { ", mission $it" } ?: "")
+        (itemMissionChipText(item)?.let { ", mission $it" } ?: "") +
+        (item.attributionText?.let { ", $it" } ?: "")
 
 /// One tracker item in the list: kind glyph, `#num`, title, a one-line body
 /// preview, origin (All scope), state caption, comment count, and a thumbnail
@@ -136,6 +137,9 @@ fun ItemRow(
                 }
                 itemMissionChipText(item)?.let { chip ->
                     Text(chip, style = MaterialTheme.typography.labelSmall, color = tertiary)
+                }
+                item.attributionText?.let { by ->
+                    Text(by, style = MaterialTheme.typography.labelSmall, color = tertiary, maxLines = 1)
                 }
                 (closedCaption ?: itemRowStatusCaption(item))?.let { caption ->
                     Text(

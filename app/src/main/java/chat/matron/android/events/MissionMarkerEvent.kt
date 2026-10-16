@@ -2,6 +2,7 @@ package chat.matron.android.events
 
 import chat.matron.android.journal.arrayOrNull
 import chat.matron.android.journal.intOrNull
+import chat.matron.android.journal.objectOrNull
 import chat.matron.android.journal.stringOrNull
 import chat.matron.android.models.ItemAuthor
 import chat.matron.android.models.MilestoneKind
@@ -65,9 +66,12 @@ data class MissionMarkerEvent(
     /// Only on a user-forced close: the numbers of items still open at the
     /// time, hidden ones included (the user's own record of their override).
     val openItemNums: List<Int> = emptyList(),
+    /// On the `closed` and `left` markers of a mission handed over to a
+    /// contact: who it went to (`handed_over: {to}`). Null otherwise.
+    val handedOverTo: String? = null,
 ) {
     enum class Action(val wire: String) {
-        CREATED("created"), JOINED("joined"), UPDATED("updated"), CLOSED("closed");
+        CREATED("created"), JOINED("joined"), UPDATED("updated"), CLOSED("closed"), LEFT("left");
 
         companion object {
             fun fromWire(raw: String?): Action? = entries.firstOrNull { it.wire == raw }
@@ -86,6 +90,7 @@ data class MissionMarkerEvent(
                 missionID = missionID, num = num, title = payload.stringOrNull("title"), action = action, by = by,
                 openItemNums = payload.arrayOrNull("open_item_nums")
                     ?.mapNotNull { (it as? JsonPrimitive)?.intOrNull } ?: emptyList(),
+                handedOverTo = payload.objectOrNull("handed_over")?.stringOrNull("to")?.trim()?.takeIf { it.isNotEmpty() },
             )
         }
     }

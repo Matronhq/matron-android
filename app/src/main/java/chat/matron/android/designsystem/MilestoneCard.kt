@@ -49,10 +49,17 @@ fun milestoneCardAccessibilityLabel(marker: MilestoneMarkerEvent): String =
 /// the card: the name rides along only when the marker carried one.
 fun missionNoticeText(marker: MissionMarkerEvent): String {
     val named = marker.title?.takeIf { it.isNotEmpty() }?.let { " · $it" } ?: ""
+    marker.handedOverTo?.let { to ->
+        return when (marker.action) {
+            MissionMarkerEvent.Action.LEFT -> "🏁 Left mission #${marker.num}$named · Handed to $to"
+            else -> "🏁 Mission #${marker.num}$named · Handed to $to"
+        }
+    }
     return when (marker.action) {
         MissionMarkerEvent.Action.CREATED -> "🏁 Mission #${marker.num} started$named"
         MissionMarkerEvent.Action.JOINED -> "🏁 Joined mission #${marker.num}$named"
         MissionMarkerEvent.Action.UPDATED -> "🏁 Mission #${marker.num} renamed$named"
+        MissionMarkerEvent.Action.LEFT -> "🏁 Left mission #${marker.num}$named"
         MissionMarkerEvent.Action.CLOSED ->
             if (marker.openItemNums.isEmpty()) "🏁 Mission #${marker.num} closed$named"
             else "🏁 Mission #${marker.num}$named closed over " + marker.openItemNums.joinToString(", ") { "#$it" }

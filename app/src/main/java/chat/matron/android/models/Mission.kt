@@ -90,6 +90,11 @@ data class Mission(
     val conversationCount: Int = 0,
     val milestoneCount: Int = 0,
     val lastMilestone: MissionLastMilestone? = null,
+    /// The mission's one-paragraph status, null when none is set.
+    val status: String? = null,
+    /// The contributor who last set [status], until the owner next sets it;
+    /// null otherwise (the journal leaves the key out).
+    val statusContributor: String? = null,
 ) {
     /// What the mission is called wherever a number alone would be opaque.
     val label: String get() = "#$num $title"
@@ -123,6 +128,8 @@ data class Mission(
                 conversationCount = json.intOrNull("conversations") ?: 0,
                 milestoneCount = json.intOrNull("milestones") ?: 0,
                 lastMilestone = json.objectOrNull("last_milestone")?.let(MissionLastMilestone::fromJson),
+                status = json.stringOrNull("status")?.takeIf(String::isNotBlank),
+                statusContributor = json.stringOrNull("status_contributor")?.takeIf(String::isNotBlank),
             )
         }
     }
@@ -142,7 +149,13 @@ data class Milestone(
     val deviceID: Long = 0,
     val createdBy: ItemAuthor = ItemAuthor.AGENT,
     val createdAt: Instant = Instant.now(),
+    /// The contact who posted it into a mission they contribute to; null on
+    /// everything else.
+    val contributor: Contributor? = null,
 ) {
+    /// "by bob" / "by bob's agent" for a contributor's milestone, else null.
+    val attributionText: String? get() = attributionLine(contributor, null)
+
     companion object {
         fun fromJson(json: JsonObject): Milestone? {
             val id = json.stringOrNull("id") ?: return null
@@ -161,6 +174,7 @@ data class Milestone(
                 deviceID = json.longOrNull("device_id") ?: 0,
                 createdBy = ItemAuthor.fromWire(json.stringOrNull("created_by")) ?: ItemAuthor.AGENT,
                 createdAt = createdAt,
+                contributor = Contributor.on(json),
             )
         }
     }

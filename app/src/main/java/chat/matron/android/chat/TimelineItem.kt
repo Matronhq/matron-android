@@ -130,6 +130,13 @@ data class TimelineItem(
             val eventID: String,
             val request: AgentSpawnRequest,
         ) : Kind
+        /// A person-to-person grant card — a mission share or a hand-over,
+        /// on the owner's side or the recipient's. Answered over HTTP
+        /// (`POST /grants/:id/answer`); `eventID` keys the local answer.
+        data class PersonGrantCard(
+            val eventID: String,
+            val request: chat.matron.android.events.PersonGrantRequest,
+        ) : Kind
         /// A journal `spawn_outcome` event — the durable resolution of an
         /// [AgentSpawnRequestCard]. Correlated to its card by
         /// `outcome.requestId`, not by `eventID` (the outcome is a distinct

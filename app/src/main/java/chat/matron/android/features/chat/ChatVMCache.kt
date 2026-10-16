@@ -49,6 +49,7 @@ class ChatVMCache(
             haptics = deps.haptics,
             agentChat = deps.agentChatService(session),
             agentSpawn = deps.agentSpawnService(session),
+            grants = deps.grantService(session),
             search = deps.search,
             sessionStopper = deps.sessionStopper(session),
         )

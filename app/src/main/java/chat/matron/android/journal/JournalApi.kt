@@ -196,6 +196,19 @@ interface AgentSpawnAnswering {
     suspend fun answerAgentSpawn(requestId: String, decision: AgentSpawnDecision)
 }
 
+/// The one call that answers a person-to-person grant card (a mission share
+/// or a hand-over): `POST /grants/:id/answer`. A slice of [JournalApi], like
+/// [AgentSpawnAnswering], so the chat view model depends on just this.
+interface GrantAnswering {
+    /// Throws `Conflict` when the grant no longer waits for this answer and
+    /// `NotFound` when it is not (or no longer) this user's to answer.
+    suspend fun answerGrant(
+        grantId: String,
+        decision: chat.matron.android.events.GrantDecision,
+        excludeMedia: List<String> = emptyList(),
+    )
+}
+
 /// One row of `GET /agent-chat/pending` — an agent's request to chat that is
 /// parked waiting on this user. The durable form of the consent card, for asks
 /// that arrived while no client was connected.
@@ -313,7 +326,7 @@ class JournalApi(
     private val baseUrl: HttpUrl,
     private val client: OkHttpClient = OkHttpClient(),
     token: String? = null,
-) : SnapshotSource, AgentSpawnAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
+) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
@@ -620,6 +633,22 @@ class JournalApi(
                 put("request_id", requestId)
                 put("decision", decision.wire)
             },
+        )
+    }
+
+    // MARK: Person-to-person grants
+
+    /// Answers a mission share or hand-over card. Only a client device may
+    /// (an agent gets 403). [excludeMedia] is the owner's unticked files on a
+    /// hand-over; it is sent only with an approval that leaves files behind.
+    override suspend fun answerGrant(
+        grantId: String,
+        decision: chat.matron.android.events.GrantDecision,
+        excludeMedia: List<String>,
+    ) {
+        request(
+            path = "/grants/${pathSegment(grantId)}/answer", method = "POST",
+            jsonBody = chat.matron.android.events.grantAnswerBody(decision, excludeMedia),
         )
     }
 
