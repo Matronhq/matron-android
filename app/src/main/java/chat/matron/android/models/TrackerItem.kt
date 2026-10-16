@@ -323,7 +323,13 @@ data class TrackerItem(
     val working: ItemWorking? = null,
     /// Null when no handover waits, and on journals that predate handovers.
     val handover: ItemHandover? = null,
+    /// The contact who filed this item into a mission they contribute to;
+    /// null on everything else (the journal leaves the key out).
+    val contributor: Contributor? = null,
 ) {
+    /// "by bob" / "by bob's agent" for a contributor's item, else null.
+    val attributionText: String? get() = attributionLine(contributor, null)
+
     /// The `from`/`to` halves of a status comment's `meta`.
     data class StatusSnapshot(
         val state: ItemState?,
@@ -404,6 +410,7 @@ data class TrackerItem(
                 lastUserInputAt = msInstant(json.longOrNull("last_user_input_at")),
                 working = ItemWorking.fromJson(json.objectOrNull("working")),
                 handover = ItemHandover.fromJson(json.objectOrNull("handover")),
+                contributor = Contributor.on(json),
             )
         }
     }
@@ -437,7 +444,17 @@ data class TrackerComment(
     val deviceName: String? = null,
     val convoID: String? = null,
     val convoTitle: String? = null,
+    /// A contributor's comment, close or reopen; null on everything else.
+    val contributor: Contributor? = null,
+    /// The journal's words for who wrote it — "bob" or "bob's agent" — on a
+    /// contributor's comment and on every comment copied by a hand-over
+    /// (which carries only this). Null on everything else.
+    val attribution: String? = null,
 ) {
+    /// "by bob" / "by bob's agent" when someone other than this user's own
+    /// side wrote it; null otherwise.
+    val attributionText: String? get() = attributionLine(contributor, attribution)
+
     val authorName: String
         get() = if (author == ItemAuthor.USER) "You" else deviceName?.trim()?.takeIf { it.isNotEmpty() } ?: "Agent"
 
@@ -485,6 +502,8 @@ data class TrackerComment(
                 deviceName = json.stringOrNull("device_name"),
                 convoID = json.stringOrNull("convo_id"),
                 convoTitle = json.stringOrNull("convo_title"),
+                contributor = Contributor.on(json),
+                attribution = json.stringOrNull("attribution")?.takeIf { it.isNotBlank() },
             )
         }
     }

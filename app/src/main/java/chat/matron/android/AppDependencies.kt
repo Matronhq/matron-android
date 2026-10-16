@@ -626,6 +626,9 @@ class AppDependencies(
      */
     fun agentSpawnService(session: UserSession): AgentSpawnAnswering = core(session).api
 
+    /** Answers person-to-person grant cards (mission shares, hand-overs). */
+    fun grantService(session: UserSession): chat.matron.android.journal.GrantAnswering = core(session).api
+
     /** Stops a session the Coordinator let start, from its spawn card. */
     fun sessionStopper(session: UserSession): SessionStopping = OutboxSessionStopper(core(session).engine)
 

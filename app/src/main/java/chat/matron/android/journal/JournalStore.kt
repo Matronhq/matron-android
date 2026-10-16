@@ -1314,6 +1314,11 @@ class JournalStore(
             when (event.payload.stringOrNull("kind")) {
                 "agent_chat" -> "🤝 Agent chat request"
                 "agent_spawn" -> "🤝 Agent spawn request"
+                "contact_request" -> "🤝 Contact request"
+                "mission_share" -> "🤝 Mission share request"
+                "mission_handover" -> "🤝 Hand-over request"
+                "person_room" -> "🤝 Room with another person"
+                "session_share" -> "🤝 Session share request"
                 else -> "permission: " + (event.payload.stringOrNull("description") ?: "").take(100)
             }
         // baseSnippet, NOT displayLine: this path also renders snapshot rows

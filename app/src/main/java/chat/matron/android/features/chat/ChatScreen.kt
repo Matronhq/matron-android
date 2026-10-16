@@ -804,6 +804,9 @@ private fun TimelineRowView(
     // badges; neither is a change to the card's own row.
     val coordinatorDecisions by chatVM.coordinatorDecisions.collectAsStateWithLifecycle()
     val sessionStopStates by chatVM.sessionStopStates.collectAsStateWithLifecycle()
+    // Grant cards answer over HTTP, not with a timeline event: the transient
+    // states are what redraw the card while an answer is in flight.
+    val grantStates by chatVM.grantStates.collectAsStateWithLifecycle()
     // A bridge queued_release lands as a hidden row, so no visible row changes;
     // collecting the memo is what recomposes the sibling queue cards' buttons
     // (apple #162; Bugbot #48).
@@ -877,6 +880,11 @@ private fun TimelineRowView(
                     onOpenItem = onOpenItem,
                     onOpenMission = onOpenMission,
                     hasMultipleSenders = hasMultipleSenders,
+                    grantState = { eventID -> grantStates.let { chatVM.grantState(eventID) } },
+                    onAnswerGrant = { eventID, request, decision, excludeMedia ->
+                        // The view model's scope, so scrolling away can't cancel it.
+                        chatVM.answerGrant(eventID, request, decision, excludeMedia)
+                    },
                 )
             }
         }

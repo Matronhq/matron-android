@@ -17,6 +17,10 @@ import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.journal.AgentChatDecision
 import chat.matron.android.journal.AgentSpawnAnswering
+import chat.matron.android.journal.GrantAnswering
+import chat.matron.android.events.GrantCardState
+import chat.matron.android.events.GrantDecision
+import chat.matron.android.events.PersonGrantRequest
 import chat.matron.android.journal.SessionStopping
 import chat.matron.android.journal.AgentSpawnDecision
 import chat.matron.android.journal.JournalApiError
@@ -103,6 +107,9 @@ class ChatViewModel(
     /// badge. Null (previews, tests) leaves the badge without its Stop
     /// session button.
     private val sessionStopper: SessionStopping? = null,
+    /// Answers person-to-person grant cards (mission shares and hand-overs).
+    /// Null (previews, tests) renders those cards read-only.
+    private val grants: GrantAnswering? = null,
 ) {
     // MARK: - In-conversation search (apple #172)
 
@@ -668,6 +675,79 @@ class ChatViewModel(
 
     private fun setAgentSpawnState(eventID: String, state: AgentSpawnCardState) {
         _agentSpawnStates.value = _agentSpawnStates.value + (eventID to state)
+    }
+
+    // MARK: - Person-to-person grant cards
+
+    /// Grant cards answered on THIS device, keyed by journal seq: the
+    /// decision's wire value, or [EXPIRED_ANSWER] after a 404/409. Persisted
+    /// under `matron.grantAnswers.<roomID>` as "<seq>:<value>" strings, the
+    /// same shape as [agentChatAnswers]: the journal writes no timeline event
+    /// for the answer, so without this the card would offer its buttons
+    /// again on the next launch.
+    private val grantAnswersKey = "matron.grantAnswers.$roomID"
+    private val grantAnswers: MutableMap<String, String> =
+        answeredPromptStore.getStringList(grantAnswersKey).orEmpty()
+            .mapNotNull { entry ->
+                val split = entry.indexOf(':')
+                if (split <= 0) null else entry.substring(0, split) to entry.substring(split + 1)
+            }.toMap().toMutableMap()
+
+    /// In-flight and failed answers. Not persisted, like [_agentChatStates].
+    private val _grantStates = MutableStateFlow<Map<String, GrantCardState>>(emptyMap())
+    val grantStates: StateFlow<Map<String, GrantCardState>> = _grantStates.asStateFlow()
+
+    /// Render state for one grant card: a remembered answer first, then the
+    /// transient state, then Idle — or Unavailable when no answerer is wired.
+    fun grantState(eventID: String): GrantCardState {
+        grantAnswers[eventID]?.let { value ->
+            return if (value == EXPIRED_ANSWER) GrantCardState.Unavailable
+            else GrantCardState.Answered(value == GrantDecision.APPROVE.wire)
+        }
+        _grantStates.value[eventID]?.let { return it }
+        return if (grants == null) GrantCardState.Unavailable else GrantCardState.Idle
+    }
+
+    /// Answers a grant card: `POST /grants/:id/answer`. [excludeMedia] is
+    /// the files the owner unticked on a hand-over (sent only with an
+    /// approval). Runs on [scope] for the same reason as [answerAgentChat].
+    fun answerGrant(
+        eventID: String,
+        request: PersonGrantRequest,
+        decision: GrantDecision,
+        excludeMedia: List<String> = emptyList(),
+    ) {
+        val answerer = grants ?: return
+        when (grantState(eventID)) {
+            GrantCardState.Idle, is GrantCardState.Failed -> {}
+            else -> return
+        }
+        setGrantState(eventID, GrantCardState.Sending)
+        scope.launch {
+            try {
+                answerer.answerGrant(request.grantId, decision, excludeMedia)
+                rememberGrantAnswer(eventID, decision.wire)
+            } catch (cancel: CancellationException) {
+                _grantStates.value = _grantStates.value - eventID
+                throw cancel
+            } catch (gone: JournalApiError.Conflict) {
+                rememberGrantAnswer(eventID, EXPIRED_ANSWER)
+            } catch (gone: JournalApiError.NotFound) {
+                rememberGrantAnswer(eventID, EXPIRED_ANSWER)
+            } catch (error: Throwable) {
+                setGrantState(eventID, GrantCardState.Failed(describeAgentSpawnError(error)))
+            }
+        }
+    }
+
+    private fun setGrantState(eventID: String, state: GrantCardState) {
+        _grantStates.value = _grantStates.value + (eventID to state)
+    }
+
+    private fun rememberGrantAnswer(eventID: String, value: String) {
+        grantAnswers[eventID] = value
+        answeredPromptStore.setStringList(grantAnswersKey, grantAnswers.map { (id, v) -> "$id:$v" })
+        _grantStates.value = _grantStates.value - eventID
     }
 
     // MARK: - Coordinator badge

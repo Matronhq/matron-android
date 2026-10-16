@@ -86,6 +86,11 @@ import java.util.concurrent.atomic.AtomicLong
 ///
 /// v16 adds `item.handover_json`: the pending offer shown below the owner.
 /// Additive; cached rows show no offer until their next fetch.
+///
+/// v17 adds contributor attribution: `item.contributor_json`,
+/// `milestone.contributor_json`, and `mission.status` with
+/// `mission.status_contributor`. Additive; cached rows read null until their
+/// next fetch.
 @Database(
     entities = [
         ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
@@ -93,7 +98,7 @@ import java.util.concurrent.atomic.AtomicLong
         ItemEntity::class, ItemCommentEntity::class, ItemOutboxEntity::class,
         MissionEntity::class, MilestoneEntity::class, MissionConversationEntity::class,
     ],
-    version = 16,
+    version = 17,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -356,10 +361,20 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
+        /// v17: contributor attribution (see the class comment).
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `item` ADD COLUMN `contributor_json` TEXT")
+                db.execSQL("ALTER TABLE `milestone` ADD COLUMN `contributor_json` TEXT")
+                db.execSQL("ALTER TABLE `mission` ADD COLUMN `status` TEXT")
+                db.execSQL("ALTER TABLE `mission` ADD COLUMN `status_contributor` TEXT")
+            }
+        }
+
         private val MIGRATIONS = listOf(
             MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
             MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
-            MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16,
+            MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
         )
 
         /// Production, file-backed at the given path. [onOpened] fires from

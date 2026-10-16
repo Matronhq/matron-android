@@ -605,6 +605,43 @@ class JournalTimelineMapperTest {
         assertTrue(kind.text.contains("Flake hunt"))
     }
 
+    // MARK: Person-to-person grant cards
+
+    @Test fun missionHandoverPermissionRequestMapsToTheGrantCard() {
+        val item = map(ev(50, "permission_request", payload = buildJsonObject {
+            put("kind", "mission_handover")
+            put("direction", "in")
+            put("grant_id", "gr_1")
+            put("brief", "Over to you.")
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.PersonGrantCard
+        assertEquals("50", kind.eventID)
+        assertEquals("gr_1", kind.request.grantId)
+    }
+
+    @Test fun missionSharePermissionRequestMapsToTheGrantCard() {
+        val item = map(ev(51, "permission_request", payload = buildJsonObject {
+            put("kind", "mission_share")
+            put("direction", "out")
+            put("grant_id", "gr_2")
+            put("level", "contribute")
+        }))!!
+        val kind = item.kind as TimelineItem.Kind.PersonGrantCard
+        assertEquals("can contribute", kind.request.levelLabel)
+    }
+
+    /// The other person-to-person cards are answered on their tracker item
+    /// (or over HTTP), never by `prompt_reply`: no dead Allow/Deny prompt.
+    @Test fun otherPersonCardsRenderAsAnInertNotice() {
+        for (k in listOf("contact_request", "session_share", "person_room")) {
+            val item = map(ev(52, "permission_request", payload = buildJsonObject { put("kind", k) }))!!
+            assertTrue(k, item.kind is TimelineItem.Kind.StateChange)
+        }
+        // A hand-over without a grant id cannot be answered either.
+        val noId = map(ev(53, "permission_request", payload = buildJsonObject { put("kind", "mission_handover") }))!!
+        assertTrue(noId.kind is TimelineItem.Kind.StateChange)
+    }
+
     @Test fun spawnOutcomeEventMapsToItsOwnKind() {
         val item = map(ev(43, "spawn_outcome", sender = "journal", payload = buildJsonObject {
             put("request_id", "spawn-1")

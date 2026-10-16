@@ -418,7 +418,7 @@ fun ItemDetailView(
                 if (hasBody) {
                     item(key = "body") {
                         ItemCard(mine = item.createdBy == ItemAuthor.USER) {
-                            AuthorCaption(if (item.createdBy == ItemAuthor.USER) "You" else "Agent", item.createdAt, now)
+                            AuthorCaption(item.attributionText ?: if (item.createdBy == ItemAuthor.USER) "You" else "Agent", item.createdAt, now)
                             ItemContent(item.body, item.attachments, image, onOpenAttachment, onOpenLink)
                         }
                     }
@@ -664,14 +664,14 @@ private fun CommentView(
             }
             row.note?.let { note ->
                 ItemCard(mine = c.author == ItemAuthor.USER) {
-                    AuthorCaption(c.authorName, c.createdAt, now, c.authorConversation, openableConvoIDs, onOpenConversation)
+                    AuthorCaption(c.attributionText ?: c.authorName, c.createdAt, now, c.authorConversation, openableConvoIDs, onOpenConversation)
                     ItemContent(note, c.attachments, image, onOpen, onOpenLink)
                 }
             }
         }
     } else {
         ItemCard(mine = c.author == ItemAuthor.USER) {
-            AuthorCaption(c.authorName, c.createdAt, now, c.authorConversation, openableConvoIDs, onOpenConversation)
+            AuthorCaption(c.attributionText ?: c.authorName, c.createdAt, now, c.authorConversation, openableConvoIDs, onOpenConversation)
             ItemContent(c.body, c.attachments, image, onOpen, onOpenLink)
             ActionButtons(c.actions, chosen, actionsEnabled, onTapAction)
         }

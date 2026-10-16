@@ -8,6 +8,7 @@ import chat.matron.android.events.ItemMarkerEvent
 import chat.matron.android.events.LiveOutputEvent
 import chat.matron.android.events.MilestoneMarkerEvent
 import chat.matron.android.events.MissionMarkerEvent
+import chat.matron.android.events.PersonGrantRequest
 import chat.matron.android.events.RoutineMarkerEvent
 import chat.matron.android.events.ConsentDecisionEvent
 import chat.matron.android.events.CoordinatorMarkerEvent
@@ -167,7 +168,22 @@ object JournalTimelineMapper {
                 // expired 24h later. Agent-spawn is tried next, same reasoning.
                 val agentChat = AgentChatRequest.parse(payload)
                 val agentSpawn = AgentSpawnRequest.parse(payload)
+                val personGrant = PersonGrantRequest.parse(payload)
                 when {
+                    personGrant != null ->
+                        TimelineItem.Kind.PersonGrantCard(event.seq.toString(), personGrant)
+
+                    // The other person-to-person cards (and a share or
+                    // hand-over with no grant id) are answered on their
+                    // tracker item or over HTTP, never by `prompt_reply`, so
+                    // they must not become Allow/Deny buttons that do
+                    // nothing. A state-change row, which the chat view
+                    // currently leaves out (like the malformed agent-spawn
+                    // case above): the tracker item's own card in this
+                    // conversation is where the user answers.
+                    PersonGrantRequest.isPersonKind(payload) ->
+                        TimelineItem.Kind.StateChange("Request from a contact — answer it on its tracker item")
+
                     agentChat != null ->
                         TimelineItem.Kind.AgentChatRequestCard(event.seq.toString(), agentChat)
 

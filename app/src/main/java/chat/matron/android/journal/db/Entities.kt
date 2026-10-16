@@ -17,6 +17,7 @@ import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.ItemState
 import chat.matron.android.models.ItemWorking
 import chat.matron.android.models.MilestoneKind
+import chat.matron.android.models.Contributor
 import chat.matron.android.models.Mission
 import chat.matron.android.models.MissionConversation
 import chat.matron.android.models.MissionLastMilestone
@@ -287,6 +288,8 @@ data class ItemEntity(
     @ColumnInfo(name = "last_user_input_at") val lastUserInputAt: Long? = null,
     /// The pending offer as JSON (v16); null until the first refetch after upgrading.
     @ColumnInfo(name = "handover_json") val handoverJson: String? = null,
+    /// The contributor who filed the item (v17); null on everything else.
+    @ColumnInfo(name = "contributor_json") val contributorJson: String? = null,
 ) {
     fun toItem(): TrackerItem = TrackerItem(
         id = id, num = num, kind = ItemKind.fromWire(kind) ?: ItemKind.TASK,
@@ -307,6 +310,7 @@ data class ItemEntity(
         lastUserInputAt = lastUserInputAt?.let(Instant::ofEpochMilli),
         working = workingJson?.let(::storedItemWorking),
         handover = ItemHandover.fromJson(handoverJson?.let(::parseJsonObjectOrNull)),
+        contributor = Contributor.fromJson(contributorJson?.let(::parseJsonObjectOrNull)),
     )
 
     companion object {
@@ -328,6 +332,7 @@ data class ItemEntity(
             workingJson = i.working?.let(::storedItemWorkingJson),
             lastUserInputAt = i.lastUserInputAt?.toEpochMilli(),
             handoverJson = i.handover?.toJson()?.toString(),
+            contributorJson = i.contributor?.toJson()?.toString(),
         )
     }
 }
@@ -366,6 +371,9 @@ data class ItemCommentEntity(
         @SerialName("device_name") val deviceName: String? = null,
         @SerialName("convo_id") val convoID: String? = null,
         @SerialName("convo_title") val convoTitle: String? = null,
+        @SerialName("contributor_name") val contributorName: String? = null,
+        @SerialName("contributor_via") val contributorVia: String? = null,
+        val attribution: String? = null,
     )
 
     fun toComment(): TrackerComment {
@@ -384,6 +392,10 @@ data class ItemCommentEntity(
             actions = meta?.actions ?: emptyList(), chosenAction = meta?.chosen,
             action = meta?.action, replyTo = meta?.replyTo,
             deviceName = meta?.deviceName, convoID = meta?.convoID, convoTitle = meta?.convoTitle,
+            contributor = meta?.contributorName?.let {
+                Contributor(it, Contributor.Via.parse(meta.contributorVia) ?: Contributor.Via.USER)
+            },
+            attribution = meta?.attribution,
         )
     }
 
@@ -392,7 +404,8 @@ data class ItemCommentEntity(
             fun snap(s: TrackerItem.StatusSnapshot?): Snap? =
                 s?.let { Snap(it.state?.wire, it.resolution?.wire, it.awaiting?.wire) }
             val hasButtons = c.actions.isNotEmpty() || c.chosenAction != null || c.action != null || c.replyTo != null
-            val hasAuthor = c.deviceName != null || c.convoID != null || c.convoTitle != null
+            val hasAuthor = c.deviceName != null || c.convoID != null || c.convoTitle != null ||
+                c.contributor != null || c.attribution != null
             val meta = if (c.statusFrom != null || c.statusTo != null || hasButtons || hasAuthor) {
                 MatronJson.encodeToString(
                     Meta.serializer(),
@@ -401,6 +414,8 @@ data class ItemCommentEntity(
                         actions = c.actions.takeIf { it.isNotEmpty() }, chosen = c.chosenAction,
                         action = c.action, replyTo = c.replyTo,
                         deviceName = c.deviceName, convoID = c.convoID, convoTitle = c.convoTitle,
+                        contributorName = c.contributor?.name, contributorVia = c.contributor?.via?.wire,
+                        attribution = c.attribution,
                     ),
                 )
             } else {
@@ -490,6 +505,10 @@ data class MissionEntity(
     /// The mission's optional short name (v12); rows cached before v12 read
     /// `null` until the next list or detail fetch fills it in.
     val name: String? = null,
+    /// The mission's status and the contributor who set it (v17); rows
+    /// cached before v17 read null until their next fetch.
+    val status: String? = null,
+    @ColumnInfo(name = "status_contributor") val statusContributor: String? = null,
 ) {
     /// Serializable mirror of `MissionLastMilestone` with wire-shaped keys,
     /// so the stored JSON reads the same as the payload it came from.
@@ -517,6 +536,7 @@ data class MissionEntity(
             lastMilestoneAt = lastMilestoneAt?.let(Instant::ofEpochMilli), closedAt = closedAt?.let(Instant::ofEpochMilli),
             openItems = openItems, needsYou = needsYou, conversationCount = conversationCount,
             milestoneCount = milestoneCount, lastMilestone = last,
+            status = status, statusContributor = statusContributor,
         )
     }
 
@@ -529,6 +549,7 @@ data class MissionEntity(
             lastMilestoneAt = m.lastMilestoneAt?.toEpochMilli(), closedAt = m.closedAt?.toEpochMilli(),
             openItems = m.openItems, needsYou = m.needsYou, conversationCount = m.conversationCount,
             milestoneCount = m.milestoneCount,
+            status = m.status, statusContributor = m.statusContributor,
             lastMilestoneJson = m.lastMilestone?.let {
                 MatronJson.encodeToString(
                     LastMilestone.serializer(),
@@ -557,11 +578,14 @@ data class MilestoneEntity(
     @ColumnInfo(name = "device_id") val deviceID: Long,
     @ColumnInfo(name = "created_by") val createdBy: String,
     @ColumnInfo(name = "created_at") val createdAt: Long,
+    /// The contributor who posted it (v17); null on everything else.
+    @ColumnInfo(name = "contributor_json") val contributorJson: String? = null,
 ) {
     fun toMilestone(): Milestone = Milestone(
         id = id, missionID = missionID, num = num, kind = MilestoneKind.fromWire(kind) ?: MilestoneKind.PROGRESS,
         title = title, body = body, convoID = convoID, seq = seq, deviceID = deviceID,
         createdBy = ItemAuthor.fromWire(createdBy) ?: ItemAuthor.AGENT, createdAt = Instant.ofEpochMilli(createdAt),
+        contributor = Contributor.fromJson(contributorJson?.let(::parseJsonObjectOrNull)),
     )
 
     companion object {
@@ -569,6 +593,7 @@ data class MilestoneEntity(
             id = m.id, missionID = m.missionID, num = m.num, kind = m.kind.wire, title = m.title, body = m.body,
             convoID = m.convoID, seq = m.seq, deviceID = m.deviceID, createdBy = m.createdBy.wire,
             createdAt = m.createdAt.toEpochMilli(),
+            contributorJson = m.contributor?.toJson()?.toString(),
         )
     }
 }
