@@ -288,6 +288,21 @@ class ArchiveTest {
     }
 
     @Test
+    fun aRefusalAfterAnAcceptedWriteRestoresWhatTheJournalAccepted() = runBlocking {
+        val store = store("x")
+        store.setArchiveSince(1)
+        val writer = FakeWriter().apply { gate = CompletableDeferred() }
+        val sync = ArchiveSync(store, writer, now = { 5_000 }, dispatcher = Dispatchers.IO)
+        sync.setArchived(listOf("x"), archived = true)
+        withTimeout(2000) { while (synchronized(writer.calls) { writer.calls.isEmpty() }) kotlinx.coroutines.delay(5) }
+        sync.setArchived(listOf("x"), archived = false)
+        writer.refuse = { _, archived -> !archived }
+        writer.gate!!.complete(Unit)
+        sync.waitUntilIdle()
+        assertEquals("the accepted archive stands", 5_000L, store.conversation("x")?.archivedAt)
+    }
+
+    @Test
     fun aRefusedUnarchivePutsBackTheArchiveTimeAndPurgeMarks() = runBlocking {
         val store = store("old")
         store.applyColdSnapshot(listOf(ConvoSummaryDTO("kid", "", "done", 0, "", 0, parentConvoID = "old")), headSeq = 0)

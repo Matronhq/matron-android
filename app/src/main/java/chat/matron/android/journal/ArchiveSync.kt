@@ -286,9 +286,16 @@ class ArchiveSync(
         try {
             writer.setArchived(batch, archived = state)
             mutex.withLock {
-                for (id in batch) if (wanted[id] == state) {
-                    wanted.remove(id)
-                    before.remove(id)
+                for (id in batch) {
+                    if (wanted[id] == state) {
+                        wanted.remove(id)
+                        before.remove(id)
+                    } else if (id in wanted) {
+                        // The user has chosen again since: what a refusal of
+                        // that later write restores is now what the journal
+                        // just accepted.
+                        before[id] = accepted(before[id], state)
+                    }
                 }
             }
         } catch (cancel: CancellationException) {
@@ -303,6 +310,15 @@ class ArchiveSync(
                 runCatching { store.setArchived(refused.filter { it !in states }, !state, now()) }
             }
         }
+    }
+
+    /// The state the journal holds after accepting [archived] over [prev]:
+    /// archiving an archived conversation keeps its first time, and an
+    /// unarchive clears the purge marks.
+    private fun accepted(prev: ArchiveState?, archived: Boolean): ArchiveState = if (archived) {
+        ArchiveState(prev?.archivedAt ?: now(), prev?.purgedAt.orEmpty())
+    } else {
+        ArchiveState(null, prev?.purgedAt.orEmpty().mapValues { null })
     }
 
     companion object {
