@@ -3,6 +3,7 @@ package chat.matron.android.chat
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -34,8 +35,16 @@ interface ChatService {
     /// Mutes notifications for `roomID`. Idempotent.
     suspend fun mute(roomID: String)
 
-    /// Leaves/hides `roomID`.
-    suspend fun leave(roomID: String)
+    /// Archives ([archived] true) or unarchives the conversations. An
+    /// archived conversation leaves the chat list for Archived at once;
+    /// nothing in it is deleted, and a new message brings it back. Synced to
+    /// the user's other devices on a journal that syncs the archive.
+    /// Default for fakes that do not archive.
+    suspend fun setArchived(roomIDs: List<String>, archived: Boolean) {}
+
+    /// Long-lived stream of the archived conversations, in the chat list's
+    /// order. Same shape as [chatSummaries]. Default for fakes: none.
+    fun archivedChatSummaries(): Flow<List<ChatSummary>> = flowOf(emptyList())
 
     /// Joined-room ids for a push bootstrap, sourced from [chatSummaries].
     ///

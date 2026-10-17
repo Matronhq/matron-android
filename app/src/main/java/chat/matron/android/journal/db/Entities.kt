@@ -51,6 +51,9 @@ data class ConversationEntity(
     @ColumnInfo(name = "created_at") val createdAt: Long,
     @ColumnInfo(name = "last_activity_ts") val lastActivityTS: Long?,
     val muted: Boolean,
+    /// The old one-way, local-only "Leave". Superseded by [archivedAt]: the
+    /// v18 migration moved every hidden row to archived, and nothing sets
+    /// it any more. The column stays so the schema keeps matching.
     val hidden: Boolean,
     @ColumnInfo(name = "read_up_to_seq") val readUpToSeq: Long,
     @ColumnInfo(name = "unread_count") val unreadCount: Int,
@@ -83,7 +86,20 @@ data class ConversationEntity(
     /// substitution does not apply (not a tool_output, no command, or a
     /// legacy payload that was never a live log and is not tombstoned).
     @ColumnInfo(name = "expired_snippet") val expiredSnippet: String? = null,
+    /// When the user (or the journal's idle sweep) archived the
+    /// conversation, in ms, or `null`. An archived conversation is left out
+    /// of the chat list and shown in Archived instead (journal protocol
+    /// "Archived conversations"); nothing about it is deleted.
+    @ColumnInfo(name = "archived_at") val archivedAt: Long? = null,
+    /// When [chat.matron.android.journal.JournalMaintenance] dropped this
+    /// conversation's stored events because it had been archived for
+    /// `JournalStore.ARCHIVED_HISTORY_RETENTION_MS`, or `null`. The row
+    /// stays; opening it pages the history back from the journal. Cleared by
+    /// an unarchive, so a later archive purges again.
+    @ColumnInfo(name = "history_purged_at") val historyPurgedAt: Long? = null,
 ) {
+    val isArchived: Boolean get() = archivedAt != null
+
     /// Decoded [participants]. Empty for anything that is not a known
     /// multi-agent room (null column, or a value that fails to decode).
     val participantIDs: List<Long>

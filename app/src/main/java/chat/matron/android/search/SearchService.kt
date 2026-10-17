@@ -44,6 +44,11 @@ interface SearchService : SearchIndexer {
         for (eventID in eventIDs) remove(eventID)
     }
 
+    /// Deletes every indexed message of the rooms in [roomIDs], and their
+    /// backfill bookkeeping — the purge of long-archived conversations'
+    /// local history. Default: nothing to delete.
+    suspend fun removeRooms(roomIDs: List<String>) {}
+
     /// Queries by free-text. Returns at most [limit] hits, newest first.
     suspend fun query(text: String, limit: Int): List<SearchHit>
 

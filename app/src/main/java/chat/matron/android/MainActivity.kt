@@ -99,6 +99,7 @@ import chat.matron.android.features.settings.DeviceSettingsScreen
 import chat.matron.android.features.settings.AgentChatScreen
 import chat.matron.android.features.settings.DevicesScreen
 import chat.matron.android.features.settings.PinnedChatsScreen
+import chat.matron.android.features.chatlist.ArchivedChatsScreen
 import chat.matron.android.features.pins.ChatPinMenu
 import chat.matron.android.features.pins.PinDialogsHost
 import chat.matron.android.features.pins.PinsController
@@ -951,6 +952,15 @@ private fun SignedInApp(
                             pins = pins,
                             boxNames = boxNames,
                             pinActions = pinsController,
+                            onOpenArchived = { nav.navigate("archived") },
+                        )
+                    }
+
+                    composable("archived") {
+                        ArchivedChatsScreen(
+                            chat = deps.chatService(session),
+                            onOpenChat = { nav.navigate("${AppTab.CONVERSATIONS.routePrefix}chat/$it") },
+                            onBack = { nav.popBackStack() },
                         )
                     }
 
@@ -1010,6 +1020,9 @@ private fun SignedInApp(
 
                     composable("settings") {
                         val noticesSetting = remember(session.userID) { deps.makeNoticesSettingViewModel(session, sessionScope) }
+                        val autoArchiveSetting = remember(session.userID) {
+                            deps.makeAutoArchiveSettingViewModel(session, sessionScope)
+                        }
                         val coordinatorConsent = remember(session.userID) {
                             deps.makeCoordinatorConsentSettingViewModel(session, sessionScope)
                         }
@@ -1031,6 +1044,7 @@ private fun SignedInApp(
                             ),
                             onPinnedChats = if (pins != null) ({ nav.navigate("pinned-chats") }) else null,
                             notices = noticesSetting,
+                            autoArchive = autoArchiveSetting,
                             onBack = { nav.popBackStack() },
                         )
                     }

@@ -15,7 +15,7 @@ class FakeChatServiceForCreate : ChatService {
     var refreshCalls = 0
     var forceSnapshotCalls = 0
     val mutedRooms = mutableListOf<String>()
-    val leftRooms = mutableListOf<String>()
+    val archivedRooms = mutableListOf<String>()
 
     override fun chatSummaries(): Flow<List<ChatSummary>> = emptyFlow()
     override fun children(parentConvoID: String): Flow<List<SubChatSummary>> = emptyFlow()
@@ -28,7 +28,9 @@ class FakeChatServiceForCreate : ChatService {
     override suspend fun refresh() { refreshCalls++ }
     override suspend fun forceSnapshot() { forceSnapshotCalls++ }
     override suspend fun mute(roomID: String) { mutedRooms.add(roomID) }
-    override suspend fun leave(roomID: String) { leftRooms.add(roomID) }
+    override suspend fun setArchived(roomIDs: List<String>, archived: Boolean) {
+        if (archived) archivedRooms.addAll(roomIDs)
+    }
 }
 
 class CreateChatTest {

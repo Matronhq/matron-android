@@ -1,6 +1,7 @@
 package chat.matron.android.features.chatlist
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,9 +15,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -63,7 +66,7 @@ import kotlinx.coroutines.launch
 
 /**
  * Chat-list screen. Ports Features/ChatList/ChatListView.swift: grouped recency
- * sections, per-row long-press mute/leave, pull-to-refresh, an inline connection
+ * sections, per-row long-press mute/archive, pull-to-refresh, an inline connection
  * indicator, and a toolbar (search when the index is available, new chat, and an
  * overflow menu with Settings + Sign Out).
  */
@@ -91,6 +94,9 @@ fun ChatListScreen(
     /// Agent box id → name, for the successor hint ("New session on …").
     boxNames: Map<Long, String> = emptyMap(),
     pinActions: PinActions? = null,
+    /// Opens Archived (the overflow menu's item and the row at the foot of
+    /// the list); `null` hides both.
+    onOpenArchived: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
@@ -130,6 +136,12 @@ fun ChatListScreen(
                         Icon(Icons.Default.MoreVert, contentDescription = "More")
                     }
                     DropdownMenu(expanded = overflowOpen, onDismissRequest = { overflowOpen = false }) {
+                        if (onOpenArchived != null) {
+                            DropdownMenuItem(
+                                text = { Text("Archived") },
+                                onClick = { overflowOpen = false; onOpenArchived() },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("Settings") },
                             onClick = { overflowOpen = false; onOpenSettings() },
@@ -182,19 +194,47 @@ fun ChatListScreen(
                                             .onFailure { MatronDebug.breadcrumb("ChatListScreen: mute failed for ${summary.id}: $it") }
                                     }
                                 },
-                                onLeave = {
+                                onArchive = {
                                     scope.launch {
-                                        runCatching { chat.leave(summary.id) }
-                                            .onFailure { MatronDebug.breadcrumb("ChatListScreen: leave failed for ${summary.id}: $it") }
+                                        runCatching { chat.setArchived(listOf(summary.id), archived = true) }
+                                            .onFailure { MatronDebug.breadcrumb("ChatListScreen: archive failed for ${summary.id}: $it") }
                                     }
                                 },
                                 onPin = if (pins != null && pinActions != null) ({ pinActions.edit(summary.id) }) else null,
                             )
                         }
                     }
+                    if (onOpenArchived != null) {
+                        item(key = "archived-row") { ArchivedRow(onOpenArchived) }
+                    }
                 }
             }
         }
+    }
+}
+
+/// The row at the foot of the chat list that opens Archived.
+@Composable
+private fun ArchivedRow(onOpen: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Icon(
+            Icons.Outlined.Inventory2,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text("Archived", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Icon(
+            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -246,12 +286,15 @@ internal fun ChatRow(
     summary: ChatSummary,
     onOpen: () -> Unit,
     onMute: (() -> Unit)?,
-    onLeave: (() -> Unit)?,
+    /// "Archive" in the long-press menu; null where it is not offered.
+    onArchive: (() -> Unit)?,
     /// "Pin…" in the long-press menu; null where pins are not offered.
     onPin: (() -> Unit)? = null,
+    /// "Unarchive" in the long-press menu (the Archived list).
+    onUnarchive: (() -> Unit)? = null,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    val hasMenu = onMute != null || onLeave != null || onPin != null
+    val hasMenu = onMute != null || onArchive != null || onPin != null || onUnarchive != null
     Box {
         Row(
             modifier = Modifier
@@ -305,7 +348,8 @@ internal fun ChatRow(
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
             if (onPin != null) DropdownMenuItem(text = { Text("Pin…") }, onClick = { menuOpen = false; onPin() })
             if (onMute != null) DropdownMenuItem(text = { Text("Mute") }, onClick = { menuOpen = false; onMute() })
-            if (onLeave != null) DropdownMenuItem(text = { Text("Leave") }, onClick = { menuOpen = false; onLeave() })
+            if (onArchive != null) DropdownMenuItem(text = { Text("Archive") }, onClick = { menuOpen = false; onArchive() })
+            if (onUnarchive != null) DropdownMenuItem(text = { Text("Unarchive") }, onClick = { menuOpen = false; onUnarchive() })
         }
     }
 }

@@ -141,6 +141,12 @@ data class ConvoSummaryDTO(
     /// field. Absent never clears a stored set (same discipline as
     /// [agentDeviceID]); present replaces it wholesale.
     val participants: List<Long>? = null,
+    /// When the conversation was archived (ms), from a journal that syncs
+    /// the archive; `null` when it is not archived or the journal says
+    /// nothing. Read only when the row is first created (see
+    /// `JournalStore.upsertSummary`): after that the archive feed keeps it
+    /// current.
+    val archivedAt: Long? = null,
 )
 
 /// One row of `GET /devices`. Timestamps are epoch ms; `lastSeenAt` is null for
@@ -330,7 +336,8 @@ class JournalApi(
     private val client: OkHttpClient = OkHttpClient(),
     token: String? = null,
 ) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
-    PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding {
+    PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
+    ArchiveWriting {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -397,6 +404,7 @@ class JournalApi(
                 // Multi-agent room membership (owner + joined). Absent for
                 // solo conversations and on older servers -> null.
                 participants = c.longArrayOrNull("participants"),
+                archivedAt = c.longOrNull("archived_at"),
             )
         }
         // Absent field (old server) → null, present-but-empty → empty list:
@@ -874,6 +882,24 @@ class JournalApi(
         UserSettingsDecoding.settings(
             request(path = "/settings", method = "PATCH", jsonBody = buildJsonObject { put("notices", notices) }),
         ) ?: throw JournalApiError.Transport("malformed settings response")
+
+    override suspend fun updateAutoArchiveDays(days: Int): UserSettings =
+        UserSettingsDecoding.settings(
+            request(path = "/settings", method = "PATCH", jsonBody = buildJsonObject { put("auto_archive_days", days) }),
+        ) ?: throw JournalApiError.Transport("malformed settings response")
+
+    // MARK: Archive
+
+    override suspend fun setArchived(convoIDs: List<String>, archived: Boolean) {
+        request(
+            path = "/archive",
+            method = "POST",
+            jsonBody = buildJsonObject {
+                put("convo_ids", JsonArray(convoIDs.map(::JsonPrimitive)))
+                put("archived", archived)
+            },
+        )
+    }
 
     // MARK: Lookup
     //

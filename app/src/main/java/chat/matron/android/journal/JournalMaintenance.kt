@@ -33,6 +33,15 @@ interface MaintenanceSweeping {
     /// after `SearchService.removeAll` has succeeded for the seqs that came
     /// with this cutoff.
     suspend fun recordSearchRetirement(upTo: Long)
+    /// Top-level conversations archived long enough for their stored
+    /// history to go (`JournalStore.ARCHIVED_HISTORY_RETENTION_MS`).
+    suspend fun archivedHistoryPurgeCandidates(now: Long): List<String> = emptyList()
+    /// Drops their stored events, keeping the rows, and queues their search
+    /// rows for removal. Returns the rooms whose events went.
+    suspend fun purgeArchivedHistory(convoIDs: List<String>, now: Long): List<String> = emptyList()
+    /// Rooms whose search rows a purge left to remove.
+    suspend fun pendingSearchRoomPurges(): List<String> = emptyList()
+    suspend fun clearPendingSearchRoomPurges(rooms: List<String>) {}
 }
 
 /// The store's background housekeeping: the tool-output TTL sweep, the
@@ -64,6 +73,9 @@ class JournalMaintenance(
     private val intervalMs: Long = DEFAULT_INTERVAL_MS,
     private val firstRunDelayMs: Long = FIRST_RUN_DELAY_MS,
     dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /// The conversations open on screen, whose history the archive purge
+    /// leaves alone this pass (`JournalSyncEngine.viewedConversationIDs`).
+    private val openConversations: () -> Set<String> = { emptySet() },
 ) {
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val lock = Any()
@@ -201,9 +213,12 @@ class JournalMaintenance(
                 searchRetired = pending.seqs.size
             }
             currentCoroutineContext().ensureActive()
+            val archivePurged = purgeArchivedHistory(now)
+            currentCoroutineContext().ensureActive()
             store.recordMaintenanceRun(now)
             MatronDebug.breadcrumb(
-                "JournalMaintenance: pass done; retention visited ${retentionVisited.size}, search retired $searchRetired",
+                "JournalMaintenance: pass done; retention visited ${retentionVisited.size}, search retired $searchRetired, " +
+                    "archived histories purged $archivePurged",
             )
         } catch (e: CancellationException) {
             // stop(): no stamp, no watermark — the next pass resumes.
@@ -213,6 +228,30 @@ class JournalMaintenance(
             // than waiting out the hour.
             MatronDebug.breadcrumb("JournalMaintenance: pass failed: $e")
         }
+    }
+
+    /// Drops the stored history of conversations archived for
+    /// `JournalStore.ARCHIVED_HISTORY_RETENTION_MS`, keeping their rows, then
+    /// their search rows. Events go first, so a conversation that came back
+    /// meanwhile (and is skipped) keeps its search rows; the store queues the
+    /// purged rooms' search rows in the same transaction, so a removal that
+    /// fails, or a pass with no index, is finished by a later pass. A
+    /// conversation open on screen waits for a later pass. Returns how many
+    /// rooms it purged.
+    private suspend fun purgeArchivedHistory(now: Long): Int {
+        val open = openConversations()
+        val candidates = store.archivedHistoryPurgeCandidates(now).filter { it !in open }
+        val purged = if (candidates.isEmpty()) emptyList() else store.purgeArchivedHistory(candidates, now)
+        val search = this.search
+        if (search != null) {
+            val pending = store.pendingSearchRoomPurges()
+            if (pending.isNotEmpty()) {
+                currentCoroutineContext().ensureActive()
+                search.removeRooms(pending)
+                store.clearPendingSearchRoomPurges(pending)
+            }
+        }
+        return purged.size
     }
 
     companion object {

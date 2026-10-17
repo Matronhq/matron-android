@@ -98,7 +98,7 @@ import java.util.concurrent.atomic.AtomicLong
         ItemEntity::class, ItemCommentEntity::class, ItemOutboxEntity::class,
         MissionEntity::class, MilestoneEntity::class, MissionConversationEntity::class,
     ],
-    version = 17,
+    version = 18,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -371,10 +371,28 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
+        /// v18: the synced archive. `conversation.archived_at` replaces the
+        /// local, one-way "Leave" (`hidden`): every hidden row becomes
+        /// archived, as of now, so it shows in Archived and can be brought
+        /// back; `ArchiveSync` carries these over to the journal on its first
+        /// sync. `history_purged_at` marks an archived row whose stored
+        /// history maintenance dropped (`JournalStore.purgeArchivedHistory`).
+        val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `conversation` ADD COLUMN `archived_at` INTEGER")
+                db.execSQL("ALTER TABLE `conversation` ADD COLUMN `history_purged_at` INTEGER")
+                db.execSQL(
+                    "UPDATE `conversation` SET `archived_at` = ?, `hidden` = 0 WHERE `hidden` = 1",
+                    arrayOf<Any>(System.currentTimeMillis()),
+                )
+            }
+        }
+
         private val MIGRATIONS = listOf(
             MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
             MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
             MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
+            MIGRATION_17_18,
         )
 
         /// Production, file-backed at the given path. [onOpened] fires from

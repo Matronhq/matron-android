@@ -25,7 +25,7 @@ class FakeChatService : ChatService {
     var refreshCalls = 0
     var forceSnapshotCalls = 0
     val mutedRooms = mutableListOf<String>()
-    val leftRooms = mutableListOf<String>()
+    val archivedRooms = mutableListOf<String>()
     val childrenByParent = mutableMapOf<String, List<List<SubChatSummary>>>()
 
     override fun chatSummaries(): Flow<List<ChatSummary>> = flow {
@@ -45,7 +45,9 @@ class FakeChatService : ChatService {
     override suspend fun refresh() { refreshCalls++ }
     override suspend fun forceSnapshot() { forceSnapshotCalls++ }
     override suspend fun mute(roomID: String) { mutedRooms.add(roomID) }
-    override suspend fun leave(roomID: String) { leftRooms.add(roomID) }
+    override suspend fun setArchived(roomIDs: List<String>, archived: Boolean) {
+        if (archived) archivedRooms.addAll(roomIDs)
+    }
 }
 
 /// Yields a single `[]` and never finishes — a room-less account whose sync
@@ -60,7 +62,6 @@ private class HangingEmptyChatService : ChatService {
     override suspend fun refresh() {}
     override suspend fun forceSnapshot() {}
     override suspend fun mute(roomID: String) {}
-    override suspend fun leave(roomID: String) {}
 }
 
 class ChatServiceFakeTest {

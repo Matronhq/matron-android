@@ -39,24 +39,78 @@ interface ConversationDao {
     /// `last_seq` alone (same latent flaw, left unfixed there) — don't "fix"
     /// this back to match it during a future parity audit.
     @Query(
-        "SELECT * FROM conversation WHERE hidden = 0 AND parent_convo_id IS NULL " +
+        "SELECT * FROM conversation WHERE archived_at IS NULL AND parent_convo_id IS NULL " +
             "ORDER BY last_activity_ts DESC, last_seq DESC"
     )
     suspend fun visibleTopLevel(): List<ConversationEntity>
 
     @Query(
-        "SELECT * FROM conversation WHERE hidden = 0 AND parent_convo_id IS NULL " +
+        "SELECT * FROM conversation WHERE archived_at IS NULL AND parent_convo_id IS NULL " +
             "ORDER BY last_activity_ts DESC, last_seq DESC"
     )
     fun visibleTopLevelFlow(): Flow<List<ConversationEntity>>
 
-    /// EVERY conversation id — hidden rows and subagent children included
-    /// (their history is searchable, so the backfill sweep must cover them).
-    /// Activity ordering indexes the conversations the user is most likely to
-    /// search before the long tail. Ported from matron-apple's
-    /// `JournalStore.allConversationIDs`.
-    @Query("SELECT id FROM conversation ORDER BY last_activity_ts DESC, last_seq DESC")
+    /// EVERY conversation id — archived rows and subagent children included
+    /// (their history is searchable, so the backfill sweep must cover them) —
+    /// except one whose stored history the archive purge dropped: indexing it
+    /// again would download what the purge freed. An unarchive clears the
+    /// mark, and the next sweep indexes it again. Activity ordering indexes
+    /// the conversations the user is most likely to search before the long
+    /// tail. Ported from matron-apple's `JournalStore.allConversationIDs`.
+    @Query(
+        "SELECT id FROM conversation WHERE history_purged_at IS NULL " +
+            "ORDER BY last_activity_ts DESC, last_seq DESC"
+    )
     suspend fun allConversationIDs(): List<String>
+
+    /// The Archived list: every archived top-level conversation, in the chat
+    /// list's order.
+    @Query(
+        "SELECT * FROM conversation WHERE archived_at IS NOT NULL AND parent_convo_id IS NULL " +
+            "ORDER BY last_activity_ts DESC, last_seq DESC"
+    )
+    fun archivedTopLevelFlow(): Flow<List<ConversationEntity>>
+
+    @Query("SELECT id FROM conversation WHERE archived_at IS NOT NULL AND parent_convo_id IS NULL ORDER BY id")
+    suspend fun archivedTopLevelIDs(): List<String>
+
+    @Query("SELECT archived_at FROM conversation WHERE id = :id")
+    suspend fun archivedAt(id: String): Long?
+
+    /// Archives (stamping [archivedAt]) a row not archived yet, or — with
+    /// [keepEarlier] false — re-stamps one that is. Returns rows changed.
+    @Query(
+        "UPDATE conversation SET archived_at = :archivedAt " +
+            "WHERE id = :id AND (archived_at IS NULL OR (NOT :keepEarlier AND archived_at != :archivedAt))"
+    )
+    suspend fun archive(id: String, archivedAt: Long, keepEarlier: Boolean): Int
+
+    /// Unarchives; also clears `history_purged_at`, so a later archive
+    /// purges again. Returns rows changed.
+    @Query(
+        "UPDATE conversation SET archived_at = NULL, history_purged_at = NULL " +
+            "WHERE id = :id AND archived_at IS NOT NULL"
+    )
+    suspend fun unarchive(id: String): Int
+
+    /// Top-level conversations archived before [cutoff] whose history is
+    /// still stored, oldest archive first.
+    @Query(
+        "SELECT id FROM conversation WHERE archived_at IS NOT NULL AND archived_at < :cutoff " +
+            "AND history_purged_at IS NULL AND parent_convo_id IS NULL ORDER BY archived_at, id"
+    )
+    suspend fun archivedHistoryPurgeCandidates(cutoff: Long): List<String>
+
+    @Query(
+        "SELECT id FROM conversation WHERE id IN (:ids) AND archived_at IS NOT NULL AND history_purged_at IS NULL"
+    )
+    suspend fun stillPurgeable(ids: List<String>): List<String>
+
+    @Query("SELECT id FROM conversation WHERE parent_convo_id IN (:ids)")
+    suspend fun childIDs(ids: List<String>): List<String>
+
+    @Query("UPDATE conversation SET history_purged_at = :at WHERE id IN (:ids)")
+    suspend fun markHistoryPurged(ids: List<String>, at: Long)
 
     @Query("SELECT * FROM conversation WHERE parent_convo_id = :parentConvoID ORDER BY created_at ASC, id ASC")
     suspend fun children(parentConvoID: String): List<ConversationEntity>
@@ -67,8 +121,6 @@ interface ConversationDao {
     @Query("UPDATE conversation SET muted = :muted WHERE id = :convoID")
     suspend fun setMuted(muted: Boolean, convoID: String)
 
-    @Query("UPDATE conversation SET hidden = :hidden WHERE id = :convoID")
-    suspend fun setHidden(hidden: Boolean, convoID: String)
 
     @Query("UPDATE conversation SET last_message_type = :type, expired_snippet = :expiredSnippet WHERE id = :id")
     suspend fun setLastMessageColumns(id: String, type: String?, expiredSnippet: String?)
@@ -127,6 +179,10 @@ interface AgentDao {
 
 @Dao
 interface EventDao {
+    /// Every stored event of [convoIDs] (the archive purge).
+    @Query("DELETE FROM event WHERE convo_id IN (:convoIDs)")
+    suspend fun deleteForConversations(convoIDs: List<String>)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertReplace(event: EventEntity)
 
@@ -322,6 +378,9 @@ interface MetaDao {
 
     /// Drops every key starting with [prefix] (the tracker's per-scope
     /// watermarks at `wipeItems`). `%`/`_` never occur in the prefixes used.
+    @Query("DELETE FROM meta WHERE key = :key")
+    suspend fun delete(key: String)
+
     @Query("DELETE FROM meta WHERE key LIKE :prefix || '%'")
     suspend fun deleteWithPrefix(prefix: String)
 
