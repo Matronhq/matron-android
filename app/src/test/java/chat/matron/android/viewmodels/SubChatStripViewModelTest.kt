@@ -42,7 +42,6 @@ private class FakeChildrenChatService : ChatService {
     override suspend fun refresh() {}
     override suspend fun forceSnapshot() {}
     override suspend fun mute(roomID: String) {}
-    override suspend fun leave(roomID: String) {}
 }
 
 class SubChatStripViewModelTest {

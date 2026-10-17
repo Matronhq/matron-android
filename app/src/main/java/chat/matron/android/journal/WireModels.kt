@@ -334,6 +334,11 @@ sealed interface ServerFrame {
         val pins: List<ConvoPin>? = null,
         val coordinator: HelloCoordinator = HelloCoordinator.Absent,
         val settings: UserSettings? = null,
+        /// `hello_ok.archive`: the archive changes since the hello's
+        /// `archive_since` (protocol "Archived conversations"). `null` from
+        /// a journal that does not sync the archive, or when the hello did
+        /// not ask.
+        val archive: ArchiveDelta? = null,
     ) : ServerFrame
     /// `requestID` correlates RPC errors back to their `agent_request`; null for
     /// ordinary op errors.
@@ -382,6 +387,12 @@ sealed interface ServerFrame {
     /// a client that misses one reads the list off the next `hello_ok`.
     data class PinsFrame(val pins: List<ConvoPin>) : ServerFrame
 
+    /// The user's archived conversations changed (`{kind:"archive", changes,
+    /// at}`): any device's `POST /archive`, or the journal's idle sweep. A
+    /// client that misses one gets the changes from `hello_ok` on its next
+    /// connect (`archive_since`).
+    data class ArchiveFrame(val delta: ArchiveDelta) : ServerFrame
+
     companion object {
         /// Bridge timestamps are `Date.toISOString()` output (fractional), but
         /// plain ISO is accepted too for robustness.
@@ -413,6 +424,7 @@ sealed interface ServerFrame {
                     BoxDefaultsFrame(BoxDefaultsUpdate(id, defaults))
                 }
                 "pins" -> Pins.parseList(obj["pins"])?.let { PinsFrame(it) }
+                "archive" -> ArchiveDelta.decode(obj)?.let { ArchiveFrame(it) }
                 "control" -> decodeControl(obj)
                 else -> null
             }
@@ -579,6 +591,7 @@ sealed interface ServerFrame {
                     pins = Pins.fromContainer(obj),
                     coordinator = HelloCoordinator.from(obj),
                     settings = UserSettingsDecoding.settings(obj.objectOrNull("settings")),
+                    archive = ArchiveDelta.decode(obj["archive"]),
                 )
                 "settings" -> UserSettingsDecoding.settings(obj.objectOrNull("settings"))?.let { SettingsFrame(it) }
                 "error" -> Error(
@@ -602,7 +615,9 @@ enum class MediaKind(val wire: String) {
 
 /// Client → server operations.
 sealed interface ClientOp {
-    data class Hello(val token: String, val cursor: Long?) : ClientOp
+    /// [archiveSince] asks for the archive changes since that cursor in
+    /// `hello_ok` (0 = the whole set); `null` leaves it out.
+    data class Hello(val token: String, val cursor: Long?, val archiveSince: Long? = null) : ClientOp
     data class Send(val convoID: String, val body: String, val localID: String) : ClientOp
     /// A media `send`: `type` is the wire kind (`"file"`/`"image"`), `blobRef`
     /// the id from a prior `POST /media` upload. `caption` is the composer text
@@ -646,6 +661,7 @@ sealed interface ClientOp {
                 put("op", "hello")
                 put("token", token)
                 put("cursor", cursor?.let { JsonPrimitive(it) } ?: JsonNull)
+                archiveSince?.let { put("archive_since", it) }
             }
             is Send -> buildJsonObject {
                 put("op", "send")

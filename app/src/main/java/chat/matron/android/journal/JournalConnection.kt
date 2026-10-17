@@ -69,13 +69,15 @@ class JournalConnection internal constructor(
             token: String,
             cursor: Long,
             handshakeTimeout: Duration = 15.seconds,
+            /// Asks for the archive changes since this cursor (`hello_ok.archive`).
+            archiveSince: Long? = null,
         ): Pair<JournalConnection, ServerFrame.HelloOK> {
             val socket = connector.connect(wsUrl)
             // Unlike URLSession, a channel-backed receive IS cancellable, so a
             // bounded handshake is just `withTimeout` around the receive loop.
             try {
                 return withTimeout(handshakeTimeout) {
-                    socket.sendText(ClientOp.Hello(token, cursor).encoded())
+                    socket.sendText(ClientOp.Hello(token, cursor, archiveSince).encoded())
                     while (true) {
                         val text = socket.receiveText()
                         when (val frame = ServerFrame.decode(text)) {

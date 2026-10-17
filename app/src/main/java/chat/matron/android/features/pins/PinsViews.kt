@@ -432,7 +432,7 @@ fun PinChooserSheet(
             )
             else -> LazyColumn(Modifier.fillMaxWidth().height(420.dp).alpha(if (enabled) 1f else 0.5f)) {
                 items(choices, key = { it.id }) { summary ->
-                    ChatRow(summary = summary, onOpen = { if (enabled) onPick(summary.id) }, onMute = null, onLeave = null)
+                    ChatRow(summary = summary, onOpen = { if (enabled) onPick(summary.id) }, onMute = null, onArchive = null)
                 }
             }
         }

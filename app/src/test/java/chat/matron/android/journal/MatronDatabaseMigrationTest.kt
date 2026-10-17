@@ -17,6 +17,7 @@ import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
 import java.io.File
 import java.time.Instant
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -782,6 +783,41 @@ class MatronDatabaseMigrationTest {
             assertEquals(item.originConvoID, store.item(item.id)?.originConvoID)
             store.upsertItems(listOf(item.copy(handover = null)))
             assertNull(store.item(item.id)?.handover)
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
+    /// MIGRATION_17_18: the synced archive replaces "Leave". A row hidden
+    /// before the upgrade becomes archived (it shows in Archived, not in the
+    /// chat list, and can be brought back); a visible row stays visible.
+    @Test
+    fun migratesToV18AndMovesHiddenRowsToArchived() = runBlocking {
+        val file = File.createTempFile("migration-test-v8-v18", ".sqlite").also { it.delete() }
+        buildV8(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            for ((id, hidden) in listOf("left" to 1, "kept" to 0)) {
+                db.execSQL(
+                    "INSERT INTO conversation (id, title, session_state, last_seq, snippet, created_at, " +
+                        "last_activity_ts, muted, hidden, read_up_to_seq, unread_count, parent_convo_id) " +
+                        "VALUES ('$id', '$id', 'done', 1, '', 1000, 1000, 0, $hidden, 0, 0, NULL)"
+                )
+            }
+        }
+        val before = System.currentTimeMillis()
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:alice")
+            val visible = store.conversations().map { it.id }
+            assertTrue("kept" in visible)
+            assertTrue("left" !in visible)
+            val left = store.archivedConversationsFlow().first().single()
+            assertEquals("left", left.id)
+            assertTrue(left.archivedAt!! >= before)
+            assertEquals(false, left.hidden)
+            store.setArchived(listOf("left"), archived = false)
+            assertTrue("left" in store.conversations().map { it.id })
         } finally {
             database.close()
             file.delete()

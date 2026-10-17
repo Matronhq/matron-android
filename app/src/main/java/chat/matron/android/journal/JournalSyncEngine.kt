@@ -134,6 +134,10 @@ class JournalSyncEngine(
     private val backoffBaseSeconds: Double = 1.0,
     dispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val watchdogInterval: Duration = 20.seconds,
+    /// The user's archived conversations, kept in step with the journal
+    /// (`hello_ok.archive`, `archive` frames, `POST /archive`). `null` in
+    /// hosts that do not sync the archive: the hello then never asks.
+    val archive: ArchiveSync? = null,
 ) : SyncService {
     private val scope = CoroutineScope(dispatcher + SupervisorJob())
     private val lock = Any()
@@ -566,6 +570,10 @@ class JournalSyncEngine(
             }
         }
     }
+
+    /// The conversations open on screen right now: maintenance leaves their
+    /// stored history alone.
+    fun viewedConversationIDs(): Set<String> = synchronized(lock) { setOfNotNull(viewingConvoID) }
 
     suspend fun setViewing(convoID: String?) {
         synchronized(lock) { viewingConvoID = convoID }
@@ -1020,9 +1028,13 @@ class JournalSyncEngine(
                 val cursor = store.cursor()
                 val (connection, hello) = JournalConnection.establishWithHello(
                     connector = connector, wsUrl = api.wsUrl, token = token, cursor = cursor,
+                    archiveSince = archive?.helloArchiveSince(),
                 )
                 val headSeq = hello.headSeq
                 synchronized(lock) { liveConnection = connection; attempt = 0 }
+                // Before the replay: a message the replay brings back is then
+                // judged against the archive as the journal has it.
+                archive?.applyHello(hello.archive)
                 publishHello(hello)
                 connection.helloSettings?.let(::fanOutSettings)
                 synchronized(lock) { viewingConvoID }?.let {
@@ -1313,6 +1325,7 @@ class JournalSyncEngine(
                 publishPinsLocked(frame.pins)
             }
             is ServerFrame.SettingsFrame -> fanOutSettings(frame.settings)
+            is ServerFrame.ArchiveFrame -> archive?.apply(frame.delta)
             is ServerFrame.HelloOK, is ServerFrame.UnknownControl -> Unit // post-hello control frames are advisory
         }
         return appliedSinceAck

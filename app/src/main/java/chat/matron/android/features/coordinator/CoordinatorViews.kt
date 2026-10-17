@@ -139,7 +139,7 @@ fun CoordinatorChooserSheet(
             )
             else -> LazyColumn(Modifier.fillMaxWidth().height(420.dp)) {
                 items(choices, key = { it.id }) { summary ->
-                    ChatRow(summary = summary, onOpen = { onPick(summary.id) }, onMute = null, onLeave = null)
+                    ChatRow(summary = summary, onOpen = { onPick(summary.id) }, onMute = null, onArchive = null)
                 }
             }
         }

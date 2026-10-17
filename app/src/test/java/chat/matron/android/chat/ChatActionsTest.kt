@@ -4,7 +4,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/// Drives the chat-list actions (`refresh`/`mute`/`leave`) against
+/// Drives the chat-list actions (`refresh`/`mute`/`setArchived`) against
 /// [FakeChatServiceForCreate], pinned to the `ChatService` type so protocol-
 /// surface regressions are caught here. Ported from matron-apple's
 /// `ChatActionsTests`.
@@ -23,11 +23,11 @@ class ChatActionsTest {
         assertEquals(listOf("!a:s"), fake.mutedRooms)
     }
 
-    @Test fun leaveRecordsRoomID() = runBlocking {
+    @Test fun archiveRecordsRoomID() = runBlocking {
         val fake = FakeChatServiceForCreate()
         val service: ChatService = fake
-        service.leave("!a:s")
-        assertEquals(listOf("!a:s"), fake.leftRooms)
+        service.setArchived(listOf("!a:s"), archived = true)
+        assertEquals(listOf("!a:s"), fake.archivedRooms)
     }
 
     @Test fun refreshIsCountedAcrossMultipleCalls() = runBlocking {

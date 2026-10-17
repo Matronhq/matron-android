@@ -36,7 +36,18 @@ class JournalChatService(
     private val coalesceInterval: Duration = 250.milliseconds,
 ) : ChatService {
 
-    override fun chatSummaries(): Flow<List<ChatSummary>> = flow {
+    override fun chatSummaries(): Flow<List<ChatSummary>> = summaries(store.conversationsFlow())
+
+    override fun archivedChatSummaries(): Flow<List<ChatSummary>> = summaries(store.archivedConversationsFlow())
+
+    override suspend fun setArchived(roomIDs: List<String>, archived: Boolean) {
+        val sync = engine.archive
+        if (sync != null) sync.setArchived(roomIDs, archived) else store.setArchived(roomIDs, archived)
+    }
+
+    /// Summaries of the rows [records] streams — the chat list's or the
+    /// Archived list's — with their box chips and needs-you counts.
+    private fun summaries(records: Flow<List<ConversationEntity>>): Flow<List<ChatSummary>> = flow {
         // A reconnect replay lands in batched transactions (one commit per
         // ~250 frames), but a catch-up burst still yields several snapshots.
         // The first goes out immediately (instant paint from the local
@@ -69,7 +80,7 @@ class JournalChatService(
         // map (⇒ needsUserCount 0 everywhere) until the query's first value
         // lands.
         val needsUser = store.needsUserCountsFlow().onStart { emit(emptyMap()) }
-        combine(store.conversationsFlow(), store.agentRosterFlow(), needsUser) { records, roster, needs ->
+        combine(records, store.agentRosterFlow(), needsUser) { records, roster, needs ->
             val boxNames = roster.associate { it.id to it.name }
             val journalTags = roster.mapNotNull { row -> row.tagChar?.let { row.id to it } }.toMap()
             // Derived once per snapshot, not per row — the letters depend on
@@ -93,7 +104,6 @@ class JournalChatService(
 
     override suspend fun mute(roomID: String) = store.setMuted(true, roomID)
 
-    override suspend fun leave(roomID: String) = store.setHidden(true, roomID)
 
     companion object {
         /// [boxNames] is the id → name map of the user's agent boxes. The chip

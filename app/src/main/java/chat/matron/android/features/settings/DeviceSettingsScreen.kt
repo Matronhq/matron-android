@@ -19,6 +19,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.platform.testTag
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -42,6 +46,7 @@ import chat.matron.android.viewmodels.AppLockTimeout
 import chat.matron.android.viewmodels.DevicesProviding
 import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
+import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
 import kotlinx.coroutines.launch
 
 /**
@@ -80,6 +85,9 @@ fun DeviceSettingsScreen(
     /// without a session (previews); the section also stays hidden until the
     /// journal answers, and for good on a journal without `/settings`.
     notices: NoticesSettingViewModel? = null,
+    /// Settings → Archive's "Archive idle chats" choice. `null` in hosts
+    /// without a session; hidden too on a journal without auto-archive.
+    autoArchive: AutoArchiveSettingViewModel? = null,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -148,6 +156,8 @@ fun DeviceSettingsScreen(
             if (onPinnedChats != null) PinnedChatsSection(onPinnedChats)
 
             if (notices != null) NoticesSection(notices)
+
+            if (autoArchive != null) AutoArchiveSection(autoArchive)
 
             SettingsSection("Appearance") {
                 AppearancePicker(selected = appearance, onSelect = onAppearanceChange)
@@ -293,6 +303,67 @@ private fun NoticesSection(model: NoticesSettingViewModel) {
         }
     }
 }
+
+/**
+ * Settings › Archive: the journal's "Archive idle chats" window, a menu of
+ * Off / 14 / 30 / 90 days. Moves at once and goes back if the save fails.
+ */
+@Composable
+private fun AutoArchiveSection(model: AutoArchiveSettingViewModel) {
+    DisposableEffect(model) {
+        model.start()
+        onDispose { model.stop() }
+    }
+    val state by model.state.collectAsStateWithLifecycle()
+    val error by model.error.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    val loaded = state as? AutoArchiveSettingViewModel.State.Loaded ?: return
+    var menuOpen by remember { mutableStateOf(false) }
+
+    SettingsSection("Archive") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(AutoArchiveSettingViewModel.TITLE, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Box {
+                TextButton(onClick = { menuOpen = true }, modifier = Modifier.testTag(AUTO_ARCHIVE_BUTTON_TAG)) {
+                    Text(AutoArchiveSettingViewModel.label(loaded.days))
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    val choices = (AutoArchiveSettingViewModel.CHOICES + loaded.days).distinct().sorted()
+                    for (days in choices) {
+                        DropdownMenuItem(
+                            text = { Text(AutoArchiveSettingViewModel.label(days)) },
+                            onClick = {
+                                menuOpen = false
+                                scope.launch { model.setDays(days) }
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        Text(
+            AutoArchiveSettingViewModel.HELP,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        error?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(vertical = 8.dp),
+            )
+        }
+    }
+}
+
+internal const val AUTO_ARCHIVE_BUTTON_TAG = "auto-archive-days"
 
 /**
  * Settings › Storage: store sizes on disk, row counts, this launch's

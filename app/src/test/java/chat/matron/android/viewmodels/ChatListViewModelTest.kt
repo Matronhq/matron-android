@@ -58,7 +58,6 @@ private class FakeStreamingChatService : ChatService {
     override suspend fun createChat(botID: String): String = "!stub:server"
     override suspend fun refresh() {}
     override suspend fun mute(roomID: String) {}
-    override suspend fun leave(roomID: String) {}
 }
 
 class ChatListViewModelTest {

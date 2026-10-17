@@ -28,11 +28,14 @@ import chat.matron.android.models.TrackerItem
 import java.time.Instant
 import kotlin.math.max
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonObject
 
 /// Thrown by the [JournalStore.failApplyForTesting] injection hook to simulate
@@ -59,7 +62,8 @@ interface MediaBrowserStoreReading {
 class JournalStore(
     private val db: MatronDatabase,
     private val ownSender: String,
-) : MediaBrowserStoreReading, MaintenanceSweeping, ItemsStoreReading, TrackerItemNumberReading, MissionsStoreReading {
+) : MediaBrowserStoreReading, MaintenanceSweeping, ItemsStoreReading, TrackerItemNumberReading, MissionsStoreReading,
+    ArchiveStoring {
     private val conversationDao = db.conversationDao()
     private val eventDao = db.eventDao()
     private val metaDao = db.metaDao()
@@ -161,6 +165,12 @@ class JournalStore(
                     unreadCount = 0, parentConvoID = c.parentConvoID,
                     agentDeviceID = c.agentDeviceID,
                     participants = c.participants?.let(ConversationEntity::encodeParticipants),
+                    // A new row takes the snapshot's word, so a fresh device
+                    // never flashes an archived conversation in the list. An
+                    // existing row's archive state is the archive feed's
+                    // alone ([ArchiveSync]): a snapshot fetched before an
+                    // Archive the user just tapped would otherwise undo it.
+                    archivedAt = c.archivedAt,
                 )
             )
         }
@@ -293,6 +303,16 @@ class JournalStore(
                 )
                 if (event.sender != ownSender && event.seq > convo.readUpToSeq) {
                     convo = convo.copy(unreadCount = convo.unreadCount + 1)
+                }
+                // A message brings an archived conversation back, as the
+                // journal does in the same transaction (protocol "Archived
+                // conversations"), so a missed `archive` frame loses
+                // nothing. Only one newer than the archive: a replayed older
+                // message must not undo it. Sub-chats are left as they are.
+                val archivedAt = convo.archivedAt
+                if (convo.parentConvoID == null && archivedAt != null && event.ts.toEpochMilli() > archivedAt) {
+                    convo = convo.copy(archivedAt = null, historyPurgedAt = null)
+                    clearPurgeMarks(convo.id)
                 }
             }
         }
@@ -451,7 +471,170 @@ class JournalStore(
 
     suspend fun setMuted(muted: Boolean, convoID: String) = conversationDao.setMuted(muted, convoID)
 
-    suspend fun setHidden(hidden: Boolean, convoID: String) = conversationDao.setHidden(hidden, convoID)
+    // MARK: Archive (journal protocol "Archived conversations")
+
+    /// The archive feed's cursor, or `null` when this device has not synced
+    /// the archive with the journal yet. [wipe] clears it with the rest of
+    /// `meta`, so a re-bootstrapped mirror asks for the whole set again.
+    override suspend fun archiveSince(): Long? = metaDao.value(ARCHIVE_SINCE_KEY)?.toLongOrNull()
+
+    /// Stores the cursor. Only ever moves it forward.
+    override suspend fun setArchiveSince(at: Long) {
+        db.withTransaction { advanceArchiveSince(at, creating = true) }
+    }
+
+    private suspend fun advanceArchiveSince(at: Long, creating: Boolean) {
+        val current = archiveSince()
+        if (current == null && !creating) return
+        if (at <= (current ?: -1)) return
+        metaDao.upsert(MetaEntity(ARCHIVE_SINCE_KEY, at.toString()))
+    }
+
+    /// The user's Archive (`archived`, stamped [now]) or Unarchive. A row
+    /// already in that state is left as it is, so archiving twice keeps the
+    /// first time.
+    override suspend fun setArchived(convoIDs: List<String>, archived: Boolean, now: Long) {
+        if (convoIDs.isEmpty()) return
+        db.withTransaction {
+            for (id in convoIDs) writeArchive(id, if (archived) now else null, keepEarlier = true)
+        }
+    }
+
+    /// Changes from the journal's archive feed, in order, and the cursor
+    /// moved to [advancingSinceTo] once they are saved — only when one is
+    /// stored already (the first sync stores it after its carry-over, see
+    /// [ArchiveSync]). Conversations this device does not have are skipped.
+    override suspend fun applyArchiveChanges(changes: List<ArchiveChange>, advancingSinceTo: Long?) {
+        db.withTransaction {
+            for (change in changes) writeArchive(change.convoID, change.archivedAt, keepEarlier = false)
+            if (advancingSinceTo != null) advanceArchiveSince(advancingSinceTo, creating = false)
+        }
+    }
+
+    /// The first sync's adoption of the journal's set: each conversation the
+    /// journal reports ends in the journal's final state, and what is
+    /// archived only here (the journal says nothing about it) stays
+    /// archived. Returns those local-only ids, for the caller to send to the
+    /// journal.
+    override suspend fun adoptArchiveSet(changes: List<ArchiveChange>): List<String> = db.withTransaction {
+        val final = LinkedHashMap<String, Long?>()
+        for (change in changes) final[change.convoID] = change.archivedAt
+        for ((id, archivedAt) in final.toSortedMap()) writeArchive(id, archivedAt, keepEarlier = false)
+        conversationDao.archivedTopLevelIDs().filter { it !in final }
+    }
+
+    /// An unarchive also clears the purge marks of the conversation and its
+    /// sub-chats: archived again later, it is purged again in its turn, and
+    /// search backfill may index it meanwhile.
+    private suspend fun writeArchive(convoID: String, archivedAt: Long?, keepEarlier: Boolean) {
+        if (archivedAt != null) conversationDao.archive(convoID, archivedAt, keepEarlier)
+        else if (conversationDao.unarchive(convoID) > 0) clearPurgeMarks(convoID)
+    }
+
+    private suspend fun clearPurgeMarks(convoID: String) {
+        withSubChats(listOf(convoID)).chunked(SQL_VARIABLE_CHUNK).forEach { conversationDao.clearHistoryPurged(it) }
+    }
+
+    /// Each conversation's archive state as it stands, with the purge marks
+    /// of it and its sub-chats: what [restoreArchiveStates] puts back when
+    /// the journal refuses a change.
+    override suspend fun archiveStates(convoIDs: List<String>): Map<String, ArchiveState> = db.withTransaction {
+        convoIDs.associateWith { id ->
+            val rooms = withSubChats(listOf(id))
+            ArchiveState(conversationDao.archivedAt(id), rooms.associateWith { conversationDao.historyPurgedAt(it) })
+        }
+    }
+
+    override suspend fun restoreArchiveStates(states: Map<String, ArchiveState>) {
+        db.withTransaction {
+            for ((id, state) in states) {
+                conversationDao.setArchivedAt(id, state.archivedAt)
+                for ((room, purgedAt) in state.purgedAt) conversationDao.setHistoryPurgedAt(room, purgedAt)
+            }
+        }
+    }
+
+    /// Live Archived list, newest activity first, with the same read-time
+    /// tool-output TTL as [conversationsFlow].
+    fun archivedConversationsFlow(now: () -> Long = { System.currentTimeMillis() }): Flow<List<ConversationEntity>> =
+        conversationDao.archivedTopLevelFlow().map { list -> list.map { applyReadTimeSnippetTTL(it, now()) } }
+
+    // MARK: Purging long-archived history
+
+    /// Top-level conversations archived for longer than
+    /// [ARCHIVED_HISTORY_RETENTION_MS] whose history is still stored, oldest
+    /// archive first.
+    override suspend fun archivedHistoryPurgeCandidates(now: Long): List<String> =
+        conversationDao.archivedHistoryPurgeCandidates(now - ARCHIVED_HISTORY_RETENTION_MS)
+
+    /// Drops the stored events of [convoIDs] and of their sub-chats, at any
+    /// depth, and stamps `history_purged_at`. The conversation rows, their
+    /// summaries and the tracker cache stay: the lists still show them, and
+    /// opening one pages its history back from the journal
+    /// (`JournalTimelineService.paginateBackward` finds no local rows and
+    /// asks the server). A conversation no longer archived by the time its
+    /// chunk runs is skipped, and so is one with a room in [keeping] (open on
+    /// screen). Runs in chunks, one transaction each, each
+    /// adding its rooms to the search rows still to remove
+    /// ([pendingSearchRoomPurges]). Returns the rooms whose events went.
+    override suspend fun purgeArchivedHistory(convoIDs: List<String>, now: Long, keeping: Set<String>): List<String> {
+        val purged = mutableListOf<String>()
+        for (chunk in convoIDs.chunked(ARCHIVE_PURGE_CHUNK_SIZE)) {
+            currentCoroutineContext().ensureActive()
+            db.withTransaction {
+                // A conversation with any room of its tree open on screen
+                // waits for a later pass.
+                val trees = conversationDao.stillPurgeable(chunk)
+                    .map { withSubChats(listOf(it)) }
+                    .filter { tree -> tree.none { it in keeping } }
+                if (trees.isEmpty()) return@withTransaction
+                val rooms = trees.flatten()
+                rooms.chunked(SQL_VARIABLE_CHUNK).forEach { eventDao.deleteForConversations(it) }
+                // Sub-chats are marked too, so search backfill skips them.
+                rooms.chunked(SQL_VARIABLE_CHUNK).forEach { conversationDao.markHistoryPurged(it, now) }
+                val pending = readPendingSearchRoomPurges()
+                writePendingSearchRoomPurges(pending + rooms.filter { it !in pending })
+                purged += rooms
+            }
+        }
+        return purged
+    }
+
+    private suspend fun withSubChats(convoIDs: List<String>): List<String> {
+        val all = convoIDs.toMutableList()
+        val seen = convoIDs.toMutableSet()
+        var frontier = convoIDs
+        while (frontier.isNotEmpty()) {
+            frontier = frontier.chunked(SQL_VARIABLE_CHUNK)
+                .flatMap { conversationDao.childIDs(it) }
+                .filter { seen.add(it) }
+            all += frontier
+        }
+        return all
+    }
+
+    /// Rooms whose events a purge dropped and whose search rows have not
+    /// been removed yet.
+    override suspend fun pendingSearchRoomPurges(): List<String> = readPendingSearchRoomPurges()
+
+    /// The search rows of [rooms] are gone.
+    override suspend fun clearPendingSearchRoomPurges(rooms: List<String>) {
+        val done = rooms.toSet()
+        db.withTransaction { writePendingSearchRoomPurges(readPendingSearchRoomPurges().filter { it !in done }) }
+    }
+
+    private suspend fun readPendingSearchRoomPurges(): List<String> {
+        val raw = metaDao.value(ARCHIVE_SEARCH_PURGE_KEY) ?: return emptyList()
+        return runCatching { MatronJson.decodeFromString(ListSerializer(String.serializer()), raw) }.getOrElse { emptyList() }
+    }
+
+    private suspend fun writePendingSearchRoomPurges(rooms: List<String>) {
+        if (rooms.isEmpty()) {
+            metaDao.delete(ARCHIVE_SEARCH_PURGE_KEY)
+        } else {
+            metaDao.upsert(MetaEntity(ARCHIVE_SEARCH_PURGE_KEY, MatronJson.encodeToString(ListSerializer(String.serializer()), rooms)))
+        }
+    }
 
     /// Inserts a placeholder conversation row for a convo id learned
     /// out-of-band (a `start` RPC answer that beat the convo's first journal
@@ -1341,6 +1524,28 @@ class JournalStore(
 
     companion object {
         private const val CURSOR_KEY = "cursor"
+
+        /// `meta` key of the archive feed's cursor ([ArchiveSync]). Absent
+        /// until this device first synced the archive with the journal.
+        internal const val ARCHIVE_SINCE_KEY = "archive_since"
+
+        /// `meta` key of the rooms whose events a purge dropped and whose
+        /// search rows are still to go (a JSON array), written in the purge's
+        /// own transaction so a removal that fails, or a pass with no index,
+        /// is picked up by a later pass.
+        internal const val ARCHIVE_SEARCH_PURGE_KEY = "archive_search_purge_pending"
+
+        /// How long a conversation stays archived before its stored events
+        /// (and their search rows) are dropped from this device. Its row stays.
+        const val ARCHIVED_HISTORY_RETENTION_MS: Long = 90L * 24 * 60 * 60 * 1000
+
+        /// Conversations whose history one purge transaction drops: small
+        /// enough that a first pass over thousands of long-archived chats
+        /// never holds the writer for long.
+        internal const val ARCHIVE_PURGE_CHUNK_SIZE = 25
+
+        /// Ids per `IN (...)` list, under SQLite's bound-variable limit.
+        private const val SQL_VARIABLE_CHUNK = 500
         private const val TTL_MS = EventTombstone.TOOL_LOG_TTL_MS
 
         /// `meta` keys written by the sweeps. None is written by a migration;

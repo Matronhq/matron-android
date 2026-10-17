@@ -11,7 +11,12 @@ import kotlinx.serialization.json.JsonObject
 /// The user's journal-held settings. [notices] — "Send things I need to read
 /// to For you": agents file what the user should read as `notice` items
 /// instead of leaving it in chat. The journal defaults it to on.
-data class UserSettings(val notices: Boolean)
+data class UserSettings(
+    val notices: Boolean,
+    /// Archive idle conversations after this many days (0 = off); `null`
+    /// from a journal without auto-archive, or a payload that leaves it out.
+    val autoArchiveDays: Int? = null,
+)
 
 /// `GET /settings` and `PATCH /settings`. A journal predating the route 404s
 /// the GET ([JournalApiError.NotFound]), which hides the setting. [JournalApi]
@@ -19,13 +24,19 @@ data class UserSettings(val notices: Boolean)
 interface UserSettingsProviding {
     suspend fun settings(): UserSettings
     suspend fun updateSettings(notices: Boolean): UserSettings
+    /// `PATCH /settings {auto_archive_days}`.
+    suspend fun updateAutoArchiveDays(days: Int): UserSettings =
+        throw UnsupportedOperationException("auto-archive is not supported here")
 }
 
 object UserSettingsDecoding {
-    /// `{notices}` — the GET/PATCH body, and the `settings` object a
+    /// `{notices, auto_archive_days?}` — the GET/PATCH body, and the `settings` object a
     /// `hello_ok` or `settings` control frame carries. `null` when the
     /// object has no boolean `notices` (malformed, or a journal that sends
     /// no settings at all).
-    fun settings(obj: JsonObject?): UserSettings? =
-        obj?.boolOrNull("notices")?.let { UserSettings(notices = it) }
+    fun settings(obj: JsonObject?): UserSettings? {
+        val notices = obj?.boolOrNull("notices") ?: return null
+        val days = obj.longOrNull("auto_archive_days")?.takeIf { it in 0..Int.MAX_VALUE.toLong() }?.toInt()
+        return UserSettings(notices = notices, autoArchiveDays = days)
+    }
 }

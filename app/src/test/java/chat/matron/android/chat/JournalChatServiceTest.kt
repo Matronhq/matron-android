@@ -21,6 +21,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -148,12 +149,16 @@ class JournalChatServiceTest {
         }
     }
 
-    @Test fun leaveHidesConversation() = runBlocking {
+    @Test fun archiveMovesConversationToArchived() = runBlocking {
         val store = makeStore()
         store.applyJournal(ev(1, "c1", "agent:a", "x"))
         val service = makeService(store)
-        service.leave("c1")
+        service.setArchived(listOf("c1"), archived = true)
         assertEquals(0, store.conversations().size)
+        assertEquals(listOf("c1"), service.archivedChatSummaries().first().map { it.id })
+        service.setArchived(listOf("c1"), archived = false)
+        assertEquals(1, store.conversations().size)
+        assertEquals(emptyList<String>(), service.archivedChatSummaries().first().map { it.id })
     }
 
     @Test fun forceSnapshotIsBestEffortWhenOffline() = runBlocking {

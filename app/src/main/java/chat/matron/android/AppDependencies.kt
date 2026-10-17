@@ -25,6 +25,7 @@ import chat.matron.android.journal.MemoriesSync
 import chat.matron.android.journal.MissionsSync
 import chat.matron.android.journal.MissionsSyncing
 import chat.matron.android.journal.CoordinatorSync
+import chat.matron.android.journal.ArchiveSync
 import chat.matron.android.journal.PinsSync
 import chat.matron.android.journal.PinsSyncing
 import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
@@ -33,6 +34,7 @@ import chat.matron.android.viewmodels.MemoriesListViewModel
 import chat.matron.android.viewmodels.MemoryEditorViewModel
 import chat.matron.android.viewmodels.MissionDetailViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
+import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
 import chat.matron.android.viewmodels.MissionsListViewModel
 import chat.matron.android.viewmodels.GoToNumberResolver
 import chat.matron.android.viewmodels.TrackerItemLinkResolver
@@ -290,8 +292,13 @@ class AppDependencies(
             token = session.accessToken,
             ownSender = "user:${session.userID}",
             search = search,
+            archive = ArchiveSync(store = store, writer = api),
         )
-        val maintenance = JournalMaintenance(store = store, search = search)
+        val maintenance = JournalMaintenance(
+            store = store,
+            search = search,
+            openConversations = { engine.viewedConversationIDs() },
+        )
         val itemsSync = ItemsSync(
             api = api,
             store = store,
@@ -567,6 +574,15 @@ class AppDependencies(
     }
 
     /**
+     * Settings → Archive's "Archive idle chats" choice: `GET`/`PATCH
+     * /settings {auto_archive_days}`, live-updated like the notices switch.
+     */
+    fun makeAutoArchiveSettingViewModel(session: UserSession, scope: CoroutineScope): AutoArchiveSettingViewModel {
+        val c = core(session)
+        return AutoArchiveSettingViewModel(api = c.api, updates = { c.engine.settingsUpdates() }, scope = scope)
+    }
+
+    /**
      * Resolves a tapped `[#65](matron://item/65)` link to a local item id,
      * with one `refresh(All)` retry on a miss, expressed in the design
      * system's vocabulary so a link-hosting screen can hand it straight to
@@ -762,6 +778,8 @@ class AppDependencies(
                     .onFailure { MatronDebug.breadcrumb("signOut: memoriesSync.stop failed: $it") }
                 runCatching { core.pinsSync.stop() }
                     .onFailure { MatronDebug.breadcrumb("signOut: pinsSync.stop failed: $it") }
+                runCatching { core.engine.archive?.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: archive.stop failed: $it") }
                 runCatching { core.coordinatorSync.stop() }
                     .onFailure { MatronDebug.breadcrumb("signOut: coordinatorSync.stop failed: $it") }
                 core.engine.endSync()

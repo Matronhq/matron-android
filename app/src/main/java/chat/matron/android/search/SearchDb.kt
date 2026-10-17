@@ -144,6 +144,14 @@ interface SearchDao {
 
     @Query("DELETE FROM indexed_rooms")
     suspend fun deleteAllRooms()
+
+    /// Up to [limit] of one room's rows, for the archive purge's bounded
+    /// chunks. Returns how many went.
+    @Query("DELETE FROM messages_fts WHERE rowid IN (SELECT rowid FROM messages_fts WHERE room_id = :roomId LIMIT :limit)")
+    suspend fun deleteRoomChunk(roomId: String, limit: Int): Int
+
+    @Query("DELETE FROM indexed_rooms WHERE room_id IN (:roomIds)")
+    suspend fun deleteRooms(roomIds: List<String>)
 }
 
 /// Room database backing the search index. Separate from the journal

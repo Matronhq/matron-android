@@ -3,6 +3,8 @@ package chat.matron.android.search
 import androidx.room.withTransaction
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 /// Room/FTS4-backed [SearchService]. Ported from matron-apple's
 /// `SearchServiceLive` (GRDB → Room). Idempotency and redaction are handled by
@@ -78,6 +80,20 @@ class SearchServiceLive(private val db: SearchDatabase) : SearchService {
         for (chunk in removalChunks(eventIDs)) {
             db.withTransaction { dao.deleteByEventIds(chunk) }
         }
+    }
+
+    override suspend fun removeRooms(roomIDs: List<String>) {
+        if (roomIDs.isEmpty()) return
+        // One room's rows can run to thousands, so each room goes in bounded
+        // chunks, one short transaction each, like [removeAll].
+        for (roomID in roomIDs) {
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val deleted = db.withTransaction { dao.deleteRoomChunk(roomID, ROOM_REMOVAL_CHUNK) }
+                if (deleted < ROOM_REMOVAL_CHUNK) break
+            }
+        }
+        for (chunk in removalChunks(roomIDs)) db.withTransaction { dao.deleteRooms(chunk) }
     }
 
     override suspend fun query(text: String, limit: Int): List<SearchHit> {
@@ -176,6 +192,9 @@ class SearchServiceLive(private val db: SearchDatabase) : SearchService {
     override suspend fun contains(eventID: String): Boolean = dao.contains(eventID)
 
     companion object {
+        /// Rows per transaction when [removeRooms] clears one room.
+        internal const val ROOM_REMOVAL_CHUNK = 500
+
         /// Ids per write transaction. 500 keeps the `IN (…)` list well inside
         /// `SQLITE_MAX_VARIABLE_NUMBER` and, more importantly, keeps each
         /// transaction short: a first retention pass retires on the order of
