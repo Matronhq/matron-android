@@ -312,6 +312,7 @@ class JournalStore(
                 val archivedAt = convo.archivedAt
                 if (convo.parentConvoID == null && archivedAt != null && event.ts.toEpochMilli() > archivedAt) {
                     convo = convo.copy(archivedAt = null, historyPurgedAt = null)
+                    clearPurgeMarks(convo.id)
                 }
             }
         }
@@ -522,9 +523,35 @@ class JournalStore(
         conversationDao.archivedTopLevelIDs().filter { it !in final }
     }
 
+    /// An unarchive also clears the purge marks of the conversation and its
+    /// sub-chats: archived again later, it is purged again in its turn, and
+    /// search backfill may index it meanwhile.
     private suspend fun writeArchive(convoID: String, archivedAt: Long?, keepEarlier: Boolean) {
         if (archivedAt != null) conversationDao.archive(convoID, archivedAt, keepEarlier)
-        else conversationDao.unarchive(convoID)
+        else if (conversationDao.unarchive(convoID) > 0) clearPurgeMarks(convoID)
+    }
+
+    private suspend fun clearPurgeMarks(convoID: String) {
+        withSubChats(listOf(convoID)).chunked(SQL_VARIABLE_CHUNK).forEach { conversationDao.clearHistoryPurged(it) }
+    }
+
+    /// Each conversation's archive state as it stands, with the purge marks
+    /// of it and its sub-chats: what [restoreArchiveStates] puts back when
+    /// the journal refuses a change.
+    override suspend fun archiveStates(convoIDs: List<String>): Map<String, ArchiveState> = db.withTransaction {
+        convoIDs.associateWith { id ->
+            val rooms = withSubChats(listOf(id))
+            ArchiveState(conversationDao.archivedAt(id), rooms.associateWith { conversationDao.historyPurgedAt(it) })
+        }
+    }
+
+    override suspend fun restoreArchiveStates(states: Map<String, ArchiveState>) {
+        db.withTransaction {
+            for ((id, state) in states) {
+                conversationDao.setArchivedAt(id, state.archivedAt)
+                for ((room, purgedAt) in state.purgedAt) conversationDao.setHistoryPurgedAt(room, purgedAt)
+            }
+        }
     }
 
     /// Live Archived list, newest activity first, with the same read-time
@@ -546,19 +573,25 @@ class JournalStore(
     /// opening one pages its history back from the journal
     /// (`JournalTimelineService.paginateBackward` finds no local rows and
     /// asks the server). A conversation no longer archived by the time its
-    /// chunk runs is skipped. Runs in chunks, one transaction each, each
+    /// chunk runs is skipped, and so is one with a room in [keeping] (open on
+    /// screen). Runs in chunks, one transaction each, each
     /// adding its rooms to the search rows still to remove
     /// ([pendingSearchRoomPurges]). Returns the rooms whose events went.
-    override suspend fun purgeArchivedHistory(convoIDs: List<String>, now: Long): List<String> {
+    override suspend fun purgeArchivedHistory(convoIDs: List<String>, now: Long, keeping: Set<String>): List<String> {
         val purged = mutableListOf<String>()
         for (chunk in convoIDs.chunked(ARCHIVE_PURGE_CHUNK_SIZE)) {
             currentCoroutineContext().ensureActive()
             db.withTransaction {
-                val still = conversationDao.stillPurgeable(chunk)
-                if (still.isEmpty()) return@withTransaction
-                val rooms = withSubChats(still)
+                // A conversation with any room of its tree open on screen
+                // waits for a later pass.
+                val trees = conversationDao.stillPurgeable(chunk)
+                    .map { withSubChats(listOf(it)) }
+                    .filter { tree -> tree.none { it in keeping } }
+                if (trees.isEmpty()) return@withTransaction
+                val rooms = trees.flatten()
                 rooms.chunked(SQL_VARIABLE_CHUNK).forEach { eventDao.deleteForConversations(it) }
-                conversationDao.markHistoryPurged(still, now)
+                // Sub-chats are marked too, so search backfill skips them.
+                rooms.chunked(SQL_VARIABLE_CHUNK).forEach { conversationDao.markHistoryPurged(it, now) }
                 val pending = readPendingSearchRoomPurges()
                 writePendingSearchRoomPurges(pending + rooms.filter { it !in pending })
                 purged += rooms

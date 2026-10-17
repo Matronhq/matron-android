@@ -38,7 +38,10 @@ interface MaintenanceSweeping {
     suspend fun archivedHistoryPurgeCandidates(now: Long): List<String> = emptyList()
     /// Drops their stored events, keeping the rows, and queues their search
     /// rows for removal. Returns the rooms whose events went.
-    suspend fun purgeArchivedHistory(convoIDs: List<String>, now: Long): List<String> = emptyList()
+    /// [keeping]: rooms open on screen; a conversation with one of them in
+    /// its tree is skipped.
+    suspend fun purgeArchivedHistory(convoIDs: List<String>, now: Long, keeping: Set<String> = emptySet()): List<String> =
+        emptyList()
     /// Rooms whose search rows a purge left to remove.
     suspend fun pendingSearchRoomPurges(): List<String> = emptyList()
     suspend fun clearPendingSearchRoomPurges(rooms: List<String>) {}
@@ -236,12 +239,13 @@ class JournalMaintenance(
     /// meanwhile (and is skipped) keeps its search rows; the store queues the
     /// purged rooms' search rows in the same transaction, so a removal that
     /// fails, or a pass with no index, is finished by a later pass. A
-    /// conversation open on screen waits for a later pass. Returns how many
+    /// conversation with a room open on screen (a sub-chat included) waits
+    /// for a later pass. Returns how many
     /// rooms it purged.
     private suspend fun purgeArchivedHistory(now: Long): Int {
         val open = openConversations()
-        val candidates = store.archivedHistoryPurgeCandidates(now).filter { it !in open }
-        val purged = if (candidates.isEmpty()) emptyList() else store.purgeArchivedHistory(candidates, now)
+        val candidates = store.archivedHistoryPurgeCandidates(now)
+        val purged = if (candidates.isEmpty()) emptyList() else store.purgeArchivedHistory(candidates, now, keeping = open)
         val search = this.search
         if (search != null) {
             val pending = store.pendingSearchRoomPurges()

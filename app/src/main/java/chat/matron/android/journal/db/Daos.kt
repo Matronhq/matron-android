@@ -112,6 +112,18 @@ interface ConversationDao {
     @Query("UPDATE conversation SET history_purged_at = :at WHERE id IN (:ids)")
     suspend fun markHistoryPurged(ids: List<String>, at: Long)
 
+    @Query("UPDATE conversation SET history_purged_at = NULL WHERE id IN (:ids)")
+    suspend fun clearHistoryPurged(ids: List<String>)
+
+    @Query("SELECT history_purged_at FROM conversation WHERE id = :id")
+    suspend fun historyPurgedAt(id: String): Long?
+
+    @Query("UPDATE conversation SET archived_at = :archivedAt WHERE id = :id")
+    suspend fun setArchivedAt(id: String, archivedAt: Long?)
+
+    @Query("UPDATE conversation SET history_purged_at = :at WHERE id = :id")
+    suspend fun setHistoryPurgedAt(id: String, at: Long?)
+
     @Query("SELECT * FROM conversation WHERE parent_convo_id = :parentConvoID ORDER BY created_at ASC, id ASC")
     suspend fun children(parentConvoID: String): List<ConversationEntity>
 

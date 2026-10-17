@@ -100,6 +100,7 @@ import chat.matron.android.features.settings.AgentChatScreen
 import chat.matron.android.features.settings.DevicesScreen
 import chat.matron.android.features.settings.PinnedChatsScreen
 import chat.matron.android.features.chatlist.ArchivedChatsScreen
+import chat.matron.android.chat.ChatSummary
 import chat.matron.android.features.pins.ChatPinMenu
 import chat.matron.android.features.pins.PinDialogsHost
 import chat.matron.android.features.pins.PinsController
@@ -594,6 +595,12 @@ private fun SignedInApp(
 
     val groups by chatListVM.groups.collectAsStateWithLifecycle()
     val allChats = remember(groups) { groups.flatMap { it.summaries } }
+    // Archived conversations are not in the list's groups; a chat opened
+    // from Archived (or search) takes its header from here instead.
+    val archivedFlow = remember(session.userID) { deps.chatService(session).archivedChatSummaries() }
+    val archivedChats by archivedFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    fun summaryFor(convoID: String): ChatSummary? =
+        currentSummary(groups, convoID) ?: archivedChats.firstOrNull { it.id == convoID }
 
     // Mirror the controller's stacks into the shell's rules (pushes, pops,
     // system back, tab roots) — see AppShellNavigation.noteDestination.
@@ -769,12 +776,12 @@ private fun SignedInApp(
                 session = session,
                 convoID = convoID,
                 vmCache = vmCache,
-                title = currentSummary(groups, convoID)?.title ?: "",
-                boxName = currentSummary(groups, convoID)?.boxName,
-                sessionShort = currentSummary(groups, convoID)?.sessionShort,
-                boxShort = currentSummary(groups, convoID)?.boxShort,
-                roomBoxNames = currentSummary(groups, convoID)?.roomBoxNames ?: emptyList(),
-                roomBoxShorts = currentSummary(groups, convoID)?.roomBoxShorts ?: emptyList(),
+                title = summaryFor(convoID)?.title ?: "",
+                boxName = summaryFor(convoID)?.boxName,
+                sessionShort = summaryFor(convoID)?.sessionShort,
+                boxShort = summaryFor(convoID)?.boxShort,
+                roomBoxNames = summaryFor(convoID)?.roomBoxNames ?: emptyList(),
+                roomBoxShorts = summaryFor(convoID)?.roomBoxShorts ?: emptyList(),
                 onBack = { nav.popBackStack() },
                 onOpenChild = { shell.pushChat(it) },
                 // Through the shell so the mirror sees a replace, not a push.
@@ -912,12 +919,12 @@ private fun SignedInApp(
                                     session = session,
                                     convoID = convoID,
                                     vmCache = vmCache,
-                                    title = currentSummary(groups, convoID)?.title ?: "",
-                                    boxName = currentSummary(groups, convoID)?.boxName,
-                                    sessionShort = currentSummary(groups, convoID)?.sessionShort,
-                                    boxShort = currentSummary(groups, convoID)?.boxShort,
-                                    roomBoxNames = currentSummary(groups, convoID)?.roomBoxNames ?: emptyList(),
-                                    roomBoxShorts = currentSummary(groups, convoID)?.roomBoxShorts ?: emptyList(),
+                                    title = summaryFor(convoID)?.title ?: "",
+                                    boxName = summaryFor(convoID)?.boxName,
+                                    sessionShort = summaryFor(convoID)?.sessionShort,
+                                    boxShort = summaryFor(convoID)?.boxShort,
+                                    roomBoxNames = summaryFor(convoID)?.roomBoxNames ?: emptyList(),
+                                    roomBoxShorts = summaryFor(convoID)?.roomBoxShorts ?: emptyList(),
                                     onBack = {},
                                     showsBackButton = false,
                                     onOpenChild = { shell.pushChat(it) },

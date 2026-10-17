@@ -64,6 +64,11 @@ interface ArchiveWriting {
     suspend fun setArchived(convoIDs: List<String>, archived: Boolean)
 }
 
+/// One conversation's archive state, kept while a change of the user's is
+/// going out, so a refused write puts back exactly what was there:
+/// [archivedAt], and the purge marks of the conversation and its sub-chats.
+data class ArchiveState(val archivedAt: Long?, val purgedAt: Map<String, Long?>)
+
 /// The store side of [ArchiveSync]. [JournalStore] implements it; tests may
 /// use a real in-memory store.
 interface ArchiveStoring {
@@ -72,6 +77,8 @@ interface ArchiveStoring {
     suspend fun setArchived(convoIDs: List<String>, archived: Boolean, now: Long = System.currentTimeMillis())
     suspend fun applyArchiveChanges(changes: List<ArchiveChange>, advancingSinceTo: Long?)
     suspend fun adoptArchiveSet(changes: List<ArchiveChange>): List<String>
+    suspend fun archiveStates(convoIDs: List<String>): Map<String, ArchiveState>
+    suspend fun restoreArchiveStates(states: Map<String, ArchiveState>)
 }
 
 /// The user's archived conversations, kept in step with the journal. Port of
@@ -112,6 +119,9 @@ class ArchiveSync(
     /// The state the user last chose for each conversation whose write has
     /// not landed yet.
     private val wanted = LinkedHashMap<String, Boolean>()
+    /// Each pending conversation's state before the user's first unsent
+    /// change: what a refused write restores.
+    private val before = HashMap<String, ArchiveState>()
     /// The first sync's carry-over still to send: the ids archived only on
     /// this device, and the cursor to store once they are on the journal.
     private var carryOver: Pair<List<String>, Long>? = null
@@ -130,6 +140,10 @@ class ArchiveSync(
         if (convoIDs.isEmpty()) return
         mutex.withLock {
             try {
+                if (syncsLocked()) {
+                    val fresh = convoIDs.filter { it !in before }
+                    if (fresh.isNotEmpty()) before.putAll(store.archiveStates(fresh))
+                }
                 store.setArchived(convoIDs, archived, now())
             } catch (cancel: CancellationException) {
                 throw cancel
@@ -196,6 +210,7 @@ class ArchiveSync(
         val job = mutex.withLock {
             stopped = true
             wanted.clear()
+            before.clear()
             carryOver = null
             worker.also { worker = null }
         }
@@ -270,7 +285,12 @@ class ArchiveSync(
     private suspend fun send(batch: List<String>, state: Boolean) {
         try {
             writer.setArchived(batch, archived = state)
-            mutex.withLock { for (id in batch) if (wanted[id] == state) wanted.remove(id) }
+            mutex.withLock {
+                for (id in batch) if (wanted[id] == state) {
+                    wanted.remove(id)
+                    before.remove(id)
+                }
+            }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (e: Throwable) {
@@ -278,7 +298,9 @@ class ArchiveSync(
             mutex.withLock {
                 val refused = batch.filter { wanted[it] == state }
                 refused.forEach { wanted.remove(it) }
-                runCatching { store.setArchived(refused, !state, now()) }
+                val states = refused.mapNotNull { id -> before.remove(id)?.let { id to it } }.toMap()
+                runCatching { store.restoreArchiveStates(states) }
+                runCatching { store.setArchived(refused.filter { it !in states }, !state, now()) }
             }
         }
     }

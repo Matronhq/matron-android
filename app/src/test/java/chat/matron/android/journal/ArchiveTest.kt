@@ -262,12 +262,45 @@ class ArchiveTest {
         assertEquals(listOf("old", "kid"), search.removed)
         assertTrue(store.pendingSearchRoomPurges().isEmpty())
         assertNotNull(store.conversation("old")?.historyPurgedAt)
+        assertNotNull("sub-chats are marked too", store.conversation("kid")?.historyPurgedAt)
         assertTrue("old" !in store.allConversationIDs())
+        assertTrue("kid" !in store.allConversationIDs())
         assertEquals("the row stays in Archived", listOf("live", "new", "old"), store.archived())
 
         store.setArchived(listOf("old"), archived = false, now = now)
         assertNull(store.conversation("old")?.historyPurgedAt)
+        assertNull(store.conversation("kid")?.historyPurgedAt)
         assertTrue("old" in store.allConversationIDs())
+        assertTrue("kid" in store.allConversationIDs())
+    }
+
+    @Test
+    fun aSubChatOpenOnScreenKeepsItsParentsHistory() = runBlocking {
+        val day = 24L * 60 * 60 * 1000
+        val now = 200 * day
+        val store = store("old")
+        store.applyColdSnapshot(listOf(ConvoSummaryDTO("kid", "", "done", 0, "", 0, parentConvoID = "old")), headSeq = 0)
+        store.applyJournalBatch(listOf(ev(1, "old"), ev(2, "kid")))
+        store.setArchived(listOf("old"), archived = true, now = now - 100 * day)
+        assertEquals(emptyList<String>(), store.purgeArchivedHistory(listOf("old"), now, keeping = setOf("kid")))
+        assertEquals(1, store.eventsBefore("kid", Long.MAX_VALUE, 10).size)
+        assertNull(store.conversation("old")?.historyPurgedAt)
+    }
+
+    @Test
+    fun aRefusedUnarchivePutsBackTheArchiveTimeAndPurgeMarks() = runBlocking {
+        val store = store("old")
+        store.applyColdSnapshot(listOf(ConvoSummaryDTO("kid", "", "done", 0, "", 0, parentConvoID = "old")), headSeq = 0)
+        store.setArchived(listOf("old"), archived = true, now = 1_000)
+        store.purgeArchivedHistory(listOf("old"), now = 2_000)
+        store.setArchiveSince(1)
+        val writer = FakeWriter().apply { refuse = { _, _ -> true } }
+        val sync = ArchiveSync(store, writer, now = { 9_000 }, dispatcher = Dispatchers.IO)
+        sync.setArchived(listOf("old"), archived = false)
+        sync.waitUntilIdle()
+        assertEquals(1_000L, store.conversation("old")?.archivedAt)
+        assertEquals(2_000L, store.conversation("old")?.historyPurgedAt)
+        assertEquals(2_000L, store.conversation("kid")?.historyPurgedAt)
     }
 
     private class RecordingRooms : chat.matron.android.search.SearchService {
