@@ -69,6 +69,10 @@ import kotlinx.coroutines.launch
  * the link code shown under the QR manually. While `linkState` is
  * `WaitingForApproval` the form is replaced with a waiting indicator; reaching
  * `SignedIn` on either view model funnels through the same `onSignedIn`.
+ *
+ * When the password is right but the journal wants a two-factor code (or
+ * two-factor set up first), [TwoFactorSignInScreen] takes over until the
+ * view model reaches `SignedIn` or drops back to the form.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -98,8 +102,27 @@ fun SignInScreen(
     var qrTab by remember { mutableStateOf(0) } // 0 = Scan, 1 = Show
     val rendezvousState by rendezvousViewModel.state.collectAsStateWithLifecycle()
 
+    val inTwoFactor = state is SignInViewModel.State.TwoFactorCode ||
+        state is SignInViewModel.State.TwoFactorEnrol ||
+        state is SignInViewModel.State.RecoveryCodes ||
+        state is SignInViewModel.State.RecoveryCodeUsed
+
     LaunchedEffect(linkState) {
+        // A password sign-in in its two-factor steps owns the screen: a link
+        // approval landing now must not sign in over it (and dismiss
+        // recovery codes shown only once).
+        if (inTwoFactor) return@LaunchedEffect
         (linkState as? LinkSignInViewModel.State.SignedIn)?.let { onSignedIn(it.session) }
+    }
+
+    // Entering the two-factor steps ends any device-link sign-in in flight
+    // and puts the QR tab back on Scan, so nothing keeps polling meanwhile.
+    LaunchedEffect(inTwoFactor) {
+        if (inTwoFactor) {
+            linkViewModel.cancel()
+            rendezvousViewModel.stop()
+            qrTab = 0
+        }
     }
 
     LaunchedEffect(qrTab) {
@@ -114,6 +137,12 @@ fun SignInScreen(
             linkViewModel.cancel()
             rendezvousViewModel.stop()
         }
+    }
+
+    // The two-factor steps of a password sign-in replace the form.
+    if (inTwoFactor) {
+        TwoFactorSignInScreen(viewModel, state)
+        return
     }
 
     val busy = state is SignInViewModel.State.Busy

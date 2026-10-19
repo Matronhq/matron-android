@@ -1030,6 +1030,7 @@ private fun SignedInApp(
                         val autoArchiveSetting = remember(session.userID) {
                             deps.makeAutoArchiveSettingViewModel(session, sessionScope)
                         }
+                        val twoFactorSetting = remember(session.userID) { deps.makeTwoFactorSettingViewModel(session) }
                         val coordinatorConsent = remember(session.userID) {
                             deps.makeCoordinatorConsentSettingViewModel(session, sessionScope)
                         }
@@ -1052,6 +1053,7 @@ private fun SignedInApp(
                             onPinnedChats = if (pins != null) ({ nav.navigate("pinned-chats") }) else null,
                             notices = noticesSetting,
                             autoArchive = autoArchiveSetting,
+                            twoFactor = twoFactorSetting,
                             onBack = { nav.popBackStack() },
                         )
                     }

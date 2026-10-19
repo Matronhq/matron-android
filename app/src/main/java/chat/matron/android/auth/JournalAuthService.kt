@@ -2,7 +2,9 @@ package chat.matron.android.auth
 
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalApiError
+import chat.matron.android.journal.LoginResponse
 import chat.matron.android.journal.MatronJson
+import chat.matron.android.journal.TwoFactorSetup
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.UserSession
 import chat.matron.android.storage.SessionStore
@@ -50,12 +52,9 @@ class JournalAuthService(
         val api = JournalApi(homeserverURL, client)
         try {
             val login = api.login(username, password, initialDeviceDisplayName)
-            return UserSession(
-                userID = username,
-                deviceID = login.deviceID.toString(),
-                homeserverURL = homeserverURL.toString(),
-                accessToken = login.token,
-            )
+            return session(homeserverURL, username, login)
+        } catch (e: JournalApiError.TwoFactorRequired) {
+            throw AuthError.TwoFactorRequired(e.ticket, e.enrolment)
         } catch (e: JournalApiError.BadCredentials) {
             throw AuthError.InvalidCredentials
         } catch (e: JournalApiError.LockedOut) {
@@ -68,6 +67,61 @@ class JournalAuthService(
             throw AuthError.Unexpected(e.message ?: "Couldn't reach the server.")
         }
     }
+
+    override suspend fun verifyTwoFactor(
+        homeserverURL: HttpUrl,
+        username: String,
+        ticket: String,
+        code: String,
+    ): TwoFactorSignIn = twoFactorStep {
+        val answer = JournalApi(homeserverURL, client).loginTwoFactor(ticket, code)
+        TwoFactorSignIn(
+            session = session(homeserverURL, username, answer.login),
+            usedRecoveryCode = answer.usedRecoveryCode,
+            recoveryCodesLeft = answer.recoveryCodesLeft,
+        )
+    }
+
+    override suspend fun beginTwoFactorEnrolment(homeserverURL: HttpUrl, ticket: String): TwoFactorSetup =
+        twoFactorStep { JournalApi(homeserverURL, client).twoFactorSetupAtLogin(ticket) }
+
+    override suspend fun finishTwoFactorEnrolment(
+        homeserverURL: HttpUrl,
+        username: String,
+        ticket: String,
+        code: String,
+    ): TwoFactorEnrolled = twoFactorStep {
+        val answer = JournalApi(homeserverURL, client).twoFactorEnableAtLogin(ticket, code)
+        TwoFactorEnrolled(session(homeserverURL, username, answer.login), answer.recoveryCodes)
+    }
+
+    /// The code steps' refusals, as the sign-in form tells them apart.
+    private suspend fun <T> twoFactorStep(body: suspend () -> T): T = try {
+        body()
+    } catch (e: JournalApiError.BadCode) {
+        throw AuthError.WrongCode(e.ticketValid)
+    } catch (e: JournalApiError.TwoFactorTicketInvalid) {
+        throw AuthError.TwoFactorExpired
+    } catch (e: JournalApiError.LockedOut) {
+        throw AuthError.LockedOut(e.retryAfterSeconds)
+    } catch (e: JournalApiError.RateLimited) {
+        throw AuthError.Unexpected("Too many attempts — try again in a minute")
+    } catch (e: JournalApiError.Http) {
+        // 503 with no `message`: the server has no key to keep secrets with.
+        if (e.code == "two_factor_unavailable") {
+            throw AuthError.Unexpected("Two-factor sign-in isn't available on this server.")
+        }
+        throw AuthError.Unexpected(e.message ?: "Couldn't reach the server.")
+    } catch (e: JournalApiError) {
+        throw AuthError.Unexpected(e.message ?: "Couldn't reach the server.")
+    }
+
+    private fun session(homeserverURL: HttpUrl, username: String, login: LoginResponse) = UserSession(
+        userID = username,
+        deviceID = login.deviceID.toString(),
+        homeserverURL = homeserverURL.toString(),
+        accessToken = login.token,
+    )
 
     override suspend fun restoreSession(): UserSession? {
         val json = sessionStore.get(sessionKey) ?: return null

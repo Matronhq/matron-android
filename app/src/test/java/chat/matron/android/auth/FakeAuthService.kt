@@ -1,6 +1,8 @@
 package chat.matron.android.auth
 
+import chat.matron.android.journal.TwoFactorSetup
 import chat.matron.android.models.UserSession
+import kotlinx.coroutines.CompletableDeferred
 import okhttp3.HttpUrl
 
 /// Test double for [AuthService], ported from matron-apple's `FakeAuthService`.
@@ -9,6 +11,17 @@ class FakeAuthService : AuthService {
     var stubbedProbe: Result<ServerCapabilities> = Result.failure(AuthError.Unexpected("not stubbed"))
     var stubbedLogin: Result<UserSession> = Result.failure(AuthError.Unexpected("not stubbed"))
     var stubbedRestore: Result<UserSession?> = Result.success(null)
+    /// Two-factor steps, answered in order; the last one repeats.
+    val stubbedVerify = mutableListOf<Result<TwoFactorSignIn>>()
+    var stubbedSetup: Result<TwoFactorSetup> = Result.failure(AuthError.Unexpected("not stubbed"))
+    val stubbedEnable = mutableListOf<Result<TwoFactorEnrolled>>()
+    /// (ticket, code) per verify / enable call.
+    val verifyCalls = mutableListOf<Pair<String, String>>()
+    val enableCalls = mutableListOf<Pair<String, String>>()
+    val setupTickets = mutableListOf<String>()
+    /// When set, verify and enable wait on it before answering, so a test can
+    /// act while a request is in flight.
+    var gate: CompletableDeferred<Unit>? = null
     val persistedSessions = mutableListOf<UserSession>()
     var clearCallCount = 0
 
@@ -20,6 +33,39 @@ class FakeAuthService : AuthService {
         password: String,
         initialDeviceDisplayName: String,
     ): UserSession = stubbedLogin.getOrThrow()
+
+    override suspend fun verifyTwoFactor(
+        homeserverURL: HttpUrl,
+        username: String,
+        ticket: String,
+        code: String,
+    ): TwoFactorSignIn {
+        verifyCalls += ticket to code
+        gate?.await()
+        return next(stubbedVerify).getOrThrow()
+    }
+
+    override suspend fun beginTwoFactorEnrolment(homeserverURL: HttpUrl, ticket: String): TwoFactorSetup {
+        setupTickets += ticket
+        return stubbedSetup.getOrThrow()
+    }
+
+    override suspend fun finishTwoFactorEnrolment(
+        homeserverURL: HttpUrl,
+        username: String,
+        ticket: String,
+        code: String,
+    ): TwoFactorEnrolled {
+        enableCalls += ticket to code
+        gate?.await()
+        return next(stubbedEnable).getOrThrow()
+    }
+
+    private fun <T> next(queue: MutableList<Result<T>>): Result<T> = when {
+        queue.isEmpty() -> Result.failure(AuthError.Unexpected("not stubbed"))
+        queue.size == 1 -> queue[0]
+        else -> queue.removeAt(0)
+    }
 
     override suspend fun restoreSession(): UserSession? = stubbedRestore.getOrThrow()
 
