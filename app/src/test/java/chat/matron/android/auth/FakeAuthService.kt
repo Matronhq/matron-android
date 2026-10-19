@@ -2,6 +2,7 @@ package chat.matron.android.auth
 
 import chat.matron.android.journal.TwoFactorSetup
 import chat.matron.android.models.UserSession
+import kotlinx.coroutines.CompletableDeferred
 import okhttp3.HttpUrl
 
 /// Test double for [AuthService], ported from matron-apple's `FakeAuthService`.
@@ -18,6 +19,9 @@ class FakeAuthService : AuthService {
     val verifyCalls = mutableListOf<Pair<String, String>>()
     val enableCalls = mutableListOf<Pair<String, String>>()
     val setupTickets = mutableListOf<String>()
+    /// When set, verify and enable wait on it before answering, so a test can
+    /// act while a request is in flight.
+    var gate: CompletableDeferred<Unit>? = null
     val persistedSessions = mutableListOf<UserSession>()
     var clearCallCount = 0
 
@@ -37,6 +41,7 @@ class FakeAuthService : AuthService {
         code: String,
     ): TwoFactorSignIn {
         verifyCalls += ticket to code
+        gate?.await()
         return next(stubbedVerify).getOrThrow()
     }
 
@@ -52,6 +57,7 @@ class FakeAuthService : AuthService {
         code: String,
     ): TwoFactorEnrolled {
         enableCalls += ticket to code
+        gate?.await()
         return next(stubbedEnable).getOrThrow()
     }
 

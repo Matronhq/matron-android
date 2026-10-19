@@ -9,6 +9,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.PersistableBundle
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -81,6 +82,16 @@ internal fun TwoFactorSignInScreen(viewModel: SignInViewModel, state: SignInView
         else -> "Two-factor code"
     }
     val cancellable = state is SignInViewModel.State.TwoFactorCode || state is SignInViewModel.State.TwoFactorEnrol
+    // System back: Cancel on the code step and setup. Once a token is issued
+    // the recovery codes stay up until "I've saved these" (they are shown this
+    // once), and back on the recovery-code note simply continues.
+    BackHandler {
+        when (state) {
+            is SignInViewModel.State.RecoveryCodes -> Unit
+            is SignInViewModel.State.RecoveryCodeUsed -> viewModel.finishTwoFactor()
+            else -> viewModel.cancelTwoFactor()
+        }
+    }
     Scaffold(
         topBar = {
             TopAppBar(

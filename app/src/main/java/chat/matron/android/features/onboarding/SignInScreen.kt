@@ -102,8 +102,27 @@ fun SignInScreen(
     var qrTab by remember { mutableStateOf(0) } // 0 = Scan, 1 = Show
     val rendezvousState by rendezvousViewModel.state.collectAsStateWithLifecycle()
 
+    val inTwoFactor = state is SignInViewModel.State.TwoFactorCode ||
+        state is SignInViewModel.State.TwoFactorEnrol ||
+        state is SignInViewModel.State.RecoveryCodes ||
+        state is SignInViewModel.State.RecoveryCodeUsed
+
     LaunchedEffect(linkState) {
+        // A password sign-in in its two-factor steps owns the screen: a link
+        // approval landing now must not sign in over it (and dismiss
+        // recovery codes shown only once).
+        if (inTwoFactor) return@LaunchedEffect
         (linkState as? LinkSignInViewModel.State.SignedIn)?.let { onSignedIn(it.session) }
+    }
+
+    // Entering the two-factor steps ends any device-link sign-in in flight
+    // and puts the QR tab back on Scan, so nothing keeps polling meanwhile.
+    LaunchedEffect(inTwoFactor) {
+        if (inTwoFactor) {
+            linkViewModel.cancel()
+            rendezvousViewModel.stop()
+            qrTab = 0
+        }
     }
 
     LaunchedEffect(qrTab) {
@@ -121,16 +140,9 @@ fun SignInScreen(
     }
 
     // The two-factor steps of a password sign-in replace the form.
-    when (state) {
-        is SignInViewModel.State.TwoFactorCode,
-        is SignInViewModel.State.TwoFactorEnrol,
-        is SignInViewModel.State.RecoveryCodes,
-        is SignInViewModel.State.RecoveryCodeUsed,
-        -> {
-            TwoFactorSignInScreen(viewModel, state)
-            return
-        }
-        else -> Unit
+    if (inTwoFactor) {
+        TwoFactorSignInScreen(viewModel, state)
+        return
     }
 
     val busy = state is SignInViewModel.State.Busy

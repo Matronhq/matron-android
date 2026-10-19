@@ -106,6 +106,12 @@ class JournalAuthService(
         throw AuthError.LockedOut(e.retryAfterSeconds)
     } catch (e: JournalApiError.RateLimited) {
         throw AuthError.Unexpected("Too many attempts — try again in a minute")
+    } catch (e: JournalApiError.Http) {
+        // 503 with no `message`: the server has no key to keep secrets with.
+        if (e.code == "two_factor_unavailable") {
+            throw AuthError.Unexpected("Two-factor sign-in isn't available on this server.")
+        }
+        throw AuthError.Unexpected(e.message ?: "Couldn't reach the server.")
     } catch (e: JournalApiError) {
         throw AuthError.Unexpected(e.message ?: "Couldn't reach the server.")
     }

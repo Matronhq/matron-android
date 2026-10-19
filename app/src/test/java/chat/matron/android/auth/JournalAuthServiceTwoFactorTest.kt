@@ -141,6 +141,15 @@ class JournalAuthServiceTwoFactorTest {
     }
 
     @Test
+    fun enrolment_onAServerWithoutTheKey_saysSoInWords() = runBlocking {
+        respond(503, """{"error":"two_factor_unavailable"}""")
+        assertEquals(
+            AuthError.Unexpected("Two-factor sign-in isn't available on this server."),
+            expectAuthError { service.beginTwoFactorEnrolment(baseUrl(), "tkt") },
+        )
+    }
+
+    @Test
     fun status_decodesGet2fa() = runBlocking {
         respond(200, """{"enabled":true,"enabled_at":1760000000000,"recovery_codes_left":9,"required":true,"available":true}""")
         val api = JournalApi(baseUrl(), token = "tok")

@@ -7,7 +7,10 @@ import chat.matron.android.auth.TwoFactorEnrolled
 import chat.matron.android.auth.TwoFactorSignIn
 import chat.matron.android.journal.TwoFactorSetup
 import chat.matron.android.models.UserSession
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -121,16 +124,48 @@ class SignInTwoFactorViewModelTest {
         vm.code = "abcd-efgh-ijkl-mnop"
         vm.submitCode()
         assertEquals(SignInViewModel.State.RecoveryCodeUsed(2, session), vm.state.value)
-        assertTrue(fake.persistedSessions.isEmpty())
+        assertEquals("the code is spent: keep the token", listOf(session), fake.persistedSessions)
         vm.finishTwoFactor()
         assertEquals(SignInViewModel.State.SignedIn(session), vm.state.value)
-        assertEquals(listOf(session), fake.persistedSessions)
     }
 
     @Test
     fun cancel_dropsTheTicket() = runBlocking {
         val vm = signedInToCodeStep(fake())
         vm.cancelTwoFactor()
+        assertEquals(SignInViewModel.State.Idle, vm.state.value)
+    }
+
+    @Test
+    fun cancel_dropsAnAnswerStillOnItsWay() = runBlocking {
+        val fake = fake()
+        fake.stubbedVerify += Result.success(TwoFactorSignIn(session, usedRecoveryCode = false, recoveryCodesLeft = 10))
+        val vm = signedInToCodeStep(fake)
+        vm.code = "123456"
+        val gate = CompletableDeferred<Unit>().also { fake.gate = it }
+        val job = launch { vm.submitCode() }
+        yield()
+        assertEquals(SignInViewModel.State.TwoFactorCode(busy = true), vm.state.value)
+        vm.cancelTwoFactor()
+        gate.complete(Unit)
+        job.join()
+        assertEquals(SignInViewModel.State.Idle, vm.state.value)
+        assertTrue("a cancelled sign-in stores nothing", fake.persistedSessions.isEmpty())
+    }
+
+    @Test
+    fun cancel_dropsAFailureStillOnItsWay() = runBlocking {
+        val fake = fake(enrolment = true)
+        fake.stubbedSetup = Result.success(setup)
+        fake.stubbedEnable += Result.failure(AuthError.WrongCode(ticketValid = true))
+        val vm = signedInToCodeStep(fake)
+        vm.code = "000000"
+        val gate = CompletableDeferred<Unit>().also { fake.gate = it }
+        val job = launch { vm.confirmEnrolment() }
+        yield()
+        vm.cancelTwoFactor()
+        gate.complete(Unit)
+        job.join()
         assertEquals(SignInViewModel.State.Idle, vm.state.value)
     }
 
@@ -148,7 +183,11 @@ class SignInTwoFactorViewModelTest {
         vm.confirmEnrolment()
         assertEquals(listOf("ticket-1" to "123456"), fake.enableCalls)
         assertEquals(SignInViewModel.State.RecoveryCodes(codes, session), vm.state.value)
-        assertTrue("not stored until the codes are saved", fake.persistedSessions.isEmpty())
+        assertEquals("two-factor is on now: keep the token", listOf(session), fake.persistedSessions)
+
+        // Cancel has nothing to undo once the token is issued.
+        vm.cancelTwoFactor()
+        assertEquals(SignInViewModel.State.RecoveryCodes(codes, session), vm.state.value)
 
         vm.finishTwoFactor()
         assertEquals(SignInViewModel.State.SignedIn(session), vm.state.value)

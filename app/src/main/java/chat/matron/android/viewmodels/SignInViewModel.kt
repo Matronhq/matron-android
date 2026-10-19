@@ -5,6 +5,7 @@ import chat.matron.android.auth.AuthService
 import chat.matron.android.auth.ServerURLValidator
 import chat.matron.android.journal.TwoFactorSetup
 import chat.matron.android.models.UserSession
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,7 +20,10 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 /// form moves on to [State.TwoFactorCode]; when it wants two-factor set up
 /// first, to [State.TwoFactorEnrol] and then [State.RecoveryCodes]. A ticket
 /// that runs out (too many wrong codes, or time) drops back to the password
-/// form with [State.Error]. The session is persisted only on [State.SignedIn].
+/// form with [State.Error]. Once the journal has issued a token after a code
+/// step the session is persisted at once — two-factor is on (or a recovery
+/// code is spent) by then, so losing the token would cost the user more than
+/// an extra screen — and published on [State.SignedIn].
 class SignInViewModel(
     private val auth: AuthService,
     private val deviceDisplayName: String,
@@ -70,6 +74,11 @@ class SignInViewModel(
     private data class Pending(val url: HttpUrl, val username: String, val ticket: String)
     private var pending: Pending? = null
 
+    /// Bumped by [cancelTwoFactor] and by every way out of a step: an answer
+    /// that lands after it is dropped, so a cancelled request can neither
+    /// sign in nor put a dead step back on screen.
+    private var attempt = 0L
+
     suspend fun submit() {
         if (serverURL.trim().isEmpty() || username.isEmpty() || password.isEmpty()) return
         _state.value = State.Busy
@@ -106,17 +115,22 @@ class SignInViewModel(
         val p = pending ?: return
         val entered = code.trim()
         if (step.busy || entered.isEmpty()) return
+        val mine = attempt
         _state.value = State.TwoFactorCode(busy = true)
         try {
             val result = auth.verifyTwoFactor(p.url, p.username, p.ticket, entered)
+            if (mine != attempt) return
             pending = null
             if (result.usedRecoveryCode) {
+                auth.persist(result.session)
                 _state.value = State.RecoveryCodeUsed(result.recoveryCodesLeft, result.session)
             } else {
                 signIn(result.session)
             }
+        } catch (cancel: CancellationException) {
+            throw cancel
         } catch (error: Throwable) {
-            codeStepFailed(error) { message -> State.TwoFactorCode(error = message) }
+            if (mine == attempt) codeStepFailed(error) { message -> State.TwoFactorCode(error = message) }
         }
     }
 
@@ -129,12 +143,17 @@ class SignInViewModel(
 
     private suspend fun beginEnrolment() {
         val p = pending ?: return
+        val mine = attempt
         _state.value = State.TwoFactorEnrol(setup = null, busy = true)
         try {
             val setup = auth.beginTwoFactorEnrolment(p.url, p.ticket)
-            _state.value = State.TwoFactorEnrol(setup = setup)
+            if (mine == attempt) _state.value = State.TwoFactorEnrol(setup = setup)
+        } catch (cancel: CancellationException) {
+            throw cancel
         } catch (error: Throwable) {
-            codeStepFailed(error) { message -> State.TwoFactorEnrol(setup = null, error = message) }
+            if (mine == attempt) {
+                codeStepFailed(error) { message -> State.TwoFactorEnrol(setup = null, error = message) }
+            }
         }
     }
 
@@ -145,14 +164,21 @@ class SignInViewModel(
         val p = pending ?: return
         val entered = code.trim()
         if (step.busy || entered.isEmpty()) return
+        val mine = attempt
         _state.value = step.copy(busy = true, error = null)
         try {
             val result = auth.finishTwoFactorEnrolment(p.url, p.username, p.ticket, entered)
+            if (mine != attempt) return
             pending = null
             code = ""
+            auth.persist(result.session)
             _state.value = State.RecoveryCodes(result.recoveryCodes, result.session)
+        } catch (cancel: CancellationException) {
+            throw cancel
         } catch (error: Throwable) {
-            codeStepFailed(error) { message -> State.TwoFactorEnrol(setup = setup, error = message) }
+            if (mine == attempt) {
+                codeStepFailed(error) { message -> State.TwoFactorEnrol(setup = setup, error = message) }
+            }
         }
     }
 
@@ -164,11 +190,16 @@ class SignInViewModel(
             is State.RecoveryCodeUsed -> s.session
             else -> return
         }
-        signIn(session)
+        _state.value = State.SignedIn(session)
     }
 
-    /// Back to the password form; the ticket is dropped.
+    /// Back to the password form; the ticket is dropped, and so is any
+    /// answer still on its way. Only from the code step or setup: after a
+    /// token has been issued there is nothing to cancel.
     fun cancelTwoFactor() {
+        val s = _state.value
+        if (s !is State.TwoFactorCode && s !is State.TwoFactorEnrol) return
+        attempt++
         pending = null
         code = ""
         _state.value = State.Idle
@@ -197,6 +228,7 @@ class SignInViewModel(
     }
 
     private fun backToPassword(message: String): State {
+        attempt++
         pending = null
         code = ""
         return State.Error(message)
