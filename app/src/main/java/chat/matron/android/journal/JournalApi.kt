@@ -311,6 +311,17 @@ sealed class JournalApiError(message: String) : Exception(message) {
     /// `link/claim` (code already claimed), `link/approve` (nothing to
     /// approve yet, or already resolved).
     data object Conflict : JournalApiError("Already handled — possibly on another device.")
+    /// 401 from `POST /login`: the password was right, and the journal wants
+    /// a two-factor code ([enrolment] false) or wants the user to set
+    /// two-factor up first ([enrolment] true) before it hands out a token.
+    data class TwoFactorRequired(val ticket: String, val expiresIn: Int?, val enrolment: Boolean) :
+        JournalApiError("Two-factor sign-in needed.")
+    /// 403 `bad_code` from the code steps. [ticketValid] false once the
+    /// ticket has used up its tries: the user must sign in again.
+    data class BadCode(val ticketValid: Boolean) : JournalApiError("That code didn't work.")
+    /// 401 `two_factor_ticket_invalid`: the sign-in ticket is unknown,
+    /// expired or used.
+    data object TwoFactorTicketInvalid : JournalApiError("The sign-in timed out — please sign in again.")
     /// Any other non-success status. [serverMessage] is the body's `message`,
     /// else its `error` code, else empty. [code], [bodyMessage], [reason] and
     /// [max] are the body's own `error`, `message`, `reason` and `max`
@@ -337,7 +348,7 @@ class JournalApi(
     token: String? = null,
 ) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
-    ArchiveWriting {
+    ArchiveWriting, TwoFactorProviding {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -384,6 +395,53 @@ class JournalApi(
         this.token = token
         return LoginResponse(token, deviceID, userID)
     }
+
+    // MARK: Two-factor
+    //
+    // The code steps of a password sign-in are unauthenticated: the ticket
+    // from `/login`'s 401 stands in for the password.
+
+    /// `POST /login/2fa {ticket, code}` — a 6-digit code or a recovery code.
+    suspend fun loginTwoFactor(ticket: String, code: String): TwoFactorLoginResponse {
+        val obj = request(
+            path = "/login/2fa", method = "POST", authenticated = false,
+            jsonBody = buildJsonObject {
+                put("ticket", ticket)
+                put("code", code)
+            },
+        )
+        val answer = TwoFactorDecoding.verified(obj) ?: throw JournalApiError.Transport("malformed login response")
+        this.token = answer.login.token
+        return answer
+    }
+
+    /// `POST /login/2fa/setup {ticket}` — enrolment at sign-in, step one.
+    suspend fun twoFactorSetupAtLogin(ticket: String): TwoFactorSetup =
+        TwoFactorDecoding.setup(
+            request(
+                path = "/login/2fa/setup", method = "POST", authenticated = false,
+                jsonBody = buildJsonObject { put("ticket", ticket) },
+            ),
+        ) ?: throw JournalApiError.Transport("malformed two-factor setup response")
+
+    /// `POST /login/2fa/enable {ticket, code}` — enrolment at sign-in, step
+    /// two: the first code from the app turns two-factor on and signs in.
+    suspend fun twoFactorEnableAtLogin(ticket: String, code: String): TwoFactorEnrolment {
+        val obj = request(
+            path = "/login/2fa/enable", method = "POST", authenticated = false,
+            jsonBody = buildJsonObject {
+                put("ticket", ticket)
+                put("code", code)
+            },
+        )
+        val answer = TwoFactorDecoding.enrolment(obj) ?: throw JournalApiError.Transport("malformed login response")
+        this.token = answer.login.token
+        return answer
+    }
+
+    override suspend fun twoFactorStatus(): TwoFactorStatus =
+        TwoFactorDecoding.status(request(path = "/2fa"))
+            ?: throw JournalApiError.Transport("malformed two-factor response")
 
     override suspend fun snapshot(): SnapshotResponse {
         val obj = request(path = "/snapshot")
@@ -1145,6 +1203,20 @@ class JournalApi(
         val code = obj?.stringOrNull("error")
         return when {
             status == 403 && code == "bad_credentials" -> JournalApiError.BadCredentials
+            status == 401 && (code == "two_factor_required" || code == "two_factor_enrolment_required") -> {
+                val ticket = obj?.stringOrNull("two_factor_ticket")
+                if (ticket.isNullOrEmpty()) {
+                    JournalApiError.Transport("malformed login response")
+                } else {
+                    JournalApiError.TwoFactorRequired(
+                        ticket = ticket,
+                        expiresIn = obj.intOrNull("expires_in"),
+                        enrolment = code == "two_factor_enrolment_required",
+                    )
+                }
+            }
+            status == 401 && code == "two_factor_ticket_invalid" -> JournalApiError.TwoFactorTicketInvalid
+            status == 403 && code == "bad_code" -> JournalApiError.BadCode(obj?.boolOrNull("ticket_valid") ?: true)
             status == 429 && code == "locked_out" ->
                 JournalApiError.LockedOut(obj?.intOrNull("retry_after") ?: 60)
             status == 429 -> JournalApiError.RateLimited

@@ -69,6 +69,10 @@ import kotlinx.coroutines.launch
  * the link code shown under the QR manually. While `linkState` is
  * `WaitingForApproval` the form is replaced with a waiting indicator; reaching
  * `SignedIn` on either view model funnels through the same `onSignedIn`.
+ *
+ * When the password is right but the journal wants a two-factor code (or
+ * two-factor set up first), [TwoFactorSignInScreen] takes over until the
+ * view model reaches `SignedIn` or drops back to the form.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -114,6 +118,19 @@ fun SignInScreen(
             linkViewModel.cancel()
             rendezvousViewModel.stop()
         }
+    }
+
+    // The two-factor steps of a password sign-in replace the form.
+    when (state) {
+        is SignInViewModel.State.TwoFactorCode,
+        is SignInViewModel.State.TwoFactorEnrol,
+        is SignInViewModel.State.RecoveryCodes,
+        is SignInViewModel.State.RecoveryCodeUsed,
+        -> {
+            TwoFactorSignInScreen(viewModel, state)
+            return
+        }
+        else -> Unit
     }
 
     val busy = state is SignInViewModel.State.Busy

@@ -1,5 +1,6 @@
 package chat.matron.android.auth
 
+import chat.matron.android.journal.TwoFactorSetup
 import chat.matron.android.models.UserSession
 import okhttp3.HttpUrl
 
@@ -9,6 +10,14 @@ class FakeAuthService : AuthService {
     var stubbedProbe: Result<ServerCapabilities> = Result.failure(AuthError.Unexpected("not stubbed"))
     var stubbedLogin: Result<UserSession> = Result.failure(AuthError.Unexpected("not stubbed"))
     var stubbedRestore: Result<UserSession?> = Result.success(null)
+    /// Two-factor steps, answered in order; the last one repeats.
+    val stubbedVerify = mutableListOf<Result<TwoFactorSignIn>>()
+    var stubbedSetup: Result<TwoFactorSetup> = Result.failure(AuthError.Unexpected("not stubbed"))
+    val stubbedEnable = mutableListOf<Result<TwoFactorEnrolled>>()
+    /// (ticket, code) per verify / enable call.
+    val verifyCalls = mutableListOf<Pair<String, String>>()
+    val enableCalls = mutableListOf<Pair<String, String>>()
+    val setupTickets = mutableListOf<String>()
     val persistedSessions = mutableListOf<UserSession>()
     var clearCallCount = 0
 
@@ -20,6 +29,37 @@ class FakeAuthService : AuthService {
         password: String,
         initialDeviceDisplayName: String,
     ): UserSession = stubbedLogin.getOrThrow()
+
+    override suspend fun verifyTwoFactor(
+        homeserverURL: HttpUrl,
+        username: String,
+        ticket: String,
+        code: String,
+    ): TwoFactorSignIn {
+        verifyCalls += ticket to code
+        return next(stubbedVerify).getOrThrow()
+    }
+
+    override suspend fun beginTwoFactorEnrolment(homeserverURL: HttpUrl, ticket: String): TwoFactorSetup {
+        setupTickets += ticket
+        return stubbedSetup.getOrThrow()
+    }
+
+    override suspend fun finishTwoFactorEnrolment(
+        homeserverURL: HttpUrl,
+        username: String,
+        ticket: String,
+        code: String,
+    ): TwoFactorEnrolled {
+        enableCalls += ticket to code
+        return next(stubbedEnable).getOrThrow()
+    }
+
+    private fun <T> next(queue: MutableList<Result<T>>): Result<T> = when {
+        queue.isEmpty() -> Result.failure(AuthError.Unexpected("not stubbed"))
+        queue.size == 1 -> queue[0]
+        else -> queue.removeAt(0)
+    }
 
     override suspend fun restoreSession(): UserSession? = stubbedRestore.getOrThrow()
 
