@@ -10,7 +10,6 @@ import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,9 +20,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.outlined.InsertDriveFile
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material3.CircularProgressIndicator
@@ -60,6 +57,9 @@ import chat.matron.android.designsystem.MarkdownPreviewTarget
 import chat.matron.android.features.chat.MarkdownPreviewSheet
 import chat.matron.android.designsystem.ItemDetailModel
 import chat.matron.android.designsystem.ItemDetailView
+import chat.matron.android.designsystem.ItemCommentSendRoute
+import chat.matron.android.designsystem.ItemCommentVoice
+import chat.matron.android.designsystem.itemCommentSendRoute
 import chat.matron.android.designsystem.ItemGlyph
 import chat.matron.android.designsystem.ItemResolveControl
 import chat.matron.android.designsystem.itemContext
@@ -284,6 +284,14 @@ fun ItemDetailScreen(
         )
     }
     val recorderState by recorder.state.collectAsStateWithLifecycle()
+    // True from the mic tap until the recorder has started (or failed): the
+    // permission prompt's window, in which send must not post the text alone.
+    var micStarting by remember { mutableStateOf(false) }
+    fun voice(): ItemCommentVoice = when {
+        recorderState is VoiceRecorder.State.Recording -> ItemCommentVoice.RECORDING
+        micStarting -> ItemCommentVoice.STARTING
+        else -> ItemCommentVoice.IDLE
+    }
     DisposableEffect(Unit) { onDispose { recorder.cancel() } }
 
     fun downloadAttachment(a: TrackerAttachment) {
@@ -423,29 +431,54 @@ fun ItemDetailScreen(
                                 // The field clears as the send starts; a failed send
                                 // puts the draft back (the VM leaves anything typed
                                 // meanwhile alone), so re-read it once it settles.
+                                //
+                                // While a note records this is the one send: it stops the
+                                // note and posts the draft, the recording and the tray as
+                                // one comment. While the mic starts it does nothing, so it
+                                // cannot post the text and leave the note running.
                                 onSubmit = {
-                                    draft = ""
-                                    scope.launch {
-                                        try { viewModel.submitComment() } finally { draft = viewModel.draft }
+                                    when (itemCommentSendRoute(draft, staged.isNotEmpty(), voice())) {
+                                        ItemCommentSendRoute.COMMENT -> {
+                                            draft = ""
+                                            scope.launch {
+                                                try { viewModel.submitComment() } finally { draft = viewModel.draft }
+                                            }
+                                        }
+                                        ItemCommentSendRoute.WITH_VOICE_NOTE -> recorder.stop()?.let { note ->
+                                            draft = ""
+                                            scope.launch {
+                                                try { viewModel.sendVoiceNote(note.file) } finally { draft = viewModel.draft }
+                                            }
+                                        }
+                                        ItemCommentSendRoute.NONE -> Unit
                                     }
                                 },
+                                voice = voice(),
+                                onCancelRecording = { recorder.cancel() },
                                 onTapAction = { comment, label -> scope.launch { viewModel.tapAction(comment, label) } },
                                 onTapItemAction = { label -> scope.launch { viewModel.tapItemAction(label) } },
                                 onRetryPending = { id -> scope.launch { viewModel.retryComment(id) } },
                                 onDiscardPending = { id -> scope.launch { viewModel.discardComment(id) } },
                                 onAttach = { attachMenu = true },
                                 onVoiceNote = {
-                                    scope.launch {
-                                        try {
-                                            recorder.start()
-                                        } catch (e: VoiceRecorder.RecorderError) {
-                                            viewModel.reportError(
-                                                when (e) {
-                                                    VoiceRecorder.RecorderError.PermissionDenied -> "Microphone access is needed to record a voice note."
-                                                    VoiceRecorder.RecorderError.RecordFailed -> "Couldn't start recording."
-                                                    VoiceRecorder.RecorderError.AlreadyRecording -> "Already recording."
-                                                },
-                                            )
+                                    // The composer disables the mic outside IDLE; this
+                                    // also covers a tap racing that recomposition.
+                                    if (voice() == ItemCommentVoice.IDLE) {
+                                        micStarting = true
+                                        scope.launch {
+                                            try {
+                                                recorder.start()
+                                            } catch (e: VoiceRecorder.RecorderError) {
+                                                viewModel.reportError(
+                                                    when (e) {
+                                                        VoiceRecorder.RecorderError.PermissionDenied -> "Microphone access is needed to record a voice note."
+                                                        VoiceRecorder.RecorderError.RecordFailed -> "Couldn't start recording."
+                                                        VoiceRecorder.RecorderError.AlreadyRecording -> "Already recording."
+                                                    },
+                                                )
+                                            } finally {
+                                                micStarting = false
+                                            }
                                         }
                                     }
                                 },
@@ -470,21 +503,6 @@ fun ItemDetailScreen(
                                     )
                                 }
                             }
-                            if (recorderState is VoiceRecorder.State.Recording) {
-                                RecordingBar(
-                                    modifier = Modifier.align(Alignment.BottomCenter),
-                                    onCancel = { recorder.cancel() },
-                                    // One comment: the draft, the recording, then the tray.
-                                    onSend = {
-                                        recorder.stop()?.let { note ->
-                                            draft = ""
-                                            scope.launch {
-                                                try { viewModel.sendVoiceNote(note.file) } finally { draft = viewModel.draft }
-                                            }
-                                        }
-                                    },
-                                )
-                            }
                         }
                     }
                 }
@@ -504,25 +522,6 @@ fun ItemDetailScreen(
 
     if (previewModel != null) {
         AttachmentFullscreenViewer(model = previewModel, onDismiss = { previewModel = null })
-    }
-}
-
-/// Overlays the composer while a voice note records: cancel on the left,
-/// send on the right — the chat composer's own recording bar.
-@Composable
-private fun RecordingBar(modifier: Modifier, onCancel: () -> Unit, onSend: () -> Unit) {
-    Row(
-        modifier
-            .fillMaxWidth()
-            .padding(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        IconButton(onClick = onCancel) { Icon(Icons.Filled.Delete, contentDescription = "Cancel recording") }
-        Text("Recording…", style = MaterialTheme.typography.bodyMedium)
-        IconButton(onClick = onSend) {
-            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send voice note", tint = MaterialTheme.colorScheme.primary)
-        }
     }
 }
 

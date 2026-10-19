@@ -313,6 +313,44 @@ class ItemsViewsTest {
         )
     }
 
+    /// One send while a voice note records: the composer's send (and Enter)
+    /// always goes through the recording, so it can never post the text and
+    /// leave the note running. While the mic is still starting, nothing sends.
+    @Test
+    fun aRecordingNoteMakesTheComposerSendTheOneSend() {
+        val recording = ItemCommentVoice.RECORDING
+        val starting = ItemCommentVoice.STARTING
+        assertEquals(ItemCommentSendRoute.WITH_VOICE_NOTE, itemCommentSendRoute("Go with option B", voice = recording))
+        assertEquals(ItemCommentSendRoute.WITH_VOICE_NOTE, itemCommentSendRoute("", hasAttachments = true, voice = recording))
+        assertEquals("a note alone is sendable", ItemCommentSendRoute.WITH_VOICE_NOTE, itemCommentSendRoute("", voice = recording))
+        assertTrue(itemCommentCanSubmit("", voice = recording))
+
+        assertEquals(ItemCommentSendRoute.NONE, itemCommentSendRoute("Go with option B", voice = starting))
+        assertEquals(ItemCommentSendRoute.NONE, itemCommentSendRoute("", hasAttachments = true, voice = starting))
+        assertFalse(itemCommentCanSubmit("Go with option B", voice = starting))
+
+        assertEquals(ItemCommentSendRoute.COMMENT, itemCommentSendRoute("Go with option B"))
+        assertEquals(ItemCommentSendRoute.COMMENT, itemCommentSendRoute("", hasAttachments = true))
+        assertEquals(ItemCommentSendRoute.NONE, itemCommentSendRoute(" \n"))
+    }
+
+    @Test
+    fun enterFollowsTheOneSendWhileANoteRecordsOrStarts() {
+        fun action(draft: String, voice: ItemCommentVoice, isBusy: Boolean = false, isRepeat: Boolean = false) =
+            itemCommentEnterAction(isEnter = true, shift = false, isRepeat = isRepeat, isBusy = isBusy, draft = draft, voice = voice)
+        assertEquals(ItemCommentEnterAction.SEND, action("ok", ItemCommentVoice.RECORDING))
+        assertEquals("sends the note over an empty draft", ItemCommentEnterAction.SEND, action("", ItemCommentVoice.RECORDING))
+        assertEquals("never the text alone while the mic starts", ItemCommentEnterAction.SWALLOW, action("ok", ItemCommentVoice.STARTING))
+        assertEquals(ItemCommentEnterAction.SWALLOW, action("", ItemCommentVoice.STARTING))
+        assertEquals(ItemCommentEnterAction.SWALLOW, action("ok", ItemCommentVoice.RECORDING, isBusy = true))
+        assertEquals(ItemCommentEnterAction.SWALLOW, action("ok", ItemCommentVoice.RECORDING, isRepeat = true))
+        // Shift+Enter still types a newline into the draft that goes with the note.
+        assertEquals(
+            ItemCommentEnterAction.PASS_THROUGH,
+            itemCommentEnterAction(isEnter = true, shift = true, isRepeat = false, isBusy = false, draft = "ok", voice = ItemCommentVoice.RECORDING),
+        )
+    }
+
     @Test
     fun openingPlacementReportsItselfOnlyAfterTheScrollHasRun() = runBlocking {
         // The jump-to-bottom button is gated on `placed`; flagging it before

@@ -342,6 +342,10 @@ fun ItemDetailView(
     /// The composer's tray: picked attachments waiting to go with the reply.
     attachments: List<StagedAttachment> = emptyList(),
     onRemoveAttachment: (String) -> Unit = {},
+    /// The composer's voice-note recorder: while it records, the composer's
+    /// send is the one send and [onSubmit] must carry the note.
+    voice: ItemCommentVoice = ItemCommentVoice.IDLE,
+    onCancelRecording: () -> Unit = {},
     /// A tap on one of a comment's one-tap answer buttons.
     onTapAction: (TrackerComment, String) -> Unit = { _, _ -> },
     /// A tap on one of the item's own buttons (a notice's Seen).
@@ -461,6 +465,7 @@ fun ItemDetailView(
                 draft = draft, onDraftChange = onDraftChange, isBusy = model.isBusy,
                 onSubmit = onSubmit, onAttach = onAttach, onVoiceNote = onVoiceNote,
                 attachments = attachments, onRemoveAttachment = onRemoveAttachment,
+                voice = voice, onCancelRecording = onCancelRecording,
             )
         }
     }
