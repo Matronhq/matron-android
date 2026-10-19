@@ -1,15 +1,20 @@
 package chat.matron.android.designsystem
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -20,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
@@ -29,10 +35,63 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.dp
 import chat.matron.android.models.StagedAttachment
 
-/// Whether there is something to submit — non-blank text or a staged tray.
-/// The send button's one definition, mirroring `ComposerViewModel.canSend`.
-fun itemCommentCanSubmit(draft: String, hasAttachments: Boolean = false): Boolean =
-    draft.isNotBlank() || hasAttachments
+/// The voice-note recorder as the reply composer sees it.
+enum class ItemCommentVoice {
+    /// No recording: send posts the draft and tray.
+    IDLE,
+
+    /// The mic was tapped and the recorder has not started yet (the
+    /// permission prompt, or the recorder spinning up). Send waits: posting
+    /// the text alone now would leave the note that is about to start
+    /// recording with nothing to go with.
+    STARTING,
+
+    /// A voice note is recording. The composer's send is the one send: it
+    /// stops the note and posts it with the draft and tray as one comment.
+    RECORDING,
+
+    /// The stopped note is being prepared to go with the draft and tray.
+    /// Send waits, as for [STARTING]: until the note's send has taken the
+    /// draft and tray, a second tap would post them on their own beside it.
+    SENDING,
+}
+
+/// What the composer's send does.
+enum class ItemCommentSendRoute {
+    /// Post the draft and tray as a comment.
+    COMMENT,
+
+    /// Stop the recording and post it, with the draft and tray, as one comment.
+    WITH_VOICE_NOTE,
+
+    /// Nothing to send yet.
+    NONE,
+}
+
+/// Whether there is something to submit — non-blank text or a staged tray,
+/// or a voice note recording (which is sendable on its own). Never while the
+/// microphone is still starting. The send button's one definition, mirroring
+/// `ComposerViewModel.canSend`.
+fun itemCommentCanSubmit(
+    draft: String,
+    hasAttachments: Boolean = false,
+    voice: ItemCommentVoice = ItemCommentVoice.IDLE,
+): Boolean = itemCommentSendRoute(draft, hasAttachments, voice) != ItemCommentSendRoute.NONE
+
+/// The one place that decides what a send (the button or an attached
+/// keyboard's Enter) does. While a note records, every send goes through the
+/// recording, so the composer can never post the text and leave the note
+/// running behind it.
+fun itemCommentSendRoute(
+    draft: String,
+    hasAttachments: Boolean = false,
+    voice: ItemCommentVoice = ItemCommentVoice.IDLE,
+): ItemCommentSendRoute = when (voice) {
+    ItemCommentVoice.RECORDING -> ItemCommentSendRoute.WITH_VOICE_NOTE
+    ItemCommentVoice.STARTING, ItemCommentVoice.SENDING -> ItemCommentSendRoute.NONE
+    ItemCommentVoice.IDLE ->
+        if (draft.isNotBlank() || hasAttachments) ItemCommentSendRoute.COMMENT else ItemCommentSendRoute.NONE
+}
 
 /// What an attached keyboard's key-down should do to the reply field.
 enum class ItemCommentEnterAction {
@@ -68,6 +127,11 @@ enum class ItemCommentEnterAction {
 ///    can never send), so holding Shift+Enter still inserts newlines.
 ///  - [isBusy] swallows rather than falling through, so an Enter pressed while
 ///    a post is in flight cannot append a newline to the in-flight draft.
+///
+/// While a voice note records, Enter is the same single send as the button
+/// (it sends the note, even over an empty draft); while the microphone is
+/// still starting, or the stopped note is still on its way into the send, it
+/// is swallowed, so it cannot post the text alone.
 fun itemCommentEnterAction(
     isEnter: Boolean,
     shift: Boolean,
@@ -75,12 +139,14 @@ fun itemCommentEnterAction(
     isBusy: Boolean,
     draft: String,
     hasAttachments: Boolean = false,
+    voice: ItemCommentVoice = ItemCommentVoice.IDLE,
 ): ItemCommentEnterAction = when {
     !isEnter -> ItemCommentEnterAction.PASS_THROUGH
     shift -> ItemCommentEnterAction.PASS_THROUGH
     isRepeat -> ItemCommentEnterAction.SWALLOW
     isBusy -> ItemCommentEnterAction.SWALLOW
-    itemCommentCanSubmit(draft, hasAttachments) -> ItemCommentEnterAction.SEND
+    voice == ItemCommentVoice.STARTING || voice == ItemCommentVoice.SENDING -> ItemCommentEnterAction.SWALLOW
+    itemCommentCanSubmit(draft, hasAttachments, voice) -> ItemCommentEnterAction.SEND
     else -> ItemCommentEnterAction.PASS_THROUGH
 }
 
@@ -91,6 +157,13 @@ fun itemCommentEnterAction(
 /// something to send. A leaf — the host owns attachment picking, staging and
 /// voice-note recording; this only forwards the intents. Ported from
 /// matron-apple's `ItemCommentComposer`.
+///
+/// While [voice] is recording, a strip above the row shows it with its
+/// Cancel, and the row's send is the only send: it is enabled with an empty
+/// draft, and the host routes it ([itemCommentSendRoute]) to stop the note
+/// and post it with the draft and tray as one comment. The mic is disabled
+/// then, and send is disabled while the microphone is still starting or the
+/// stopped note is still being taken into the send.
 @Composable
 fun ItemCommentComposer(
     draft: String,
@@ -102,13 +175,22 @@ fun ItemCommentComposer(
     modifier: Modifier = Modifier,
     attachments: List<StagedAttachment> = emptyList(),
     onRemoveAttachment: (String) -> Unit = {},
+    voice: ItemCommentVoice = ItemCommentVoice.IDLE,
+    onCancelRecording: () -> Unit = {},
 ) {
-    val sendable = itemCommentCanSubmit(draft, attachments.isNotEmpty())
+    val hasAttachments = attachments.isNotEmpty()
+    val sendable = itemCommentCanSubmit(draft, hasAttachments, voice)
+    // Shown (disabled) while the mic starts over a draft, so the button does
+    // not vanish and reappear under the user's finger.
+    val showsSend = sendable || draft.isNotBlank() || hasAttachments
     Column(
         modifier = modifier
             .fillMaxWidth()
             .widthIn(max = ItemTypography.measure),
     ) {
+        if (voice == ItemCommentVoice.RECORDING) {
+            ItemCommentRecordingStrip(onCancel = onCancelRecording)
+        }
         AttachmentTray(attachments = attachments, onRemove = onRemoveAttachment)
         Row(
             modifier = Modifier
@@ -146,7 +228,8 @@ fun ItemCommentComposer(
                                 isRepeat = event.nativeKeyEvent.repeatCount > 0,
                                 isBusy = isBusy,
                                 draft = draft,
-                                hasAttachments = attachments.isNotEmpty(),
+                                hasAttachments = hasAttachments,
+                                voice = voice,
                             )
                         ) {
                             ItemCommentEnterAction.SEND -> { onSubmit(); true }
@@ -155,14 +238,44 @@ fun ItemCommentComposer(
                         }
                     },
             )
-            IconButton(onClick = onVoiceNote, enabled = !isBusy) {
-                Icon(Icons.Filled.Mic, contentDescription = "Record voice note", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            // Never a second send: while a note records (or starts) the
+            // mic does nothing — the send beside it carries the note.
+            val micEnabled = !isBusy && voice == ItemCommentVoice.IDLE
+            IconButton(onClick = onVoiceNote, enabled = micEnabled) {
+                Icon(
+                    Icons.Filled.Mic, contentDescription = "Record voice note",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (micEnabled) 1f else 0.38f),
+                )
             }
-            if (sendable) {
-                IconButton(onClick = onSubmit, enabled = !isBusy) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send reply", tint = MaterialTheme.colorScheme.primary)
+            if (showsSend) {
+                val enabled = sendable && !isBusy
+                IconButton(onClick = onSubmit, enabled = enabled) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        contentDescription = if (voice == ItemCommentVoice.RECORDING) "Send reply with voice note" else "Send reply",
+                        tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
+    }
+}
+
+/// The live-recording strip above the reply row: what is happening and a
+/// way out. It has no send of its own — the row's send carries the note.
+@Composable
+private fun ItemCommentRecordingStrip(onCancel: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 8.dp, end = 16.dp, top = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        IconButton(onClick = onCancel) {
+            Icon(Icons.Filled.Delete, contentDescription = "Cancel recording", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Box(Modifier.size(10.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
+        Text("Recording…", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
     }
 }
