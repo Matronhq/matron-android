@@ -49,6 +49,11 @@ enum class ItemCommentVoice {
     /// A voice note is recording. The composer's send is the one send: it
     /// stops the note and posts it with the draft and tray as one comment.
     RECORDING,
+
+    /// The stopped note is being prepared to go with the draft and tray.
+    /// Send waits, as for [STARTING]: until the note's send has taken the
+    /// draft and tray, a second tap would post them on their own beside it.
+    SENDING,
 }
 
 /// What the composer's send does.
@@ -83,7 +88,7 @@ fun itemCommentSendRoute(
     voice: ItemCommentVoice = ItemCommentVoice.IDLE,
 ): ItemCommentSendRoute = when (voice) {
     ItemCommentVoice.RECORDING -> ItemCommentSendRoute.WITH_VOICE_NOTE
-    ItemCommentVoice.STARTING -> ItemCommentSendRoute.NONE
+    ItemCommentVoice.STARTING, ItemCommentVoice.SENDING -> ItemCommentSendRoute.NONE
     ItemCommentVoice.IDLE ->
         if (draft.isNotBlank() || hasAttachments) ItemCommentSendRoute.COMMENT else ItemCommentSendRoute.NONE
 }
@@ -125,7 +130,8 @@ enum class ItemCommentEnterAction {
 ///
 /// While a voice note records, Enter is the same single send as the button
 /// (it sends the note, even over an empty draft); while the microphone is
-/// still starting it is swallowed, so it cannot post the text alone.
+/// still starting, or the stopped note is still on its way into the send, it
+/// is swallowed, so it cannot post the text alone.
 fun itemCommentEnterAction(
     isEnter: Boolean,
     shift: Boolean,
@@ -139,7 +145,7 @@ fun itemCommentEnterAction(
     shift -> ItemCommentEnterAction.PASS_THROUGH
     isRepeat -> ItemCommentEnterAction.SWALLOW
     isBusy -> ItemCommentEnterAction.SWALLOW
-    voice == ItemCommentVoice.STARTING -> ItemCommentEnterAction.SWALLOW
+    voice == ItemCommentVoice.STARTING || voice == ItemCommentVoice.SENDING -> ItemCommentEnterAction.SWALLOW
     itemCommentCanSubmit(draft, hasAttachments, voice) -> ItemCommentEnterAction.SEND
     else -> ItemCommentEnterAction.PASS_THROUGH
 }
@@ -156,7 +162,8 @@ fun itemCommentEnterAction(
 /// Cancel, and the row's send is the only send: it is enabled with an empty
 /// draft, and the host routes it ([itemCommentSendRoute]) to stop the note
 /// and post it with the draft and tray as one comment. The mic is disabled
-/// then, and send is disabled while the microphone is still starting.
+/// then, and send is disabled while the microphone is still starting or the
+/// stopped note is still being taken into the send.
 @Composable
 fun ItemCommentComposer(
     draft: String,

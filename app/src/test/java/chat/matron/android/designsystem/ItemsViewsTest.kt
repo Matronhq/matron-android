@@ -329,6 +329,10 @@ class ItemsViewsTest {
         assertEquals(ItemCommentSendRoute.NONE, itemCommentSendRoute("", hasAttachments = true, voice = starting))
         assertFalse(itemCommentCanSubmit("Go with option B", voice = starting))
 
+        // The stopped note is still on its way into the send: a second tap
+        // must not post the draft and tray beside it.
+        assertEquals(ItemCommentSendRoute.NONE, itemCommentSendRoute("Go with option B", hasAttachments = true, voice = ItemCommentVoice.SENDING))
+
         assertEquals(ItemCommentSendRoute.COMMENT, itemCommentSendRoute("Go with option B"))
         assertEquals(ItemCommentSendRoute.COMMENT, itemCommentSendRoute("", hasAttachments = true))
         assertEquals(ItemCommentSendRoute.NONE, itemCommentSendRoute(" \n"))
@@ -342,6 +346,7 @@ class ItemsViewsTest {
         assertEquals("sends the note over an empty draft", ItemCommentEnterAction.SEND, action("", ItemCommentVoice.RECORDING))
         assertEquals("never the text alone while the mic starts", ItemCommentEnterAction.SWALLOW, action("ok", ItemCommentVoice.STARTING))
         assertEquals(ItemCommentEnterAction.SWALLOW, action("", ItemCommentVoice.STARTING))
+        assertEquals(ItemCommentEnterAction.SWALLOW, action("ok", ItemCommentVoice.SENDING))
         assertEquals(ItemCommentEnterAction.SWALLOW, action("ok", ItemCommentVoice.RECORDING, isBusy = true))
         assertEquals(ItemCommentEnterAction.SWALLOW, action("ok", ItemCommentVoice.RECORDING, isRepeat = true))
         // Shift+Enter still types a newline into the draft that goes with the note.

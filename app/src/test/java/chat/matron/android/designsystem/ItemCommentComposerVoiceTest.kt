@@ -75,6 +75,16 @@ class ItemCommentComposerVoiceTest {
     }
 
     @Test
+    fun sendWaitsWhileTheStoppedNoteIsTakenIntoTheSend() {
+        val log = mutableListOf<String>()
+        setComposer("Typed after the note was sent", ItemCommentVoice.SENDING, log)
+        compose.onNodeWithContentDescription("Send reply").assertIsNotEnabled().performClick()
+        compose.onNodeWithContentDescription("Record voice note").assertIsNotEnabled()
+        compose.onNodeWithText("Recording…").assertDoesNotExist()
+        compose.runOnIdle { assertEquals(emptyList<String>(), log) }
+    }
+
+    @Test
     fun idleComposerKeepsItsMicAndTextSend() {
         val log = mutableListOf<String>()
         setComposer("Go with option B", ItemCommentVoice.IDLE, log)

@@ -287,8 +287,13 @@ fun ItemDetailScreen(
     // True from the mic tap until the recorder has started (or failed): the
     // permission prompt's window, in which send must not post the text alone.
     var micStarting by remember { mutableStateOf(false) }
+    // True from the send that stops a note until its send has run: the view
+    // model only takes the draft and tray once the note is staged, and a
+    // second send in that gap would post them separately.
+    var voiceNoteSending by remember { mutableStateOf(false) }
     fun voice(): ItemCommentVoice = when {
         recorderState is VoiceRecorder.State.Recording -> ItemCommentVoice.RECORDING
+        voiceNoteSending -> ItemCommentVoice.SENDING
         micStarting -> ItemCommentVoice.STARTING
         else -> ItemCommentVoice.IDLE
     }
@@ -446,8 +451,14 @@ fun ItemDetailScreen(
                                         }
                                         ItemCommentSendRoute.WITH_VOICE_NOTE -> recorder.stop()?.let { note ->
                                             draft = ""
+                                            voiceNoteSending = true
                                             scope.launch {
-                                                try { viewModel.sendVoiceNote(note.file) } finally { draft = viewModel.draft }
+                                                try {
+                                                    viewModel.sendVoiceNote(note.file)
+                                                } finally {
+                                                    draft = viewModel.draft
+                                                    voiceNoteSending = false
+                                                }
                                             }
                                         }
                                         ItemCommentSendRoute.NONE -> Unit
