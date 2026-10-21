@@ -192,9 +192,7 @@ private fun CodeStep(viewModel: SignInViewModel, state: SignInViewModel.State.Tw
 @Composable
 private fun EnrolStep(viewModel: SignInViewModel, state: SignInViewModel.State.TwoFactorEnrol) {
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
     var code by remember { mutableStateOf(viewModel.code) }
-    var note by remember { mutableStateOf<String?>(null) }
 
     Text(
         "This server needs two-factor sign-in. Set it up now with an authenticator app such as " +
@@ -219,7 +217,62 @@ private fun EnrolStep(viewModel: SignInViewModel, state: SignInViewModel.State.T
     }
 
     Text("1. Add Matron to your authenticator app", style = MaterialTheme.typography.labelLarge)
-    SetupKeyCard(setup)
+    TwoFactorSetupKey(setup)
+
+    Text("2. Enter the 6-digit code it shows", style = MaterialTheme.typography.labelLarge)
+    SixDigitField(
+        value = code,
+        enabled = !state.busy,
+        onValueChange = { code = it; viewModel.code = it },
+        onComplete = { scope.launch { viewModel.confirmEnrolment() } },
+    )
+    state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    Button(
+        onClick = { scope.launch { viewModel.confirmEnrolment() } },
+        enabled = !state.busy && code.length == 6,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        if (state.busy) CircularProgressIndicator(modifier = Modifier.padding(4.dp)) else Text("Turn on and sign in")
+    }
+}
+
+/**
+ * The setup key for an authenticator app: the QR code, the key as text for
+ * an app that can't scan, "Open in authenticator" and "Copy setup key".
+ * Shared by setup at sign-in and Settings → Security.
+ */
+@Composable
+internal fun TwoFactorSetupKey(setup: TwoFactorSetup) {
+    val context = LocalContext.current
+    var note by remember(setup) { mutableStateOf<String?>(null) }
+    val bitmap = remember(setup.otpauthURI) { QRCode.bitmap(setup.otpauthURI) }
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "Two-factor setup QR code",
+            modifier = Modifier.size(200.dp),
+        )
+        Text(
+            "Setup key",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        Text(
+            TwoFactorDecoding.groupedSecret(setup.secret),
+            style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+            textAlign = TextAlign.Center,
+        )
+        TwoFactorDecoding.shownAs(setup)?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+    }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         OutlinedButton(
             onClick = {
@@ -243,58 +296,32 @@ private fun EnrolStep(viewModel: SignInViewModel, state: SignInViewModel.State.T
     note?.let {
         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-
-    Text("2. Enter the 6-digit code it shows", style = MaterialTheme.typography.labelLarge)
-    SixDigitField(
-        value = code,
-        enabled = !state.busy,
-        onValueChange = { code = it; viewModel.code = it },
-        onComplete = { scope.launch { viewModel.confirmEnrolment() } },
-    )
-    state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    Button(
-        onClick = { scope.launch { viewModel.confirmEnrolment() } },
-        enabled = !state.busy && code.length == 6,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        if (state.busy) CircularProgressIndicator(modifier = Modifier.padding(4.dp)) else Text("Turn on and sign in")
-    }
-}
-
-@Composable
-private fun SetupKeyCard(setup: TwoFactorSetup) {
-    val bitmap = remember(setup.otpauthURI) { QRCode.bitmap(setup.otpauthURI) }
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-        Image(
-            bitmap = bitmap.asImageBitmap(),
-            contentDescription = "Two-factor setup QR code",
-            modifier = Modifier.size(200.dp),
-        )
-        Text(
-            "Setup key",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 8.dp),
-        )
-        Text(
-            TwoFactorDecoding.groupedSecret(setup.secret),
-            style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
-            textAlign = TextAlign.Center,
-        )
-    }
 }
 
 @Composable
 private fun RecoveryCodesStep(viewModel: SignInViewModel, codes: List<String>) {
+    Text(
+        "Two-factor sign-in is on.",
+        style = MaterialTheme.typography.titleMedium,
+        modifier = Modifier.padding(top = 16.dp),
+    )
+    RecoveryCodesPanel(codes, doneLabel = "I've saved these", onDone = { viewModel.finishTwoFactor() })
+}
+
+/**
+ * Recovery codes, shown this once: the list, Copy and Share, and [doneLabel]
+ * to move on. Shared by setup at sign-in and Settings → Security.
+ */
+@Composable
+internal fun RecoveryCodesPanel(codes: List<String>, doneLabel: String, onDone: () -> Unit) {
     val context = LocalContext.current
-    var copied by remember { mutableStateOf(false) }
+    var copied by remember(codes) { mutableStateOf(false) }
     val text = codes.joinToString("\n")
 
     Text(
-        "Two-factor sign-in is on. Save these recovery codes somewhere safe, such as a password manager. " +
+        "Save these recovery codes somewhere safe, such as a password manager. " +
             "Each one signs you in once if you lose your authenticator app.",
         style = MaterialTheme.typography.bodyLarge,
-        modifier = Modifier.padding(top = 16.dp),
     )
     Text(
         "They won't be shown again.",
@@ -332,9 +359,7 @@ private fun RecoveryCodesStep(viewModel: SignInViewModel, codes: List<String>) {
             modifier = Modifier.weight(1f),
         ) { Text("Share") }
     }
-    Button(onClick = { viewModel.finishTwoFactor() }, modifier = Modifier.fillMaxWidth()) {
-        Text("I've saved these")
-    }
+    Button(onClick = onDone, modifier = Modifier.fillMaxWidth()) { Text(doneLabel) }
 }
 
 @Composable
@@ -346,7 +371,7 @@ private fun RecoveryCodeUsedStep(viewModel: SignInViewModel, codesLeft: Int?) {
         modifier = Modifier.padding(top = 16.dp),
     )
     Text(
-        "You can make a new set of recovery codes in Matron Web.",
+        "You can make a new set of recovery codes in Settings → Security.",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -356,7 +381,7 @@ private fun RecoveryCodeUsedStep(viewModel: SignInViewModel, codesLeft: Int?) {
 /// A 6-digit code field: digits only, number keyboard, the one-time-code
 /// autofill hint, and [onComplete] once the sixth digit lands.
 @Composable
-private fun SixDigitField(
+internal fun SixDigitField(
     value: String,
     enabled: Boolean,
     onValueChange: (String) -> Unit,

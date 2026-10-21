@@ -322,6 +322,19 @@ sealed class JournalApiError(message: String) : Exception(message) {
     /// 401 `two_factor_ticket_invalid`: the sign-in ticket is unknown,
     /// expired or used.
     data object TwoFactorTicketInvalid : JournalApiError("The sign-in timed out — please sign in again.")
+    /// 401 `bad_password` from the signed-in `/2fa` routes: the password
+    /// typed to confirm a change is wrong. The session itself is fine.
+    data object BadPassword : JournalApiError("That password is incorrect.")
+    /// 409 from the signed-in `/2fa` routes: `no_pending_setup` (the setup
+    /// expired), `not_enabled`, or `two_factor_required` (the server
+    /// requires it, so it can't be turned off).
+    data class TwoFactorConflict(val code: String) : JournalApiError(
+        when (code) {
+            "no_pending_setup" -> "That setup expired. Start again."
+            "two_factor_required" -> "This server requires two-factor sign-in, so it can't be turned off."
+            else -> "Two-factor sign-in is already off."
+        },
+    )
     /// Any other non-success status. [serverMessage] is the body's `message`,
     /// else its `error` code, else empty. [code], [bodyMessage], [reason] and
     /// [max] are the body's own `error`, `message`, `reason` and `max`
@@ -442,6 +455,56 @@ class JournalApi(
     override suspend fun twoFactorStatus(): TwoFactorStatus =
         TwoFactorDecoding.status(request(path = "/2fa"))
             ?: throw JournalApiError.Transport("malformed two-factor response")
+
+    /// `POST /2fa/setup {password, code?}` — starts a pending setup. [code]
+    /// (from the current app, or a recovery code) only when two-factor is
+    /// already on and the user is moving to a new app.
+    override suspend fun twoFactorSetup(password: String, code: String?): TwoFactorSetup =
+        TwoFactorDecoding.setup(
+            request(
+                path = "/2fa/setup", method = "POST",
+                jsonBody = buildJsonObject {
+                    put("password", password)
+                    if (code != null) put("code", code)
+                },
+            ),
+        ) ?: throw JournalApiError.Transport("malformed two-factor setup response")
+
+    /// `POST /2fa/enable {code, sign_out_others}` — the new app's first code
+    /// confirms the pending setup.
+    override suspend fun twoFactorEnable(code: String, signOutOthers: Boolean): TwoFactorEnabled =
+        TwoFactorDecoding.enabled(
+            request(
+                path = "/2fa/enable", method = "POST",
+                jsonBody = buildJsonObject {
+                    put("code", code)
+                    put("sign_out_others", signOutOthers)
+                },
+            ),
+        ) ?: throw JournalApiError.Transport("malformed two-factor response")
+
+    /// `POST /2fa/disable {password, code}`.
+    override suspend fun twoFactorDisable(password: String, code: String) {
+        request(
+            path = "/2fa/disable", method = "POST",
+            jsonBody = buildJsonObject {
+                put("password", password)
+                put("code", code)
+            },
+        )
+    }
+
+    /// `POST /2fa/recovery-codes {password, code}` — a new set replaces the old.
+    override suspend fun twoFactorRecoveryCodes(password: String, code: String): List<String> =
+        TwoFactorDecoding.recoveryCodes(
+            request(
+                path = "/2fa/recovery-codes", method = "POST",
+                jsonBody = buildJsonObject {
+                    put("password", password)
+                    put("code", code)
+                },
+            ),
+        ) ?: throw JournalApiError.Transport("malformed two-factor response")
 
     override suspend fun snapshot(): SnapshotResponse {
         val obj = request(path = "/snapshot")
@@ -1217,6 +1280,9 @@ class JournalApi(
             }
             status == 401 && code == "two_factor_ticket_invalid" -> JournalApiError.TwoFactorTicketInvalid
             status == 403 && code == "bad_code" -> JournalApiError.BadCode(obj?.boolOrNull("ticket_valid") ?: true)
+            status == 401 && code == "bad_password" -> JournalApiError.BadPassword
+            status == 409 && (code == "no_pending_setup" || code == "not_enabled" || code == "two_factor_required") ->
+                JournalApiError.TwoFactorConflict(code)
             status == 429 && code == "locked_out" ->
                 JournalApiError.LockedOut(obj?.intOrNull("retry_after") ?: 60)
             status == 429 -> JournalApiError.RateLimited

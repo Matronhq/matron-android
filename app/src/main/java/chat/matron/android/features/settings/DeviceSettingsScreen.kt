@@ -89,7 +89,7 @@ fun DeviceSettingsScreen(
     /// Settings → Archive's "Archive idle chats" choice. `null` in hosts
     /// without a session; hidden too on a journal without auto-archive.
     autoArchive: AutoArchiveSettingViewModel? = null,
-    /// Settings → Security's two-factor status. `null` in hosts without a
+    /// Settings → Security's two-factor sign-in. `null` in hosts without a
     /// session; hidden too on a journal without two-factor.
     twoFactor: TwoFactorSettingViewModel? = null,
     onBack: () -> Unit,
@@ -311,60 +311,6 @@ private fun NoticesSection(model: NoticesSettingViewModel) {
 }
 
 /**
- * Settings → Security: whether two-factor sign-in is on. Read-only — turning
- * it on or off and new recovery codes live in Matron Web, and the section
- * says so. Hidden until `GET /2fa` answers, and for good on a journal that
- * 404s it.
- */
-@Composable
-private fun SecuritySection(model: TwoFactorSettingViewModel) {
-    LaunchedEffect(model) { model.load() }
-    val state by model.state.collectAsStateWithLifecycle()
-    if (state == TwoFactorSettingViewModel.State.Loading || state == TwoFactorSettingViewModel.State.Unsupported) return
-
-    SettingsSection("Security") {
-        when (val s = state) {
-            is TwoFactorSettingViewModel.State.Loaded -> {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(TwoFactorSettingViewModel.TITLE, style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            TwoFactorSettingViewModel.detailText(s.status),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Text(
-                        TwoFactorSettingViewModel.valueText(s.status),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = if (s.status.enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            is TwoFactorSettingViewModel.State.Failed -> Text(
-                s.message,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(vertical = 8.dp),
-            )
-            else -> Unit
-        }
-        Text(
-            TwoFactorSettingViewModel.MANAGE,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(bottom = 8.dp),
-        )
-    }
-}
-
-/**
  * Settings › Archive: the journal's "Archive idle chats" window, a menu of
  * Off / 14 / 30 / 90 days. Moves at once and goes back if the save fails.
  */
@@ -551,7 +497,7 @@ private fun PinnedChatsSection(onOpen: () -> Unit) {
 }
 
 @Composable
-private fun SettingsSection(title: String, content: @Composable () -> Unit) {
+internal fun SettingsSection(title: String, content: @Composable () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(
             title,

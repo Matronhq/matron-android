@@ -257,8 +257,8 @@ class SignInViewModel(
         /// The note after a recovery-code sign-in.
         fun recoveryCodesLeftText(left: Int?): String = when (left) {
             null -> "You signed in with a recovery code. That code can't be used again."
-            0 -> "You signed in with your last recovery code. Make new ones in Matron Web now."
-            1 -> "You signed in with a recovery code. You have 1 recovery code left. Make new ones in Matron Web."
+            0 -> "You signed in with your last recovery code. Make new ones in Settings → Security now."
+            1 -> "You signed in with a recovery code. You have 1 recovery code left. Make new ones in Settings → Security."
             else -> "You signed in with a recovery code. You have $left recovery codes left."
         }
 

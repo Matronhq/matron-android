@@ -2,6 +2,7 @@ package chat.matron.android.auth
 
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalApiError
+import chat.matron.android.journal.TwoFactorEnabled
 import chat.matron.android.journal.TwoFactorStatus
 import chat.matron.android.storage.InMemorySessionStore
 import kotlinx.coroutines.runBlocking
@@ -154,7 +155,13 @@ class JournalAuthServiceTwoFactorTest {
         respond(200, """{"enabled":true,"enabled_at":1760000000000,"recovery_codes_left":9,"required":true,"available":true}""")
         val api = JournalApi(baseUrl(), token = "tok")
         assertEquals(
-            TwoFactorStatus(enabled = true, recoveryCodesLeft = 9, required = true, available = true),
+            TwoFactorStatus(
+                enabled = true,
+                recoveryCodesLeft = 9,
+                required = true,
+                available = true,
+                enabledAtMillis = 1760000000000,
+            ),
             api.twoFactorStatus(),
         )
         val request = server.takeRequest()
@@ -171,5 +178,77 @@ class JournalAuthServiceTwoFactorTest {
         } catch (e: JournalApiError) {
             assertEquals(JournalApiError.NotFound, e)
         }
+    }
+
+    @Test
+    fun settingsSetup_postsThePassword_andTheCurrentCodeOnlyWhenMoving() = runBlocking {
+        val setupBody = """{"secret":"JBSWY3DPEHPK3PXP","otpauth_uri":"otpauth://totp/Matron:alice@example.com?secret=JBSWY3DPEHPK3PXP","issuer":"Matron","account":"alice@example.com"}"""
+        val api = JournalApi(baseUrl(), token = "tok")
+        respond(200, setupBody)
+        assertEquals("JBSWY3DPEHPK3PXP", api.twoFactorSetup("pw", null).secret)
+        var request = server.takeRequest()
+        assertEquals("/2fa/setup", request.path)
+        assertEquals("Bearer tok", request.getHeader("Authorization"))
+        assertEquals("""{"password":"pw"}""", request.body.readUtf8())
+
+        respond(200, setupBody)
+        api.twoFactorSetup("pw", "123456")
+        request = server.takeRequest()
+        assertEquals("""{"password":"pw","code":"123456"}""", request.body.readUtf8())
+    }
+
+    @Test
+    fun settingsEnable_sendsSignOutOthers_andDecodesTheCodes() = runBlocking {
+        respond(200, """{"recovery_codes":["aaaa-bbbb-cccc-dddd"],"signed_out":2}""")
+        val enabled = JournalApi(baseUrl(), token = "tok").twoFactorEnable("123456", signOutOthers = true)
+        val request = server.takeRequest()
+        assertEquals("/2fa/enable", request.path)
+        assertEquals("""{"code":"123456","sign_out_others":true}""", request.body.readUtf8())
+        assertEquals(TwoFactorEnabled(listOf("aaaa-bbbb-cccc-dddd"), signedOut = 2), enabled)
+    }
+
+    @Test
+    fun settingsRecoveryCodesAndDisable_postPasswordAndCode() = runBlocking {
+        val api = JournalApi(baseUrl(), token = "tok")
+        respond(200, """{"recovery_codes":["aaaa-bbbb-cccc-dddd","eeee-ffff-gggg-hhhh"]}""")
+        assertEquals(listOf("aaaa-bbbb-cccc-dddd", "eeee-ffff-gggg-hhhh"), api.twoFactorRecoveryCodes("pw", "123456"))
+        var request = server.takeRequest()
+        assertEquals("/2fa/recovery-codes", request.path)
+        assertEquals("""{"password":"pw","code":"123456"}""", request.body.readUtf8())
+
+        respond(200, """{"ok":true}""")
+        api.twoFactorDisable("pw", "123456")
+        request = server.takeRequest()
+        assertEquals("/2fa/disable", request.path)
+        assertEquals("""{"password":"pw","code":"123456"}""", request.body.readUtf8())
+    }
+
+    @Test
+    fun settingsRefusals_mapToTheirOwnErrors() = runBlocking {
+        val api = JournalApi(baseUrl(), token = "tok")
+        suspend fun refusal(block: suspend () -> Unit): JournalApiError {
+            try {
+                block()
+            } catch (e: JournalApiError) {
+                return e
+            }
+            fail("expected a JournalApiError")
+            throw AssertionError()
+        }
+        // A wrong password is a 401, but not a dead session.
+        respond(401, """{"error":"bad_password"}""")
+        assertEquals(JournalApiError.BadPassword, refusal { api.twoFactorSetup("nope", null) })
+        respond(403, """{"error":"bad_code"}""")
+        assertEquals(JournalApiError.BadCode(ticketValid = true), refusal { api.twoFactorDisable("pw", "000000") })
+        respond(409, """{"error":"no_pending_setup"}""")
+        assertEquals(
+            JournalApiError.TwoFactorConflict("no_pending_setup"),
+            refusal { api.twoFactorEnable("123456", signOutOthers = false) },
+        )
+        respond(409, """{"error":"two_factor_required"}""")
+        assertEquals(
+            JournalApiError.TwoFactorConflict("two_factor_required"),
+            refusal { api.twoFactorDisable("pw", "123456") },
+        )
     }
 }
