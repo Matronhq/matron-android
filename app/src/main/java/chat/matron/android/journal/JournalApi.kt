@@ -328,6 +328,10 @@ sealed class JournalApiError(message: String) : Exception(message) {
     data object BadPassword : JournalApiError("That password is incorrect.")
     /// 400 `weak_password` from `POST /password`: the new password is too short.
     data object WeakPassword : JournalApiError("Use at least 8 characters.")
+    /// 400 `bad_email` from `PUT /account/email`.
+    data object BadEmail : JournalApiError("Enter a valid email address.")
+    /// 409 `email_taken` from `PUT /account/email`: another account has it.
+    data object EmailTaken : JournalApiError("Another account already uses that address.")
     /// Any other non-success status. [serverMessage] is the body's `message`,
     /// else its `error` code, else empty. [code], [bodyMessage], [reason] and
     /// [max] are the body's own `error`, `message`, `reason` and `max`
@@ -354,7 +358,7 @@ class JournalApi(
     token: String? = null,
 ) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
-    ArchiveWriting, TwoFactorProviding, PasswordChanging {
+    ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -464,6 +468,44 @@ class JournalApi(
         )
         return PasswordChange(signedOut = obj.intOrNull("signed_out") ?: 0)
     }
+
+    // MARK: Password reset by email
+    //
+    // The sign-in screen's "Forgot password?" is unauthenticated; the link
+    // the journal mails is finished in Matron Web.
+
+    /// `GET /password/forgot` — whether the journal can mail reset links.
+    /// Only an explicit `true` counts.
+    suspend fun passwordResetEnabled(): Boolean =
+        request(path = "/password/forgot", authenticated = false).boolOrNull("enabled") == true
+
+    /// `POST /password/forgot {identifier}` — a username or an email address.
+    /// Always 200 when accepted, whether or not the account exists, so the
+    /// answer reveals nothing.
+    suspend fun requestPasswordReset(identifier: String) {
+        request(
+            path = "/password/forgot", method = "POST", authenticated = false,
+            jsonBody = buildJsonObject { put("identifier", identifier) },
+        )
+    }
+
+    override suspend fun accountEmail(): AccountEmail {
+        val obj = request(path = "/account/email")
+        return AccountEmail(
+            email = obj.stringOrNull("email")?.takeIf { it.isNotEmpty() },
+            resetByEmail = obj.boolOrNull("reset_by_email") ?: false,
+        )
+    }
+
+    /// `PUT /account/email {password, email}` — `email: null` removes it.
+    override suspend fun setAccountEmail(password: String, email: String?): String? =
+        request(
+            path = "/account/email", method = "PUT",
+            jsonBody = buildJsonObject {
+                put("password", password)
+                put("email", email?.let { JsonPrimitive(it) } ?: JsonNull)
+            },
+        ).stringOrNull("email")?.takeIf { it.isNotEmpty() }
 
     override suspend fun snapshot(): SnapshotResponse {
         val obj = request(path = "/snapshot")
@@ -1241,6 +1283,8 @@ class JournalApi(
             // Before the catch-all 401: a wrong current password is not a dead session.
             status == 401 && code == "bad_password" -> JournalApiError.BadPassword
             status == 400 && code == "weak_password" -> JournalApiError.WeakPassword
+            status == 400 && code == "bad_email" -> JournalApiError.BadEmail
+            status == 409 && code == "email_taken" -> JournalApiError.EmailTaken
             status == 403 && code == "bad_code" -> JournalApiError.BadCode(obj?.boolOrNull("ticket_valid") ?: true)
             status == 429 && code == "locked_out" ->
                 JournalApiError.LockedOut(obj?.intOrNull("retry_after") ?: 60)
