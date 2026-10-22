@@ -322,6 +322,12 @@ sealed class JournalApiError(message: String) : Exception(message) {
     /// 401 `two_factor_ticket_invalid`: the sign-in ticket is unknown,
     /// expired or used.
     data object TwoFactorTicketInvalid : JournalApiError("The sign-in timed out — please sign in again.")
+    /// 401 `bad_password` from a signed-in route that asks for the current
+    /// password (`POST /password`): the password typed is wrong. The session
+    /// itself is fine, so this is never [Unauthenticated].
+    data object BadPassword : JournalApiError("That password is incorrect.")
+    /// 400 `weak_password` from `POST /password`: the new password is too short.
+    data object WeakPassword : JournalApiError("Use at least 8 characters.")
     /// Any other non-success status. [serverMessage] is the body's `message`,
     /// else its `error` code, else empty. [code], [bodyMessage], [reason] and
     /// [max] are the body's own `error`, `message`, `reason` and `max`
@@ -348,7 +354,7 @@ class JournalApi(
     token: String? = null,
 ) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
-    ArchiveWriting, TwoFactorProviding {
+    ArchiveWriting, TwoFactorProviding, PasswordChanging {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -442,6 +448,22 @@ class JournalApi(
     override suspend fun twoFactorStatus(): TwoFactorStatus =
         TwoFactorDecoding.status(request(path = "/2fa"))
             ?: throw JournalApiError.Transport("malformed two-factor response")
+
+    /// `POST /password {old_password, new_password, sign_out_others}` —
+    /// client devices only (an agent device gets 403). A wrong
+    /// [oldPassword] is a 401 `bad_password` ([JournalApiError.BadPassword])
+    /// and counts against the same lockout as sign-in.
+    override suspend fun changePassword(oldPassword: String, newPassword: String, signOutOthers: Boolean): PasswordChange {
+        val obj = request(
+            path = "/password", method = "POST",
+            jsonBody = buildJsonObject {
+                put("old_password", oldPassword)
+                put("new_password", newPassword)
+                put("sign_out_others", signOutOthers)
+            },
+        )
+        return PasswordChange(signedOut = obj.intOrNull("signed_out") ?: 0)
+    }
 
     override suspend fun snapshot(): SnapshotResponse {
         val obj = request(path = "/snapshot")
@@ -1216,6 +1238,9 @@ class JournalApi(
                 }
             }
             status == 401 && code == "two_factor_ticket_invalid" -> JournalApiError.TwoFactorTicketInvalid
+            // Before the catch-all 401: a wrong current password is not a dead session.
+            status == 401 && code == "bad_password" -> JournalApiError.BadPassword
+            status == 400 && code == "weak_password" -> JournalApiError.WeakPassword
             status == 403 && code == "bad_code" -> JournalApiError.BadCode(obj?.boolOrNull("ticket_valid") ?: true)
             status == 429 && code == "locked_out" ->
                 JournalApiError.LockedOut(obj?.intOrNull("retry_after") ?: 60)
