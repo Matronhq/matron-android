@@ -94,11 +94,12 @@ class ChangePasswordScreenTest {
         compose.waitUntil(3000) {
             compose.onAllNodesWithText("That password is incorrect.").fetchSemanticsNodes().isNotEmpty()
         }
-        // Still signed in, still on the form, passwords gone.
+        // Still signed in, still on the form; only the current password is gone.
         compose.onNodeWithTag(CHANGE_PASSWORD_SUBMIT_TAG).assertIsNotEnabled()
         shoot("build/reports/change-password-wrong-password.png")
 
-        fill("right-secret", "new-secret")
+        compose.onNodeWithText(ChangePasswordViewModel.CURRENT).performTextInput("right-secret")
+        compose.onNodeWithTag(CHANGE_PASSWORD_SUBMIT_TAG).assertIsEnabled()
         compose.onNodeWithTag(CHANGE_PASSWORD_SUBMIT_TAG).performClick()
         compose.waitUntil(3000) {
             compose.onAllNodesWithText("Password changed. Signed out of 2 other devices.")

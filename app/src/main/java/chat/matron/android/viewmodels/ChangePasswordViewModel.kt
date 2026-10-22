@@ -11,8 +11,10 @@ import kotlinx.coroutines.flow.update
 /// Settings → Security's "Change password", as in Matron Web: a row that
 /// opens a small form (current, new, confirm, and "Sign out of my other
 /// devices", on by default), `POST /password` on submit. The passwords live
-/// only in [state] while the form is open: they are cleared once the journal
-/// answers, either way, and never logged ([State.toString] leaves them out).
+/// only in [state] while the form is open and are never logged
+/// ([State.toString] leaves them out). A success, Cancel or leaving the screen
+/// clears them all; a refusal clears only the current password, so the new
+/// one need not be typed twice again.
 class ChangePasswordViewModel(private val api: PasswordChanging) {
     data class State(
         val isOpen: Boolean = false,
@@ -64,14 +66,12 @@ class ChangePasswordViewModel(private val api: PasswordChanging) {
             val answer = api.changePassword(form.currentPassword, form.newPassword, form.signOutOthers)
             _state.value = State(confirmation = confirmationText(answer.signedOut))
         } catch (cancel: CancellationException) {
-            _state.update { it.cleared().copy(isSubmitting = false) }
+            _state.update { it.copy(currentPassword = "", isSubmitting = false) }
             throw cancel
         } catch (error: Throwable) {
-            _state.update { it.cleared().copy(isSubmitting = false, error = errorText(error)) }
+            _state.update { it.copy(currentPassword = "", isSubmitting = false, error = errorText(error)) }
         }
     }
-
-    private fun State.cleared() = copy(currentPassword = "", newPassword = "", confirmPassword = "")
 
     companion object {
         const val TITLE = "Change password"

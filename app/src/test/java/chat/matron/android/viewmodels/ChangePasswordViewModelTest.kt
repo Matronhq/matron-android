@@ -123,16 +123,28 @@ class ChangePasswordViewModelTest {
     }
 
     @Test
-    fun aWrongPasswordKeepsTheFormOpenAndClearsThePasswords() = runBlocking {
+    fun aRefusalClearsOnlyTheCurrentPassword() = runBlocking {
         val vm = filled(Api(Result.failure(JournalApiError.BadPassword)))
         vm.submit()
         val s = vm.state.value
         assertTrue(s.isOpen)
         assertEquals("That password is incorrect.", s.error)
         assertEquals("", s.currentPassword)
-        assertEquals("", s.newPassword)
-        assertEquals("", s.confirmPassword)
+        assertEquals("new-secret", s.newPassword)
+        assertEquals("new-secret", s.confirmPassword)
         assertFalse(s.isSubmitting)
+        assertFalse(s.canSubmit)
+        vm.setCurrentPassword("right-secret")
+        assertTrue(vm.state.value.canSubmit)
+    }
+
+    @Test
+    fun aNetworkErrorAlsoKeepsTheNewPassword() = runBlocking {
+        val vm = filled(Api(Result.failure(JournalApiError.Transport("offline"))))
+        vm.submit()
+        assertEquals("", vm.state.value.currentPassword)
+        assertEquals("new-secret", vm.state.value.newPassword)
+        assertEquals("new-secret", vm.state.value.confirmPassword)
     }
 
     @Test
