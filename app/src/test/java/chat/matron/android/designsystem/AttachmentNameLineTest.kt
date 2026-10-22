@@ -15,6 +15,9 @@ import androidx.compose.ui.test.performTouchInput
 import chat.matron.android.models.ItemKind
 import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerItem
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.width
 import java.io.File
 import java.time.Instant
@@ -46,6 +49,26 @@ class AttachmentNameLineTest {
         // No usable extension: a dotfile, or a "suffix" too long to be one.
         assertEquals(".bash" to "_rc0", splitFilenameForMiddleTruncation(".bash_rc0"))
         assertEquals("notes.this-is-no" to "t-it", splitFilenameForMiddleTruncation("notes.this-is-not-it"))
+    }
+
+    @Test
+    fun aNarrowImageKeepsItsSizeAndAMissingSizeIsLeftOut() {
+        compose.setContent {
+            MatronTheme(appearance = MatronAppearance.Light) {
+                Surface {
+                    androidx.compose.foundation.layout.Column {
+                        AttachmentImage(model = photo(0), filename = long.name, sizeBytes = long.size, modifier = androidx.compose.ui.Modifier.width(60.dp))
+                        AttachmentNameLine("no-size.png", null)
+                    }
+                }
+            }
+        }
+        compose.waitForIdle()
+        val size = compose.onNodeWithText(" · 38.9 MB", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val line = compose.onNodeWithContentDescription("${long.name} · 38.9 MB").getUnclippedBoundsInRoot()
+        assertTrue("size squeezed to ${size.width}", size.width > 40.dp)
+        assertTrue("size ${size.right} spills past line ${line.right}", size.right <= line.right)
+        compose.onNodeWithContentDescription("no-size.png").assertExists()
     }
 
     @Test

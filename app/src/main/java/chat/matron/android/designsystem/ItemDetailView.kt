@@ -583,7 +583,7 @@ internal fun AuthorCaption(
 private fun Attachments(list: List<TrackerAttachment>, image: (TrackerAttachment) -> Any?, onOpen: (TrackerAttachment) -> Unit) {
     list.forEach { a ->
         when {
-            a.isImage -> AttachmentImage(model = image(a), filename = a.name, sizeBytes = a.size, onTap = { onOpen(a) })
+            a.isImage -> AttachmentImage(model = image(a), filename = a.name, sizeBytes = a.size.takeIf { it > 0 }, onTap = { onOpen(a) })
             a.isAudio -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(
                     Modifier.clickable { onOpen(a) },
@@ -601,7 +601,7 @@ private fun Attachments(list: List<TrackerAttachment>, image: (TrackerAttachment
                     Text(caption, style = ItemTypography.bodyStyle(), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            else -> AttachmentFile(filename = a.name, sizeBytes = a.size, onTap = { onOpen(a) })
+            else -> AttachmentFile(filename = a.name, sizeBytes = a.size.takeIf { it > 0 }, onTap = { onOpen(a) })
         }
     }
 }

@@ -19,7 +19,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.TooltipBox
@@ -117,15 +116,30 @@ fun AttachmentNameLine(filename: String, sizeBytes: Long?, modifier: Modifier = 
         state = rememberTooltipState(),
         modifier = modifier,
     ) {
-        Row(Modifier.clearAndSetSemantics { contentDescription = full }) {
-            if (name.isNotEmpty()) {
-                val (head, tail) = splitFilenameForMiddleTruncation(name)
-                Text(head, Modifier.weight(1f, fill = false), style = style, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(tail, style = style, color = color, maxLines = 1, softWrap = false)
-            }
-            if (size != null) {
-                Text(if (name.isNotEmpty()) " · $size" else size, style = style, color = color, maxLines = 1, softWrap = false)
-            }
+        val (head, tail) = splitFilenameForMiddleTruncation(name)
+        NameLineLayout(Modifier.clearAndSetSemantics { contentDescription = full }) {
+            Text(if (size != null && name.isNotEmpty()) " · $size" else size.orEmpty(), style = style, color = color, maxLines = 1, softWrap = false)
+            Text(tail, style = style, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(head, style = style, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+/// One row of size, tail and head, laid out head-tail-size but measured
+/// size first, then tail, then head, each in what the earlier ones left: the
+/// size always shows, the tail gives way only once the head is gone.
+@Composable
+private fun NameLineLayout(modifier: Modifier, content: @Composable () -> Unit) {
+    Layout(content, modifier) { measurables, constraints ->
+        var left = constraints.maxWidth
+        val (size, tail, head) = measurables.map { m ->
+            m.measure(constraints.copy(minWidth = 0, maxWidth = left.coerceAtLeast(0))).also { left -= it.width }
+        }
+        val width = head.width + tail.width + size.width
+        layout(width, maxOf(head.height, tail.height, size.height)) {
+            head.placeRelative(0, 0)
+            tail.placeRelative(head.width, 0)
+            size.placeRelative(head.width + tail.width, 0)
         }
     }
 }
