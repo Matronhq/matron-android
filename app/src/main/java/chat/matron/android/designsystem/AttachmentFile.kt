@@ -136,7 +136,7 @@ internal fun attachmentFileSubtitle(
 /// Decimal (1000-based) size string — "12 bytes", "3.4 kB", "1.2 MB" — matching
 /// the tray's `StagedAttachment.formattedSize` so a staged file and a sent one
 /// read the same.
-private fun formatFileSize(bytes: Long): String {
+internal fun formatFileSize(bytes: Long): String {
     if (bytes < 1000) return "$bytes bytes"
     val units = listOf("kB", "MB", "GB", "TB")
     var value = bytes.toDouble() / 1000.0

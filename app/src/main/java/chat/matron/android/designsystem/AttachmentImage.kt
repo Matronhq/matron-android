@@ -19,6 +19,16 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.PlainTooltip
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.rememberTooltipState
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.SubcomposeAsyncImage
 
@@ -33,12 +43,17 @@ import coil.compose.SubcomposeAsyncImage
 /// [onTap] (when wired) fires on the whole image box — including the
 /// placeholder state, so the user can open the (eventually-resolved) image
 /// before the bytes have rendered.
+///
+/// With [filename] or [sizeBytes] (item threads, port of apple #101) the
+/// image gets a `name · size` line right under it: see [AttachmentNameLine].
 @Composable
 fun AttachmentImage(
     model: Any?,
     modifier: Modifier = Modifier,
     placeholder: String = "Image",
     caption: String? = null,
+    filename: String? = null,
+    sizeBytes: Long? = null,
     onTap: (() -> Unit)? = null,
 ) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -47,14 +62,19 @@ fun AttachmentImage(
             .clip(RoundedCornerShape(8.dp))
             .then(if (onTap != null) Modifier.clickable { onTap() } else Modifier)
 
-        SubcomposeAsyncImage(
-            model = model,
-            contentDescription = caption ?: placeholder,
-            modifier = boxModifier,
-            contentScale = ContentScale.Fit,
-            loading = { ImagePlaceholder(placeholder) },
-            error = { ImagePlaceholder(placeholder) },
-        )
+        CappedToFirstWidth {
+            SubcomposeAsyncImage(
+                model = model,
+                contentDescription = caption ?: filename?.takeIf { it.isNotBlank() } ?: placeholder,
+                modifier = boxModifier,
+                contentScale = ContentScale.Fit,
+                loading = { ImagePlaceholder(placeholder) },
+                error = { ImagePlaceholder(placeholder) },
+            )
+            if (filename != null || sizeBytes != null) {
+                AttachmentNameLine(filename.orEmpty(), sizeBytes)
+            }
+        }
 
         if (caption != null && caption.isNotEmpty()) {
             Text(caption, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
@@ -73,6 +93,68 @@ private fun ImagePlaceholder(label: String) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Icon(Icons.Filled.Image, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(32.dp))
             Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/// The `name · size` line under an image in an item thread. The name is
+/// truncated in the middle so the extension stays (Compose 1.7 has no
+/// `TextOverflow.MiddleEllipsis`, so the head ellipsizes and the tail never
+/// does), the size never truncates, and a long-press shows the full name.
+/// Just the size when the attachment has no name.
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AttachmentNameLine(filename: String, sizeBytes: Long?, modifier: Modifier = Modifier) {
+    val name = filename.trim()
+    val size = sizeBytes?.let(::formatFileSize)
+    val full = listOfNotNull(name.ifEmpty { null }, size).joinToString(" · ")
+    if (full.isEmpty()) return
+    val style = MaterialTheme.typography.labelSmall
+    val color = MaterialTheme.colorScheme.onSurfaceVariant
+    TooltipBox(
+        positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+        tooltip = { PlainTooltip { Text(full) } },
+        state = rememberTooltipState(),
+        modifier = modifier,
+    ) {
+        Row(Modifier.clearAndSetSemantics { contentDescription = full }) {
+            if (name.isNotEmpty()) {
+                val (head, tail) = splitFilenameForMiddleTruncation(name)
+                Text(head, Modifier.weight(1f, fill = false), style = style, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(tail, style = style, color = color, maxLines = 1, softWrap = false)
+            }
+            if (size != null) {
+                Text(if (name.isNotEmpty()) " · $size" else size, style = style, color = color, maxLines = 1, softWrap = false)
+            }
+        }
+    }
+}
+
+/// A filename split for middle truncation: `head` may be cut with an
+/// ellipsis, `tail` (the last few characters of the stem and the extension)
+/// always shows, so "divider_4867x3071.png" narrows to "divid…3071.png"
+/// rather than losing its extension.
+internal fun splitFilenameForMiddleTruncation(name: String): Pair<String, String> {
+    val dot = name.lastIndexOf('.')
+    val extension = if (dot > 0 && name.length - dot <= 10) name.length - dot else 0
+    val cut = maxOf(0, name.length - extension - 4)
+    return name.substring(0, cut) to name.substring(cut)
+}
+
+/// Lays its children out in a column, every child after the first measured no
+/// wider than the first: the name line under an image never widens it.
+@Composable
+private fun CappedToFirstWidth(content: @Composable () -> Unit) {
+    Layout(content) { measurables, constraints ->
+        val loose = constraints.copy(minWidth = 0, minHeight = 0)
+        val first = measurables.first().measure(loose)
+        val gap = 4.dp.roundToPx()
+        val rest = measurables.drop(1).map { it.measure(loose.copy(maxWidth = first.width)) }
+        val height = first.height + rest.sumOf { gap + it.height }
+        layout(first.width, height) {
+            first.placeRelative(0, 0)
+            var y = first.height
+            rest.forEach { y += gap; it.placeRelative(0, y); y += it.height }
         }
     }
 }
