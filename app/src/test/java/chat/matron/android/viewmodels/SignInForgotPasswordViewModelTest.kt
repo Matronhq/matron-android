@@ -63,6 +63,21 @@ class SignInForgotPasswordViewModelTest {
     }
 
     @Test
+    fun changingTheServerHidesItUntilCheckedAgain() = runBlocking {
+        val vm = offered(FakeAuthService())
+        assertTrue(vm.forgotPasswordAvailable.value)
+        vm.serverURL = "https://other.example.com"
+        assertFalse(vm.forgotPasswordAvailable.value)
+        vm.openForgotPassword()
+        assertNull(vm.forgotPassword.value)
+        // Only whitespace changed: still the same server.
+        vm.serverURL = server
+        vm.checkPasswordReset()
+        vm.serverURL = "$server "
+        assertTrue(vm.forgotPasswordAvailable.value)
+    }
+
+    @Test
     fun theFormStartsWithTheTypedUsername() = runBlocking {
         val vm = offered(FakeAuthService())
         vm.username = "alice "

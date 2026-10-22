@@ -78,6 +78,12 @@ class SignInViewModel(
     // placeholder host) meant the field looked already-answered — App Review
     // signed in over it and hit "Couldn't reach that server."
     var serverURL: String = ""
+        set(value) {
+            // "Forgot password?" answered for the old server, not this one:
+            // hide it until [checkPasswordReset] asks the new one.
+            if (value.trim() != field.trim()) _forgotPasswordAvailable.value = false
+            field = value
+        }
     var username: String = ""
     var password: String = ""
 
