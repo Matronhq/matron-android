@@ -1032,6 +1032,7 @@ private fun SignedInApp(
                         }
                         val twoFactorSetting = remember(session.userID) { deps.makeTwoFactorSettingViewModel(session) }
                         val changePassword = remember(session.userID) { deps.makeChangePasswordViewModel(session) }
+                        val accountEmail = remember(session.userID) { deps.makeAccountEmailViewModel(session) }
                         val coordinatorConsent = remember(session.userID) {
                             deps.makeCoordinatorConsentSettingViewModel(session, sessionScope)
                         }
@@ -1056,6 +1057,7 @@ private fun SignedInApp(
                             autoArchive = autoArchiveSetting,
                             twoFactor = twoFactorSetting,
                             changePassword = changePassword,
+                            accountEmail = accountEmail,
                             onBack = { nav.popBackStack() },
                         )
                     }

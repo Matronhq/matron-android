@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -40,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -54,6 +56,7 @@ import chat.matron.android.viewmodels.SignInViewModel
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -73,6 +76,10 @@ import kotlinx.coroutines.launch
  * When the password is right but the journal wants a two-factor code (or
  * two-factor set up first), [TwoFactorSignInScreen] takes over until the
  * view model reaches `SignedIn` or drops back to the form.
+ *
+ * "Forgot password?" shows under the password field only while the journal at
+ * the typed server mails reset links; it swaps the credentials for a small
+ * "Username or email" form until "Back to sign in".
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -91,6 +98,15 @@ fun SignInScreen(
 
     LaunchedEffect(state) {
         (state as? SignInViewModel.State.SignedIn)?.let { onSignedIn(it.session) }
+    }
+
+    val forgotAvailable by viewModel.forgotPasswordAvailable.collectAsStateWithLifecycle()
+    val forgot by viewModel.forgotPassword.collectAsStateWithLifecycle()
+    // Ask the typed server whether it mails reset links once typing pauses;
+    // a new keystroke cancels the pending ask.
+    LaunchedEffect(server) {
+        delay(FORGOT_CHECK_DELAY_MS)
+        viewModel.checkPasswordReset()
     }
 
     val linkState by linkViewModel.state.collectAsStateWithLifecycle()
@@ -208,12 +224,24 @@ fun SignInScreen(
                     onValueChange = { server = it; viewModel.serverURL = it },
                     label = { Text("Server URL") },
                     singleLine = true,
+                    // The reset link goes to this server: fixed while the form is open.
+                    enabled = forgot == null,
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Uri,
                         imeAction = ImeAction.Next,
                     ),
                     modifier = Modifier.fillMaxWidth(),
                 )
+
+                forgot?.let { form ->
+                    ForgotPasswordForm(
+                        form = form,
+                        onIdentifierChange = viewModel::setForgotIdentifier,
+                        onSubmit = { scope.launch { viewModel.submitForgotPassword() } },
+                        onBack = viewModel::closeForgotPassword,
+                    )
+                    return@Column
+                }
 
                 Text("Credentials", style = MaterialTheme.typography.labelLarge)
                 OutlinedTextField(
@@ -236,6 +264,12 @@ fun SignInScreen(
                     ),
                     modifier = Modifier.fillMaxWidth(),
                 )
+                if (forgotAvailable) {
+                    TextButton(
+                        onClick = viewModel::openForgotPassword,
+                        modifier = Modifier.testTag(FORGOT_PASSWORD_LINK_TAG),
+                    ) { Text(SignInViewModel.FORGOT_LINK) }
+                }
 
                 if (errorMessage != null) {
                     Text(errorMessage, color = MaterialTheme.colorScheme.error)
@@ -390,3 +424,43 @@ fun SignInScreen(
         }
     }
 }
+
+/// The "Forgot password?" form: one field and "Send reset link", then the
+/// same answer whatever the account, with "Back to sign in".
+@Composable
+private fun ForgotPasswordForm(
+    form: SignInViewModel.ForgotPassword,
+    onIdentifierChange: (String) -> Unit,
+    onSubmit: () -> Unit,
+    onBack: () -> Unit,
+) {
+    Text(SignInViewModel.FORGOT_LINK, style = MaterialTheme.typography.labelLarge)
+    if (form.sent) {
+        Text(SignInViewModel.FORGOT_SENT, style = MaterialTheme.typography.bodyMedium)
+    } else {
+        OutlinedTextField(
+            value = form.identifier,
+            onValueChange = onIdentifierChange,
+            label = { Text(SignInViewModel.FORGOT_IDENTIFIER) },
+            singleLine = true,
+            enabled = !form.busy,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(onSend = { if (form.canSubmit) onSubmit() }),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        form.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        Button(
+            onClick = onSubmit,
+            enabled = form.canSubmit,
+            modifier = Modifier.fillMaxWidth().testTag(FORGOT_PASSWORD_SUBMIT_TAG),
+        ) {
+            if (form.busy) CircularProgressIndicator(modifier = Modifier.padding(4.dp))
+            else Text(SignInViewModel.FORGOT_SUBMIT)
+        }
+    }
+    TextButton(onClick = onBack, enabled = !form.busy) { Text(SignInViewModel.FORGOT_BACK) }
+}
+
+private const val FORGOT_CHECK_DELAY_MS = 500L
+internal const val FORGOT_PASSWORD_LINK_TAG = "forgot-password-link"
+internal const val FORGOT_PASSWORD_SUBMIT_TAG = "forgot-password-submit"
