@@ -63,6 +63,8 @@ fun DecisionsScreen(
     /// The toolbar's "Go to number" entry; the shell owns the dialog.
     onGoToNumber: () -> Unit = {},
     rootGesture: Modifier = Modifier,
+    /// "Search everything for …": the Search tab with the same text.
+    onSearchEverything: ((String) -> Unit)? = null,
 ) {
     val awaiting by viewModel.awaitingYou.collectAsStateWithLifecycle()
     val isSupported by viewModel.isSupported.collectAsStateWithLifecycle()
@@ -136,6 +138,7 @@ fun DecisionsScreen(
                         query = query,
                     ),
                     onQueryChange = { query = it },
+                    onSearchEverything = onSearchEverything,
                     onSelect = onSelect,
                     onOpenConversation = onOpenConversation,
                     onRefresh = { coroutineScope.launch { viewModel.refresh() } },

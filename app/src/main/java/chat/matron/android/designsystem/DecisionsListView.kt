@@ -84,6 +84,8 @@ object ForYouCopy {
     /// A search that leaves the tab's list empty.
     const val NO_MATCHES_TITLE = "No matches"
     const val NO_MATCHES_DESCRIPTION = "Nothing in this list matches your search."
+    /// The link from a For you search to the Search tab.
+    fun searchEverything(query: String) = "Search everything for \u201C$query\u201D \u2192"
 }
 
 /// Whether every word of [query] appears in the row's number, title, text
@@ -185,11 +187,25 @@ fun DecisionsListView(
     now: Instant = Instant.now(),
     /// The search field's edits; the host filters the rows.
     onQueryChange: (String) -> Unit = {},
+    /// "Search everything for …" under a search: the Search tab, same text.
+    /// `null` hides it.
+    onSearchEverything: ((String) -> Unit)? = null,
 ) {
     Column(modifier.fillMaxSize()) {
         if (decisionsShowsTabs(model)) {
             ForYouSearchField(model.query, onQueryChange)
             ForYouTabPicker(model.tab, onSelectTab)
+            if (model.query.isNotBlank() && onSearchEverything != null) {
+                Text(
+                    ForYouCopy.searchEverything(model.query.trim()),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSearchEverything(model.query.trim()) }
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
         }
         PullToRefreshBox(isRefreshing = model.isRefreshing, onRefresh = onRefresh, modifier = Modifier.fillMaxSize()) {
             when (decisionsListState(model)) {

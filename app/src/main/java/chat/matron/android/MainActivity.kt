@@ -1234,6 +1234,11 @@ private fun SignedInApp(
                             onOpenConversation = onOpenConversationFromDecisions,
                             onGoToNumber = { goToNumberFrom = AppTab.DECISIONS },
                             rootGesture = rootSwipe,
+                            onSearchEverything = { text ->
+                                tabSearchVM.query = text
+                                sessionScope.launch { tabSearchVM.search() }
+                                shell.selectTab(AppTab.SEARCH)
+                            },
                         )
                     }
                     composable(
