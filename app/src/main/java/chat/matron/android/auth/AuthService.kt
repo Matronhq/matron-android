@@ -24,6 +24,8 @@ sealed class AuthError : Exception() {
     data object TwoFactorExpired : AuthError()
     /// Too many wrong passwords or codes for this username.
     data class LockedOut(val retryAfterSeconds: Int) : AuthError()
+    /// Too many reset-link requests from here for now.
+    data object RateLimited : AuthError()
 }
 
 /// A password sign-in finished with a two-factor code. [usedRecoveryCode]:
@@ -80,6 +82,18 @@ interface AuthService {
         ticket: String,
         code: String,
     ): TwoFactorEnrolled
+
+    /// Whether the journal at [rawURL] mails password-reset links: `GET
+    /// /password/forgot` says `enabled: true`. Anything else — an invalid
+    /// URL, an older journal's 404, no answer — is `false`, so "Forgot
+    /// password?" is never offered where it cannot work.
+    suspend fun passwordResetAvailable(rawURL: String): Boolean
+
+    /// "Forgot password?": asks the journal to mail a reset link for
+    /// [identifier] (a username or an email address). Succeeds whether or not
+    /// the account exists. Throws [AuthError.RateLimited] when asked too
+    /// often.
+    suspend fun requestPasswordReset(homeserverURL: HttpUrl, identifier: String)
 
     /// Restores a previously persisted session, or `null` if none stored.
     suspend fun restoreSession(): UserSession?

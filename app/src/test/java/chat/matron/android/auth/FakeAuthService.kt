@@ -22,6 +22,13 @@ class FakeAuthService : AuthService {
     /// When set, verify and enable wait on it before answering, so a test can
     /// act while a request is in flight.
     var gate: CompletableDeferred<Unit>? = null
+    /// "Forgot password?": the answer per server URL (absent = off), and
+    /// what each reset request sent.
+    val stubbedResetAvailable = mutableMapOf<String, Boolean>()
+    val resetAvailableChecks = mutableListOf<String>()
+    var resetAvailableGate: CompletableDeferred<Unit>? = null
+    var stubbedResetRequest: Result<Unit> = Result.success(Unit)
+    val resetRequests = mutableListOf<Pair<HttpUrl, String>>()
     val persistedSessions = mutableListOf<UserSession>()
     var clearCallCount = 0
 
@@ -65,6 +72,17 @@ class FakeAuthService : AuthService {
         queue.isEmpty() -> Result.failure(AuthError.Unexpected("not stubbed"))
         queue.size == 1 -> queue[0]
         else -> queue.removeAt(0)
+    }
+
+    override suspend fun passwordResetAvailable(rawURL: String): Boolean {
+        resetAvailableChecks += rawURL
+        resetAvailableGate?.await()
+        return stubbedResetAvailable[rawURL] ?: false
+    }
+
+    override suspend fun requestPasswordReset(homeserverURL: HttpUrl, identifier: String) {
+        resetRequests += homeserverURL to identifier
+        stubbedResetRequest.getOrThrow()
     }
 
     override suspend fun restoreSession(): UserSession? = stubbedRestore.getOrThrow()

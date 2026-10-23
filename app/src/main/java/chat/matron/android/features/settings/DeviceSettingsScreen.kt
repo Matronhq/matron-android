@@ -48,6 +48,8 @@ import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
 import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
+import chat.matron.android.viewmodels.AccountEmailViewModel
+import chat.matron.android.viewmodels.ChangePasswordViewModel
 import kotlinx.coroutines.launch
 
 /**
@@ -92,6 +94,12 @@ fun DeviceSettingsScreen(
     /// Settings → Security's two-factor sign-in. `null` in hosts without a
     /// session; hidden too on a journal without two-factor.
     twoFactor: TwoFactorSettingViewModel? = null,
+    /// Settings → Security's "Change password". `null` in hosts without a
+    /// session (previews).
+    changePassword: ChangePasswordViewModel? = null,
+    /// Settings → Security's "Email address" for password resets. `null` in
+    /// hosts without a session; hidden too on a journal without it.
+    accountEmail: AccountEmailViewModel? = null,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -116,7 +124,9 @@ fun DeviceSettingsScreen(
                 LabeledRow("Server", hostOf(session.homeserverURL))
             }
 
-            if (twoFactor != null) SecuritySection(twoFactor)
+            if (twoFactor != null || changePassword != null || accountEmail != null) {
+                SecuritySection(twoFactor, changePassword, accountEmail)
+            }
 
             if (devicesApi != null) {
                 SettingsSection("Devices") {

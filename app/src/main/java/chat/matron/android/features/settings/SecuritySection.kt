@@ -46,6 +46,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.features.onboarding.RecoveryCodesPanel
 import chat.matron.android.features.onboarding.SixDigitField
 import chat.matron.android.features.onboarding.TwoFactorSetupKey
+import chat.matron.android.viewmodels.AccountEmailViewModel
+import chat.matron.android.viewmodels.ChangePasswordViewModel
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel.ConfirmAction
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel.SetupPhase
@@ -54,82 +56,99 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 /**
- * Settings → Security, as in Matron Web: two-factor sign-in on or off, with
- * Set Up… while it's off, and New Recovery Codes…, Change App… and Turn
- * Off… while it's on (Turn Off… hidden while the server requires it).
- * Hidden until `GET /2fa` answers, and for good on a journal that 404s it.
+ * Settings → Security: the email address for password resets, Change
+ * password, then two-factor sign-in as in Matron Web — on or off, with Set
+ * Up… while it's off, and New Recovery Codes…, Change App… and Turn Off…
+ * while it's on (Turn Off… hidden while the server requires it).
+ * The two-factor rows stay hidden until `GET /2fa` answers, and for good on
+ * a journal that 404s it; the section shows while any of its rows does.
  */
+@Composable
+internal fun SecuritySection(
+    twoFactor: TwoFactorSettingViewModel?,
+    changePassword: ChangePasswordViewModel?,
+    accountEmail: AccountEmailViewModel?,
+) {
+    if (twoFactor != null) LaunchedEffect(twoFactor) { twoFactor.load() }
+    val twoFactorState = twoFactor?.state?.collectAsStateWithLifecycle()?.value
+    val showTwoFactor = twoFactorState != null && twoFactorState != TwoFactorSettingViewModel.State.Loading &&
+        twoFactorState != TwoFactorSettingViewModel.State.Unsupported
+    if (!showTwoFactor && changePassword == null && accountEmail == null) return
+
+    SettingsSection("Security") {
+        if (accountEmail != null) AccountEmailRows(accountEmail)
+        if (changePassword != null) ChangePasswordRows(changePassword)
+        if (showTwoFactor && twoFactor != null) TwoFactorRows(twoFactor, twoFactorState!!)
+    }
+}
+
+/// The interactive two-factor rows, and the sheet they open.
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-internal fun SecuritySection(model: TwoFactorSettingViewModel) {
-    LaunchedEffect(model) { model.load() }
+private fun TwoFactorRows(model: TwoFactorSettingViewModel, state: TwoFactorSettingViewModel.State) {
     // The sheets' work runs here, not in a scope of their own: closing a
     // sheet leaves its composition, and the reload that follows must outlive it.
     val scope = rememberCoroutineScope()
-    val state by model.state.collectAsStateWithLifecycle()
     val sheet by model.sheet.collectAsStateWithLifecycle()
-    if (state == TwoFactorSettingViewModel.State.Loading || state == TwoFactorSettingViewModel.State.Unsupported) return
 
-    SettingsSection("Security") {
-        when (val s = state) {
-            is TwoFactorSettingViewModel.State.Loaded -> {
-                val status = s.status
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(TwoFactorSettingViewModel.TITLE, style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            TwoFactorSettingViewModel.detailText(status),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    if (!status.enabled && status.available) {
-                        TextButton(onClick = { model.openSetUp() }) { Text(TwoFactorSettingViewModel.SET_UP) }
-                    }
-                }
-                if (TwoFactorSettingViewModel.runningLow(status)) {
+    when (val s = state) {
+        is TwoFactorSettingViewModel.State.Loaded -> {
+            val status = s.status
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(TwoFactorSettingViewModel.TITLE, style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        TwoFactorSettingViewModel.RUNNING_LOW,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-                if (status.enabled) {
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = { model.openNewRecoveryCodes() }) {
-                            Text(TwoFactorSettingViewModel.NEW_RECOVERY_CODES)
-                        }
-                        TextButton(onClick = { model.openChangeApp() }) { Text(TwoFactorSettingViewModel.CHANGE_APP) }
-                        if (!status.required) {
-                            TextButton(onClick = { model.openTurnOff() }) {
-                                Text(TwoFactorSettingViewModel.TURN_OFF, color = MaterialTheme.colorScheme.error)
-                            }
-                        }
-                    }
-                }
-                if (status.required) {
-                    Text(
-                        TwoFactorSettingViewModel.REQUIRED,
+                        TwoFactorSettingViewModel.detailText(status),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(bottom = 8.dp),
                     )
                 }
+                if (!status.enabled && status.available) {
+                    TextButton(onClick = { model.openSetUp() }) { Text(TwoFactorSettingViewModel.SET_UP) }
+                }
             }
-            is TwoFactorSettingViewModel.State.Failed -> Text(
-                s.message,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(vertical = 8.dp),
-            )
-            else -> Unit
+            if (TwoFactorSettingViewModel.runningLow(status)) {
+                Text(
+                    TwoFactorSettingViewModel.RUNNING_LOW,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            if (status.enabled) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = { model.openNewRecoveryCodes() }) {
+                        Text(TwoFactorSettingViewModel.NEW_RECOVERY_CODES)
+                    }
+                    TextButton(onClick = { model.openChangeApp() }) { Text(TwoFactorSettingViewModel.CHANGE_APP) }
+                    if (!status.required) {
+                        TextButton(onClick = { model.openTurnOff() }) {
+                            Text(TwoFactorSettingViewModel.TURN_OFF, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+            if (status.required) {
+                Text(
+                    TwoFactorSettingViewModel.REQUIRED,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
         }
+        is TwoFactorSettingViewModel.State.Failed -> Text(
+            s.message,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(vertical = 8.dp),
+        )
+        else -> Unit
     }
 
     sheet?.let { TwoFactorSheet(model, it, scope) }

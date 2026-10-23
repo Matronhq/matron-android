@@ -322,8 +322,10 @@ sealed class JournalApiError(message: String) : Exception(message) {
     /// 401 `two_factor_ticket_invalid`: the sign-in ticket is unknown,
     /// expired or used.
     data object TwoFactorTicketInvalid : JournalApiError("The sign-in timed out — please sign in again.")
-    /// 401 `bad_password` from the signed-in `/2fa` routes: the password
-    /// typed to confirm a change is wrong. The session itself is fine.
+    /// 401 `bad_password` from a signed-in route that asks for the current
+    /// password (the `/2fa` routes, `POST /password`, `PUT /account/email`):
+    /// the password typed to confirm a change is wrong. The session itself is
+    /// fine, so this is never [Unauthenticated].
     data object BadPassword : JournalApiError("That password is incorrect.")
     /// 409 from the signed-in `/2fa` routes: `no_pending_setup` (the setup
     /// expired), `not_enabled`, or `two_factor_required` (the server
@@ -335,6 +337,12 @@ sealed class JournalApiError(message: String) : Exception(message) {
             else -> "Two-factor sign-in is already off."
         },
     )
+    /// 400 `weak_password` from `POST /password`: the new password is too short.
+    data object WeakPassword : JournalApiError("Use at least 8 characters.")
+    /// 400 `bad_email` from `PUT /account/email`.
+    data object BadEmail : JournalApiError("Enter a valid email address.")
+    /// 409 `email_taken` from `PUT /account/email`: another account has it.
+    data object EmailTaken : JournalApiError("Another account already uses that address.")
     /// Any other non-success status. [serverMessage] is the body's `message`,
     /// else its `error` code, else empty. [code], [bodyMessage], [reason] and
     /// [max] are the body's own `error`, `message`, `reason` and `max`
@@ -361,7 +369,7 @@ class JournalApi(
     token: String? = null,
 ) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
-    ArchiveWriting, TwoFactorProviding {
+    ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -505,6 +513,60 @@ class JournalApi(
                 },
             ),
         ) ?: throw JournalApiError.Transport("malformed two-factor response")
+
+    /// `POST /password {old_password, new_password, sign_out_others}` —
+    /// client devices only (an agent device gets 403). A wrong
+    /// [oldPassword] is a 401 `bad_password` ([JournalApiError.BadPassword])
+    /// and counts against the same lockout as sign-in.
+    override suspend fun changePassword(oldPassword: String, newPassword: String, signOutOthers: Boolean): PasswordChange {
+        val obj = request(
+            path = "/password", method = "POST",
+            jsonBody = buildJsonObject {
+                put("old_password", oldPassword)
+                put("new_password", newPassword)
+                put("sign_out_others", signOutOthers)
+            },
+        )
+        return PasswordChange(signedOut = obj.intOrNull("signed_out") ?: 0)
+    }
+
+    // MARK: Password reset by email
+    //
+    // The sign-in screen's "Forgot password?" is unauthenticated; the link
+    // the journal mails is finished in Matron Web.
+
+    /// `GET /password/forgot` — whether the journal can mail reset links.
+    /// Only an explicit `true` counts.
+    suspend fun passwordResetEnabled(): Boolean =
+        request(path = "/password/forgot", authenticated = false).boolOrNull("enabled") == true
+
+    /// `POST /password/forgot {identifier}` — a username or an email address.
+    /// Always 200 when accepted, whether or not the account exists, so the
+    /// answer reveals nothing.
+    suspend fun requestPasswordReset(identifier: String) {
+        request(
+            path = "/password/forgot", method = "POST", authenticated = false,
+            jsonBody = buildJsonObject { put("identifier", identifier) },
+        )
+    }
+
+    override suspend fun accountEmail(): AccountEmail {
+        val obj = request(path = "/account/email")
+        return AccountEmail(
+            email = obj.stringOrNull("email")?.takeIf { it.isNotEmpty() },
+            resetByEmail = obj.boolOrNull("reset_by_email") ?: false,
+        )
+    }
+
+    /// `PUT /account/email {password, email}` — `email: null` removes it.
+    override suspend fun setAccountEmail(password: String, email: String?): String? =
+        request(
+            path = "/account/email", method = "PUT",
+            jsonBody = buildJsonObject {
+                put("password", password)
+                put("email", email?.let { JsonPrimitive(it) } ?: JsonNull)
+            },
+        ).stringOrNull("email")?.takeIf { it.isNotEmpty() }
 
     override suspend fun snapshot(): SnapshotResponse {
         val obj = request(path = "/snapshot")
@@ -1279,8 +1341,12 @@ class JournalApi(
                 }
             }
             status == 401 && code == "two_factor_ticket_invalid" -> JournalApiError.TwoFactorTicketInvalid
-            status == 403 && code == "bad_code" -> JournalApiError.BadCode(obj?.boolOrNull("ticket_valid") ?: true)
+            // Before the catch-all 401: a wrong current password is not a dead session.
             status == 401 && code == "bad_password" -> JournalApiError.BadPassword
+            status == 400 && code == "weak_password" -> JournalApiError.WeakPassword
+            status == 400 && code == "bad_email" -> JournalApiError.BadEmail
+            status == 409 && code == "email_taken" -> JournalApiError.EmailTaken
+            status == 403 && code == "bad_code" -> JournalApiError.BadCode(obj?.boolOrNull("ticket_valid") ?: true)
             status == 409 && (code == "no_pending_setup" || code == "not_enabled" || code == "two_factor_required") ->
                 JournalApiError.TwoFactorConflict(code)
             status == 429 && code == "locked_out" ->

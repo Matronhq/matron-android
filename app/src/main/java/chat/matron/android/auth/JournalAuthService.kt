@@ -95,6 +95,27 @@ class JournalAuthService(
         TwoFactorEnrolled(session(homeserverURL, username, answer.login), answer.recoveryCodes)
     }
 
+    override suspend fun passwordResetAvailable(rawURL: String): Boolean {
+        val url = runCatching { ServerURLValidator.normalize(rawURL) }.getOrNull() ?: return false
+        return try {
+            JournalApi(url, client).passwordResetEnabled()
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    override suspend fun requestPasswordReset(homeserverURL: HttpUrl, identifier: String) {
+        try {
+            JournalApi(homeserverURL, client).requestPasswordReset(identifier)
+        } catch (e: JournalApiError.RateLimited) {
+            throw AuthError.RateLimited
+        } catch (e: JournalApiError) {
+            throw AuthError.Unexpected(e.message ?: "Couldn't reach the server.")
+        }
+    }
+
     /// The code steps' refusals, as the sign-in form tells them apart.
     private suspend fun <T> twoFactorStep(body: suspend () -> T): T = try {
         body()

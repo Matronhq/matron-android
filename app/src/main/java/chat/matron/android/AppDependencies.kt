@@ -35,6 +35,8 @@ import chat.matron.android.viewmodels.MemoryEditorViewModel
 import chat.matron.android.viewmodels.MissionDetailViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
+import chat.matron.android.viewmodels.ChangePasswordViewModel
+import chat.matron.android.viewmodels.AccountEmailViewModel
 import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
 import chat.matron.android.viewmodels.MissionsListViewModel
 import chat.matron.android.viewmodels.GoToNumberResolver
@@ -577,6 +579,14 @@ class AppDependencies(
     /** Settings → Security's two-factor status: `GET /2fa` on the session's API client. */
     fun makeTwoFactorSettingViewModel(session: UserSession): TwoFactorSettingViewModel =
         TwoFactorSettingViewModel(api = core(session).api)
+
+    /** Settings → Security's "Change password": `POST /password` on the session's API client. */
+    fun makeChangePasswordViewModel(session: UserSession): ChangePasswordViewModel =
+        ChangePasswordViewModel(api = core(session).api)
+
+    /** Settings → Security's "Email address": `GET`/`PUT /account/email` on the session's API client. */
+    fun makeAccountEmailViewModel(session: UserSession): AccountEmailViewModel =
+        AccountEmailViewModel(api = core(session).api)
 
     /**
      * Settings → Archive's "Archive idle chats" choice: `GET`/`PATCH
