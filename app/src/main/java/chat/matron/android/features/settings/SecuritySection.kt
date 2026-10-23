@@ -171,8 +171,9 @@ private fun TwoFactorSheet(model: TwoFactorSettingViewModel, sheet: Sheet, scope
         scope.launch { model.closeSheet() }
     }
     Dialog(
-        // The recovery codes are shown this once: back does nothing until Done.
-        onDismissRequest = { if (!showingCodes) close() },
+        // The recovery codes are shown this once: back does nothing until
+        // Done. Nor while a request is in flight, so its answer is seen.
+        onDismissRequest = { if (!showingCodes && !sheet.busy) close() },
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
     ) {
         Scaffold(
@@ -180,7 +181,7 @@ private fun TwoFactorSheet(model: TwoFactorSettingViewModel, sheet: Sheet, scope
                 TopAppBar(
                     title = { Text(title) },
                     navigationIcon = {
-                        if (!showingCodes) TextButton(onClick = { close() }) { Text("Cancel") }
+                        if (!showingCodes && !sheet.busy) TextButton(onClick = { close() }) { Text("Cancel") }
                     },
                 )
             },

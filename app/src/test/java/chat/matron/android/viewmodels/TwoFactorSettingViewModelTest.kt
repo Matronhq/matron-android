@@ -214,6 +214,24 @@ class TwoFactorSettingViewModelTest {
     }
 
     @Test
+    fun anAnswerAfterReopeningIsDropped() = runBlocking {
+        val api = object : TwoFactorProviding by Api(Result.success(off)) {
+            lateinit var vm: TwoFactorSettingViewModel
+            override suspend fun twoFactorSetup(password: String, code: String?): TwoFactorSetup {
+                vm.closeSheet()
+                vm.openSetUp()
+                return SETUP
+            }
+        }
+        val vm = TwoFactorSettingViewModel(api)
+        api.vm = vm
+        vm.openSetUp()
+        vm.submitPassword("pw")
+        // The fresh Set Up sheet stays on its password step.
+        assertEquals(Sheet.Setup(moving = false), vm.sheet.value)
+    }
+
+    @Test
     fun copy() {
         assertEquals("On since 1 Oct 2026 · 8 recovery codes left", TwoFactorSettingViewModel.detailText(on.copy(enabledAtMillis = 1L)) { "1 Oct 2026" })
         assertEquals("On · 1 recovery code left", TwoFactorSettingViewModel.detailText(on.copy(recoveryCodesLeft = 1)))

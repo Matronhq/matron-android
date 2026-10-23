@@ -96,14 +96,15 @@ class TwoFactorSettingViewModel(private val api: TwoFactorProviding) {
         val sheet = _sheet.value as? Sheet.Setup ?: return
         if (sheet.busy || sheet.phase != SetupPhase.Password || password.isEmpty()) return
         if (sheet.moving && currentCode.isBlank()) return
-        _sheet.value = sheet.copy(busy = true, error = null)
+        val sent = sheet.copy(busy = true, error = null)
+        _sheet.value = sent
         try {
             val setup = api.twoFactorSetup(password, if (sheet.moving) currentCode.trim() else null)
-            update<Sheet.Setup> { it.copy(phase = SetupPhase.Scan, setup = setup, busy = false) }
+            update(sent) { it.copy(phase = SetupPhase.Scan, setup = setup, busy = false) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            update<Sheet.Setup> { it.copy(busy = false, error = messageOf(error)) }
+            update(sent) { it.copy(busy = false, error = messageOf(error)) }
         }
     }
 
@@ -112,10 +113,11 @@ class TwoFactorSettingViewModel(private val api: TwoFactorProviding) {
     suspend fun confirmSetup(code: String, signOutOthers: Boolean) {
         val sheet = _sheet.value as? Sheet.Setup ?: return
         if (sheet.busy || sheet.phase != SetupPhase.Scan || code.isBlank()) return
-        _sheet.value = sheet.copy(busy = true, error = null)
+        val sent = sheet.copy(busy = true, error = null)
+        _sheet.value = sent
         try {
             val enabled = api.twoFactorEnable(code.trim(), signOutOthers && !sheet.moving)
-            update<Sheet.Setup> {
+            update(sent) {
                 it.copy(
                     phase = SetupPhase.Codes,
                     setup = null,
@@ -129,7 +131,7 @@ class TwoFactorSettingViewModel(private val api: TwoFactorProviding) {
         } catch (error: Throwable) {
             // The pending setup expired: back to the password for a new key.
             val expired = error is JournalApiError.TwoFactorConflict && error.code == "no_pending_setup"
-            update<Sheet.Setup> {
+            update(sent) {
                 if (expired) {
                     it.copy(phase = SetupPhase.Password, setup = null, busy = false, error = messageOf(error))
                 } else {
@@ -144,12 +146,13 @@ class TwoFactorSettingViewModel(private val api: TwoFactorProviding) {
     suspend fun confirmAction(password: String, code: String) {
         val sheet = _sheet.value as? Sheet.Confirm ?: return
         if (sheet.busy || sheet.recoveryCodes != null || password.isEmpty() || code.isBlank()) return
-        _sheet.value = sheet.copy(busy = true, error = null)
+        val sent = sheet.copy(busy = true, error = null)
+        _sheet.value = sent
         try {
             when (sheet.action) {
                 ConfirmAction.RecoveryCodes -> {
                     val codes = api.twoFactorRecoveryCodes(password, code.trim())
-                    update<Sheet.Confirm> { it.copy(recoveryCodes = codes, busy = false) }
+                    update(sent) { it.copy(recoveryCodes = codes, busy = false) }
                 }
                 ConfirmAction.TurnOff -> {
                     api.twoFactorDisable(password, code.trim())
@@ -159,15 +162,17 @@ class TwoFactorSettingViewModel(private val api: TwoFactorProviding) {
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            update<Sheet.Confirm> { it.copy(busy = false, error = messageOf(error)) }
+            update(sent) { it.copy(busy = false, error = messageOf(error)) }
         }
     }
 
-    /// Applies [change] if the open sheet is still a [T] (Cancel may have
-    /// closed it while a request was in flight).
-    private inline fun <reified T : Sheet> update(change: (T) -> Sheet) {
-        val current = _sheet.value as? T ?: return
-        _sheet.value = change(current)
+    /// Applies [change] only if the open sheet is still the very one that
+    /// sent the request: the sheet may have been closed, or closed and opened
+    /// again, while it was in flight, and a late answer must not land on a
+    /// new attempt.
+    private inline fun <T : Sheet> update(sent: T, change: (T) -> Sheet) {
+        if (_sheet.value !== sent) return
+        _sheet.value = change(sent)
     }
 
     companion object {
