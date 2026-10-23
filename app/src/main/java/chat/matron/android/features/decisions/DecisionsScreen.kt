@@ -34,7 +34,6 @@ import chat.matron.android.designsystem.DecisionsListView
 import chat.matron.android.designsystem.DecisionsRow
 import chat.matron.android.designsystem.decisionsRowMatches
 import chat.matron.android.designsystem.MatronTimelineBackground
-import chat.matron.android.features.gotonumber.GoToNumberButton
 import chat.matron.android.models.ForYouTab
 import chat.matron.android.viewmodels.ItemsPanelViewModel
 import java.time.Instant
@@ -60,8 +59,6 @@ fun DecisionsScreen(
     originLabels: suspend () -> Map<String, String>,
     onSelect: (String) -> Unit,
     onOpenConversation: (String) -> Unit,
-    /// The toolbar's "Go to number" entry; the shell owns the dialog.
-    onGoToNumber: () -> Unit = {},
     rootGesture: Modifier = Modifier,
     /// "Search everything for …": the Search tab with the same text.
     onSearchEverything: ((String) -> Unit)? = null,
@@ -107,7 +104,6 @@ fun DecisionsScreen(
         topBar = {
             TopAppBar(
                 title = { Text(ForYouCopy.TITLE) },
-                actions = { GoToNumberButton(onClick = onGoToNumber) },
             )
         },
     ) { padding ->

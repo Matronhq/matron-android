@@ -76,7 +76,6 @@ import chat.matron.android.features.coordinator.CoordinatorRoot
 import chat.matron.android.features.coordinator.CoordinatorSetupView
 import chat.matron.android.features.coordinator.coordinatorRoot
 import chat.matron.android.features.decisions.DecisionsScreen
-import chat.matron.android.features.gotonumber.GoToNumberDialog
 import chat.matron.android.features.missions.MissionDetailScreen
 import chat.matron.android.features.missions.MissionOpenConversationOutcome
 import chat.matron.android.features.memories.MemoriesScreen
@@ -120,7 +119,6 @@ import chat.matron.android.viewmodels.VoiceRecorderHandoff
 import chat.matron.android.viewmodels.KeyValueBoxCapacityCache
 import chat.matron.android.viewmodels.ChatListViewModel
 import chat.matron.android.viewmodels.GoToNumberResolver
-import chat.matron.android.viewmodels.GoToNumberViewModel
 import chat.matron.android.viewmodels.GoToTarget
 import chat.matron.android.viewmodels.LinkSignInViewModel
 import chat.matron.android.viewmodels.MediaBrowserViewModel
@@ -555,7 +553,6 @@ private fun SignedInApp(
     var showCoordinatorChooser by remember { mutableStateOf(false) }
     // The tab whose "Go to number" button opened the dialog: the target is
     // pushed on THAT tab's stack where the tab can host it.
-    var goToNumberFrom by remember { mutableStateOf<AppTab?>(null) }
     val goToResolver = remember(session.userID, shell) { deps.goToNumberResolver(session) { shell.missionsSupported } }
 
     // Shareable tracker links (`https://<journal>/u/<user>/<num>`), tapped
@@ -1122,7 +1119,6 @@ private fun SignedInApp(
                             viewModel = missionsVM,
                             onSelect = { shell.pushMission(it) },
                             onOpenMemories = { shell.openMemories() },
-                            onGoToNumber = { goToNumberFrom = AppTab.MISSIONS },
                             rootGesture = rootSwipe,
                         )
                     }
@@ -1232,7 +1228,6 @@ private fun SignedInApp(
                             originLabels = { deps.journalStore(session).conversationOriginLabels() },
                             onSelect = { shell.pushDecision(it) },
                             onOpenConversation = onOpenConversationFromDecisions,
-                            onGoToNumber = { goToNumberFrom = AppTab.DECISIONS },
                             rootGesture = rootSwipe,
                             onSearchEverything = { text ->
                                 tabSearchVM.query = text
@@ -1283,24 +1278,6 @@ private fun SignedInApp(
         }
     }
 
-    goToNumberFrom?.let { from ->
-        // A fresh view model per opening, so the dialog never reopens on the
-        // last number or its message.
-        val goToVM = remember(from, goToResolver) {
-            GoToNumberViewModel(goToResolver) { target ->
-                when (target) {
-                    // On Missions the item joins that tab's stack; anywhere
-                    // else it opens where items live, on For you.
-                    is GoToTarget.Item ->
-                        if (from == AppTab.MISSIONS) shell.pushMissionItem(target.itemID) else shell.pushDecision(target.itemID)
-                    // From For you (which hosts no mission page) this opens
-                    // the mission on the Missions tab — the shell's own rule.
-                    is GoToTarget.Mission -> shell.pushMission(target.missionID)
-                }
-            }
-        }
-        GoToNumberDialog(viewModel = goToVM, onDismiss = { goToNumberFrom = null })
-    }
 
     PinDialogsHost(pinsController, chats = allChats, isLoading = chatListVM.isLoading.collectAsStateWithLifecycle().value)
 

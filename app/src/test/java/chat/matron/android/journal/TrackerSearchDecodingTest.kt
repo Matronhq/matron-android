@@ -42,4 +42,17 @@ class TrackerSearchDecodingTest {
         assertNull(TrackerSearchDecoding.whyLabel("number"))
         assertEquals("similar meaning", TrackerSearchDecoding.whyLabel("similar"))
     }
+
+    @Test
+    fun theSnippetLosesTheTitleItRepeats() {
+        assertEquals(
+            "Move the app to **Postgres** 16.",
+            TrackerSearchDecoding.snippetBeyondTitle(
+                "**Postgres** 16 **Postgres** 16 migration Move the app to **Postgres** 16.",
+                listOf("Postgres 16", "Postgres 16 migration"),
+            ),
+        )
+        assertEquals("…restarted **nginx**", TrackerSearchDecoding.snippetBeyondTitle("…restarted **nginx**", listOf(null, "Proxy")))
+        assertNull(TrackerSearchDecoding.snippetBeyondTitle("**Proxy** hardening", listOf(null, "Proxy hardening")))
+    }
 }

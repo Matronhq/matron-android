@@ -60,6 +60,29 @@ object TrackerSearchDecoding {
         )
     }
 
+    /// The journal runs a hit's own name and title into its snippet
+    /// ("**Postgres** 16 migration Move the app…"). The row already shows the
+    /// title, so drop those leading words (markers and all); a snippet that
+    /// is only the title is `null`. The web's `snippetBeyondTitle`.
+    fun snippetBeyondTitle(snippet: String, heads: List<String?>): String? {
+        var rest = snippet
+        for (head in heads) {
+            if (head.isNullOrBlank()) continue
+            val words = head.trim().split(Regex("\\s+"))
+            var cursor = rest.trimStart()
+            var matched = 0
+            for (word in words) {
+                val bare = cursor.removePrefix("**")
+                if (!bare.lowercase().startsWith(word.lowercase())) break
+                cursor = bare.substring(word.length).removePrefix("**").trimStart()
+                matched += 1
+            }
+            if (matched == words.size) rest = cursor
+        }
+        rest = rest.trim()
+        return rest.takeUnless { it.isEmpty() || it == "\u2026" }
+    }
+
     /// The tiers a person should be told about; the strict ones need no label.
     fun whyLabel(why: String): String? = when (why) {
         "stemmed" -> "similar words"

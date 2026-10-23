@@ -30,7 +30,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -125,6 +128,21 @@ fun SearchScreen(
                 },
                 label = { Text(if (onBack == null) "Search everything" else "Search chats, bots, and messages") },
                 singleLine = true,
+                // Search does Go to as well: Enter on a number opens what carries it.
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = {
+                    val hit = numberHit ?: return@KeyboardActions
+                    if (numberOpening) return@KeyboardActions
+                    numberOpening = true
+                    numberNote = null
+                    scope.launch {
+                        try {
+                            numberNote = onSelectNumber(hit)
+                        } finally {
+                            numberOpening = false
+                        }
+                    }
+                }),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -285,7 +303,8 @@ private fun TrackerHitRow(hit: TrackerSearchHit, onTap: () -> Unit) {
         hit.num != null -> "#${hit.num} ${hit.title}"
         else -> hit.title
     }
-    val detail = hit.snippet ?: if (hit.kind == TrackerSearchKind.MEMORY && hit.name != null) hit.title else hit.state
+    val detail = hit.snippet?.let { TrackerSearchDecoding.snippetBeyondTitle(it, listOf(hit.name, hit.title)) }
+        ?: if (hit.kind == TrackerSearchKind.MEMORY && hit.name != null) hit.title else hit.state
     val accent = MaterialTheme.colorScheme.primary
     Column(
         modifier = Modifier
