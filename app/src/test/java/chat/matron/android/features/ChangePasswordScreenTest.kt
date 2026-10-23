@@ -53,6 +53,10 @@ class ChangePasswordScreenTest {
     private object TwoFactorOn : TwoFactorProviding {
         override suspend fun twoFactorStatus() =
             TwoFactorStatus(enabled = true, recoveryCodesLeft = 8, required = false, available = true)
+        override suspend fun twoFactorSetup(password: String, code: String?) = error("unused")
+        override suspend fun twoFactorEnable(code: String, signOutOthers: Boolean) = error("unused")
+        override suspend fun twoFactorDisable(password: String, code: String) = error("unused")
+        override suspend fun twoFactorRecoveryCodes(password: String, code: String) = error("unused")
     }
 
     private fun show(api: Api) {

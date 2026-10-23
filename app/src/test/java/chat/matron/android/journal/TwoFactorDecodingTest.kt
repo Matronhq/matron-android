@@ -39,6 +39,23 @@ class TwoFactorDecodingTest {
     }
 
     @Test
+    fun enabledNeedsRecoveryCodes_andDefaultsSignedOutToNone() {
+        assertNull(TwoFactorDecoding.enabled(obj("""{"recovery_codes":[],"signed_out":1}""")))
+        assertEquals(
+            TwoFactorEnabled(listOf("aaaa-bbbb-cccc-dddd"), signedOut = 0),
+            TwoFactorDecoding.enabled(obj("""{"recovery_codes":["aaaa-bbbb-cccc-dddd"]}""")),
+        )
+    }
+
+    @Test
+    fun shownAsNamesTheIssuerAndAccount() {
+        val setup = TwoFactorSetup("ABC", "otpauth://totp/x", issuer = "Matron", account = "alice@example.com")
+        assertEquals("It shows up as Matron (alice@example.com).", TwoFactorDecoding.shownAs(setup))
+        assertEquals("It shows up as Matron.", TwoFactorDecoding.shownAs(setup.copy(account = null)))
+        assertNull(TwoFactorDecoding.shownAs(setup.copy(issuer = "", account = null)))
+    }
+
+    @Test
     fun groupsTheSetupKeyInFours() {
         assertEquals("JBSW Y3DP EHPK 3PXP", TwoFactorDecoding.groupedSecret("JBSWY3DPEHPK3PXP"))
     }
