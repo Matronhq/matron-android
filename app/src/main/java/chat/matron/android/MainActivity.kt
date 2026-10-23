@@ -13,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.SportsScore
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SupervisorAccount
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
@@ -105,6 +106,7 @@ import chat.matron.android.features.pins.ChatPinMenu
 import chat.matron.android.features.pins.PinDialogsHost
 import chat.matron.android.features.pins.PinsController
 import chat.matron.android.features.pins.chatPinMenu
+import chat.matron.android.journal.TrackerSearchKind
 import chat.matron.android.journal.RelayApi
 import chat.matron.android.journal.StoreDiagnostics
 import chat.matron.android.models.LaunchTimeline
@@ -560,6 +562,16 @@ private fun SignedInApp(
     // in-app or arriving as an App Link: resolved like a typed number and
     // opened on the selected tab; what the app cannot show goes to a
     // browser. The latest link wins: a new one cancels one still resolving.
+    // The Search tab's view model lives for the session, so its text and
+    // results survive a trip to another tab and back.
+    val tabSearchVM = remember(session.userID, goToResolver) {
+        SearchViewModel(
+            deps.search,
+            emptyList(),
+            numberLookup = { num -> (goToResolver.find(num) as? GoToNumberResolver.Found.Hit)?.hit },
+            trackerSearch = deps.trackerSearch(session),
+        )
+    }
     val trackerLinks = remember(session.userID, goToResolver) {
         TrackerLinkRouter(journalBaseURL = session.homeserverURL, sessionUser = session.userID, resolver = goToResolver)
     }
@@ -982,9 +994,9 @@ private fun SignedInApp(
                             LaunchedEffect(Unit) { nav.popBackStack() }
                         } else {
                             val searchVM = remember {
-                                SearchViewModel(searchService, allChats) { num ->
+                                SearchViewModel(searchService, allChats, numberLookup = { num ->
                                     (goToResolver.find(num) as? GoToNumberResolver.Found.Hit)?.hit
-                                }
+                                })
                             }
                             SearchScreen(
                                 viewModel = searchVM,
@@ -1169,6 +1181,48 @@ private fun SignedInApp(
                     }
                 }
 
+                // The Search tab: one field over everything. A hit opens on the
+                // tab that owns it (a chat on Conversations, an item on For
+                // you, a mission or memory on Missions), so this stack is
+                // only its root.
+                navigation(route = AppTab.SEARCH.route, startDestination = AppTab.SEARCH.rootRoute) {
+                    composable(AppTab.SEARCH.rootRoute) {
+                        SearchScreen(
+                            viewModel = tabSearchVM,
+                            onSelectChat = { chat -> shell.openChat(chat.id) },
+                            onSelectMessage = { hit ->
+                                val query = tabSearchVM.trimmedQuery
+                                val (chatVM, _) = vmCache.viewModels(hit.roomID)
+                                sessionScope.launch { chatVM.beginChatSearch(query) }
+                                shell.openChat(hit.roomID)
+                            },
+                            onSelectNumber = { hit ->
+                                when (val opened = goToResolver.open(hit)) {
+                                    is GoToNumberResolver.Opened.Message -> opened.text
+                                    is GoToNumberResolver.Opened.Target -> {
+                                        when (val target = opened.target) {
+                                            is GoToTarget.Item -> shell.openItemFromSearch(target.itemID)
+                                            is GoToTarget.Mission -> shell.openMission(target.missionID)
+                                        }
+                                        null
+                                    }
+                                }
+                            },
+                            onBack = null,
+                            liveChats = allChats,
+                            onSelectTracker = { hit ->
+                                when (hit.kind) {
+                                    TrackerSearchKind.ITEM -> shell.openItemFromSearch(hit.id)
+                                    TrackerSearchKind.MISSION -> shell.openMission(hit.id)
+                                    TrackerSearchKind.MEMORY -> shell.openMemoryFromSearch(hit.name ?: hit.id)
+                                    // Not asked for: this app has no project page.
+                                    TrackerSearchKind.PROJECT -> Unit
+                                }
+                            },
+                        )
+                    }
+                }
+
                 // The Decisions tab (spec §3): its own graph, rooted at the list;
                 // a tapped decision pushes item detail WITHIN this tab.
                 navigation(route = AppTab.DECISIONS.route, startDestination = AppTab.DECISIONS.rootRoute) {
@@ -1315,6 +1369,7 @@ private fun AppTabBar(
                         AppTab.MISSIONS -> Icons.Filled.SportsScore
                         AppTab.CONVERSATIONS -> Icons.Filled.Forum
                         AppTab.DECISIONS -> Icons.Filled.CheckCircle
+                        AppTab.SEARCH -> Icons.Filled.Search
                     }
                     when {
                         tab == AppTab.DECISIONS && awaitingYouCount > 0 ->

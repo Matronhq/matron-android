@@ -369,6 +369,7 @@ class JournalApi(
     token: String? = null,
 ) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
+    TrackerSearching,
     ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
@@ -1093,6 +1094,21 @@ class JournalApi(
         NumberLookupDecoding.lookup(
             request(path = "/lookup", query = listOf("user" to user, "num" to num.toString())),
         ) ?: throw JournalApiError.Transport("malformed lookup response")
+
+    /// The tracker-wide search (protocol.md "Unified search"). `chats=0`:
+    /// this app searches message text in its own index.
+    override suspend fun searchAll(query: String, kinds: Set<TrackerSearchKind>, limit: Int): List<TrackerSearchHit> =
+        TrackerSearchDecoding.hits(
+            request(
+                path = "/search/all",
+                query = listOf(
+                    "q" to query,
+                    "limit" to limit.toString(),
+                    "kinds" to kinds.joinToString(",") { it.wire },
+                    "chats" to "0",
+                ),
+            ),
+        )
 
     // MARK: Memories
     //

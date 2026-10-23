@@ -42,6 +42,8 @@ import chat.matron.android.viewmodels.MissionsListViewModel
 import chat.matron.android.viewmodels.GoToNumberResolver
 import chat.matron.android.viewmodels.TrackerItemLinkResolver
 import chat.matron.android.journal.JournalApi
+import chat.matron.android.journal.TrackerSearchHit
+import chat.matron.android.journal.TrackerSearchKind
 import chat.matron.android.journal.JournalMaintenance
 import chat.matron.android.journal.JournalStore
 import chat.matron.android.journal.StoreDiagnostics
@@ -622,6 +624,15 @@ class AppDependencies(
      * layer that sees the store, the API and both syncs. [missionsSupported]
      * is the shell's live answer, read at open time.
      */
+    /// The Search tab's journal search: items, missions and memories. No
+    /// projects, as this app has no project page to open one on.
+    fun trackerSearch(session: UserSession): suspend (String) -> List<TrackerSearchHit> {
+        val api = core(session).api
+        return { query ->
+            api.searchAll(query, setOf(TrackerSearchKind.ITEM, TrackerSearchKind.MISSION, TrackerSearchKind.MEMORY))
+        }
+    }
+
     fun goToNumberResolver(session: UserSession, missionsSupported: () -> Boolean): GoToNumberResolver {
         val c = core(session)
         return GoToNumberResolver(

@@ -1,5 +1,6 @@
 package chat.matron.android.viewmodels
 
+import chat.matron.android.journal.TrackerSearchHit
 import chat.matron.android.chat.ChatSummary
 import chat.matron.android.chat.SessionTag
 import chat.matron.android.models.MatronDebug
@@ -11,14 +12,21 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /// Drives the unified search UI. Owns the query string, the FTS message hits, and
 /// the chat (title/bot) hits derived from a chat-list snapshot. Ported from
 /// matron-apple's `SearchViewModel`.
 class SearchViewModel(
-    private val search: SearchService,
+    /// The local message index; `null` where it could not be opened, which
+    /// leaves the Messages section empty.
+    private val search: SearchService?,
     allChats: List<ChatSummary>,
+    /// The journal's tracker search (items, missions, memories), for the
+    /// Search tab. `null` turns those sections off, as on the Conversations
+    /// list's own search.
+    private val trackerSearch: (suspend (String) -> List<TrackerSearchHit>)? = null,
     /// "What is #N?" for a query that is a bare number — the same resolution
     /// the "Go to number" dialog uses. `null` (the default) turns the number
     /// section off, e.g. where no journal session backs the search.
@@ -43,6 +51,15 @@ class SearchViewModel(
     /// `null` for any other query and when nothing has that number.
     private val _numberHit = MutableStateFlow<NumberHit?>(null)
     val numberHit: StateFlow<NumberHit?> = _numberHit.asStateFlow()
+
+    /// Tracker hits for [trackerHitsQuery]; the screen shows them only while
+    /// that is still the query, so an older answer never sits under new text.
+    private val _trackerHits = MutableStateFlow<List<TrackerSearchHit>>(emptyList())
+    val trackerHits: StateFlow<List<TrackerSearchHit>> = _trackerHits.asStateFlow()
+    @Volatile var trackerHitsQuery: String = ""
+        private set
+    private val _trackerFailed = MutableStateFlow(false)
+    val trackerFailed: StateFlow<Boolean> = _trackerFailed.asStateFlow()
 
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
@@ -155,9 +172,14 @@ class SearchViewModel(
         // Drop a hit the new query no longer names BEFORE anything suspends,
         // so "#412 · Item" never sits above results for a different query.
         if (_numberHit.value?.let { it.num != num } == true) _numberHit.value = null
+        if (trackerHitsQuery != trimmed) {
+            _trackerHits.value = emptyList()
+            _trackerFailed.value = false
+        }
         if (trimmed.isEmpty()) {
             _messageHits.value = emptyList()
             _searchFailed.value = false
+            trackerHitsQuery = ""
             return
         }
         _isSearching.value = true
@@ -166,7 +188,8 @@ class SearchViewModel(
                 // Alongside the message search, not before it: a local miss
                 // costs a round trip, which must not hold the FTS hits back.
                 if (num != null) launch { lookUpNumber(num, trimmed) }
-                val result = runCatching { search.queryGrouped(trimmed, limit = 50) }
+                if (trackerSearch != null) launch { searchTracker(trimmed) }
+                val result = runCatching { search?.queryGrouped(trimmed, limit = 50) ?: emptyList() }
                 result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
                 result.onFailure { MatronDebug.breadcrumb("SearchViewModel: search failed for query \"$trimmed\": $it") }
                 _searchFailed.value = result.isFailure
@@ -175,6 +198,31 @@ class SearchViewModel(
         } finally {
             _isSearching.value = false
         }
+    }
+
+    /// Waits out a typing pause, then asks the journal. Applied only while
+    /// the query is still the one it was asked for, like [lookUpNumber].
+    private suspend fun searchTracker(askedFor: String) {
+        val tracker = trackerSearch ?: return
+        delay(TRACKER_SEARCH_DEBOUNCE_MS)
+        if (query.trim() != askedFor) return
+        val result = try {
+            Result.success(tracker(askedFor))
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (e: Exception) {
+            MatronDebug.breadcrumb("SearchViewModel: tracker search failed: $e")
+            Result.failure(e)
+        }
+        if (query.trim() != askedFor) return
+        trackerHitsQuery = askedFor
+        _trackerHits.value = result.getOrDefault(emptyList())
+        _trackerFailed.value = result.isFailure
+    }
+
+    companion object {
+        /// Keystrokes settle for this long before the journal is asked.
+        const val TRACKER_SEARCH_DEBOUNCE_MS = 250L
     }
 
     /// A failed lookup adds nothing — the number section is a bonus over the

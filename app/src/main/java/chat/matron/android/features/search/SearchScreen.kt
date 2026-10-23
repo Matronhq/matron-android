@@ -30,7 +30,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import chat.matron.android.chat.ChatSummary
+import chat.matron.android.journal.TrackerSearchDecoding
+import chat.matron.android.journal.TrackerSearchHit
+import chat.matron.android.journal.TrackerSearchKind
 import chat.matron.android.designsystem.SearchResultRow
 import chat.matron.android.designsystem.SessionTagText
 import chat.matron.android.search.SearchChatHit
@@ -60,8 +69,12 @@ fun SearchScreen(
     /// Opens the number hit. Resolves to why it could not open, in words,
     /// shown under the row; `null` once it has navigated.
     onSelectNumber: suspend (NumberHit) -> String? = { null },
-    onBack: () -> Unit,
+    /// `null` on the Search tab's root, which has nowhere to go back to.
+    onBack: (() -> Unit)?,
     liveChats: List<ChatSummary>,
+    /// Opens a tracker hit (the Search tab); unused where the view model
+    /// has no tracker search.
+    onSelectTracker: (TrackerSearchHit) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val messageHits by viewModel.messageHits.collectAsStateWithLifecycle()
@@ -73,6 +86,9 @@ fun SearchScreen(
     var numberOpening by remember(numberHit) { mutableStateOf(false) }
 
     var query by remember { mutableStateOf(viewModel.query) }
+    val trackerHitsAll by viewModel.trackerHits.collectAsStateWithLifecycle()
+    // Only the hits for the text in the field: an older answer never shows.
+    val trackerHits = if (viewModel.trackerHitsQuery == query.trim()) trackerHitsAll else emptyList()
 
     LaunchedEffect(liveChats) { viewModel.updateChats(liveChats) }
 
@@ -84,8 +100,10 @@ fun SearchScreen(
             TopAppBar(
                 title = { Text("Search") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
                     }
                 },
             )
@@ -105,7 +123,7 @@ fun SearchScreen(
                     viewModel.query = it
                     scope.launch { viewModel.search() }
                 },
-                label = { Text("Search chats, bots, and messages") },
+                label = { Text(if (onBack == null) "Search everything" else "Search chats, bots, and messages") },
                 singleLine = true,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -187,6 +205,16 @@ fun SearchScreen(
                     }
                 }
 
+                // The journal's tracker hits, one section per kind, best match first.
+                for ((kind, heading) in TRACKER_SECTIONS) {
+                    val hits = trackerHits.filter { it.kind == kind }
+                    if (hits.isEmpty()) continue
+                    item(key = "tracker-head-${kind.wire}") { SectionHeader(heading) }
+                    items(hits, key = { "tracker-${it.kind.wire}-${it.id}" }) { hit ->
+                        TrackerHitRow(hit, onTap = { onSelectTracker(hit) })
+                    }
+                }
+
                 if (messageHits.isNotEmpty()) {
                     item { SectionHeader("Messages") }
                     items(messageHits, key = { "msg-${it.roomID}" }) { hit ->
@@ -207,9 +235,12 @@ fun SearchScreen(
 
                 if (query.isEmpty()) {
                     item {
-                        HintRow("Search across chat titles, bots, and messages.")
+                        HintRow(
+                            if (onBack == null) "Search conversations, items, missions, memories and messages."
+                            else "Search across chat titles, bots, and messages.",
+                        )
                     }
-                } else if (numberHit == null && chatHits.isEmpty() && messageHits.isEmpty() && !isSearching) {
+                } else if (numberHit == null && chatHits.isEmpty() && messageHits.isEmpty() && trackerHits.isEmpty() && !isSearching) {
                     val hint = if (searchFailed) "Search failed. Try again." else viewModel.emptyResultsMessage
                     item { HintRow(hint) }
                 }
@@ -236,4 +267,52 @@ private fun HintRow(text: String) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(16.dp),
     )
+}
+
+private val TRACKER_SECTIONS = listOf(
+    TrackerSearchKind.ITEM to "Items",
+    TrackerSearchKind.MISSION to "Missions",
+    TrackerSearchKind.PROJECT to "Projects",
+    TrackerSearchKind.MEMORY to "Memories",
+)
+
+/// One tracker hit: `#N title` (a memory's name), then the matched snippet
+/// or the item's state, and how it was found when that was loose.
+@Composable
+private fun TrackerHitRow(hit: TrackerSearchHit, onTap: () -> Unit) {
+    val heading = when {
+        hit.kind == TrackerSearchKind.MEMORY -> hit.name ?: hit.title
+        hit.num != null -> "#${hit.num} ${hit.title}"
+        else -> hit.title
+    }
+    val detail = hit.snippet ?: if (hit.kind == TrackerSearchKind.MEMORY && hit.name != null) hit.title else hit.state
+    val accent = MaterialTheme.colorScheme.primary
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onTap)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Text(heading, style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        detail?.let {
+            Text(
+                starredSnippet(it, accent),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        TrackerSearchDecoding.whyLabel(hit.why)?.let {
+            Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/// The journal's snippets mark matches with `**…**`; bold and tint them.
+internal fun starredSnippet(raw: String, highlight: Color): AnnotatedString = buildAnnotatedString {
+    raw.split("**").forEachIndexed { index, part ->
+        if (index % 2 == 1) withStyle(SpanStyle(color = highlight, fontWeight = FontWeight.Bold)) { append(part) }
+        else append(part)
+    }
 }

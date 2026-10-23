@@ -15,7 +15,9 @@ import kotlinx.coroutines.flow.asStateFlow
 /// hosts on its own stack (the Coordinator tab keeps its own copies so a
 /// sub-chat opened from the coordinator pushes there, not in Conversations).
 ///
-/// Order (apple #209): Coordinator · Missions · For you · Conversations.
+/// Order (apple #209): Coordinator · Missions · For you · Conversations ·
+/// Search. Search is always there: it reaches every other tab, and a hit
+/// opens on the tab that owns it, so its own stack is only its root.
 /// The For you tab keeps its old `DECISIONS` / `decisions` identifiers: only
 /// what the user reads was renamed.
 /// The Missions tab is in the bar only while the journal is known to
@@ -25,6 +27,7 @@ enum class AppTab(val route: String, val rootRoute: String, val label: String, v
     MISSIONS("missions", "missions/list", "Missions", "missions/"),
     DECISIONS("decisions", "decisions/list", ForYouCopy.TITLE, "decisions/"),
     CONVERSATIONS("conversations", "chats", "Conversations", ""),
+    SEARCH("searchtab", "searchtab/root", "Search", "searchtab/"),
 }
 
 /// The signed-in shell's navigation rules, ported from matron-apple's
@@ -89,6 +92,9 @@ class AppShellNavigation(var host: Host? = null) {
     var chatPath: List<String> = emptyList()
     /// Decisions tab stack: `item/<id>` values.
     var decisionsPath: List<String> = emptyList()
+    /// The Search tab's stack; a hit hands off to its own tab, so it stays
+    /// empty in practice.
+    var searchPath: List<String> = emptyList()
     /// Coordinator tab stack: sub-chats and items opened from the
     /// coordinator push here, so back returns to it.
     var coordinatorPath: List<String> = emptyList()
@@ -363,6 +369,21 @@ class AppShellNavigation(var host: Host? = null) {
         navigateExpecting(AppTab.DECISIONS, value) { host?.pushDecision(itemID) }
     }
 
+    /// A Search tab hit on an item: it opens on For you, where items live,
+    /// so Back returns to that list rather than to the search.
+    fun openItemFromSearch(itemID: String) {
+        selectTabInternal(AppTab.DECISIONS)
+        pushDecision(itemID)
+    }
+
+    /// A Search tab hit on a memory: its editor, on the Missions tab that
+    /// hosts the Memories list. No-op on a journal with no Missions tab.
+    fun openMemoryFromSearch(name: String) {
+        if (!missionsSupported) return
+        selectTabInternal(AppTab.MISSIONS)
+        pushMemory(name)
+    }
+
     /// Chat-list rows and origin links can land the coordinator on the
     /// Conversations stack, or a second copy over the Coordinator root:
     /// cut the stack back to just below it and hand off to its tab instead
@@ -481,6 +502,7 @@ class AppShellNavigation(var host: Host? = null) {
         AppTab.MISSIONS -> missionsPath
         AppTab.CONVERSATIONS -> chatPath
         AppTab.DECISIONS -> decisionsPath
+        AppTab.SEARCH -> searchPath
     }
 
     private fun setPath(tab: AppTab, value: List<String>) {
@@ -489,6 +511,7 @@ class AppShellNavigation(var host: Host? = null) {
             AppTab.MISSIONS -> missionsPath = value
             AppTab.CONVERSATIONS -> chatPath = value
             AppTab.DECISIONS -> decisionsPath = value
+            AppTab.SEARCH -> searchPath = value
         }
     }
 
