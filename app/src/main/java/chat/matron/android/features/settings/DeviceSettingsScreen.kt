@@ -48,6 +48,7 @@ import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
 import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
+import chat.matron.android.viewmodels.ChangePasswordViewModel
 import kotlinx.coroutines.launch
 
 /**
@@ -92,6 +93,9 @@ fun DeviceSettingsScreen(
     /// Settings → Security's two-factor status. `null` in hosts without a
     /// session; hidden too on a journal without two-factor.
     twoFactor: TwoFactorSettingViewModel? = null,
+    /// Settings → Security's "Change password". `null` in hosts without a
+    /// session (previews).
+    changePassword: ChangePasswordViewModel? = null,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -116,7 +120,7 @@ fun DeviceSettingsScreen(
                 LabeledRow("Server", hostOf(session.homeserverURL))
             }
 
-            if (twoFactor != null) SecuritySection(twoFactor)
+            if (twoFactor != null || changePassword != null) SecuritySection(twoFactor, changePassword)
 
             if (devicesApi != null) {
                 SettingsSection("Devices") {
@@ -311,57 +315,66 @@ private fun NoticesSection(model: NoticesSettingViewModel) {
 }
 
 /**
- * Settings → Security: whether two-factor sign-in is on. Read-only — turning
- * it on or off and new recovery codes live in Matron Web, and the section
- * says so. Hidden until `GET /2fa` answers, and for good on a journal that
- * 404s it.
+ * Settings → Security: Change password, and whether two-factor sign-in is on.
+ * The two-factor rows are read-only — turning it on or off and new recovery
+ * codes live in Matron Web, and the section says so. They stay hidden until
+ * `GET /2fa` answers, and for good on a journal that 404s it; the section
+ * itself then shows only for Change password.
  */
 @Composable
-private fun SecuritySection(model: TwoFactorSettingViewModel) {
-    LaunchedEffect(model) { model.load() }
-    val state by model.state.collectAsStateWithLifecycle()
-    if (state == TwoFactorSettingViewModel.State.Loading || state == TwoFactorSettingViewModel.State.Unsupported) return
+private fun SecuritySection(twoFactor: TwoFactorSettingViewModel?, changePassword: ChangePasswordViewModel?) {
+    if (twoFactor != null) LaunchedEffect(twoFactor) { twoFactor.load() }
+    val twoFactorState = twoFactor?.state?.collectAsStateWithLifecycle()?.value
+    val showTwoFactor = twoFactorState != null && twoFactorState != TwoFactorSettingViewModel.State.Loading &&
+        twoFactorState != TwoFactorSettingViewModel.State.Unsupported
+    if (!showTwoFactor && changePassword == null) return
 
     SettingsSection("Security") {
-        when (val s = state) {
-            is TwoFactorSettingViewModel.State.Loaded -> {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(TwoFactorSettingViewModel.TITLE, style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            TwoFactorSettingViewModel.detailText(s.status),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+        if (changePassword != null) ChangePasswordRows(changePassword)
+        if (showTwoFactor) TwoFactorRows(twoFactorState!!)
+    }
+}
+
+@Composable
+private fun TwoFactorRows(state: TwoFactorSettingViewModel.State) {
+    when (val s = state) {
+        is TwoFactorSettingViewModel.State.Loaded -> {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(TwoFactorSettingViewModel.TITLE, style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        TwoFactorSettingViewModel.valueText(s.status),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = if (s.status.enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        TwoFactorSettingViewModel.detailText(s.status),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                Text(
+                    TwoFactorSettingViewModel.valueText(s.status),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (s.status.enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-            is TwoFactorSettingViewModel.State.Failed -> Text(
-                s.message,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(vertical = 8.dp),
-            )
-            else -> Unit
         }
-        Text(
-            TwoFactorSettingViewModel.MANAGE,
+        is TwoFactorSettingViewModel.State.Failed -> Text(
+            s.message,
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(bottom = 8.dp),
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(vertical = 8.dp),
         )
+        else -> Unit
     }
+    Text(
+        TwoFactorSettingViewModel.MANAGE,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(bottom = 8.dp),
+    )
 }
 
 /**
