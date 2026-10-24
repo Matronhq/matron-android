@@ -106,6 +106,7 @@ import chat.matron.android.features.pins.PinDialogsHost
 import chat.matron.android.features.pins.PinsController
 import chat.matron.android.features.pins.chatPinMenu
 import chat.matron.android.journal.TrackerSearchKind
+import chat.matron.android.journal.NumberKind
 import chat.matron.android.journal.RelayApi
 import chat.matron.android.journal.StoreDiagnostics
 import chat.matron.android.models.LaunchTimeline
@@ -120,6 +121,7 @@ import chat.matron.android.viewmodels.KeyValueBoxCapacityCache
 import chat.matron.android.viewmodels.ChatListViewModel
 import chat.matron.android.viewmodels.GoToNumberResolver
 import chat.matron.android.viewmodels.GoToTarget
+import chat.matron.android.viewmodels.NumberHit
 import chat.matron.android.viewmodels.LinkSignInViewModel
 import chat.matron.android.viewmodels.MediaBrowserViewModel
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -1207,9 +1209,21 @@ private fun SignedInApp(
                             onBack = null,
                             liveChats = allChats,
                             onSelectTracker = { hit ->
+                                val num = hit.num
                                 when (hit.kind) {
-                                    TrackerSearchKind.ITEM -> shell.openItemFromSearch(hit.id)
-                                    TrackerSearchKind.MISSION -> shell.openMission(hit.id)
+                                    // Through the resolver, as a number hit is: it puts the row on
+                                    // this device first, and the detail page reads it from the store.
+                                    TrackerSearchKind.ITEM, TrackerSearchKind.MISSION -> sessionScope.launch {
+                                        val kind = if (hit.kind == TrackerSearchKind.ITEM) NumberKind.ITEM else NumberKind.MISSION
+                                        val opened = num?.let { goToResolver.open(NumberHit(kind, it, hit.title, hit.id)) }
+                                        when (val target = (opened as? GoToNumberResolver.Opened.Target)?.target) {
+                                            is GoToTarget.Item -> shell.openItemFromSearch(target.itemID)
+                                            is GoToTarget.Mission -> shell.openMission(target.missionID)
+                                            // No number, or it could not be synced: open by id as before.
+                                            null -> if (hit.kind == TrackerSearchKind.ITEM) shell.openItemFromSearch(hit.id)
+                                                else shell.openMission(hit.id)
+                                        }
+                                    }
                                     TrackerSearchKind.MEMORY -> shell.openMemoryFromSearch(hit.name ?: hit.id)
                                     // Not asked for: this app has no project page.
                                     TrackerSearchKind.PROJECT -> Unit

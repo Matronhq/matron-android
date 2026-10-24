@@ -239,11 +239,11 @@ class AppShellNavigation(var host: Host? = null) {
     /// chat's title tap, a milestone card (apple #209, `ChatView.pushMission`).
     /// Idempotent for the mission already on top: a double title tap or a
     /// second card tap for the same mission must not stack two identical
-    /// pages. From Decisions (which hosts no mission page) it opens the
-    /// mission on the Missions tab.
+    /// pages. From Decisions or Search (which host no mission page) it opens
+    /// the mission on the Missions tab.
     fun pushMission(missionID: String) {
         val current = _tab.value
-        if (current == AppTab.DECISIONS) {
+        if (current == AppTab.DECISIONS || current == AppTab.SEARCH) {
             openMission(missionID)
             return
         }
@@ -288,6 +288,11 @@ class AppShellNavigation(var host: Host? = null) {
     /// the tab. Idempotent for the item already on top, like [pushDecision].
     fun openItem(itemID: String) {
         val tab = _tab.value
+        // The Search stack is only its root: an item opens on For you, as a hit does.
+        if (tab == AppTab.SEARCH) {
+            openItemFromSearch(itemID)
+            return
+        }
         val value = itemRoute(itemID)
         if (path(tab).lastOrNull() == value) return
         setPath(tab, path(tab) + value)
@@ -321,6 +326,11 @@ class AppShellNavigation(var host: Host? = null) {
         }
         if (current == AppTab.DECISIONS) {
             openConversationFromDecisions(roomID)
+            return
+        }
+        // The Search stack is only its root: a chat opens on Conversations.
+        if (current == AppTab.SEARCH) {
+            openChat(roomID)
             return
         }
         if (path(current).lastOrNull() == roomID) return
@@ -434,7 +444,9 @@ class AppShellNavigation(var host: Host? = null) {
     /// Returns whether the tab changed.
     fun swipeRoot(dx: Float, dy: Float): Boolean {
         if (!isAtRoot || abs(dx) <= SWIPE_THRESHOLD_DP || abs(dx) <= abs(dy)) return false
-        val tabs = tabs(missionsSupported)
+        // Search is reached from the bar only: its field owns horizontal drags,
+        // and a swipe could not lead back out of it.
+        val tabs = tabs(missionsSupported).filter { it != AppTab.SEARCH }
         val index = tabs.indexOf(_tab.value)
         if (index < 0) return false
         val next = if (dx < 0) index + 1 else index - 1

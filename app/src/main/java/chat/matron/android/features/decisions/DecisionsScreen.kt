@@ -119,10 +119,14 @@ fun DecisionsScreen(
                         IconButton(onClick = { viewModel.dismissError() }) { Icon(Icons.Filled.Close, contentDescription = "Dismiss") }
                     }
                 }
-                val openRows = awaiting.map { DecisionsRow(it, titles[it.originConvoID]) }
-                    .filter { decisionsRowMatches(it, query) }
-                val closedRows = closed.map { DecisionsRow(it, titles[it.originConvoID]) }
-                    .filter { decisionsRowMatches(it, query) }
+                // Remembered: the Done clock and refresh state recompose this often,
+                // and while searching Done filters the whole local history.
+                val openRows = remember(awaiting, titles, query) {
+                    awaiting.map { DecisionsRow(it, titles[it.originConvoID]) }.filter { decisionsRowMatches(it, query) }
+                }
+                val closedRows = remember(closed, titles, query) {
+                    closed.map { DecisionsRow(it, titles[it.originConvoID]) }.filter { decisionsRowMatches(it, query) }
+                }
                 DecisionsListView(
                     model = DecisionsListModel(
                         rows = openRows,

@@ -66,6 +66,9 @@ class SearchViewModel(
     val trackerHitsQuery: String get() = _trackerResults.value.query
     val trackerFailed: Boolean get() = _trackerResults.value.failed
 
+    /// Searches still running: each keystroke starts one, and only the last
+    /// to finish may say the search is over.
+    private var activeSearches = 0
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
 
@@ -183,6 +186,7 @@ class SearchViewModel(
             _searchFailed.value = false
             return
         }
+        activeSearches += 1
         _isSearching.value = true
         try {
             coroutineScope {
@@ -197,7 +201,8 @@ class SearchViewModel(
                 _messageHits.value = result.getOrDefault(emptyList())
             }
         } finally {
-            _isSearching.value = false
+            activeSearches -= 1
+            if (activeSearches == 0) _isSearching.value = false
         }
     }
 

@@ -172,10 +172,7 @@ class AppShellNavigationTest {
     fun rootSwipeLeftGoesToTheNextTabAndRightComesBack() {
         val host = RecordingHost()
         val nav = AppShellNavigation(host)
-        assertTrue("Search sits to the right of Conversations", nav.swipeRoot(dx = -120f, dy = 10f))
-        assertEquals(AppTab.SEARCH, nav.tab.value)
-        assertFalse("nothing to the right of the last tab", nav.swipeRoot(dx = -120f, dy = 10f))
-        assertTrue(nav.swipeRoot(dx = 120f, dy = 10f))
+        assertFalse("a swipe never reaches Search", nav.swipeRoot(dx = -120f, dy = 10f))
         assertEquals(AppTab.CONVERSATIONS, nav.tab.value)
         assertTrue(nav.swipeRoot(dx = 120f, dy = 10f))
         assertEquals(AppTab.DECISIONS, nav.tab.value)
@@ -186,7 +183,7 @@ class AppShellNavigationTest {
         assertFalse("nothing to the left of the first tab", nav.swipeRoot(dx = 120f, dy = 10f))
         assertTrue(nav.swipeRoot(dx = -120f, dy = 10f))
         assertEquals(AppTab.MISSIONS, nav.tab.value)
-        assertEquals(listOf("switch:SEARCH", "switch:CONVERSATIONS", "switch:DECISIONS", "switch:MISSIONS", "switch:COORDINATOR", "switch:MISSIONS"), host.commands)
+        assertEquals(listOf("switch:DECISIONS", "switch:MISSIONS", "switch:COORDINATOR", "switch:MISSIONS"), host.commands)
     }
 
     // MARK: - Coordinator tab (apple #197)
@@ -354,6 +351,27 @@ class AppShellNavigationTest {
         nav.openMemoryFromSearch("proxy-timeouts")
         assertEquals(AppTab.MISSIONS, nav.tab.value)
         assertEquals(listOf(AppShellNavigation.memoryRoute("proxy-timeouts")), nav.missionsPath)
+    }
+
+    @Test
+    fun linksOpenedOnSearchLandOnTheTabThatOwnsThem() {
+        val host = SimulatedControllerHost()
+        val nav = AppShellNavigation(host).also { host.nav = it }
+        nav.noteDestination(AppTab.CONVERSATIONS, "root-CONVERSATIONS", null)
+        nav.selectTab(AppTab.SEARCH)
+        nav.openItem("it_2")
+        assertEquals(AppTab.DECISIONS, nav.tab.value)
+        assertEquals(listOf("item/it_2"), nav.decisionsPath)
+
+        nav.selectTab(AppTab.SEARCH)
+        nav.pushMission("ms_1")
+        assertEquals(AppTab.MISSIONS, nav.tab.value)
+
+        nav.selectTab(AppTab.SEARCH)
+        nav.pushChat("c9")
+        assertEquals(AppTab.CONVERSATIONS, nav.tab.value)
+        assertEquals(listOf("c9"), nav.chatPath)
+        assertEquals("the search stack stays at its root", emptyList<String>(), nav.searchPath)
     }
 
     private class SimulatedControllerHost : AppShellNavigation.Host {

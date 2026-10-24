@@ -47,6 +47,7 @@ import chat.matron.android.designsystem.SearchResultRow
 import chat.matron.android.designsystem.SessionTagText
 import chat.matron.android.search.SearchChatHit
 import chat.matron.android.search.SearchHit
+import chat.matron.android.viewmodels.GoToNumberParser
 import chat.matron.android.viewmodels.GoToNumberCopy
 import chat.matron.android.viewmodels.NumberHit
 import chat.matron.android.viewmodels.SearchViewModel
@@ -131,7 +132,10 @@ fun SearchScreen(
                 // Search does Go to as well: Enter on a number opens what carries it.
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = {
-                    val hit = numberHit ?: return@KeyboardActions
+                    // Only the hit for the text in the field: a search for the new
+                    // text may not have cleared the last one yet.
+                    val hit = numberHit?.takeIf { it.num == GoToNumberParser.parse(query.trim()) }
+                        ?: return@KeyboardActions
                     if (numberOpening) return@KeyboardActions
                     numberOpening = true
                     numberNote = null
@@ -263,6 +267,10 @@ fun SearchScreen(
                 } else if (numberHit == null && chatHits.isEmpty() && messageHits.isEmpty() && trackerHits.isEmpty() && !isSearching) {
                     val hint = if (searchFailed) "Search failed. Try again." else viewModel.emptyResultsMessage
                     item { HintRow(hint) }
+                }
+                // Messages may still show; say that items, missions and memories were not searched.
+                if (trackerResults.failed && trackerResults.query == query.trim() && query.isNotBlank()) {
+                    item { HintRow("Items, missions and memories could not be searched.") }
                 }
             }
         }
