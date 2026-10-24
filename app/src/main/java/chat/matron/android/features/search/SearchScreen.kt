@@ -89,9 +89,9 @@ fun SearchScreen(
     var numberOpening by remember(numberHit) { mutableStateOf(false) }
 
     var query by remember { mutableStateOf(viewModel.query) }
-    val trackerHitsAll by viewModel.trackerHits.collectAsStateWithLifecycle()
+    val trackerResults by viewModel.trackerResults.collectAsStateWithLifecycle()
     // Only the hits for the text in the field: an older answer never shows.
-    val trackerHits = if (viewModel.trackerHitsQuery == query.trim()) trackerHitsAll else emptyList()
+    val trackerHits = if (trackerResults.query == query.trim()) trackerResults.hits else emptyList()
 
     LaunchedEffect(liveChats) { viewModel.updateChats(liveChats) }
 
@@ -247,6 +247,8 @@ fun SearchScreen(
                             roomBoxNames = line.roomBoxNames,
                             roomBoxShorts = line.roomBoxShorts,
                             onTap = { onSelectMessage(hit) },
+                            // Inset like the chat and tracker rows above it.
+                            modifier = Modifier.padding(horizontal = 16.dp),
                         )
                     }
                 }

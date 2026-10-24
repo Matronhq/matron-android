@@ -346,12 +346,12 @@ class SearchViewModelTest {
         vm.query = "nginx"
         vm.search()
         assertEquals(listOf("nginx"), asked)
-        assertEquals(listOf(hit), vm.trackerHits.value)
+        assertEquals(listOf(hit), vm.trackerHits)
         assertEquals("nginx", vm.trackerHitsQuery)
 
         vm.query = ""
         vm.search()
-        assertEquals(emptyList<TrackerSearchHit>(), vm.trackerHits.value)
+        assertEquals(emptyList<TrackerSearchHit>(), vm.trackerHits)
     }
 
     @Test
@@ -359,8 +359,8 @@ class SearchViewModelTest {
         val vm = SearchViewModel(FakeSearchService(), emptyList(), trackerSearch = { error("offline") })
         vm.query = "nginx"
         vm.search()
-        assertEquals(emptyList<TrackerSearchHit>(), vm.trackerHits.value)
-        assertEquals(true, vm.trackerFailed.value)
+        assertEquals(emptyList<TrackerSearchHit>(), vm.trackerHits)
+        assertEquals(true, vm.trackerFailed)
     }
 
     @Test

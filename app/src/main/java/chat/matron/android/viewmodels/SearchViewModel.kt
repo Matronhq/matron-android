@@ -52,14 +52,19 @@ class SearchViewModel(
     private val _numberHit = MutableStateFlow<NumberHit?>(null)
     val numberHit: StateFlow<NumberHit?> = _numberHit.asStateFlow()
 
-    /// Tracker hits for [trackerHitsQuery]; the screen shows them only while
-    /// that is still the query, so an older answer never sits under new text.
-    private val _trackerHits = MutableStateFlow<List<TrackerSearchHit>>(emptyList())
-    val trackerHits: StateFlow<List<TrackerSearchHit>> = _trackerHits.asStateFlow()
-    @Volatile var trackerHitsQuery: String = ""
-        private set
-    private val _trackerFailed = MutableStateFlow(false)
-    val trackerFailed: StateFlow<Boolean> = _trackerFailed.asStateFlow()
+    /// The journal's tracker hits with the query they answer, in one value
+    /// so the screen never pairs new hits with an old query (or the other
+    /// way round). The screen shows them only while that is still the text.
+    data class TrackerResults(
+        val query: String = "",
+        val hits: List<TrackerSearchHit> = emptyList(),
+        val failed: Boolean = false,
+    )
+    private val _trackerResults = MutableStateFlow(TrackerResults())
+    val trackerResults: StateFlow<TrackerResults> = _trackerResults.asStateFlow()
+    val trackerHits: List<TrackerSearchHit> get() = _trackerResults.value.hits
+    val trackerHitsQuery: String get() = _trackerResults.value.query
+    val trackerFailed: Boolean get() = _trackerResults.value.failed
 
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
@@ -172,14 +177,10 @@ class SearchViewModel(
         // Drop a hit the new query no longer names BEFORE anything suspends,
         // so "#412 · Item" never sits above results for a different query.
         if (_numberHit.value?.let { it.num != num } == true) _numberHit.value = null
-        if (trackerHitsQuery != trimmed) {
-            _trackerHits.value = emptyList()
-            _trackerFailed.value = false
-        }
+        if (trackerHitsQuery != trimmed) _trackerResults.value = TrackerResults()
         if (trimmed.isEmpty()) {
             _messageHits.value = emptyList()
             _searchFailed.value = false
-            trackerHitsQuery = ""
             return
         }
         _isSearching.value = true
@@ -215,9 +216,7 @@ class SearchViewModel(
             Result.failure(e)
         }
         if (query.trim() != askedFor) return
-        trackerHitsQuery = askedFor
-        _trackerHits.value = result.getOrDefault(emptyList())
-        _trackerFailed.value = result.isFailure
+        _trackerResults.value = TrackerResults(askedFor, result.getOrDefault(emptyList()), result.isFailure)
     }
 
     companion object {

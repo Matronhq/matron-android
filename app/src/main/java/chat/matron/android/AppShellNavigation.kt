@@ -26,7 +26,7 @@ enum class AppTab(val route: String, val rootRoute: String, val label: String, v
     COORDINATOR("coordinator", "coordinator/root", "Coordinator", "coordinator/"),
     MISSIONS("missions", "missions/list", "Missions", "missions/"),
     DECISIONS("decisions", "decisions/list", ForYouCopy.TITLE, "decisions/"),
-    CONVERSATIONS("conversations", "chats", "Conversations", ""),
+    CONVERSATIONS("conversations", "chats", "Chats", ""),
     SEARCH("searchtab", "searchtab/root", "Search", "searchtab/"),
 }
 

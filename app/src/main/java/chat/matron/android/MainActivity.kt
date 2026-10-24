@@ -1344,7 +1344,7 @@ private fun AppTabBar(
             NavigationBarItem(
                 selected = tab == selected,
                 onClick = { onSelect(tab) },
-                label = { Text(tab.label) },
+                label = { Text(tab.label, maxLines = 1, softWrap = false) },
                 icon = {
                     val icon = when (tab) {
                         AppTab.COORDINATOR -> Icons.Filled.SupervisorAccount
