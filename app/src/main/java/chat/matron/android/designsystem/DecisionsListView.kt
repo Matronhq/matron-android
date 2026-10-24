@@ -94,14 +94,19 @@ object ForYouCopy {
 fun decisionsRowMatches(row: DecisionsRow, query: String): Boolean {
     val words = query.lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
     if (words.isEmpty()) return true
-    val haystack = "#${row.item.num} ${row.item.title} ${row.item.body} ${decisionsRowOrigin(row)}".lowercase()
-    return words.all { haystack.contains(it) }
+    return words.all { row.haystack.contains(it) }
 }
 
 /// One For you row: the item plus its origin conversation's label (`null`
 /// when unknown or untitled — the row falls back to "Another chat").
 data class DecisionsRow(val item: TrackerItem, val originTitle: String?) {
     val id: String get() = item.id
+
+    /// The lowercased text `decisionsRowMatches` searches, built on first use
+    /// and kept with the row (outside equals, since it derives from it).
+    internal val haystack: String by lazy {
+        "#${item.num} ${item.title} ${item.body} ${decisionsRowOrigin(this)}".lowercase()
+    }
 }
 
 /// Everything the Decisions list renders, mapped by the host from

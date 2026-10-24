@@ -171,4 +171,15 @@ class DecisionsListViewTest {
         val populated = model.copy(rows = listOf(DecisionsRow(t("q1", 1, ItemKind.QUESTION, "c1"), null)))
         assertEquals(DecisionsListState.POPULATED, decisionsListState(populated))
     }
+
+    @Test
+    fun searchText_followsTheRowItWasBuiltFrom() {
+        val row = DecisionsRow(t("q1", 12, ItemKind.QUESTION, "c1").copy(title = "Old title"), "auth refactor")
+        assertTrue(decisionsRowMatches(row, "old auth"))
+        val renamed = row.copy(item = row.item.copy(title = "New title"))
+        assertTrue(decisionsRowMatches(renamed, "new"))
+        assertFalse(decisionsRowMatches(renamed, "old"))
+        assertTrue(decisionsRowMatches(renamed.copy(originTitle = "billing"), "billing"))
+        assertEquals("the cached text is not part of equality", row, row.copy())
+    }
 }
