@@ -21,6 +21,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -31,8 +32,8 @@ import chat.matron.android.designsystem.ForYouCopy
 import chat.matron.android.designsystem.DecisionsListModel
 import chat.matron.android.designsystem.DecisionsListView
 import chat.matron.android.designsystem.DecisionsRow
+import chat.matron.android.designsystem.decisionsRowMatches
 import chat.matron.android.designsystem.MatronTimelineBackground
-import chat.matron.android.features.gotonumber.GoToNumberButton
 import chat.matron.android.models.ForYouTab
 import chat.matron.android.viewmodels.ItemsPanelViewModel
 import java.time.Instant
@@ -58,9 +59,9 @@ fun DecisionsScreen(
     originLabels: suspend () -> Map<String, String>,
     onSelect: (String) -> Unit,
     onOpenConversation: (String) -> Unit,
-    /// The toolbar's "Go to number" entry; the shell owns the dialog.
-    onGoToNumber: () -> Unit = {},
     rootGesture: Modifier = Modifier,
+    /// "Search everything for …": the Search tab with the same text.
+    onSearchEverything: ((String) -> Unit)? = null,
 ) {
     val awaiting by viewModel.awaitingYou.collectAsStateWithLifecycle()
     val isSupported by viewModel.isSupported.collectAsStateWithLifecycle()
@@ -68,13 +69,22 @@ fun DecisionsScreen(
     val error by viewModel.error.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
     var titles by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    // The search field's text. It survives a tab switch, like the web's.
+    var query by rememberSaveable { mutableStateOf("") }
 
     val tab by viewModel.forYouTab.collectAsStateWithLifecycle()
     val decided by viewModel.decided.collectAsStateWithLifecycle()
     val decidedVisibleCount by viewModel.decidedVisibleCount.collectAsStateWithLifecycle()
     // Only while the Done tab shows, so the open list never pays for it.
-    val closed = remember(tab, decided, decidedVisibleCount) {
-        if (tab == ForYouTab.CLOSED) decided.take(decidedVisibleCount) else emptyList()
+    // While searching, the Done tab filters everything it knows rather than
+    // the visible window, so a match further down is not hidden.
+    val searching = query.isNotBlank()
+    val closed = remember(tab, decided, decidedVisibleCount, searching) {
+        when {
+            tab != ForYouTab.CLOSED -> emptyList()
+            searching -> decided
+            else -> decided.take(decidedVisibleCount)
+        }
     }
     // The Done captions' clock, ticking only while that tab shows.
     var now by remember { mutableStateOf(Instant.now()) }
@@ -94,7 +104,6 @@ fun DecisionsScreen(
         topBar = {
             TopAppBar(
                 title = { Text(ForYouCopy.TITLE) },
-                actions = { GoToNumberButton(onClick = onGoToNumber) },
             )
         },
     ) { padding ->
@@ -110,15 +119,26 @@ fun DecisionsScreen(
                         IconButton(onClick = { viewModel.dismissError() }) { Icon(Icons.Filled.Close, contentDescription = "Dismiss") }
                     }
                 }
+                // Remembered: the Done clock and refresh state recompose this often,
+                // and while searching Done filters the whole local history.
+                val openRows = remember(awaiting, titles, query) {
+                    awaiting.map { DecisionsRow(it, titles[it.originConvoID]) }.filter { decisionsRowMatches(it, query) }
+                }
+                val closedRows = remember(closed, titles, query) {
+                    closed.map { DecisionsRow(it, titles[it.originConvoID]) }.filter { decisionsRowMatches(it, query) }
+                }
                 DecisionsListView(
                     model = DecisionsListModel(
-                        rows = awaiting.map { DecisionsRow(it, titles[it.originConvoID]) },
+                        rows = openRows,
                         isSupported = isSupported,
                         isRefreshing = isRefreshing,
                         tab = tab,
-                        closed = closed.map { DecisionsRow(it, titles[it.originConvoID]) },
-                        closedTotalCount = decided.size,
+                        closed = closedRows,
+                        closedTotalCount = if (searching) closedRows.size else decided.size,
+                        query = query,
                     ),
+                    onQueryChange = { query = it },
+                    onSearchEverything = onSearchEverything,
                     onSelect = onSelect,
                     onOpenConversation = onOpenConversation,
                     onRefresh = { coroutineScope.launch { viewModel.refresh() } },

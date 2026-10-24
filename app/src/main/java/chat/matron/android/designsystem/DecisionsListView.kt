@@ -20,6 +20,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.Visibility
@@ -70,6 +79,23 @@ object ForYouCopy {
             "Newest first by your last reply."
     /// The row under the Done tab's visible window.
     const val SHOW_MORE = "Show more"
+    /// The search field above the Needs you | Done control.
+    const val SEARCH_PLACEHOLDER = "Search For you"
+    /// A search that leaves the tab's list empty.
+    const val NO_MATCHES_TITLE = "No matches"
+    const val NO_MATCHES_DESCRIPTION = "Nothing in this list matches your search."
+    /// The link from a For you search to the Search tab.
+    fun searchEverything(query: String) = "Search everything for \u201C$query\u201D \u2192"
+}
+
+/// Whether every word of [query] appears in the row's number, title, text
+/// or origin conversation — the For you search field's filter, the same
+/// rule the web inbox applies. A blank query lets every row through.
+fun decisionsRowMatches(row: DecisionsRow, query: String): Boolean {
+    val words = query.lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+    if (words.isEmpty()) return true
+    val haystack = "#${row.item.num} ${row.item.title} ${row.item.body} ${decisionsRowOrigin(row)}".lowercase()
+    return words.all { haystack.contains(it) }
 }
 
 /// One For you row: the item plus its origin conversation's label (`null`
@@ -95,6 +121,9 @@ data class DecisionsListModel(
     /// Every locally known closed question, decision and notice, however
     /// many of them [closed] currently shows.
     val closedTotalCount: Int = 0,
+    /// The search field's text. The host has already filtered [rows] and
+    /// [closed] by it; a non-blank query only changes the empty state.
+    val query: String = "",
 ) {
     /// Whether "Show more" renders under the visible window — purely local;
     /// there is no server page to reach for.
@@ -104,10 +133,13 @@ data class DecisionsListModel(
 /// Which body the list shows. Pure so the precedence (unsupported wins over
 /// empty; an unknown support state shows the list; each tab has its own
 /// empty state) is unit-tested.
-enum class DecisionsListState { UNSUPPORTED, EMPTY, POPULATED, CLOSED_EMPTY, CLOSED_POPULATED }
+enum class DecisionsListState { UNSUPPORTED, EMPTY, POPULATED, CLOSED_EMPTY, CLOSED_POPULATED, NO_MATCHES }
 
 fun decisionsListState(model: DecisionsListModel): DecisionsListState = when {
     model.isSupported == false -> DecisionsListState.UNSUPPORTED
+    model.query.isNotBlank() &&
+        (if (model.tab == ForYouTab.CLOSED) model.closedTotalCount == 0 else model.rows.isEmpty()) ->
+        DecisionsListState.NO_MATCHES
     model.tab == ForYouTab.CLOSED ->
         if (model.closedTotalCount == 0) DecisionsListState.CLOSED_EMPTY else DecisionsListState.CLOSED_POPULATED
     model.rows.isEmpty() -> DecisionsListState.EMPTY
@@ -153,15 +185,39 @@ fun DecisionsListView(
     /// The clock the Done rows' "Answered · 2 hr ago" captions read. The
     /// host refreshes it on a timer; a parameter so the view stays pure.
     now: Instant = Instant.now(),
+    /// The search field's edits; the host filters the rows.
+    onQueryChange: (String) -> Unit = {},
+    /// "Search everything for …" under a search: the Search tab, same text.
+    /// `null` hides it.
+    onSearchEverything: ((String) -> Unit)? = null,
 ) {
     Column(modifier.fillMaxSize()) {
-        if (decisionsShowsTabs(model)) ForYouTabPicker(model.tab, onSelectTab)
+        if (decisionsShowsTabs(model)) {
+            ForYouSearchField(model.query, onQueryChange)
+            ForYouTabPicker(model.tab, onSelectTab)
+            if (model.query.isNotBlank() && onSearchEverything != null) {
+                Text(
+                    ForYouCopy.searchEverything(model.query.trim()),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSearchEverything(model.query.trim()) }
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
+        }
         PullToRefreshBox(isRefreshing = model.isRefreshing, onRefresh = onRefresh, modifier = Modifier.fillMaxSize()) {
             when (decisionsListState(model)) {
                 DecisionsListState.UNSUPPORTED -> Placeholder(
                     icon = { Icon(Icons.Outlined.Warning, contentDescription = null, modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
                     title = "Tracker not available",
                     description = "Update the journal server to use items.",
+                )
+                DecisionsListState.NO_MATCHES -> Placeholder(
+                    icon = { Icon(Icons.Outlined.Search, contentDescription = null, modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                    title = ForYouCopy.NO_MATCHES_TITLE,
+                    description = ForYouCopy.NO_MATCHES_DESCRIPTION,
                 )
                 DecisionsListState.EMPTY -> Placeholder(
                     icon = { Icon(Icons.Filled.Verified, contentDescription = null, modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
@@ -225,6 +281,29 @@ fun DecisionsListView(
 /// ordered by, so the list reads in order.
 fun decisionsClosedRowCaption(row: DecisionsRow, now: Instant): String? =
     ItemGlyph.closedCaption(row.item, at = row.item.closedSortDate, now = now)
+
+/// The search field above the Needs you | Done control: a rounded filled
+/// field with a clear button, filtering whichever tab shows.
+@Composable
+private fun ForYouSearchField(query: String, onQueryChange: (String) -> Unit) {
+    TextField(
+        value = query,
+        onValueChange = onQueryChange,
+        placeholder = { Text(ForYouCopy.SEARCH_PLACEHOLDER) },
+        leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+        trailingIcon = if (query.isEmpty()) null else {
+            { IconButton(onClick = { onQueryChange("") }) { Icon(Icons.Filled.Close, contentDescription = "Clear search") } }
+        },
+        singleLine = true,
+        shape = RoundedCornerShape(28.dp),
+        colors = TextFieldDefaults.colors(
+            focusedIndicatorColor = Color.Transparent,
+            unfocusedIndicatorColor = Color.Transparent,
+        ),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp),
+    )
+}
 
 /// The Needs you | Done control, above whichever tab's list shows — the
 /// tracker's own segmented control ([ItemsListView]'s This chat | All). A

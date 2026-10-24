@@ -166,13 +166,13 @@ class AppShellNavigationTest {
     // bar order; deeper in a stack the chat / item detail own horizontal
     // drags, so a non-empty path ignores it.
     /// Bar order since apple #209: Coordinator · Missions · Decisions ·
-    /// Conversations, with Missions present until a 404 proves it
+    /// Conversations, then Search last; Missions present until a 404 proves it
     /// unsupported (the default, like iOS, is shown).
     @Test
     fun rootSwipeLeftGoesToTheNextTabAndRightComesBack() {
         val host = RecordingHost()
         val nav = AppShellNavigation(host)
-        assertFalse("nothing to the right of the last tab", nav.swipeRoot(dx = -120f, dy = 10f))
+        assertFalse("a swipe never reaches Search", nav.swipeRoot(dx = -120f, dy = 10f))
         assertEquals(AppTab.CONVERSATIONS, nav.tab.value)
         assertTrue(nav.swipeRoot(dx = 120f, dy = 10f))
         assertEquals(AppTab.DECISIONS, nav.tab.value)
@@ -330,6 +330,50 @@ class AppShellNavigationTest {
     /// `noteDestination` synchronously (as `NavController` does from inside
     /// `navigate()`), a tab switch restores that tab's saved stack, and
     /// `popChats` restores Conversations first when another tab shows.
+    @Test
+    fun searchIsTheLastTabAndAlwaysThere() {
+        assertEquals(AppTab.SEARCH, AppShellNavigation.tabs(true).last())
+        assertEquals(AppTab.SEARCH, AppShellNavigation.tabs(false).last())
+    }
+
+    @Test
+    fun aSearchHitOpensOnTheTabThatOwnsIt() {
+        val host = SimulatedControllerHost()
+        val nav = AppShellNavigation(host).also { host.nav = it }
+        nav.noteDestination(AppTab.CONVERSATIONS, "root-CONVERSATIONS", null)
+        nav.selectTab(AppTab.SEARCH)
+        nav.openItemFromSearch("it_1")
+        assertEquals(AppTab.DECISIONS, nav.tab.value)
+        assertEquals(listOf("item/it_1"), nav.decisionsPath)
+        assertEquals("the search stack stays at its root", emptyList<String>(), nav.searchPath)
+
+        nav.selectTab(AppTab.SEARCH)
+        nav.openMemoryFromSearch("proxy-timeouts")
+        assertEquals(AppTab.MISSIONS, nav.tab.value)
+        assertEquals(listOf(AppShellNavigation.memoryRoute("proxy-timeouts")), nav.missionsPath)
+    }
+
+    @Test
+    fun linksOpenedOnSearchLandOnTheTabThatOwnsThem() {
+        val host = SimulatedControllerHost()
+        val nav = AppShellNavigation(host).also { host.nav = it }
+        nav.noteDestination(AppTab.CONVERSATIONS, "root-CONVERSATIONS", null)
+        nav.selectTab(AppTab.SEARCH)
+        nav.openItem("it_2")
+        assertEquals(AppTab.DECISIONS, nav.tab.value)
+        assertEquals(listOf("item/it_2"), nav.decisionsPath)
+
+        nav.selectTab(AppTab.SEARCH)
+        nav.pushMission("ms_1")
+        assertEquals(AppTab.MISSIONS, nav.tab.value)
+
+        nav.selectTab(AppTab.SEARCH)
+        nav.pushChat("c9")
+        assertEquals(AppTab.CONVERSATIONS, nav.tab.value)
+        assertEquals(listOf("c9"), nav.chatPath)
+        assertEquals("the search stack stays at its root", emptyList<String>(), nav.searchPath)
+    }
+
     private class SimulatedControllerHost : AppShellNavigation.Host {
         lateinit var nav: AppShellNavigation
         val commands = mutableListOf<String>()

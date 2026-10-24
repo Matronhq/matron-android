@@ -143,4 +143,32 @@ class DecisionsListViewTest {
         assertEquals("Seen", itemChosenAction(item.copy(chosenAction = "Seen"), null))
         assertEquals("a label no longer offered marks nothing", null, itemChosenAction(item, "Go"))
     }
+
+    @Test
+    fun searchMatchesEveryWordAcrossNumberTitleTextAndOrigin() {
+        val row = DecisionsRow(
+            t("q1", 1755, ItemKind.QUESTION, "c1").copy(title = "Design audit done", body = "The side-by-side audit"),
+            "matron-web deploy",
+        )
+        assertTrue(decisionsRowMatches(row, ""))
+        assertTrue(decisionsRowMatches(row, "  "))
+        assertTrue(decisionsRowMatches(row, "design"))
+        assertTrue(decisionsRowMatches(row, "AUDIT side"))
+        assertTrue("the origin conversation counts", decisionsRowMatches(row, "audit deploy"))
+        assertTrue(decisionsRowMatches(row, "#1755"))
+        assertTrue(decisionsRowMatches(row, "1755"))
+        assertFalse(decisionsRowMatches(row, "design nginx"))
+        val unknownOrigin = row.copy(originTitle = null)
+        assertTrue("an unknown origin searches as Another chat", decisionsRowMatches(unknownOrigin, "another chat"))
+    }
+
+    @Test
+    fun aSearchThatEmptiesTheTabSaysNoMatches() {
+        val model = DecisionsListModel(rows = emptyList(), isSupported = true, isRefreshing = false, query = "nginx")
+        assertEquals(DecisionsListState.NO_MATCHES, decisionsListState(model))
+        assertEquals(DecisionsListState.NO_MATCHES, decisionsListState(model.copy(tab = ForYouTab.CLOSED)))
+        assertEquals("unsupported still wins", DecisionsListState.UNSUPPORTED, decisionsListState(model.copy(isSupported = false)))
+        val populated = model.copy(rows = listOf(DecisionsRow(t("q1", 1, ItemKind.QUESTION, "c1"), null)))
+        assertEquals(DecisionsListState.POPULATED, decisionsListState(populated))
+    }
 }

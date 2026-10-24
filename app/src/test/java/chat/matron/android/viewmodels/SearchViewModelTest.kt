@@ -2,6 +2,8 @@ package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.ChatSummary
 import chat.matron.android.journal.NumberKind
+import chat.matron.android.journal.TrackerSearchHit
+import chat.matron.android.journal.TrackerSearchKind
 import chat.matron.android.models.BotIdentity
 import chat.matron.android.search.SearchHit
 import java.time.Instant
@@ -334,5 +336,43 @@ class SearchViewModelTest {
         slow.complete(Unit)
         first.join()
         assertEquals(null, vm.numberHit.value)
+    }
+
+    @Test
+    fun trackerHits_followTheQueryTheyWereAskedFor() = runBlocking {
+        val asked = mutableListOf<String>()
+        val hit = TrackerSearchHit(kind = TrackerSearchKind.ITEM, id = "it_1", num = 12, title = "Pick the nginx timeout")
+        val vm = SearchViewModel(FakeSearchService(), emptyList(), trackerSearch = { q -> asked += q; listOf(hit) })
+        vm.query = "nginx"
+        vm.search()
+        assertEquals(listOf("nginx"), asked)
+        assertEquals(listOf(hit), vm.trackerHits)
+        assertEquals("nginx", vm.trackerHitsQuery)
+
+        vm.query = ""
+        vm.search()
+        assertEquals(emptyList<TrackerSearchHit>(), vm.trackerHits)
+    }
+
+    @Test
+    fun trackerHits_aFailureSaysSoAndKeepsTheRest() = runBlocking {
+        val vm = SearchViewModel(FakeSearchService(), emptyList(), trackerSearch = { error("offline") })
+        vm.query = "nginx"
+        vm.search()
+        assertEquals(emptyList<TrackerSearchHit>(), vm.trackerHits)
+        assertEquals(true, vm.trackerFailed)
+    }
+
+    @Test
+    fun trackerHits_aQueryChangedDuringThePauseIsNotAsked() = runBlocking {
+        val asked = mutableListOf<String>()
+        val vm = SearchViewModel(FakeSearchService(), emptyList(), trackerSearch = { q -> asked += q; emptyList() })
+        vm.query = "ngi"
+        val first = launch { vm.search() }
+        yield()
+        vm.query = "nginx"
+        vm.search()
+        first.join()
+        assertEquals(listOf("nginx"), asked)
     }
 }

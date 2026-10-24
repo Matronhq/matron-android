@@ -33,10 +33,10 @@ class MissionsNavigationTest {
     }
 
     @Test
-    fun tabOrderIsCoordinatorMissionsDecisionsConversations() {
-        assertEquals(listOf(AppTab.COORDINATOR, AppTab.MISSIONS, AppTab.DECISIONS, AppTab.CONVERSATIONS), AppTab.entries)
+    fun tabOrderIsCoordinatorMissionsDecisionsConversationsSearch() {
+        assertEquals(listOf(AppTab.COORDINATOR, AppTab.MISSIONS, AppTab.DECISIONS, AppTab.CONVERSATIONS, AppTab.SEARCH), AppTab.entries)
         assertEquals(AppTab.entries, AppShellNavigation.tabs(missionsSupported = true))
-        assertEquals(listOf(AppTab.COORDINATOR, AppTab.DECISIONS, AppTab.CONVERSATIONS), AppShellNavigation.tabs(missionsSupported = false))
+        assertEquals(listOf(AppTab.COORDINATOR, AppTab.DECISIONS, AppTab.CONVERSATIONS, AppTab.SEARCH), AppShellNavigation.tabs(missionsSupported = false))
     }
 
     @Test

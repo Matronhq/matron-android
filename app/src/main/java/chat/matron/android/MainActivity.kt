@@ -13,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.SportsScore
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SupervisorAccount
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
@@ -75,7 +76,6 @@ import chat.matron.android.features.coordinator.CoordinatorRoot
 import chat.matron.android.features.coordinator.CoordinatorSetupView
 import chat.matron.android.features.coordinator.coordinatorRoot
 import chat.matron.android.features.decisions.DecisionsScreen
-import chat.matron.android.features.gotonumber.GoToNumberDialog
 import chat.matron.android.features.missions.MissionDetailScreen
 import chat.matron.android.features.missions.MissionOpenConversationOutcome
 import chat.matron.android.features.memories.MemoriesScreen
@@ -105,6 +105,8 @@ import chat.matron.android.features.pins.ChatPinMenu
 import chat.matron.android.features.pins.PinDialogsHost
 import chat.matron.android.features.pins.PinsController
 import chat.matron.android.features.pins.chatPinMenu
+import chat.matron.android.journal.TrackerSearchKind
+import chat.matron.android.journal.NumberKind
 import chat.matron.android.journal.RelayApi
 import chat.matron.android.journal.StoreDiagnostics
 import chat.matron.android.models.LaunchTimeline
@@ -118,8 +120,8 @@ import chat.matron.android.viewmodels.VoiceRecorderHandoff
 import chat.matron.android.viewmodels.KeyValueBoxCapacityCache
 import chat.matron.android.viewmodels.ChatListViewModel
 import chat.matron.android.viewmodels.GoToNumberResolver
-import chat.matron.android.viewmodels.GoToNumberViewModel
 import chat.matron.android.viewmodels.GoToTarget
+import chat.matron.android.viewmodels.NumberHit
 import chat.matron.android.viewmodels.LinkSignInViewModel
 import chat.matron.android.viewmodels.MediaBrowserViewModel
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -553,13 +555,22 @@ private fun SignedInApp(
     var showCoordinatorChooser by remember { mutableStateOf(false) }
     // The tab whose "Go to number" button opened the dialog: the target is
     // pushed on THAT tab's stack where the tab can host it.
-    var goToNumberFrom by remember { mutableStateOf<AppTab?>(null) }
     val goToResolver = remember(session.userID, shell) { deps.goToNumberResolver(session) { shell.missionsSupported } }
 
     // Shareable tracker links (`https://<journal>/u/<user>/<num>`), tapped
     // in-app or arriving as an App Link: resolved like a typed number and
     // opened on the selected tab; what the app cannot show goes to a
     // browser. The latest link wins: a new one cancels one still resolving.
+    // The Search tab's view model lives for the session, so its text and
+    // results survive a trip to another tab and back.
+    val tabSearchVM = remember(session.userID, goToResolver) {
+        SearchViewModel(
+            deps.search,
+            emptyList(),
+            numberLookup = { num -> (goToResolver.find(num) as? GoToNumberResolver.Found.Hit)?.hit },
+            trackerSearch = deps.trackerSearch(session),
+        )
+    }
     val trackerLinks = remember(session.userID, goToResolver) {
         TrackerLinkRouter(journalBaseURL = session.homeserverURL, sessionUser = session.userID, resolver = goToResolver)
     }
@@ -982,9 +993,9 @@ private fun SignedInApp(
                             LaunchedEffect(Unit) { nav.popBackStack() }
                         } else {
                             val searchVM = remember {
-                                SearchViewModel(searchService, allChats) { num ->
+                                SearchViewModel(searchService, allChats, numberLookup = { num ->
                                     (goToResolver.find(num) as? GoToNumberResolver.Found.Hit)?.hit
-                                }
+                                })
                             }
                             SearchScreen(
                                 viewModel = searchVM,
@@ -1110,7 +1121,6 @@ private fun SignedInApp(
                             viewModel = missionsVM,
                             onSelect = { shell.pushMission(it) },
                             onOpenMemories = { shell.openMemories() },
-                            onGoToNumber = { goToNumberFrom = AppTab.MISSIONS },
                             rootGesture = rootSwipe,
                         )
                     }
@@ -1169,6 +1179,60 @@ private fun SignedInApp(
                     }
                 }
 
+                // The Search tab: one field over everything. A hit opens on the
+                // tab that owns it (a chat on Conversations, an item on For
+                // you, a mission or memory on Missions), so this stack is
+                // only its root.
+                navigation(route = AppTab.SEARCH.route, startDestination = AppTab.SEARCH.rootRoute) {
+                    composable(AppTab.SEARCH.rootRoute) {
+                        SearchScreen(
+                            viewModel = tabSearchVM,
+                            onSelectChat = { chat -> shell.openChat(chat.id) },
+                            onSelectMessage = { hit ->
+                                val query = tabSearchVM.trimmedQuery
+                                val (chatVM, _) = vmCache.viewModels(hit.roomID)
+                                sessionScope.launch { chatVM.beginChatSearch(query) }
+                                shell.openChat(hit.roomID)
+                            },
+                            onSelectNumber = { hit ->
+                                when (val opened = goToResolver.open(hit)) {
+                                    is GoToNumberResolver.Opened.Message -> opened.text
+                                    is GoToNumberResolver.Opened.Target -> {
+                                        when (val target = opened.target) {
+                                            is GoToTarget.Item -> shell.openItemFromSearch(target.itemID)
+                                            is GoToTarget.Mission -> shell.openMission(target.missionID)
+                                        }
+                                        null
+                                    }
+                                }
+                            },
+                            onBack = null,
+                            liveChats = allChats,
+                            onSelectTracker = { hit ->
+                                val num = hit.num
+                                when (hit.kind) {
+                                    // Through the resolver, as a number hit is: it puts the row on
+                                    // this device first, and the detail page reads it from the store.
+                                    TrackerSearchKind.ITEM, TrackerSearchKind.MISSION -> sessionScope.launch {
+                                        val kind = if (hit.kind == TrackerSearchKind.ITEM) NumberKind.ITEM else NumberKind.MISSION
+                                        val opened = num?.let { goToResolver.open(NumberHit(kind, it, hit.title, hit.id)) }
+                                        when (val target = (opened as? GoToNumberResolver.Opened.Target)?.target) {
+                                            is GoToTarget.Item -> shell.openItemFromSearch(target.itemID)
+                                            is GoToTarget.Mission -> shell.openMission(target.missionID)
+                                            // No number, or it could not be synced: open by id as before.
+                                            null -> if (hit.kind == TrackerSearchKind.ITEM) shell.openItemFromSearch(hit.id)
+                                                else shell.openMission(hit.id)
+                                        }
+                                    }
+                                    TrackerSearchKind.MEMORY -> shell.openMemoryFromSearch(hit.name ?: hit.id)
+                                    // Not asked for: this app has no project page.
+                                    TrackerSearchKind.PROJECT -> Unit
+                                }
+                            },
+                        )
+                    }
+                }
+
                 // The Decisions tab (spec §3): its own graph, rooted at the list;
                 // a tapped decision pushes item detail WITHIN this tab.
                 navigation(route = AppTab.DECISIONS.route, startDestination = AppTab.DECISIONS.rootRoute) {
@@ -1178,8 +1242,12 @@ private fun SignedInApp(
                             originLabels = { deps.journalStore(session).conversationOriginLabels() },
                             onSelect = { shell.pushDecision(it) },
                             onOpenConversation = onOpenConversationFromDecisions,
-                            onGoToNumber = { goToNumberFrom = AppTab.DECISIONS },
                             rootGesture = rootSwipe,
+                            onSearchEverything = { text ->
+                                tabSearchVM.query = text
+                                sessionScope.launch { tabSearchVM.search() }
+                                shell.selectTab(AppTab.SEARCH)
+                            },
                         )
                     }
                     composable(
@@ -1224,24 +1292,6 @@ private fun SignedInApp(
         }
     }
 
-    goToNumberFrom?.let { from ->
-        // A fresh view model per opening, so the dialog never reopens on the
-        // last number or its message.
-        val goToVM = remember(from, goToResolver) {
-            GoToNumberViewModel(goToResolver) { target ->
-                when (target) {
-                    // On Missions the item joins that tab's stack; anywhere
-                    // else it opens where items live, on For you.
-                    is GoToTarget.Item ->
-                        if (from == AppTab.MISSIONS) shell.pushMissionItem(target.itemID) else shell.pushDecision(target.itemID)
-                    // From For you (which hosts no mission page) this opens
-                    // the mission on the Missions tab — the shell's own rule.
-                    is GoToTarget.Mission -> shell.pushMission(target.missionID)
-                }
-            }
-        }
-        GoToNumberDialog(viewModel = goToVM, onDismiss = { goToNumberFrom = null })
-    }
 
     PinDialogsHost(pinsController, chats = allChats, isLoading = chatListVM.isLoading.collectAsStateWithLifecycle().value)
 
@@ -1308,13 +1358,14 @@ private fun AppTabBar(
             NavigationBarItem(
                 selected = tab == selected,
                 onClick = { onSelect(tab) },
-                label = { Text(tab.label) },
+                label = { Text(tab.label, maxLines = 1, softWrap = false) },
                 icon = {
                     val icon = when (tab) {
                         AppTab.COORDINATOR -> Icons.Filled.SupervisorAccount
                         AppTab.MISSIONS -> Icons.Filled.SportsScore
                         AppTab.CONVERSATIONS -> Icons.Filled.Forum
                         AppTab.DECISIONS -> Icons.Filled.CheckCircle
+                        AppTab.SEARCH -> Icons.Filled.Search
                     }
                     when {
                         tab == AppTab.DECISIONS && awaitingYouCount > 0 ->

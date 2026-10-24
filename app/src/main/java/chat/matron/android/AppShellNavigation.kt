@@ -15,7 +15,9 @@ import kotlinx.coroutines.flow.asStateFlow
 /// hosts on its own stack (the Coordinator tab keeps its own copies so a
 /// sub-chat opened from the coordinator pushes there, not in Conversations).
 ///
-/// Order (apple #209): Coordinator · Missions · For you · Conversations.
+/// Order (apple #209): Coordinator · Missions · For you · Conversations ·
+/// Search. Search is always there: it reaches every other tab, and a hit
+/// opens on the tab that owns it, so its own stack is only its root.
 /// The For you tab keeps its old `DECISIONS` / `decisions` identifiers: only
 /// what the user reads was renamed.
 /// The Missions tab is in the bar only while the journal is known to
@@ -24,7 +26,8 @@ enum class AppTab(val route: String, val rootRoute: String, val label: String, v
     COORDINATOR("coordinator", "coordinator/root", "Coordinator", "coordinator/"),
     MISSIONS("missions", "missions/list", "Missions", "missions/"),
     DECISIONS("decisions", "decisions/list", ForYouCopy.TITLE, "decisions/"),
-    CONVERSATIONS("conversations", "chats", "Conversations", ""),
+    CONVERSATIONS("conversations", "chats", "Chats", ""),
+    SEARCH("searchtab", "searchtab/root", "Search", "searchtab/"),
 }
 
 /// The signed-in shell's navigation rules, ported from matron-apple's
@@ -89,6 +92,9 @@ class AppShellNavigation(var host: Host? = null) {
     var chatPath: List<String> = emptyList()
     /// Decisions tab stack: `item/<id>` values.
     var decisionsPath: List<String> = emptyList()
+    /// The Search tab's stack; a hit hands off to its own tab, so it stays
+    /// empty in practice.
+    var searchPath: List<String> = emptyList()
     /// Coordinator tab stack: sub-chats and items opened from the
     /// coordinator push here, so back returns to it.
     var coordinatorPath: List<String> = emptyList()
@@ -233,11 +239,11 @@ class AppShellNavigation(var host: Host? = null) {
     /// chat's title tap, a milestone card (apple #209, `ChatView.pushMission`).
     /// Idempotent for the mission already on top: a double title tap or a
     /// second card tap for the same mission must not stack two identical
-    /// pages. From Decisions (which hosts no mission page) it opens the
-    /// mission on the Missions tab.
+    /// pages. From Decisions or Search (which host no mission page) it opens
+    /// the mission on the Missions tab.
     fun pushMission(missionID: String) {
         val current = _tab.value
-        if (current == AppTab.DECISIONS) {
+        if (current == AppTab.DECISIONS || current == AppTab.SEARCH) {
             openMission(missionID)
             return
         }
@@ -282,6 +288,11 @@ class AppShellNavigation(var host: Host? = null) {
     /// the tab. Idempotent for the item already on top, like [pushDecision].
     fun openItem(itemID: String) {
         val tab = _tab.value
+        // The Search stack is only its root: an item opens on For you, as a hit does.
+        if (tab == AppTab.SEARCH) {
+            openItemFromSearch(itemID)
+            return
+        }
         val value = itemRoute(itemID)
         if (path(tab).lastOrNull() == value) return
         setPath(tab, path(tab) + value)
@@ -315,6 +326,11 @@ class AppShellNavigation(var host: Host? = null) {
         }
         if (current == AppTab.DECISIONS) {
             openConversationFromDecisions(roomID)
+            return
+        }
+        // The Search stack is only its root: a chat opens on Conversations.
+        if (current == AppTab.SEARCH) {
+            openChat(roomID)
             return
         }
         if (path(current).lastOrNull() == roomID) return
@@ -361,6 +377,21 @@ class AppShellNavigation(var host: Host? = null) {
         if (decisionsPath.lastOrNull() == value) return
         decisionsPath = decisionsPath + value
         navigateExpecting(AppTab.DECISIONS, value) { host?.pushDecision(itemID) }
+    }
+
+    /// A Search tab hit on an item: it opens on For you, where items live,
+    /// so Back returns to that list rather than to the search.
+    fun openItemFromSearch(itemID: String) {
+        selectTabInternal(AppTab.DECISIONS)
+        pushDecision(itemID)
+    }
+
+    /// A Search tab hit on a memory: its editor, on the Missions tab that
+    /// hosts the Memories list. No-op on a journal with no Missions tab.
+    fun openMemoryFromSearch(name: String) {
+        if (!missionsSupported) return
+        selectTabInternal(AppTab.MISSIONS)
+        pushMemory(name)
     }
 
     /// Chat-list rows and origin links can land the coordinator on the
@@ -413,7 +444,9 @@ class AppShellNavigation(var host: Host? = null) {
     /// Returns whether the tab changed.
     fun swipeRoot(dx: Float, dy: Float): Boolean {
         if (!isAtRoot || abs(dx) <= SWIPE_THRESHOLD_DP || abs(dx) <= abs(dy)) return false
-        val tabs = tabs(missionsSupported)
+        // Search is reached from the bar only: its field owns horizontal drags,
+        // and a swipe could not lead back out of it.
+        val tabs = tabs(missionsSupported).filter { it != AppTab.SEARCH }
         val index = tabs.indexOf(_tab.value)
         if (index < 0) return false
         val next = if (dx < 0) index + 1 else index - 1
@@ -481,6 +514,7 @@ class AppShellNavigation(var host: Host? = null) {
         AppTab.MISSIONS -> missionsPath
         AppTab.CONVERSATIONS -> chatPath
         AppTab.DECISIONS -> decisionsPath
+        AppTab.SEARCH -> searchPath
     }
 
     private fun setPath(tab: AppTab, value: List<String>) {
@@ -489,6 +523,7 @@ class AppShellNavigation(var host: Host? = null) {
             AppTab.MISSIONS -> missionsPath = value
             AppTab.CONVERSATIONS -> chatPath = value
             AppTab.DECISIONS -> decisionsPath = value
+            AppTab.SEARCH -> searchPath = value
         }
     }
 
