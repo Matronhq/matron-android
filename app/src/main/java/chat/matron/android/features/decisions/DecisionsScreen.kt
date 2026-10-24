@@ -40,6 +40,9 @@ import java.time.Instant
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+/// How long typing must pause before the For you list re-filters.
+private const val FILTER_DEBOUNCE_MS = 150L
+
 /// The For you tab's root (app shell, spec §3; once "Decisions"): every open item awaiting
 /// the user across every conversation, and on its Done tab every closed
 /// question, decision and notice, fed by the shell's app-wide
@@ -71,6 +74,14 @@ fun DecisionsScreen(
     var titles by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     // The search field's text. It survives a tab switch, like the web's.
     var query by rememberSaveable { mutableStateOf("") }
+    // What the list is filtered by: the field's text once typing pauses, so
+    // each key shows at once instead of waiting for the whole list to
+    // re-filter and recompose. Clearing the field applies straight away.
+    var filterQuery by remember { mutableStateOf(query) }
+    LaunchedEffect(query) {
+        if (query.isNotBlank()) delay(FILTER_DEBOUNCE_MS)
+        filterQuery = query
+    }
 
     val tab by viewModel.forYouTab.collectAsStateWithLifecycle()
     val decided by viewModel.decided.collectAsStateWithLifecycle()
@@ -78,7 +89,7 @@ fun DecisionsScreen(
     // Only while the Done tab shows, so the open list never pays for it.
     // While searching, the Done tab filters everything it knows rather than
     // the visible window, so a match further down is not hidden.
-    val searching = query.isNotBlank()
+    val searching = filterQuery.isNotBlank()
     val closed = remember(tab, decided, decidedVisibleCount, searching) {
         when {
             tab != ForYouTab.CLOSED -> emptyList()
@@ -121,12 +132,12 @@ fun DecisionsScreen(
                 }
                 // Remembered: the Done clock and refresh state recompose this often,
                 // and while searching Done filters the whole local history.
-                val openRows = remember(awaiting, titles, query) {
-                    awaiting.map { DecisionsRow(it, titles[it.originConvoID]) }.filter { decisionsRowMatches(it, query) }
-                }
-                val closedRows = remember(closed, titles, query) {
-                    closed.map { DecisionsRow(it, titles[it.originConvoID]) }.filter { decisionsRowMatches(it, query) }
-                }
+                // Rows are built once per list or title change, so each row's
+                // lowercased search text is computed once, not on every key.
+                val allOpenRows = remember(awaiting, titles) { awaiting.map { DecisionsRow(it, titles[it.originConvoID]) } }
+                val allClosedRows = remember(closed, titles) { closed.map { DecisionsRow(it, titles[it.originConvoID]) } }
+                val openRows = remember(allOpenRows, filterQuery) { allOpenRows.filter { decisionsRowMatches(it, filterQuery) } }
+                val closedRows = remember(allClosedRows, filterQuery) { allClosedRows.filter { decisionsRowMatches(it, filterQuery) } }
                 DecisionsListView(
                     model = DecisionsListModel(
                         rows = openRows,
