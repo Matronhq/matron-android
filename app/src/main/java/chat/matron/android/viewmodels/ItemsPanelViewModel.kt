@@ -404,6 +404,15 @@ class ItemsPanelViewModel(
         val localID = UUID.randomUUID().toString()
         answerPending = answerPending + (item.id to localID)
         publishAwaitingYou()
+        // The flow may not have caught up with an answer the detail screen
+        // just queued: one answer per request, never a second (or opposite) one.
+        val queued = runCatching { store.itemOutboxRows(item.id) }.getOrDefault(emptyList())
+        if (ItemDetailViewModel.pendingItemTap(queued) in TrackerItem.ROW_ANSWERS) {
+            answerPending = answerPending - item.id
+            answerQueued = answerQueued + item.id
+            publishAwaitingYou()
+            return false
+        }
         val inserted = sync.enqueueComment(item.id, localID, label, emptyList(), action = label, replyTo = null)
         if (!inserted) {
             answerPending = answerPending - item.id

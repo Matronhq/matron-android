@@ -532,6 +532,17 @@ class ItemsPanelViewModelTest {
     }
 
     @Test
+    fun answerConsentSkipsAnAnswerTheFlowHasNotCaughtUpWith() = runBlocking {
+        val store = FakeItemsStore(); val sync = FakeItemsSync()
+        val vm = ItemsPanelViewModel(null, store, FakeItemsApi(), sync, this)
+        store.storedOutbox = listOf(
+            ItemOutboxEntity("L1", "c", ItemOutboxEntity.OP_COMMENT, """{"body":"Approve","action":"Approve"}""", 1, 0, null),
+        )
+        assertFalse("the detail screen already answered it", vm.answerConsent(consentAsk("c", 7), "Decline"))
+        assertTrue(sync.taps.isEmpty())
+    }
+
+    @Test
     fun aConsentAnswerQueuedOnTheDetailScreenTakesTheRowOutOfForYou() {
         val rows = listOf(
             ItemOutboxEntity("L1", "c", ItemOutboxEntity.OP_COMMENT, """{"body":"Approve","action":"Approve"}""", 1, 0, null),
