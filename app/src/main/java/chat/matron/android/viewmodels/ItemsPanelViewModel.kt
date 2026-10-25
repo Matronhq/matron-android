@@ -406,10 +406,12 @@ class ItemsPanelViewModel(
         publishAwaitingYou()
         // The flow may not have caught up with an answer the detail screen
         // just queued: one answer per request, never a second (or opposite) one.
+        // That answer is then the one tracked: the row stays out until the
+        // close lands, and a refusal of it is told back like this list's own.
         val queued = runCatching { store.itemOutboxRows(item.id) }.getOrDefault(emptyList())
         if (ItemDetailViewModel.pendingItemTap(queued) in TrackerItem.ROW_ANSWERS) {
-            answerPending = answerPending - item.id
-            answerQueued = answerQueued + item.id
+            val theirs = queued.last { !it.isRejected && ItemDetailViewModel.pendingItemTap(listOf(it)) != null }
+            answerPending = answerPending + (item.id to theirs.localID)
             publishAwaitingYou()
             return false
         }

@@ -540,6 +540,8 @@ class ItemsPanelViewModelTest {
         )
         assertFalse("the detail screen already answered it", vm.answerConsent(consentAsk("c", 7), "Decline"))
         assertTrue(sync.taps.isEmpty())
+        assertFalse("and the row keeps that answer tracked: no second one", vm.answerConsent(consentAsk("c", 7), "Approve"))
+        assertTrue(sync.taps.isEmpty())
     }
 
     @Test
