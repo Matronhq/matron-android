@@ -130,6 +130,19 @@ class ItemsApiTest {
     }
 
     @Test
+    fun aConsentTapOnAnAnsweredRequestKeepsTheJournalsWords() = runBlocking {
+        server.enqueue(json(409, """{"error":"conflict","reason":"already_answered","message":"Already answered: this request was approved."}"""))
+        try {
+            api().commentItem("it_1", "Approve", emptyList(), idempotencyKey = "k9", action = "Approve"); fail("expected throw")
+        } catch (e: JournalApiError) {
+            val http = e as JournalApiError.Http
+            assertEquals(409, http.status)
+            assertEquals("already_answered", http.reason)
+            assertEquals("Already answered: this request was approved.", ItemsSync.rejectionReason(e))
+        }
+    }
+
+    @Test
     fun closeMapsConflict() = runBlocking {
         server.enqueue(json(409, """{"error":"conflict"}"""))
         try {

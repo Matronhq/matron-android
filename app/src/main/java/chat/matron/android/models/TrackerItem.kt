@@ -368,7 +368,28 @@ data class TrackerItem(
     /// you row's Seen button and swipe, and the detail screen's button.
     val canMarkSeen: Boolean get() = kind == ItemKind.NOTICE && state == ItemState.OPEN
 
+    /// A consent request's one-tap answers for its For you row: its own
+    /// Approve and Decline (or Accept and Decline) while it waits on the
+    /// user, so it is answered without finding the request card — the
+    /// journal answers the tap exactly as the card. Decided by the
+    /// `consent` label the journal files every request's item with (a
+    /// file transfer's item has no consent link): an agent putting the
+    /// label on its own question only gets that question answered. Empty
+    /// when any button needs more than a tap (a hand-over's "Pick a box").
+    val rowConsentAnswers: List<String>
+        get() {
+            if (kind != ItemKind.QUESTION || !needsUser || CONSENT_LABEL !in labels) return emptyList()
+            return if (actions.isNotEmpty() && actions.all { it in ROW_ANSWERS }) actions else emptyList()
+        }
+
     companion object {
+        /// The label the journal puts on every consent request's item.
+        const val CONSENT_LABEL = "consent"
+        /// The answers a For you row may offer in place: each is final in one tap.
+        val ROW_ANSWERS = setOf("Approve", "Accept", "Decline")
+        /// Whether a consent answer says yes, for the filled button.
+        fun isAffirmativeAnswer(label: String): Boolean = label == "Approve" || label == "Accept"
+
         /// The label of a notice's one action. Tapping it closes the notice
         /// as done on the journal, in the same write as the tap comment.
         const val SEEN_ACTION = "Seen"

@@ -121,6 +121,14 @@ class ItemsPanelViewModel(
     /// screen made it (this list or the detail screen). Kept out of
     /// [awaitingYou] like [seenPending], and a second tap is not queued.
     private var seenQueued: Set<String> = emptySet()
+    /// Consent requests answered from their For you row (Approve / Decline)
+    /// whose close has not come back yet, each with its outbox row's local
+    /// id: kept out of [awaitingYou] like [seenPending], and the local id is
+    /// how a refusal (most often "already answered") is told back.
+    private var answerPending: Map<String, String> = emptyMap()
+    /// Consent requests whose answer tap sits in the comment outbox right
+    /// now, whichever screen made it.
+    private var answerQueued: Set<String> = emptySet()
     /// The latest [ItemsStoreReading.needsUserFlow] value, so a Seen tap can
     /// re-derive [awaitingYou] without waiting for the store.
     private var lastNeedsUserItems: List<TrackerItem> = emptyList()
@@ -170,6 +178,8 @@ class ItemsPanelViewModel(
         seenQueuedJob = scope.launch {
             store.itemOutboxCommentsFlow().collect { rows ->
                 seenQueued = queuedSeenTaps(rows)
+                answerQueued = queuedConsentAnswers(rows)
+                noteRefusedAnswers(rows)
                 publishAwaitingYou()
             }
         }
@@ -346,7 +356,10 @@ class ItemsPanelViewModel(
     private fun publishAwaitingYou() {
         val stillWaiting = lastNeedsUserItems.filter { it.needsUser }.map { it.id }.toSet()
         seenPending = seenPending intersect stillWaiting
-        val awaiting = awaitingYou(lastNeedsUserItems).filter { it.id !in seenPending && it.id !in seenQueued }
+        answerPending = answerPending.filterKeys { it in stillWaiting }
+        val awaiting = awaitingYou(lastNeedsUserItems).filter {
+            it.id !in seenPending && it.id !in seenQueued && it.id !in answerPending && it.id !in answerQueued
+        }
         _awaitingYou.value = awaiting
         _awaitingYouCount.value = awaiting.size
     }
@@ -379,7 +392,59 @@ class ItemsPanelViewModel(
         return inserted
     }
 
+    /// For you's one-tap answer to a consent request (a chat, join, spawn or
+    /// file transfer waiting on the user): the same item-action tap the
+    /// detail screen makes, queued through the outbox, which the journal
+    /// answers exactly as the request card and closes the item. The row
+    /// leaves the list at once. Returns whether the tap was queued: `false`
+    /// for a label the row does not offer, a request already being answered,
+    /// or a failed outbox write (the row then comes back with an error).
+    suspend fun answerConsent(item: TrackerItem, label: String): Boolean {
+        if (label !in item.rowConsentAnswers || item.id in answerPending || item.id in answerQueued) return false
+        val localID = UUID.randomUUID().toString()
+        answerPending = answerPending + (item.id to localID)
+        publishAwaitingYou()
+        // The flow may not have caught up with an answer the detail screen
+        // just queued: one answer per request, never a second (or opposite) one.
+        // That answer is then the one tracked: the row stays out until the
+        // close lands, and a refusal of it is told back like this list's own.
+        val queued = runCatching { store.itemOutboxRows(item.id) }.getOrDefault(emptyList())
+        if (ItemDetailViewModel.pendingItemTap(queued) in TrackerItem.ROW_ANSWERS) {
+            val theirs = queued.last { !it.isRejected && ItemDetailViewModel.pendingItemTap(listOf(it)) != null }
+            answerPending = answerPending + (item.id to theirs.localID)
+            publishAwaitingYou()
+            return false
+        }
+        val inserted = sync.enqueueComment(item.id, localID, label, emptyList(), action = label, replyTo = null)
+        if (!inserted) {
+            answerPending = answerPending - item.id
+            publishAwaitingYou()
+            _error.value = "Couldn't send your answer — try again."
+        }
+        return inserted
+    }
+
+    /// A row answer the journal refused: the row comes back (unless the
+    /// refetch that follows a refusal drops it), and the refusal's words —
+    /// the journal's own "Already answered: this request was approved." —
+    /// are shown once.
+    private fun noteRefusedAnswers(rows: List<ItemOutboxEntity>) {
+        if (answerPending.isEmpty()) return
+        val refused = rows.filter { it.isRejected && it.itemID != null && answerPending[it.itemID] == it.localID }
+        if (refused.isEmpty()) return
+        answerPending = answerPending - refused.mapNotNull { it.itemID }.toSet()
+        _error.value = refused.last().rejectedReason
+        scope.launch { runRefresh(surfaceFailure = false) }
+    }
+
     companion object {
+        /// The items with a queued consent answer among [rows]: an item-level
+        /// tap (no `reply_to`) on one of the row answers, not refused.
+        fun queuedConsentAnswers(rows: List<ItemOutboxEntity>): Set<String> =
+            rows.groupBy { it.itemID }
+                .filter { (id, itemRows) -> id != null && ItemDetailViewModel.pendingItemTap(itemRows) in TrackerItem.ROW_ANSWERS }
+                .keys.filterNotNull().toSet()
+
         /// The items with a queued item-level Seen tap among [rows] — a
         /// comment row whose `action` is Seen and which replies to nothing.
         fun queuedSeenTaps(rows: List<ItemOutboxEntity>): Set<String> =

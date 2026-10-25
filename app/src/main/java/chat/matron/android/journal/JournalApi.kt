@@ -1371,6 +1371,15 @@ class JournalApi(
             status == 401 -> JournalApiError.Unauthenticated
             status == 403 -> JournalApiError.Forbidden
             status == 404 -> JournalApiError.NotFound
+            // A consent tap on a request no longer waiting: the journal says how
+            // it ended in words the app shows as they are, so the body is kept.
+            status == 409 && obj?.stringOrNull("reason") == "already_answered" -> JournalApiError.Http(
+                status,
+                obj.stringOrNull("message") ?: code ?: "",
+                code = code,
+                bodyMessage = obj.stringOrNull("message"),
+                reason = "already_answered",
+            )
             status == 409 -> JournalApiError.Conflict
             else -> JournalApiError.Http(
                 status,
