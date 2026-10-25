@@ -120,6 +120,22 @@ class DecisionsListViewTest {
     }
 
     @Test
+    fun onlyConsentRequestsWaitingOnTheUserOfferRowAnswers() {
+        val ask = t("c1", 7, ItemKind.QUESTION, "c1").copy(
+            labels = listOf(TrackerItem.CONSENT_LABEL), actions = listOf("Approve", "Decline"), awaiting = ItemAwaiting.USER,
+        )
+        assertEquals(listOf("Approve", "Decline"), decisionsRowAnswers(DecisionsRow(ask, null)))
+        assertEquals(listOf("Accept", "Decline"), decisionsRowAnswers(DecisionsRow(ask.copy(actions = listOf("Accept", "Decline")), null)))
+        assertEquals(emptyList<String>(), decisionsRowAnswers(DecisionsRow(ask.copy(state = ItemState.CLOSED, awaiting = null), null)))
+        assertEquals(emptyList<String>(), decisionsRowAnswers(DecisionsRow(ask.copy(awaiting = ItemAwaiting.AGENT), null)))
+        assertEquals(emptyList<String>(), decisionsRowAnswers(DecisionsRow(ask.copy(labels = emptyList()), null)))
+        assertEquals("a button that needs more than a tap", emptyList<String>(), decisionsRowAnswers(DecisionsRow(ask.copy(actions = listOf("Accept", "Pick a box", "Decline")), null)))
+        assertEquals(emptyList<String>(), decisionsRowAnswers(DecisionsRow(ask.copy(actions = emptyList()), null)))
+        assertTrue(TrackerItem.isAffirmativeAnswer("Approve"))
+        assertFalse(TrackerItem.isAffirmativeAnswer("Decline"))
+    }
+
+    @Test
     fun noticeRowsReadLighter() {
         val notice = t("n1", 3, ItemKind.NOTICE, "c1")
         assertTrue(itemRowTitleIsSecondary(notice))

@@ -39,6 +39,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -57,6 +58,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import chat.matron.android.models.ForYouTab
@@ -159,6 +162,10 @@ fun decisionsShowsTabs(model: DecisionsListModel): Boolean = model.isSupported !
 /// tracker's All scope uses (`itemOriginCaption`).
 fun decisionsRowOrigin(row: DecisionsRow): String = row.originTitle ?: "Another chat"
 
+/// A consent request's answers on its row (Approve / Decline), drawn under
+/// the row: empty for every other item.
+fun decisionsRowAnswers(row: DecisionsRow): List<String> = row.item.rowConsentAnswers
+
 /// Whether a row offers the one-tap Seen button and the swipe that does the
 /// same: open notices only — everything else in For you needs an answer.
 fun decisionsRowOffersSeen(row: DecisionsRow): Boolean = row.item.canMarkSeen
@@ -183,6 +190,8 @@ fun DecisionsListView(
     modifier: Modifier = Modifier,
     /// A notice's Seen — its row button or a swipe from the trailing edge.
     onMarkSeen: (TrackerItem) -> Unit = {},
+    /// A consent request's Approve or Decline, tapped on its row.
+    onAnswerConsent: (TrackerItem, String) -> Unit = { _, _ -> },
     /// The Needs you | Done control.
     onSelectTab: (ForYouTab) -> Unit = {},
     /// "Show more" under the Done tab — a local window grow.
@@ -239,10 +248,10 @@ fun DecisionsListView(
                         Column(Modifier.fillMaxWidth()) {
                             if (decisionsRowOffersSeen(row)) {
                                 SeenSwipeRow(onSeen = { onMarkSeen(row.item) }) {
-                                    DecisionsRowContent(row, onSelect, onOpenConversation, onMarkSeen)
+                                    DecisionsRowContent(row, onSelect, onOpenConversation, onMarkSeen, onAnswerConsent = onAnswerConsent)
                                 }
                             } else {
-                                DecisionsRowContent(row, onSelect, onOpenConversation, onMarkSeen)
+                                DecisionsRowContent(row, onSelect, onOpenConversation, onMarkSeen, onAnswerConsent = onAnswerConsent)
                             }
                             HorizontalDivider()
                         }
@@ -338,24 +347,48 @@ private fun DecisionsRowContent(
     onOpenConversation: (String) -> Unit,
     onMarkSeen: (TrackerItem) -> Unit,
     closedCaption: String? = null,
+    onAnswerConsent: (TrackerItem, String) -> Unit = { _, _ -> },
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    val answers = decisionsRowAnswers(row)
     Box {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .combinedClickable(onClick = { onSelect(row.item.id) }, onLongClick = { menuOpen = true })
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            ItemRow(row.item, origin = decisionsRowOrigin(row), modifier = Modifier.weight(1f), closedCaption = closedCaption)
-            if (decisionsRowOffersSeen(row)) {
-                OutlinedButton(
-                    onClick = { onMarkSeen(row.item) },
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                    modifier = Modifier.padding(start = 8.dp),
+        Column {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .combinedClickable(onClick = { onSelect(row.item.id) }, onLongClick = { menuOpen = true })
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ItemRow(row.item, origin = decisionsRowOrigin(row), modifier = Modifier.weight(1f), closedCaption = closedCaption)
+                if (decisionsRowOffersSeen(row)) {
+                    OutlinedButton(
+                        onClick = { onMarkSeen(row.item) },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.padding(start = 8.dp),
+                    ) {
+                        Text(ForYouCopy.SEEN_BUTTON, style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+            }
+            // A consent request's Approve and Decline, as its request card draws
+            // them (Decline outlined, Approve filled), on a line under the row
+            // aligned with its title (glyph 20 + gap 10), so a long title keeps
+            // its width. Outside the row's own click target.
+            if (answers.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 46.dp, end = 16.dp, bottom = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(ForYouCopy.SEEN_BUTTON, style = MaterialTheme.typography.labelLarge)
+                    for (label in answers) {
+                        val onClick = { onAnswerConsent(row.item, label) }
+                        val semantics = Modifier.semantics { contentDescription = "$label, number ${row.item.num}" }
+                        if (TrackerItem.isAffirmativeAnswer(label)) {
+                            Button(onClick = onClick, modifier = semantics) { Text(label) }
+                        } else {
+                            OutlinedButton(onClick = onClick, modifier = semantics) { Text(label) }
+                        }
+                    }
                 }
             }
         }

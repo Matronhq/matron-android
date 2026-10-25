@@ -100,11 +100,14 @@ internal open class FakeItemsSync : ItemsSyncing {
     override suspend fun applyItem(item: TrackerItem) { applied += item }
     /// (item id, label, asking-comment id) of every queued button tap.
     val taps = mutableListOf<Triple<String, String, String?>>()
+    /// The local id of every queued comment, in order.
+    val localIDs = mutableListOf<String>()
     override suspend fun enqueueComment(
         itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>, action: String?, replyTo: String?,
     ): Boolean {
         comments += Triple(itemID, body, attachments)
         if (action != null) taps += Triple(itemID, action, replyTo)
+        localIDs += localID
         return commentSucceeds
     }
     override suspend fun enqueueCreate(localID: String, new: NewItem): Boolean { created += new; return createSucceeds }
@@ -477,6 +480,66 @@ class ItemsPanelViewModelTest {
     private fun itemSeenRow(localID: String, itemID: String) = ItemOutboxEntity(
         localID, itemID, ItemOutboxEntity.OP_COMMENT, """{"body":"Seen","action":"Seen"}""", 1, 0, null,
     )
+
+    private fun consentAsk(id: String, num: Int, actions: List<String> = listOf("Approve", "Decline")) =
+        t(id, num, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 1.0)
+            .copy(labels = listOf(TrackerItem.CONSENT_LABEL), actions = actions)
+
+    @Test
+    fun answerConsentQueuesTheItemTapAndHidesTheRowUntilTheCloseLands() = runBlocking {
+        val store = FakeItemsStore(); val sync = FakeItemsSync()
+        val vm = ItemsPanelViewModel(null, store, FakeItemsApi(), sync, this)
+        vm.start()
+        waitUntil { store.awaitingSubscriptions == 1 }
+        val ask = consentAsk("c", 7)
+        val question = t("q", 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 1.0)
+        store.awaiting.emit(listOf(ask, question))
+        waitUntil { vm.awaitingYouCount.value == 2 }
+
+        assertFalse("a question that is no consent request has no row answers", vm.answerConsent(question, "Approve"))
+        assertFalse("a label the row does not offer", vm.answerConsent(ask, "Maybe"))
+        assertTrue(sync.taps.isEmpty())
+
+        assertTrue(vm.answerConsent(ask, "Approve"))
+        assertEquals("an item-level tap: the label, no reply_to", listOf(Triple("c", "Approve", null as String?)), sync.taps)
+        assertEquals("the body is the label", "Approve", sync.comments.single().second)
+        assertEquals("the row leaves at once", listOf("q"), vm.awaitingYou.value.map { it.id })
+        assertFalse("a second tap is not queued", vm.answerConsent(ask, "Decline"))
+        assertEquals(1, sync.taps.size)
+        vm.stop()
+    }
+
+    @Test
+    fun aRefusedConsentAnswerBringsTheRowBackWithTheJournalsWords() = runBlocking {
+        val store = FakeItemsStore(); val sync = FakeItemsSync()
+        val vm = ItemsPanelViewModel(null, store, FakeItemsApi(), sync, this)
+        vm.start()
+        waitUntil { store.awaitingSubscriptions == 1 && store.commentRows.subscriptionCount.value == 1 }
+        val ask = consentAsk("c", 7)
+        store.awaiting.emit(listOf(ask))
+        waitUntil { vm.awaitingYouCount.value == 1 }
+        assertTrue(vm.answerConsent(ask, "Decline"))
+        val localID = sync.localIDs.single()
+        val queued = ItemOutboxEntity(localID, "c", ItemOutboxEntity.OP_COMMENT, """{"body":"Decline","action":"Decline"}""", 1, 0, null)
+        store.commentRows.emit(listOf(queued))
+        waitUntil(200) { false }
+        assertEquals("still out while the tap is queued", 0, vm.awaitingYouCount.value)
+
+        store.commentRows.emit(listOf(queued.copy(rejectedReason = "Already answered: this request was approved.")))
+        waitUntil { vm.awaitingYouCount.value == 1 }
+        assertEquals("Already answered: this request was approved.", vm.error.value)
+        vm.stop()
+    }
+
+    @Test
+    fun aConsentAnswerQueuedOnTheDetailScreenTakesTheRowOutOfForYou() {
+        val rows = listOf(
+            ItemOutboxEntity("L1", "c", ItemOutboxEntity.OP_COMMENT, """{"body":"Approve","action":"Approve"}""", 1, 0, null),
+            ItemOutboxEntity("L2", "d", ItemOutboxEntity.OP_COMMENT, """{"body":"Decline","action":"Decline"}""", 1, 0, null, rejectedReason = "no"),
+            ItemOutboxEntity("L3", "e", ItemOutboxEntity.OP_COMMENT, """{"body":"Go","action":"Go"}""", 1, 0, null),
+        )
+        assertEquals(setOf("c"), ItemsPanelViewModel.queuedConsentAnswers(rows))
+    }
 
     @Test
     fun aSeenTapQueuedOnTheDetailScreenTakesTheNoticeOutOfForYou() = runBlocking {

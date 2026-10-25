@@ -154,6 +154,7 @@ fun DecisionsScreen(
                     onOpenConversation = onOpenConversation,
                     onRefresh = { coroutineScope.launch { viewModel.refresh() } },
                     onMarkSeen = { item -> coroutineScope.launch { viewModel.markSeen(item) } },
+                    onAnswerConsent = { item, label -> coroutineScope.launch { viewModel.answerConsent(item, label) } },
                     onSelectTab = viewModel::selectForYouTab,
                     onShowMoreClosed = viewModel::showMoreDecided,
                     now = now,
