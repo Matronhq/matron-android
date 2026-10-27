@@ -6,11 +6,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.ui.text.SpanStyle
+import chat.matron.android.journal.TrackerLinkInfo
+import chat.matron.android.journal.TrackerLinkTarget
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 
 /// Resolves the theme colours the markdown parser bakes into spans.
 @Composable
@@ -66,6 +73,15 @@ fun MarkdownText(
     val openItem = LocalOpenTrackerItem.current
     val external: (String) -> Unit = onLinkClick ?: { url -> runCatching { uriHandler.openUri(url) } }
     val click: (String) -> Unit = { url -> handleMessageLink(url, openItem, external) }
+    // Each tracker link shows what its number points at (TrackerLinkChips):
+    // looked up per target, the chips appear as the answers arrive.
+    val titles = LocalTrackerLinkTitles.current
+    val linkInfo by produceState(emptyMap<TrackerLinkTarget, TrackerLinkInfo>(), document, titles) {
+        val lookups = titles ?: return@produceState
+        val targets = document.blocks.flatMap { TrackerLinkChips.links(it.text, lookups::target) }.map { it.target }.distinct()
+        for (target in targets) launch { value = value + (target to lookups.info(target)) }
+    }
+    val chipStyle = rememberTrackerLinkChipStyle()
 
     Column(modifier) {
         document.blocks.forEach { block ->
@@ -77,12 +93,20 @@ fun MarkdownText(
             } else if (block.kind == MarkdownBlockKind.Table && table != null) {
                 MarkdownTableBlock(table, modifier = blockModifier, textStyle = bodyStyle, onLinkClick = click)
             } else {
+                val lookups = titles
+                val text = if (lookups == null || linkInfo.isEmpty()) {
+                    block.text
+                } else {
+                    TrackerLinkChips.decorate(block.text, lookups::target, chipStyle) { span ->
+                        linkInfo[span.target]?.let { TrackerLinkChips.chipFor(it, span.target.num, span.text) }
+                    }
+                }
                 ClickableText(
-                    text = block.text,
+                    text = text,
                     modifier = blockModifier,
                     style = bodyStyle,
                     onClick = { offset ->
-                        block.text.getStringAnnotations("URL", offset, offset)
+                        text.getStringAnnotations("URL", offset, offset)
                             .firstOrNull()?.let { click(it.item) }
                     },
                 )
@@ -100,3 +124,16 @@ fun MarkdownText(
 /// larger than the chat body.
 fun markdownBodyStyle(themeBody: TextStyle, ambient: TextStyle, caller: TextStyle?): TextStyle =
     if (caller == null) ambient.merge(themeBody) else themeBody.merge(caller)
+
+/// The tracker link chip's look: smaller, secondary text on a subtle
+/// background; a warning one in the error colour.
+@Composable
+fun rememberTrackerLinkChipStyle(): TrackerLinkChipStyle {
+    val scheme = MaterialTheme.colorScheme
+    return remember(scheme) {
+        TrackerLinkChipStyle(
+            normal = SpanStyle(fontSize = 0.8.em, color = scheme.onSurfaceVariant, background = scheme.surfaceVariant),
+            mismatch = SpanStyle(fontSize = 0.8.em, color = scheme.onErrorContainer, background = scheme.errorContainer),
+        )
+    }
+}
