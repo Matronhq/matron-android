@@ -27,7 +27,7 @@ sealed interface TrackerLinkInfo {
     /// The journal answered: no such number, or not visible to this user.
     data object Missing : TrackerLinkInfo
 
-    /// The journal could not be asked. Never cached.
+    /// The journal could not be asked. Neither this nor [Missing] is cached.
     data object Failed : TrackerLinkInfo
 }
 
@@ -36,6 +36,9 @@ object TrackerLinkTitleMatch {
         "a", "an", "the", "of", "to", "for", "and", "or", "on", "in", "at", "by", "with", "from",
         "is", "it", "this", "that", "item", "one", "new",
     )
+    /// Words a link's text uses to point rather than to name: "click here",
+    /// "read more", "see this" claim nothing about the target.
+    private val generic = setOf("here", "click", "read", "more", "see", "link", "open", "view", "details", "this", "that", "it")
     private val marks = Regex("\\p{M}+")
     private val ellipsis = Regex("(\\.\\.\\.|…)\\s*$")
     private val separators = Regex("[^\\p{L}\\p{N}]+")
@@ -69,6 +72,11 @@ object TrackerLinkTitleMatch {
         return hits >= minOf(2, words.size) && hits.toDouble() / words.size >= 0.6
     }
 
+    /// Does a link's text say which record it means? A number does, and so
+    /// do two or more words beyond the stopwords and pointing words.
+    fun claims(written: WrittenLink): Boolean =
+        written.num != null || tokens(written.title).count { it !in stopwords && it !in generic } >= 2
+
     fun writtenLink(text: String): WrittenLink {
         val plain = text.replace(Regex("[*_`~]+"), " ").trim()
         val match = textRe.find(plain)
@@ -83,10 +91,10 @@ object TrackerLinkTitleMatch {
     }
 }
 
-/// One session's tracker link lookups. Answers are kept for [TTL_MILLIS], so
-/// a chat full of links to the same number asks once; concurrent asks for
-/// one number share a request; a failure is not kept, so the next render asks
-/// again.
+/// One session's tracker link lookups. A found target is kept for
+/// [TTL_MILLIS], so a chat full of links to the same number asks once;
+/// concurrent asks for one number share a request; a missing number and a
+/// failure are not kept, so the next render asks again.
 class TrackerLinkTitles(
     private val journalBaseURL: String,
     private val sessionUser: String,
@@ -99,7 +107,9 @@ class TrackerLinkTitles(
         private val inApp = Regex("^matron://(item|mission|project)/([1-9][0-9]{0,9})$", RegexOption.IGNORE_CASE)
     }
 
-    private class Entry(val answer: CompletableDeferred<TrackerLinkInfo>, val until: Long)
+    /// A shared lookup. Completes with `null` when the coroutine running it
+    /// was cancelled, so whoever waited on it asks again.
+    private class Entry(val answer: CompletableDeferred<TrackerLinkInfo?>, val until: Long)
 
     private val entries = LinkedHashMap<TrackerLinkTarget, Entry>()
 
@@ -116,35 +126,45 @@ class TrackerLinkTitles(
     }
 
     suspend fun info(target: TrackerLinkTarget): TrackerLinkInfo {
-        var owner = false
-        val answer = synchronized(entries) {
-            val cached = entries[target]
-            if (cached != null && cached.until > now()) return@synchronized cached.answer
-            if (entries.size >= MAX_ENTRIES) entries.keys.firstOrNull()?.let { entries.remove(it) }
-            val fresh = CompletableDeferred<TrackerLinkInfo>()
-            entries[target] = Entry(fresh, now() + TTL_MILLIS)
-            owner = true
-            fresh
+        while (true) {
+            var owner = false
+            val answer = synchronized(entries) {
+                val cached = entries[target]
+                if (cached != null && cached.until > now()) return@synchronized cached.answer
+                if (entries.size >= MAX_ENTRIES) entries.keys.firstOrNull()?.let { entries.remove(it) }
+                val fresh = CompletableDeferred<TrackerLinkInfo?>()
+                entries[target] = Entry(fresh, now() + TTL_MILLIS)
+                owner = true
+                fresh
+            }
+            if (!owner) {
+                // null: the asker running it went away (its composable left)
+                // before an answer; ask again rather than report a failure.
+                val got = answer.await()
+                if (got != null) return got
+                continue
+            }
+            val result = try {
+                val hit = lookup(target.user, target.num)
+                TrackerLinkInfo.Found(hit.kind, hit.title)
+            } catch (cancel: CancellationException) {
+                forget(target, answer)
+                answer.complete(null)
+                throw cancel
+            } catch (e: JournalApiError.NotFound) {
+                TrackerLinkInfo.Missing
+            } catch (e: Exception) {
+                TrackerLinkInfo.Failed
+            }
+            // Only a found target is kept: a missing number can be made a
+            // moment later, and a failure is worth asking again.
+            if (result !is TrackerLinkInfo.Found) forget(target, answer)
+            answer.complete(result)
+            return result
         }
-        if (!owner) return answer.await()
-        val result = try {
-            val hit = lookup(target.user, target.num)
-            TrackerLinkInfo.Found(hit.kind, hit.title)
-        } catch (cancel: CancellationException) {
-            forget(target, answer)
-            answer.complete(TrackerLinkInfo.Failed)
-            throw cancel
-        } catch (e: JournalApiError.NotFound) {
-            TrackerLinkInfo.Missing
-        } catch (e: Exception) {
-            TrackerLinkInfo.Failed
-        }
-        if (result == TrackerLinkInfo.Failed) forget(target, answer)
-        answer.complete(result)
-        return result
     }
 
-    private fun forget(target: TrackerLinkTarget, answer: CompletableDeferred<TrackerLinkInfo>) {
+    private fun forget(target: TrackerLinkTarget, answer: CompletableDeferred<TrackerLinkInfo?>) {
         synchronized(entries) { if (entries[target]?.answer === answer) entries.remove(target) }
     }
 }

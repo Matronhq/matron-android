@@ -19,18 +19,18 @@ class TrackerLinkTitlesTest {
 
     @Test
     fun titleMatchesAcceptsTheTitleAPrefixAnAbbreviationOrAParaphrase() {
-        assertTrue(TrackerLinkTitleMatch.titleMatches("Merge: printer XML export", "Merge: printer XML export"))
-        assertTrue(TrackerLinkTitleMatch.titleMatches("Merge: printer XML…", "Merge: printer XML export for the run"))
-        assertTrue(TrackerLinkTitleMatch.titleMatches("merge printer xml exp...", "Merge: printer XML export"))
-        assertTrue(TrackerLinkTitleMatch.titleMatches("late-orders item", "Late orders shipped after the cut-off: options"))
+        assertTrue(TrackerLinkTitleMatch.titleMatches("Merge: release notes export", "Merge: release notes export"))
+        assertTrue(TrackerLinkTitleMatch.titleMatches("Merge: release notes…", "Merge: release notes export for the launch"))
+        assertTrue(TrackerLinkTitleMatch.titleMatches("merge release notes exp...", "Merge: release notes export"))
+        assertTrue(TrackerLinkTitleMatch.titleMatches("holiday-rota item", "Holiday rota for December: options"))
         assertTrue(TrackerLinkTitleMatch.titleMatches("CAFÉ menu", "Cafe menu update"))
     }
 
     @Test
     fun titleMatchesRefusesATitleAboutSomethingElseAndAnEmptyOne() {
-        assertFalse(TrackerLinkTitleMatch.titleMatches("the new merge question", "Late orders shipped after the cut-off"))
-        assertFalse(TrackerLinkTitleMatch.titleMatches("Printer XML", "Holiday rota for December"))
-        assertFalse(TrackerLinkTitleMatch.titleMatches("here", "Merge: printer XML export"))
+        assertFalse(TrackerLinkTitleMatch.titleMatches("the new merge question", "Holiday rota for December"))
+        assertFalse(TrackerLinkTitleMatch.titleMatches("Release notes", "Holiday rota for December"))
+        assertFalse(TrackerLinkTitleMatch.titleMatches("here", "Merge: release notes export"))
         assertFalse(TrackerLinkTitleMatch.titleMatches("", "Merge"))
     }
 
@@ -39,7 +39,7 @@ class TrackerLinkTitlesTest {
     @Test
     fun writtenLinkSplitsTheNumberFromTheTitle() {
         assertEquals(WrittenLink(12, "Ship it"), TrackerLinkTitleMatch.writtenLink("#12 Ship it"))
-        assertEquals(WrittenLink(7, "Late orders"), TrackerLinkTitleMatch.writtenLink("item #7 — Late orders"))
+        assertEquals(WrittenLink(7, "Holiday rota"), TrackerLinkTitleMatch.writtenLink("item #7 — Holiday rota"))
         assertEquals(WrittenLink(9, "Ship the thing"), TrackerLinkTitleMatch.writtenLink("**#9** \"Ship the thing\""))
         assertEquals(WrittenLink(4, ""), TrackerLinkTitleMatch.writtenLink("#4"))
         assertEquals(WrittenLink(null, "the merge question"), TrackerLinkTitleMatch.writtenLink("the merge question"))
@@ -85,21 +85,43 @@ class TrackerLinkTitlesTest {
     }
 
     @Test
-    fun infoKeepsAMissingNumberButAsksAgainAfterAFailure() = runTest {
+    fun infoKeepsOnlyAFoundAnswer() = runTest {
         var calls = 0
         val t = titles(lookup = { _, num ->
             calls++
             when {
-                num == 1 -> throw JournalApiError.NotFound
-                calls == 2 -> throw JournalApiError.Transport("offline")
+                num == 1 && calls == 1 -> throw JournalApiError.NotFound
+                calls == 3 -> throw JournalApiError.Transport("offline")
                 else -> NumberLookup(NumberKind.MISSION, "ms_$num", num, "Rota")
             }
         })
+        // A missing number may be made a moment later: asked again.
         assertEquals(TrackerLinkInfo.Missing, t.info(TrackerLinkTarget("alice", 1)))
-        assertEquals(TrackerLinkInfo.Missing, t.info(TrackerLinkTarget("alice", 1)))
+        assertEquals(TrackerLinkInfo.Found(NumberKind.MISSION, "Rota"), t.info(TrackerLinkTarget("alice", 1)))
+        // A failure is asked again too.
         assertEquals(TrackerLinkInfo.Failed, t.info(TrackerLinkTarget("alice", 2)))
         assertEquals(TrackerLinkInfo.Found(NumberKind.MISSION, "Rota"), t.info(TrackerLinkTarget("alice", 2)))
-        assertEquals(3, calls)
+        // A found one is kept.
+        t.info(TrackerLinkTarget("alice", 2))
+        assertEquals(4, calls)
+    }
+
+    @Test
+    fun aWaiterAsksAgainWhenTheLookupItSharedIsCancelled() = runTest {
+        var calls = 0
+        val never = CompletableDeferred<Unit>()
+        val t = titles(lookup = { _, num ->
+            calls++
+            if (calls == 1) never.await()
+            NumberLookup(NumberKind.ITEM, "it_$num", num, "Rotate the API keys")
+        })
+        val owner = async { t.info(TrackerLinkTarget("alice", 41)) }
+        testScheduler.runCurrent()
+        val waiter = async { t.info(TrackerLinkTarget("alice", 41)) }
+        testScheduler.runCurrent()
+        owner.cancel()
+        assertEquals(TrackerLinkInfo.Found(NumberKind.ITEM, "Rotate the API keys"), waiter.await())
+        assertEquals(2, calls)
     }
 
     @Test

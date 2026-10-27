@@ -79,7 +79,14 @@ fun MarkdownText(
     val linkInfo by produceState(emptyMap<TrackerLinkTarget, TrackerLinkInfo>(), document, titles) {
         val lookups = titles ?: return@produceState
         val targets = document.blocks.flatMap { TrackerLinkChips.links(it.text, lookups::target) }.map { it.target }.distinct()
-        for (target in targets) launch { value = value + (target to lookups.info(target)) }
+        for (target in targets) {
+            launch {
+                // Await first, then read `value`: reading it before the
+                // lookup suspends would drop answers that landed meanwhile.
+                val info = lookups.info(target)
+                value = value + (target to info)
+            }
+        }
     }
     val chipStyle = rememberTrackerLinkChipStyle()
 

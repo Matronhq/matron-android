@@ -18,6 +18,7 @@ import chat.matron.android.journal.NumberKind
 import chat.matron.android.journal.NumberLookup
 import chat.matron.android.journal.TrackerLinkTitles
 import java.io.File
+import kotlinx.coroutines.CompletableDeferred
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -38,9 +39,9 @@ class TrackerLinkChipsRenderTest {
 
     private val own = "https://chat.example/u/alice"
     private val body = listOf(
-        "Filed the follow-ups: [#412]($own/412) for the backup check, and [#415 Rotate the API keys]($own/415).",
+        "Filed the follow-ups: [#41]($own/41) for the backup check, and [#42 Rotate the API keys]($own/42).",
         "",
-        "The merge question is [#418 Merge: nginx config]($own/418). The old runbook was [#9999]($own/9999).",
+        "The merge question is [#43 Merge: nginx config]($own/43). The old runbook was [#99]($own/99).",
     ).joinToString("\n")
 
     private val titles = TrackerLinkTitles(
@@ -48,9 +49,9 @@ class TrackerLinkChipsRenderTest {
         sessionUser = "alice",
         lookup = { _, num ->
             when (num) {
-                412 -> NumberLookup(NumberKind.ITEM, "a", num, "Verify last night's backup with a test restore")
-                415 -> NumberLookup(NumberKind.ITEM, "b", num, "Rotate the API keys before Friday")
-                418 -> NumberLookup(NumberKind.MISSION, "c", num, "Postgres upgrade dry-run")
+                41 -> NumberLookup(NumberKind.ITEM, "a", num, "Verify last night's backup with a test restore")
+                42 -> NumberLookup(NumberKind.ITEM, "b", num, "Rotate the API keys before Friday")
+                43 -> NumberLookup(NumberKind.MISSION, "c", num, "Postgres upgrade dry-run")
                 else -> throw JournalApiError.NotFound
             }
         },
@@ -94,9 +95,41 @@ class TrackerLinkChipsRenderTest {
     }
 
     @Test
+    fun everyChipShowsWhenTheLookupsAnswerOutOfOrder() {
+        val gates = mapOf(41 to CompletableDeferred<Unit>(), 42 to CompletableDeferred<Unit>(), 43 to CompletableDeferred<Unit>())
+        val slow = TrackerLinkTitles(
+            journalBaseURL = "https://chat.example",
+            sessionUser = "alice",
+            lookup = { _, num ->
+                gates[num]?.await()
+                when (num) {
+                    41 -> NumberLookup(NumberKind.ITEM, "a", num, "Verify last night's backup with a test restore")
+                    42 -> NumberLookup(NumberKind.ITEM, "b", num, "Rotate the API keys before Friday")
+                    43 -> NumberLookup(NumberKind.MISSION, "c", num, "Postgres upgrade dry-run")
+                    else -> throw JournalApiError.NotFound
+                }
+            },
+        )
+        compose.setContent {
+            MatronTheme(appearance = MatronAppearance.Light) {
+                CompositionLocalProvider(LocalTrackerLinkTitles provides slow) { MarkdownText(raw = body) }
+            }
+        }
+        settle()
+        for (num in listOf(43, 41, 42)) {
+            gates.getValue(num).complete(Unit)
+            settle()
+        }
+        compose.onNodeWithText("item · Verify last night's backup with a test restore", substring = true).assertExists()
+        compose.onNodeWithText("\u00A0item\u00A0", substring = true).assertExists()
+        compose.onNodeWithText("⚠ mission · Postgres upgrade dry-run", substring = true).assertExists()
+        compose.onNodeWithText("⚠ not found", substring = true).assertExists()
+    }
+
+    @Test
     fun withoutLookupsTheLinksRenderAsBefore() {
         render(MatronAppearance.Light, withTitles = false)
-        compose.onNodeWithText("Filed the follow-ups: #412 for the backup check", substring = true).assertExists()
+        compose.onNodeWithText("Filed the follow-ups: #41 for the backup check", substring = true).assertExists()
         compose.onNodeWithText("·", substring = true).assertDoesNotExist()
     }
 

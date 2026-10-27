@@ -34,10 +34,26 @@ class TrackerLinkChipsTest {
 
     @Test
     fun aLinkNamingAnotherTitleOrNumberIsFlagged() {
-        val other = TrackerLinkChips.chipFor(found(NumberKind.ITEM, "Late orders after the cut-off"), 12, "#12 Merge: printer export")
-        assertEquals(TrackerLinkChip("item · Late orders after the cut-off", mismatch = true), other)
-        val wrongNumber = TrackerLinkChips.chipFor(found(NumberKind.ITEM, "Merge: printer export"), 12, "#13 Merge: printer export")
+        val other = TrackerLinkChips.chipFor(found(NumberKind.ITEM, "Holiday rota for December"), 12, "#12 Merge: release notes export")
+        assertEquals(TrackerLinkChip("item · Holiday rota for December", mismatch = true), other)
+        val wrongNumber = TrackerLinkChips.chipFor(found(NumberKind.ITEM, "Rotate the API keys"), 12, "#13 Rotate the API keys")
         assertTrue(wrongNumber!!.mismatch)
+    }
+
+    @Test
+    fun aWrongNumberIsFlaggedEvenWhenTheTargetHasNoTitle() {
+        val untitled = TrackerLinkInfo.Found(NumberKind.ITEM, null)
+        assertEquals(TrackerLinkChip("item", mismatch = true), TrackerLinkChips.chipFor(untitled, 41, "#42 Rotate the API keys"))
+        assertEquals(TrackerLinkChip("item", mismatch = false), TrackerLinkChips.chipFor(untitled, 41, "#41 Rotate the API keys"))
+    }
+
+    @Test
+    fun genericLinkWordsAreNotATitleClaim() {
+        for (text in listOf("click here", "read more", "see this link", "open details")) {
+            val chip = TrackerLinkChips.chipFor(found(NumberKind.ITEM, "Rotate the API keys"), 41, text)
+            assertFalse(text, chip!!.mismatch)
+        }
+        assertTrue(TrackerLinkChips.chipFor(found(NumberKind.ITEM, "Rotate the API keys"), 41, "holiday rota")!!.mismatch)
     }
 
     @Test

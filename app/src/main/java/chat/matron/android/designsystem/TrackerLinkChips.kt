@@ -37,17 +37,16 @@ object TrackerLinkChips {
             is TrackerLinkInfo.Found -> info
         }
         val kind = found.kind.wire
-        val title = found.title ?: return TrackerLinkChip(kind, mismatch = false)
         val written = TrackerLinkTitleMatch.writtenLink(linkText)
         val wrongNumber = written.num != null && written.num != num
+        val title = found.title ?: return TrackerLinkChip(kind, mismatch = wrongNumber)
         if (!wrongNumber && written.title.isNotEmpty() && TrackerLinkTitleMatch.titleMatches(written.title, title)) {
             return TrackerLinkChip(kind, mismatch = false)
         }
         // Link text that names something ("#12 Some title", or a few words)
-        // and does not match is flagged; a one-word "here" is not a claim
-        // about the target.
-        val claims = written.num != null || TrackerLinkTitleMatch.tokens(written.title).size >= 2
-        val mismatch = wrongNumber || (claims && written.title.isNotEmpty())
+        // and does not match is flagged; "here" or "read more" is not a
+        // claim about the target.
+        val mismatch = wrongNumber || (TrackerLinkTitleMatch.claims(written) && written.title.isNotEmpty())
         return TrackerLinkChip("$kind · $title", mismatch)
     }
 
