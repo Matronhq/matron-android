@@ -62,6 +62,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import chat.matron.android.designsystem.AppLockShield
 import chat.matron.android.designsystem.LocalAppLockActive
+import chat.matron.android.designsystem.LocalTrackerLinkTitles
 import chat.matron.android.designsystem.MatronAppearance
 import chat.matron.android.designsystem.MatronTheme
 import chat.matron.android.designsystem.StorageSettingsRows
@@ -889,7 +890,9 @@ private fun SignedInApp(
 
     // Shareable tracker links stay in the app wherever they are tapped:
     // every link opener under the shell reads this handler.
-    CompositionLocalProvider(LocalUriHandler provides trackerLinkUriHandler) {
+    // Every tracker link in a message body shows what its number points at.
+    val trackerLinkTitles = remember(session.userID) { deps.trackerLinkTitles(session) }
+    CompositionLocalProvider(LocalUriHandler provides trackerLinkUriHandler, LocalTrackerLinkTitles provides trackerLinkTitles) {
         Scaffold(
             // Only the bottom bar contributes padding; each screen keeps its own
             // Scaffold and its own status-bar / IME handling.

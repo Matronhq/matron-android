@@ -18,6 +18,7 @@ import chat.matron.android.journal.AgentSpawnAnswering
 import chat.matron.android.journal.OutboxSessionStopper
 import chat.matron.android.journal.SessionStopping
 import chat.matron.android.journal.ItemsProviding
+import chat.matron.android.journal.TrackerLinkTitles
 import chat.matron.android.designsystem.TrackerItemLinkOutcome
 import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.ItemsSyncing
@@ -631,6 +632,18 @@ class AppDependencies(
         return { query ->
             api.searchAll(query, setOf(TrackerSearchKind.ITEM, TrackerSearchKind.MISSION, TrackerSearchKind.MEMORY))
         }
+    }
+
+    /// What each tracker link in a message body points at, for the chip
+    /// beside it (`TrackerLinkChips`). One per session: its cache is the
+    /// session's.
+    fun trackerLinkTitles(session: UserSession): TrackerLinkTitles {
+        val c = core(session)
+        return TrackerLinkTitles(
+            journalBaseURL = session.homeserverURL,
+            sessionUser = session.userID,
+            lookup = { user, num -> c.api.lookup(user = user, num = num) },
+        )
     }
 
     fun goToNumberResolver(session: UserSession, missionsSupported: () -> Boolean): GoToNumberResolver {
