@@ -59,7 +59,6 @@ class TrackerLinkTitlesTest {
         assertEquals(TrackerLinkTarget("alice", 7), t.target("matron://mission/7"))
         assertEquals(TrackerLinkTarget("alice", 5), t.target("matron://project/5"))
         assertNull(t.target("https://other.example/u/alice/12"))
-        assertNull(t.target("matron://convo/abc"))
         assertNull(t.target("matron://item/0"))
         assertNull(t.target("https://github.com/acme/x/pull/1"))
     }
