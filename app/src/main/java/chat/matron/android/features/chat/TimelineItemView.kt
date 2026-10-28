@@ -242,7 +242,7 @@ private fun RenderedBody(
                     caption = kind.caption,
                     // The URL rides along so the viewer can find this image in
                     // the conversation's gallery (apple #175).
-                    onTap = if (model != null && onTapImage != null) ({ onTapImage(TappedImage(kind.url, model)) }) else null,
+                    onTap = if (model != null && onTapImage != null) ({ onTapImage(TappedImage(kind.url, model, kind.name)) }) else null,
                 )
             }
         }
@@ -589,4 +589,4 @@ fun timelineDisplayName(senderID: String): String {
 /// What a timeline image tap hands up: the resolved Coil model plus the
 /// media URL it came from, so the fullscreen viewer can locate the image in
 /// the conversation's gallery and step to its neighbours (apple #175).
-data class TappedImage(val url: String?, val model: Any)
+data class TappedImage(val url: String?, val model: Any, val name: String? = null)

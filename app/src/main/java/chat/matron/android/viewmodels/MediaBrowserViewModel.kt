@@ -43,6 +43,7 @@ class MediaBrowserViewModel(
         val url: String?,
         val caption: String?,
         val expired: Boolean,
+        val name: String? = null,
     )
 
     data class FileEntry(
@@ -132,7 +133,7 @@ class MediaBrowserViewModel(
                     ?: continue
                 when (val kind = item.kind) {
                     is TimelineItem.Kind.Image ->
-                        mediaAcc.add(MediaEntry(event.seq, kind.url, kind.caption, kind.expired))
+                        mediaAcc.add(MediaEntry(event.seq, kind.url, kind.caption, kind.expired, kind.name))
                     is TimelineItem.Kind.File ->
                         fileAcc.add(
                             FileEntry(event.seq, kind.url, kind.filename, kind.sizeBytes, kind.caption, kind.expired, kind.mime)
@@ -172,7 +173,7 @@ class MediaBrowserViewModel(
     suspend fun imageEntries(): List<MediaEntry> =
         store.attachmentEvents(convoID).mapNotNull { event ->
             val item = JournalTimelineMapper.timelineItem(event, ownSender = "", serverURL = serverURL) ?: return@mapNotNull null
-            (item.kind as? TimelineItem.Kind.Image)?.let { MediaEntry(event.seq, it.url, it.caption, it.expired) }
+            (item.kind as? TimelineItem.Kind.Image)?.let { MediaEntry(event.seq, it.url, it.caption, it.expired, it.name) }
         }
 
     /// Fetch one grid thumbnail's bytes. A 404 is permanent (blob ids are

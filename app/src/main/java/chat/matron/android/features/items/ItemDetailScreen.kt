@@ -178,6 +178,7 @@ fun ItemDetailScreen(
     val vmDraft by viewModel.draftFlow.collectAsStateWithLifecycle()
     LaunchedEffect(vmDraft) { if (vmDraft != draft) draft = vmDraft }
     var previewModel by remember { mutableStateOf<Any?>(null) }
+    var previewName by remember { mutableStateOf<String?>(null) }
     var attachMenu by remember { mutableStateOf(false) }
     var openingBlob by remember { mutableStateOf<String?>(null) }
     val markdownPreview = remember { MarkdownPreviewState() }
@@ -342,6 +343,7 @@ fun ItemDetailScreen(
     fun openAttachment(a: TrackerAttachment) {
         if (a.isImage) {
             previewModel = images[a.blobRef] ?: mediaURL(a)
+            previewName = a.name.ifEmpty { null }
             return
         }
         // Markdown (≤ 2 MB) opens in the in-app preview; its Download
@@ -532,7 +534,13 @@ fun ItemDetailScreen(
     }
 
     if (previewModel != null) {
-        AttachmentFullscreenViewer(model = previewModel, onDismiss = { previewModel = null })
+        AttachmentFullscreenViewer(
+            model = previewModel,
+            name = previewName,
+            // Still a URL when the inline load hasn't landed: Download fetches it.
+            load = { url -> nullOnFailure { media.image(url) } },
+            onDismiss = { previewModel = null },
+        )
     }
 }
 

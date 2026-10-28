@@ -27,6 +27,8 @@ class ImageGallery(
         /// the user came from.
         val url: String?,
         val expired: Boolean,
+        /// The sender's file name, suggested when the image is downloaded.
+        val name: String? = null,
     )
 
     /// At least one entry: an empty list is replaced by a single placeholder
@@ -37,8 +39,10 @@ class ImageGallery(
     companion object {
         /// A one-image gallery — the pre-#175 viewer, for call sites with no
         /// list to step through.
-        fun single(model: Any?): ImageGallery =
-            ImageGallery(listOf(Entry(id = "single", url = null, expired = model == null)), 0, model) { null }
+        /// [load] fetches the original when [model] is still a URL string
+        /// (the viewer's Download needs the bytes, not just a picture).
+        fun single(model: Any?, name: String? = null, load: suspend (String) -> Any? = { null }): ImageGallery =
+            ImageGallery(listOf(Entry(id = "single", url = null, expired = model == null, name = name)), 0, model, load)
     }
 }
 

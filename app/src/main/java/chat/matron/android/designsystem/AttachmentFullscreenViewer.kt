@@ -1,6 +1,22 @@
 package chat.matron.android.designsystem
 
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Box
@@ -47,6 +63,9 @@ import kotlin.math.abs
 /// counter matches the grid. Pinch-to-zoom (clamped 1×–4×) via a
 /// transformable; a top-trailing close button gives a no-gesture path out
 /// for TalkBack users. Port of matron-apple's viewer changes in #175.
+/// A Download button beside it saves the shown image's original bytes
+/// through the system save picker ([ImageDownload]), as the web viewer's
+/// header Download does; it is hidden while there is nothing to save.
 @Composable
 fun AttachmentFullscreenViewer(gallery: ImageGallery, onDismiss: () -> Unit) {
     Dialog(
@@ -94,6 +113,43 @@ fun AttachmentFullscreenViewer(gallery: ImageGallery, onDismiss: () -> Unit) {
         // No key yet means the fetch hasn't answered; a stored null is a
         // fetch that failed (or an expired entry) and is final (Bugbot).
         val stillLoading = !resolved.value.containsKey(index)
+
+        val context = LocalContext.current
+        val scope = rememberCoroutineScope()
+        // The bytes waiting for the picker to name a destination, and
+        // whether a save is between the tap and its result.
+        var pendingSave by remember { mutableStateOf<ByteArray?>(null) }
+        var saving by remember { mutableStateOf(false) }
+        val saveLauncher = rememberLauncherForActivityResult(ImageDownload.SaveContract) { uri ->
+            val bytes = pendingSave
+            pendingSave = null
+            if (uri == null || bytes == null) { saving = false; return@rememberLauncherForActivityResult }
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.openOutputStream(uri, "w")?.use { it.write(bytes) } != null
+                    }.getOrDefault(false)
+                }
+                saving = false
+                Toast.makeText(context, if (ok) "Image saved" else "Couldn't save the image", Toast.LENGTH_SHORT).show()
+            }
+        }
+        fun download() {
+            if (saving) return
+            saving = true
+            val shown = model
+            val name = entry.name
+            scope.launch {
+                val bytes = ImageDownload.originalBytes(shown, context, gallery.load)
+                if (bytes == null) {
+                    saving = false
+                    Toast.makeText(context, "Couldn't download the image", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                pendingSave = bytes
+                saveLauncher.launch(ImageDownload.request(name, bytes))
+            }
+        }
 
         Box(
             Modifier
@@ -178,17 +234,50 @@ fun AttachmentFullscreenViewer(gallery: ImageGallery, onDismiss: () -> Unit) {
             }
 
             ImageGalleryNavigation.counterLabel(index, count)?.let { label ->
-                Text(
-                    label,
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.align(Alignment.TopStart).padding(16.dp),
-                )
+                // Same 48dp row as the controls on the right, so the counter
+                // lines up with Download and Close.
+                Box(
+                    Modifier.align(Alignment.TopStart).padding(start = 16.dp, top = 8.dp).height(48.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(
+                        label,
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
             }
 
-            IconButton(onClick = onDismiss, modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
-                Icon(Icons.Filled.Cancel, contentDescription = "Close image preview", tint = Color.White)
+            Row(
+                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                // Nothing to save for an expired, failed or still-loading image.
+                if (model != null && !entry.expired) {
+                    OutlinedButton(
+                        onClick = ::download,
+                        enabled = !saving,
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.5f)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color.Black.copy(alpha = 0.4f),
+                            contentColor = Color.White,
+                            disabledContentColor = Color.White.copy(alpha = 0.5f),
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    ) {
+                        Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text(
+                            if (saving) "Saving…" else "Download",
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.padding(start = 6.dp),
+                        )
+                    }
+                }
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Filled.Cancel, contentDescription = "Close image preview", tint = Color.White)
+                }
             }
         }
     }
@@ -197,8 +286,15 @@ fun AttachmentFullscreenViewer(gallery: ImageGallery, onDismiss: () -> Unit) {
 /// The one-image viewer, for call sites with nothing to step through.
 /// [model] is any Coil-loadable handle (URL string, `File`, `Uri`, bytes).
 @Composable
-fun AttachmentFullscreenViewer(model: Any?, onDismiss: () -> Unit) {
-    AttachmentFullscreenViewer(gallery = remember(model) { ImageGallery.single(model) }, onDismiss = onDismiss)
+/// [name] is the suggested file name for Download; [load] fetches the
+/// original when [model] is a URL string.
+fun AttachmentFullscreenViewer(
+    model: Any?,
+    onDismiss: () -> Unit,
+    name: String? = null,
+    load: suspend (String) -> Any? = { null },
+) {
+    AttachmentFullscreenViewer(gallery = remember(model, name) { ImageGallery.single(model, name, load) }, onDismiss = onDismiss)
 }
 
 private const val MIN_SCALE = 1f
