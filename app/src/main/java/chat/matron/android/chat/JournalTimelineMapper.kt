@@ -275,7 +275,11 @@ object JournalTimelineMapper {
                 // server-side, payload rewritten in place with `expired: true`.
                 val expired = payload.boolOrNull("expired") ?: false
                 if (event.type == JournalEventType.IMAGE) {
-                    TimelineItem.Kind.Image(url, caption, size, expired)
+                    TimelineItem.Kind.Image(
+                        url, caption, size, expired,
+                        // The viewer's Download suggests it as the file name.
+                        name = payload.stringOrNull("name") ?: payload.stringOrNull("filename"),
+                    )
                 } else {
                     // `name`, not `filename`: the key the media-send contract
                     // defines and both producers emit.

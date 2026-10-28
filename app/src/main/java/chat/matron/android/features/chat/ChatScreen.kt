@@ -186,7 +186,7 @@ fun ChatScreen(
         val image = tapped as? TappedImage ?: run { previewGallery = ImageGallery.single(tapped); return@LaunchedEffect }
         // The tapped image opens on the SAME frame as the tap; the full
         // gallery swaps in underneath once the store has answered (Bugbot).
-        previewGallery = ImageGallery.single(image.model)
+        previewGallery = ImageGallery.single(image.model, image.name)
         val browser = mediaBrowser?.invoke(compactScope)
         val stored = if (browser == null || image.url == null) {
             emptyList()
@@ -201,7 +201,7 @@ fun ChatScreen(
                 emptyList()
             }
         }
-        val entries = stored.asReversed().map { ImageGallery.Entry(it.id.toString(), it.url, it.expired) }
+        val entries = stored.asReversed().map { ImageGallery.Entry(it.id.toString(), it.url, it.expired, it.name) }
         val start = entries.indexOfFirst { it.url == image.url }
         if (browser != null && start >= 0) {
             previewGallery = ImageGallery(entries, start, image.model) { url ->

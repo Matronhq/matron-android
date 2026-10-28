@@ -71,6 +71,8 @@ data class TimelineItem(
             val caption: String?,
             val sizeBytes: Long?,
             val expired: Boolean = false,
+            /// The sender's file name, when the event carries one.
+            val name: String? = null,
         ) : Kind
         data class File(
             val url: String?,

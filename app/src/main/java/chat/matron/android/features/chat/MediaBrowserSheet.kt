@@ -140,7 +140,7 @@ fun MediaBrowserSheet(
                                     // (newest first), starting at the tapped
                                     // cell, so "next" is the next cell on
                                     // screen (apple #175).
-                                    val entries = mediaItems.map { ImageGallery.Entry(it.id.toString(), it.url, it.expired) }
+                                    val entries = mediaItems.map { ImageGallery.Entry(it.id.toString(), it.url, it.expired, it.name) }
                                     preview = ImageGallery(
                                         entries = entries,
                                         startIndex = mediaItems.indexOfFirst { it.url == url }.coerceAtLeast(0),
