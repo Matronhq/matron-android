@@ -41,12 +41,15 @@ object TrackerLinkChips {
         val written = TrackerLinkTitleMatch.writtenLink(linkText)
         val wrongNumber = written.num != null && written.num != num
         val title = found.title ?: return TrackerLinkChip(kind, mismatch = wrongNumber)
-        // The link already says what it points at: a chip would only repeat it.
-        if (!wrongNumber && written.title.isNotEmpty() && TrackerLinkTitleMatch.titleMatches(written.title, title)) return null
+        // The link already says what it points at: a chip would only repeat
+        // it. A label like "here", or a lone word that happens to start the
+        // title, says nothing, so it keeps the chip.
+        val claimed = TrackerLinkTitleMatch.claims(written)
+        if (!wrongNumber && claimed && written.title.isNotEmpty() && TrackerLinkTitleMatch.titleMatches(written.title, title)) return null
         // Link text that names something ("#12 Some title", or a few words)
         // and does not match is flagged; "here" or "read more" is not a
         // claim about the target.
-        val mismatch = wrongNumber || (TrackerLinkTitleMatch.claims(written) && written.title.isNotEmpty())
+        val mismatch = wrongNumber || (claimed && written.title.isNotEmpty())
         return TrackerLinkChip("$kind · $title", mismatch)
     }
 

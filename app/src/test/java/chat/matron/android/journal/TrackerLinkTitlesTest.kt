@@ -44,6 +44,13 @@ class TrackerLinkTitlesTest {
         assertTrue(TrackerLinkTitleMatch.titleMatches("Merge https://example.com/org/repo/pull/10", actual))
         assertTrue(TrackerLinkTitleMatch.titleMatches("Merge https://example.com/org/repo/pu…", actual))
         assertTrue(TrackerLinkTitleMatch.titleMatches("Merge (live tracking fix)", actual))
+        assertTrue(TrackerLinkTitleMatch.titleMatches("https://example.com/org/repo/pull/1...", actual))
+        // Every other word the same: the address alone tells them apart.
+        assertFalse(TrackerLinkTitleMatch.titleMatches("Merge https://example.com/org/repo/pull/11 (live tracking fix)", actual))
+        assertFalse(TrackerLinkTitleMatch.titleMatches("Fix https://example.com/Files/A", "Fix https://example.com/Files/a"))
+        assertFalse(TrackerLinkTitleMatch.titleMatches("Fix https://example.com/item(1) docs", "Fix https://example.com/item(2) docs"))
+        assertTrue(TrackerLinkTitleMatch.titleMatches("Fix [https://example.com/a]", "Fix https://example.com/a"))
+        assertTrue(TrackerLinkTitleMatch.titleMatches("Fix (see https://example.com/a)", "Fix: see https://example.com/a"))
     }
 
     // MARK: - writtenLink

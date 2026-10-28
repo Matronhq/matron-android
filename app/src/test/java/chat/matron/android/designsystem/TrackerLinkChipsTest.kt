@@ -33,6 +33,22 @@ class TrackerLinkChipsTest {
     }
 
     @Test
+    fun aLabelThatNamesNothingKeepsTheChipEvenWhenItStartsTheTitle() {
+        for (text in listOf("here", "Here", "read more")) {
+            val chip = TrackerLinkChips.chipFor(found(NumberKind.ITEM, "Here is the release plan"), 12, text)
+            assertEquals(text, TrackerLinkChip("item · Here is the release plan", mismatch = false), chip)
+        }
+        val readMore = TrackerLinkChips.chipFor(found(NumberKind.ITEM, "Read more about backups"), 12, "read more")
+        assertEquals(TrackerLinkChip("item · Read more about backups", mismatch = false), readMore)
+    }
+
+    @Test
+    fun linkTextNamingAnotherAddressIsFlagged() {
+        val chip = TrackerLinkChips.chipFor(found(NumberKind.ITEM, "Merge https://example.com/org/repo/pull/10"), 12, "https://example.com/org/repo/pull/11")
+        assertTrue(chip!!.mismatch)
+    }
+
+    @Test
     fun aLinkTitledAfterAnotherRecordsAddressIsFlagged() {
         val chip = TrackerLinkChips.chipFor(
             found(NumberKind.ITEM, "Merge https://example.com/org/repo/pull/10 (live tracking fix)"),
