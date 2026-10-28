@@ -51,18 +51,22 @@ object TrackerLinkTitleMatch {
     /// words) would otherwise match any other title that carries an address
     /// on the same site.
     private val address = Regex("[a-z][a-z0-9+.-]*://[^\\s<>\"'\\[\\]]+", RegexOption.IGNORE_CASE)
-    private val addressEnd = Regex("[.,;:!?/]+$")
 
     /// The address as written, without what wraps or follows it: a full
     /// stop, a trailing slash, or a closing parenthesis it did not open
     /// ("(see https://…)"). A trailing "..." becomes "…": cut short.
     private fun trimAddress(text: String): String {
-        var t = text.replace(Regex("\\.\\.\\.$"), "…")
+        var t = text
+        // One character at a time, so "..." is seen wherever it ends up
+        // last: "(https://…/pull/1...)" and "https://…/pull/1...," are both
+        // cut short.
         while (true) {
-            val before = t
-            t = t.replace(addressEnd, "")
-            if (t.endsWith(")") && t.count { it == '(' } < t.count { it == ')' }) t = t.dropLast(1)
-            if (t == before) return t
+            t = when {
+                t.endsWith("...") -> t.dropLast(3) + "…"
+                t.isNotEmpty() && t.last() in ".,;:!?/" -> t.dropLast(1)
+                t.endsWith(")") && t.count { it == '(' } < t.count { it == ')' } -> t.dropLast(1)
+                else -> return t
+            }
         }
     }
 
