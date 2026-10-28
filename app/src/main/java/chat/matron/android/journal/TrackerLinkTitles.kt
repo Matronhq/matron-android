@@ -7,9 +7,9 @@ import kotlinx.coroutines.CompletableDeferred
 
 // What a tracker link points at, for the chip shown beside it in a message
 // body. Agents sometimes link a real number that is not the one they meant,
-// and a bare `#412` gives the reader no way to tell, so every tracker link
-// shows its target's kind and title, and a link whose text names something
-// else stands out. The web client does the same, and the bridge refuses an
+// and a bare `#412` gives the reader no way to tell, so a tracker link that
+// does not already name its target shows the target's kind and title, and a
+// link whose text names something else stands out. The web client does the same, and the bridge refuses an
 // agent's link whose written title does not match, with the same rule.
 
 /// The owner's login name and the number in their one per-user number space:
@@ -47,25 +47,50 @@ object TrackerLinkTitleMatch {
         setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
     )
 
-    fun tokens(text: String): List<String> =
-        Normalizer.normalize(text, Normalizer.Form.NFKD)
-            .replace(marks, "")
-            .lowercase()
-            .replace(ellipsis, "")
-            .split(separators)
-            .filter { it.isNotEmpty() }
+    /// An address in a title is one word, compared whole: its pieces (https,
+    /// the host, the path's words) would otherwise match any other title
+    /// that carries an address on the same site.
+    private val address = Regex("[a-z][a-z0-9+.-]*://[^\\s<>()\"']+")
+    private val addressEnd = Regex("[.,;:!?/]+$")
+
+    /// The words of a title, and whether it ended with an ellipsis (only
+    /// then may an address at its end be a cut-off prefix of the real one).
+    private data class Words(val list: List<String>, val cut: Boolean)
+
+    private fun words(text: String): Words {
+        val full = Normalizer.normalize(text, Normalizer.Form.NFKD).replace(marks, "").lowercase()
+        val plain = full.replace(ellipsis, "")
+        val out = mutableListOf<String>()
+        fun addPlain(s: String) = s.split(separators).filterTo(out) { it.isNotEmpty() }
+        var last = 0
+        for (m in address.findAll(plain)) {
+            addPlain(plain.substring(last, m.range.first))
+            out += m.value.replace(addressEnd, "")
+            last = m.range.last + 1
+        }
+        addPlain(plain.substring(last))
+        return Words(out, plain != full)
+    }
+
+    fun tokens(text: String): List<String> = words(text).list
+
+    private fun isAddress(t: String) = "://" in t
 
     private fun sameWord(a: String, b: String): Boolean =
-        a == b || (minOf(a.length, b.length) >= 3 && (a.startsWith(b) || b.startsWith(a)))
+        a == b ||
+            // Addresses match whole: ".../pull/1" is not ".../pull/10".
+            (!isAddress(a) && !isAddress(b) && minOf(a.length, b.length) >= 3 && (a.startsWith(b) || b.startsWith(a)))
 
     /// Does a title written in a link name this record? A prefix (the last
     /// word possibly cut short), an abbreviation, or a paraphrase that keeps
     /// most of the words passes; a title about something else does not.
     fun titleMatches(written: String, actual: String): Boolean {
-        val w = tokens(written)
+        val written = words(written)
+        val w = written.list
         val a = tokens(actual)
         if (w.isEmpty() || a.isEmpty()) return false
-        if (w.size <= a.size && w.withIndex().all { (i, t) -> t == a[i] || (i == w.size - 1 && a[i].startsWith(t)) }) return true
+        fun cutShort(t: String, x: String) = x.startsWith(t) && (!isAddress(t) || written.cut)
+        if (w.size <= a.size && w.withIndex().all { (i, t) -> t == a[i] || (i == w.size - 1 && cutShort(t, a[i])) }) return true
         val content = w.filter { it !in stopwords }
         val words = content.ifEmpty { w }
         val hits = words.count { t -> a.any { sameWord(t, it) } }

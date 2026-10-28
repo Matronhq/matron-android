@@ -34,6 +34,18 @@ class TrackerLinkTitlesTest {
         assertFalse(TrackerLinkTitleMatch.titleMatches("", "Merge"))
     }
 
+    @Test
+    fun titleMatchesComparesAnAddressAsOneWholeWord() {
+        val actual = "Merge https://example.com/org/repo/pull/10 (live tracking fix)"
+        assertFalse(TrackerLinkTitleMatch.titleMatches("Merge https://example.com/org/repo/pull/11 (search fix)", actual))
+        assertFalse(TrackerLinkTitleMatch.titleMatches("Merge https://example.com/org/repo/pull/1", actual))
+        assertFalse(TrackerLinkTitleMatch.titleMatches("https://example.com/org/repo/pull/10", "Merge https://example.com/org/repo/pull/11"))
+        assertTrue(TrackerLinkTitleMatch.titleMatches(actual, actual))
+        assertTrue(TrackerLinkTitleMatch.titleMatches("Merge https://example.com/org/repo/pull/10", actual))
+        assertTrue(TrackerLinkTitleMatch.titleMatches("Merge https://example.com/org/repo/pu…", actual))
+        assertTrue(TrackerLinkTitleMatch.titleMatches("Merge (live tracking fix)", actual))
+    }
+
     // MARK: - writtenLink
 
     @Test

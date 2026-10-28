@@ -27,9 +27,19 @@ class TrackerLinkChipsTest {
     }
 
     @Test
-    fun aLinkThatCarriesTheRightTitleShowsOnlyTheKind() {
-        val chip = TrackerLinkChips.chipFor(found(NumberKind.MISSION, "Ship the release notes"), 12, "#12 Ship the release…")
-        assertEquals(TrackerLinkChip("mission", mismatch = false), chip)
+    fun aLinkThatCarriesTheRightTitleGetsNoChip() {
+        assertNull(TrackerLinkChips.chipFor(found(NumberKind.MISSION, "Ship the release notes"), 12, "#12 Ship the release…"))
+        assertNull(TrackerLinkChips.chipFor(found(NumberKind.ITEM, "Ship the release notes"), 12, "Ship the release notes"))
+    }
+
+    @Test
+    fun aLinkTitledAfterAnotherRecordsAddressIsFlagged() {
+        val chip = TrackerLinkChips.chipFor(
+            found(NumberKind.ITEM, "Merge https://example.com/org/repo/pull/10 (live tracking fix)"),
+            12,
+            "#12 Merge https://example.com/org/repo/pull/11 (search fix)",
+        )
+        assertTrue(chip!!.mismatch)
     }
 
     @Test

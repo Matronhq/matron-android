@@ -80,7 +80,8 @@ class TrackerLinkChipsRenderTest {
         render(MatronAppearance.Light)
         settle()
         compose.onNodeWithText("item · Verify last night's backup with a test restore", substring = true).assertExists()
-        compose.onNodeWithText(" item ", substring = true).assertExists()
+        // #42 already names its target: no chip after it.
+        compose.onNodeWithText("Rotate the API keys.", substring = true).assertExists()
         compose.onNodeWithText("⚠ mission · Postgres upgrade dry-run", substring = true).assertExists()
         compose.onNodeWithText("⚠ not found", substring = true).assertExists()
         shoot("light")
@@ -121,7 +122,7 @@ class TrackerLinkChipsRenderTest {
             settle()
         }
         compose.onNodeWithText("item · Verify last night's backup with a test restore", substring = true).assertExists()
-        compose.onNodeWithText("\u00A0item\u00A0", substring = true).assertExists()
+        compose.onNodeWithText("Rotate the API keys.", substring = true).assertExists()
         compose.onNodeWithText("⚠ mission · Postgres upgrade dry-run", substring = true).assertExists()
         compose.onNodeWithText("⚠ not found", substring = true).assertExists()
     }
