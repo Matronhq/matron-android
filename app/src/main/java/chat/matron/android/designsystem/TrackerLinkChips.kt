@@ -14,8 +14,8 @@ import chat.matron.android.journal.TrackerLinkTitles
 /// `null` (previews, tests, signed out) renders links exactly as before.
 val LocalTrackerLinkTitles = compositionLocalOf<TrackerLinkTitles?> { null }
 
-/// What follows a tracker link: its target's kind, and its title unless the
-/// link already says it. [mismatch]: the link's text names another title or
+/// What follows a tracker link that does not already name its target: the
+/// target's kind and title. [mismatch]: the link's text names another title or
 /// number, or the number does not exist.
 data class TrackerLinkChip(val text: String, val mismatch: Boolean)
 
@@ -28,8 +28,9 @@ data class TrackerLinkSpan(val target: TrackerLinkTarget, val text: String, val 
 
 object TrackerLinkChips {
 
-    /// The chip for a link, or `null` while there is nothing worth saying
-    /// (the journal could not be asked).
+    /// The chip for a link, or `null` when there is nothing worth saying (the
+    /// journal could not be asked, or the link's text already names its
+    /// target).
     fun chipFor(info: TrackerLinkInfo, num: Int, linkText: String): TrackerLinkChip? {
         val found = when (info) {
             TrackerLinkInfo.Failed -> return null
@@ -40,13 +41,15 @@ object TrackerLinkChips {
         val written = TrackerLinkTitleMatch.writtenLink(linkText)
         val wrongNumber = written.num != null && written.num != num
         val title = found.title ?: return TrackerLinkChip(kind, mismatch = wrongNumber)
-        if (!wrongNumber && written.title.isNotEmpty() && TrackerLinkTitleMatch.titleMatches(written.title, title)) {
-            return TrackerLinkChip(kind, mismatch = false)
-        }
+        // The link already says what it points at: a chip would only repeat
+        // it. A label like "here", or a lone word that happens to start the
+        // title, says nothing, so it keeps the chip.
+        val claimed = TrackerLinkTitleMatch.claims(written)
+        if (!wrongNumber && claimed && written.title.isNotEmpty() && TrackerLinkTitleMatch.titleMatches(written.title, title)) return null
         // Link text that names something ("#12 Some title", or a few words)
         // and does not match is flagged; "here" or "read more" is not a
         // claim about the target.
-        val mismatch = wrongNumber || (TrackerLinkTitleMatch.claims(written) && written.title.isNotEmpty())
+        val mismatch = wrongNumber || (claimed && written.title.isNotEmpty())
         return TrackerLinkChip("$kind · $title", mismatch)
     }
 

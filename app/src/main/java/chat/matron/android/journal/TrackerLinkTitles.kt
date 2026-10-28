@@ -7,9 +7,9 @@ import kotlinx.coroutines.CompletableDeferred
 
 // What a tracker link points at, for the chip shown beside it in a message
 // body. Agents sometimes link a real number that is not the one they meant,
-// and a bare `#412` gives the reader no way to tell, so every tracker link
-// shows its target's kind and title, and a link whose text names something
-// else stands out. The web client does the same, and the bridge refuses an
+// and a bare `#412` gives the reader no way to tell, so a tracker link that
+// does not already name its target shows the target's kind and title, and a
+// link whose text names something else stands out. The web client does the same, and the bridge refuses an
 // agent's link whose written title does not match, with the same rule.
 
 /// The owner's login name and the number in their one per-user number space:
@@ -40,42 +40,85 @@ object TrackerLinkTitleMatch {
     /// "read more", "see this" claim nothing about the target.
     private val generic = setOf("here", "click", "read", "more", "see", "link", "open", "view", "details", "this", "that", "it")
     private val marks = Regex("\\p{M}+")
-    private val ellipsis = Regex("(\\.\\.\\.|…)\\s*$")
     private val separators = Regex("[^\\p{L}\\p{N}]+")
     private val textRe = Regex(
         "^(?:(?:item|mission|milestone|project|question|task|decision|notice)\\s+)?#([1-9][0-9]{0,9})(?![\\p{L}\\p{N}])(.*)$",
         setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
     )
 
-    fun tokens(text: String): List<String> =
-        Normalizer.normalize(text, Normalizer.Form.NFKD)
-            .replace(marks, "")
-            .lowercase()
-            .replace(ellipsis, "")
-            .split(separators)
-            .filter { it.isNotEmpty() }
+    /// An address in a title is one word, compared whole and as written
+    /// (paths are case-sensitive): its pieces (https, the host, the path's
+    /// words) would otherwise match any other title that carries an address
+    /// on the same site.
+    private val address = Regex("[a-z][a-z0-9+.-]*://[^\\s<>\"'\\[\\]]+", RegexOption.IGNORE_CASE)
+    private val addressEnd = Regex("[.,;:!?/]+$")
+
+    /// The address as written, without what wraps or follows it: a full
+    /// stop, a trailing slash, or a closing parenthesis it did not open
+    /// ("(see https://…)"). A trailing "..." becomes "…": cut short.
+    private fun trimAddress(text: String): String {
+        var t = text.replace(Regex("\\.\\.\\.$"), "…")
+        while (true) {
+            val before = t
+            t = t.replace(addressEnd, "")
+            if (t.endsWith(")") && t.count { it == '(' } < t.count { it == ')' }) t = t.dropLast(1)
+            if (t == before) return t
+        }
+    }
+
+    private fun plainWords(text: String): List<String> =
+        text.lowercase().split(separators).filter { it.isNotEmpty() }
+
+    fun tokens(text: String): List<String> {
+        val plain = Normalizer.normalize(text, Normalizer.Form.NFKD).replace(marks, "")
+        val out = mutableListOf<String>()
+        var last = 0
+        for (m in address.findAll(plain)) {
+            out += plainWords(plain.substring(last, m.range.first))
+            out += trimAddress(m.value)
+            last = m.range.last + 1
+        }
+        out += plainWords(plain.substring(last))
+        return out
+    }
+
+    private fun isAddress(t: String) = "://" in t
+
+    /// The same address, or one cut short with an ellipsis and the address
+    /// it starts: ".../pull/1" is not ".../pull/10", ".../pu…" is.
+    private fun sameAddress(t: String, x: String?): Boolean =
+        t == x || (t.endsWith("…") && x != null && isAddress(x) && x.startsWith(t.dropLast(1)))
 
     private fun sameWord(a: String, b: String): Boolean =
-        a == b || (minOf(a.length, b.length) >= 3 && (a.startsWith(b) || b.startsWith(a)))
+        a == b || (!isAddress(a) && !isAddress(b) && minOf(a.length, b.length) >= 3 && (a.startsWith(b) || b.startsWith(a)))
 
     /// Does a title written in a link name this record? A prefix (the last
     /// word possibly cut short), an abbreviation, or a paraphrase that keeps
-    /// most of the words passes; a title about something else does not.
+    /// most of the words passes; a title about something else does not, and
+    /// neither does one naming an address the record's title does not have.
     fun titleMatches(written: String, actual: String): Boolean {
         val w = tokens(written)
         val a = tokens(actual)
         if (w.isEmpty() || a.isEmpty()) return false
-        if (w.size <= a.size && w.withIndex().all { (i, t) -> t == a[i] || (i == w.size - 1 && a[i].startsWith(t)) }) return true
+        // An address names one thing: every address written must be in the title.
+        if (!w.all { t -> !isAddress(t) || a.any { sameAddress(t, it) } }) return false
+        fun atPosition(i: Int, t: String) =
+            if (isAddress(t)) sameAddress(t, a[i]) else t == a[i] || (i == w.size - 1 && a[i].startsWith(t))
+        if (w.size <= a.size && w.withIndex().all { (i, t) -> atPosition(i, t) }) return true
+        // Most of the written words appear in the title (each address already does).
         val content = w.filter { it !in stopwords }
         val words = content.ifEmpty { w }
-        val hits = words.count { t -> a.any { sameWord(t, it) } }
+        val hits = words.count { t -> isAddress(t) || a.any { sameWord(t, it) } }
         return hits >= minOf(2, words.size) && hits.toDouble() / words.size >= 0.6
     }
 
-    /// Does a link's text say which record it means? A number does, and so
-    /// do two or more words beyond the stopwords and pointing words.
-    fun claims(written: WrittenLink): Boolean =
-        written.num != null || tokens(written.title).count { it !in stopwords && it !in generic } >= 2
+    /// Does a link's text say which record it means? A number does, an
+    /// address does, and so do two or more words beyond the stopwords and
+    /// pointing words.
+    fun claims(written: WrittenLink): Boolean {
+        val words = tokens(written.title)
+        return written.num != null || words.any(::isAddress) || words.count { it !in stopwords && it !in generic } >= 2
+    }
 
     fun writtenLink(text: String): WrittenLink {
         val plain = text.replace(Regex("[*_`~]+"), " ").trim()
