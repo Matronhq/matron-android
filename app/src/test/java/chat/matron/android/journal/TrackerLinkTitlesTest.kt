@@ -50,6 +50,14 @@ class TrackerLinkTitlesTest {
         assertFalse(TrackerLinkTitleMatch.titleMatches("Fix https://example.com/Files/A", "Fix https://example.com/Files/a"))
         assertFalse(TrackerLinkTitleMatch.titleMatches("Fix https://example.com/item(1) docs", "Fix https://example.com/item(2) docs"))
         assertTrue(TrackerLinkTitleMatch.titleMatches("Fix [https://example.com/a]", "Fix https://example.com/a"))
+        // An address cut short inside wrapping punctuation is still cut short.
+        assertTrue(TrackerLinkTitleMatch.titleMatches("Merge (https://example.com/org/repo/pull/1...)", "Merge https://example.com/org/repo/pull/10"))
+        assertTrue(
+            TrackerLinkTitleMatch.titleMatches(
+                "Merge https://example.com/org/repo/pull/1..., then ship",
+                "Merge https://example.com/org/repo/pull/10 then ship",
+            ),
+        )
         assertTrue(TrackerLinkTitleMatch.titleMatches("Fix (see https://example.com/a)", "Fix: see https://example.com/a"))
     }
 
