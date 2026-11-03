@@ -15,3 +15,6 @@ captures/
 matron.db
 matron.db-shm
 matron.db-wal
+
+# Agent scratch (PR bodies, screenshots): never committed
+.superpowers/
