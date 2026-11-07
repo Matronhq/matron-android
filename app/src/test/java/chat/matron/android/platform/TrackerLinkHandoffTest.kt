@@ -71,19 +71,21 @@ class TrackerLinkHandoffTest {
         val handler = TrackerLinkUriHandler(
             platform = object : UriHandler { override fun openUri(uri: String) { platform += uri } },
             // A tracker matcher that would claim anything on the journal.
-            isTrackerLink = { it.startsWith("https://b.example/") },
+            isTrackerLink = { it.startsWith("https://b.example/u/") },
             openTrackerLink = { tracker += it },
             openInviteLink = { invites += it },
         )
         val web = "https://b.example/contact#v=1&j=b.example&u=bob&t=${"A".repeat(43)}&fp=${"b".repeat(26)}"
         handler.openUri(web)
-        handler.openUri("https://b.example/contact#bad")
         handler.openUri("matron://contact?v=1")
         handler.openUri("https://b.example/u/bob/4")
         handler.openUri("https://a.example/docs")
-        assertEquals(listOf(web, "https://b.example/contact#bad", "matron://contact?v=1"), invites)
+        // Not a valid invite: another site's contact page stays a web page.
+        handler.openUri("https://a.example/contact")
+        handler.openUri("https://a.example/contact?ref=nav")
+        assertEquals(listOf(web, "matron://contact?v=1"), invites)
         assertEquals(listOf("https://b.example/u/bob/4"), tracker)
-        assertEquals(listOf("https://a.example/docs"), platform)
+        assertEquals(listOf("https://a.example/docs", "https://a.example/contact", "https://a.example/contact?ref=nav"), platform)
     }
 
     @Test
