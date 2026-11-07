@@ -21,7 +21,13 @@ import chat.matron.android.journal.GrantAnswering
 import chat.matron.android.events.GrantCardState
 import chat.matron.android.events.GrantDecision
 import chat.matron.android.events.KeepLevel
+import chat.matron.android.events.ContactInviteAsk
+import chat.matron.android.events.InviteAskState
 import chat.matron.android.events.PersonGrantRequest
+import chat.matron.android.journal.ContactRefusal
+import chat.matron.android.journal.ContactsWording
+import chat.matron.android.journal.InviteAskAnswering
+import chat.matron.android.journal.RevealedInviteLinks
 import chat.matron.android.journal.SessionStopping
 import chat.matron.android.journal.AgentSpawnDecision
 import chat.matron.android.journal.JournalApiError
@@ -111,6 +117,13 @@ class ChatViewModel(
     /// Answers person-to-person grant cards (mission shares and hand-overs).
     /// Null (previews, tests) renders those cards read-only.
     private val grants: GrantAnswering? = null,
+    /// Answers an agent's invite-link ask. Null (previews, tests) renders
+    /// that card read-only.
+    private val inviteAsks: InviteAskAnswering? = null,
+    /// Where an approved ask's link goes to be shown once. It also runs the
+    /// answer, so leaving the chat (or the app lock) cannot cancel it after
+    /// the journal has made the link.
+    private val inviteLinks: RevealedInviteLinks? = null,
 ) {
     // MARK: - In-conversation search (apple #172)
 
@@ -768,6 +781,85 @@ class ChatViewModel(
         _grantStates.value = _grantStates.value - eventID
     }
 
+    // MARK: - Invite link asks
+
+    /// Invite asks answered on THIS device, keyed by journal seq: `approve`,
+    /// `decline` or `expired`. Persisted under `matron.inviteAskAnswers.<roomID>`
+    /// like [grantAnswers] — the answer only, never the link.
+    private val inviteAnswersKey = "matron.inviteAskAnswers.$roomID"
+    private val inviteAnswers: MutableMap<String, String> =
+        answeredPromptStore.getStringList(inviteAnswersKey).orEmpty()
+            .mapNotNull { entry ->
+                val split = entry.indexOf(':')
+                if (split <= 0) null else entry.substring(0, split) to entry.substring(split + 1)
+            }.toMap().toMutableMap()
+
+    /// In-flight and failed states. In memory only.
+    private val _inviteAskStates = MutableStateFlow<Map<String, InviteAskState>>(emptyMap())
+    val inviteAskStates: StateFlow<Map<String, InviteAskState>> = _inviteAskStates.asStateFlow()
+
+    /// How each card ended, read from its mirror item's markers.
+    private val _inviteAskResolutions = MutableStateFlow<Map<String, InviteAskState>>(emptyMap())
+    val inviteAskResolutions: StateFlow<Map<String, InviteAskState>> = _inviteAskResolutions.asStateFlow()
+
+    /// Render state for one ask card: this device's own answer, then the
+    /// timeline's record, then Idle.
+    fun inviteAskState(eventID: String): InviteAskState {
+        _inviteAskStates.value[eventID]?.let { if (it !is InviteAskState.Idle) return it }
+        val local = inviteAnswers[eventID]
+        when (local) {
+            "approve" -> return InviteAskState.Approved
+            "decline" -> return InviteAskState.Declined
+            EXPIRED_ANSWER -> return InviteAskState.Expired
+        }
+        _inviteAskResolutions.value[eventID]?.let { return it }
+        if (local == INVITE_ELSEWHERE) return InviteAskState.ApprovedElsewhere
+        return if (inviteAsks == null) InviteAskState.Unavailable else InviteAskState.Idle
+    }
+
+    /// Answers an ask card. An approve hands the returned link to
+    /// [inviteLinks], which shows it once.
+    fun answerInviteAsk(eventID: String, ask: ContactInviteAsk, approve: Boolean) {
+        val answerer = inviteAsks ?: return
+        if (!inviteAskState(eventID).answerable) return
+        _inviteAskStates.value = _inviteAskStates.value + (eventID to InviteAskState.Sending)
+        (inviteLinks?.scope ?: scope).launch {
+            try {
+                val answer = answerer.answerInviteAsk(ask.askId, approve)
+                answer.link?.let { inviteLinks?.show(it, RevealedInviteLinks.Source.ASK) }
+                rememberInviteAnswer(eventID, if (approve) "approve" else "decline")
+                _inviteAskStates.value = _inviteAskStates.value - eventID
+            } catch (cancel: CancellationException) {
+                _inviteAskStates.value = _inviteAskStates.value - eventID
+                throw cancel
+            } catch (refused: ContactRefusal) {
+                when (refused.reason) {
+                    "expired" -> settleInviteAsk(eventID, EXPIRED_ANSWER)
+                    "not_pending" -> settleInviteAsk(eventID, null)
+                    else -> _inviteAskStates.value = _inviteAskStates.value +
+                        (eventID to InviteAskState.Failed(ContactsWording.inviteError(refused)))
+                }
+            } catch (gone: JournalApiError.NotFound) {
+                _inviteAskStates.value = _inviteAskStates.value + (eventID to InviteAskState.Unavailable)
+            } catch (error: Throwable) {
+                _inviteAskStates.value = _inviteAskStates.value + (eventID to InviteAskState.Failed(ContactsWording.inviteError(error)))
+            }
+        }
+    }
+
+    /// Answered elsewhere (or expired): the timeline's record says which once
+    /// the mirror's close arrives; until then an unknown answer reads as
+    /// answered on another device.
+    private fun settleInviteAsk(eventID: String, value: String?) {
+        _inviteAskStates.value = _inviteAskStates.value - eventID
+        rememberInviteAnswer(eventID, value ?: INVITE_ELSEWHERE)
+    }
+
+    private fun rememberInviteAnswer(eventID: String, value: String) {
+        inviteAnswers[eventID] = value
+        answeredPromptStore.setStringList(inviteAnswersKey, inviteAnswers.map { (id, v) -> "$id:$v" })
+    }
+
     // MARK: - Coordinator badge
 
     /// The Coordinator's answers to this conversation's consent cards, keyed
@@ -839,6 +931,7 @@ class ChatViewModel(
     private fun applyDerivedRecompute() {
         val consentFold = TimelineConsentFold.read(_items.value)
         _agentChatResolutions.value = consentFold.chatResolutions
+        _inviteAskResolutions.value = ContactInviteAsk.resolutions(_items.value)
         _coordinatorDecisions.value = consentFold.coordinatorDecisions
         val nextRows = ArrayList<TimelineRow>(_items.value.size + 4)
         var first: String? = null
@@ -1798,6 +1891,7 @@ class ChatViewModel(
         /// awaiting an answer. Not a decision, so it can't collide with
         /// [AgentChatDecision]'s wire values.
         private const val EXPIRED_ANSWER = "expired"
+        private const val INVITE_ELSEWHERE = "elsewhere"
 
         internal fun describeAgentChatError(error: Throwable): String = when (error) {
             is JournalApiError.Transport ->

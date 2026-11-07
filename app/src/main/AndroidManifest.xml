@@ -42,6 +42,14 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Contact invite links (matron://contact?…) open People's
+                 accept card. Opening one sends nothing. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="matron" android:host="contact" />
+            </intent-filter>
             <!-- Shareable tracker links (App Links) are claimed in
                  src/appLinks/AndroidManifest.xml when the build names a
                  journal host. singleTop: a link opened while the app is in

@@ -60,7 +60,9 @@ data class ItemsPage(val items: List<TrackerItem>, val nextCursor: String?)
 data class ItemDetail(val item: TrackerItem, val comments: List<TrackerComment>)
 
 /// `POST /items/:id/comments`: the comment as stored plus the item it left behind.
-data class ItemCommentResult(val item: TrackerItem, val comment: TrackerComment)
+/// [link] is an invite link, on the answer to an Approve tap on an agent's
+/// invite ask only: shown once on this device and never stored.
+data class ItemCommentResult(val item: TrackerItem, val comment: TrackerComment, val link: String? = null)
 
 /// `POST /items` body. [awaiting] is tri-state like the Swift `ItemAwaiting??`:
 /// [awaitingSet] false ⇒ key omitted (server default), true with a null

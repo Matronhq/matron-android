@@ -184,6 +184,11 @@ class ItemsSync(
     @Volatile
     private var stopped = false
 
+    /// Receives the invite link an Approve tap on an agent's invite ask
+    /// mirror brings back, to show once. Never stored here.
+    @Volatile
+    var onInviteLink: ((String) -> Unit)? = null
+
     private val _isSupported = MutableStateFlow(true)
     override val isSupported: StateFlow<Boolean> = _isSupported.asStateFlow()
 
@@ -669,6 +674,7 @@ class ItemsSync(
                         // outbox — without this the reply would be invisible
                         // until the detail screen is reopened.
                         store.commitOutboxResult(result.item, result.comment, deletingLocalID = row.localID)
+                        result.link?.let { link -> onInviteLink?.invoke(link) }
                         refreshItem(itemID)
                     }
                     ItemOutboxEntity.OP_CREATE -> {

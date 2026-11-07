@@ -222,12 +222,14 @@ data class PersonGrantRequest(
 
         /// Whether a `permission_request` payload is one of the
         /// person-to-person kinds (`contact_request`, `mission_share`,
-        /// `session_share`, `person_room`, `mission_handover`). None of them
+        /// `session_share`, `person_room`, `mission_handover`, `contact_invite`). None of them
         /// is answered by `prompt_reply`, so none may fall through to the
         /// generic Allow/Deny prompt.
         fun isPersonKind(payload: JsonObject): Boolean = payload.stringOrNull("kind") in PERSON_KINDS
 
-        private val PERSON_KINDS = setOf("contact_request", "mission_share", "session_share", "person_room", "mission_handover")
+        private val PERSON_KINDS = setOf(
+            "contact_request", "mission_share", "session_share", "person_room", "mission_handover", ContactInviteAsk.KIND,
+        )
 
         private fun nonEmpty(raw: String?): String? = raw?.trim()?.takeIf { it.isNotEmpty() }
     }

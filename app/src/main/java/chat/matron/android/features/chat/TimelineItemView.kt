@@ -36,6 +36,9 @@ import chat.matron.android.designsystem.PersonGrantCard
 import chat.matron.android.events.GrantCardState
 import chat.matron.android.events.GrantDecision
 import chat.matron.android.events.KeepLevel
+import chat.matron.android.designsystem.ContactInviteAskCard
+import chat.matron.android.events.ContactInviteAsk
+import chat.matron.android.events.InviteAskState
 import chat.matron.android.events.PersonGrantRequest
 import chat.matron.android.designsystem.AskUserCard
 import chat.matron.android.designsystem.AttachmentFile
@@ -151,6 +154,9 @@ fun TimelineItemView(
     /// shows the payload's value.
     grantKeepLevel: ((eventID: String, request: PersonGrantRequest) -> KeepLevel)? = null,
     onGrantKeepLevelChange: ((eventID: String, level: KeepLevel) -> Unit)? = null,
+    /// An agent's invite-link ask card. `null` (previews, tests) renders
+    /// it read-only.
+    inviteAsks: InviteAskHost? = null,
 ) {
     if (item.isOwn && item.sendState != TimelineSendState.Sent) {
         Column(horizontalAlignment = Alignment.End) {
@@ -159,7 +165,7 @@ fun TimelineItemView(
                 askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
                 agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, coordinatorBadge, onStopSession,
                 onOpenItem, onOpenMission, hasMultipleSenders, grantState, onAnswerGrant,
-                grantKeepLevel, onGrantKeepLevelChange,
+                grantKeepLevel, onGrantKeepLevelChange, inviteAsks,
             )
             SendStateIndicator(
                 state = sendStateGlyphFrom(item.sendState),
@@ -173,7 +179,7 @@ fun TimelineItemView(
             askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
             agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, coordinatorBadge, onStopSession,
                 onOpenItem, onOpenMission, hasMultipleSenders, grantState, onAnswerGrant,
-                grantKeepLevel, onGrantKeepLevelChange,
+                grantKeepLevel, onGrantKeepLevelChange, inviteAsks,
         )
     }
 }
@@ -216,6 +222,7 @@ private fun RenderedBody(
     ) -> Unit)?,
     grantKeepLevel: ((eventID: String, request: PersonGrantRequest) -> KeepLevel)?,
     onGrantKeepLevelChange: ((eventID: String, level: KeepLevel) -> Unit)?,
+    inviteAsks: InviteAskHost?,
 ) {
     val style = if (item.isOwn) MessageAuthorStyle.Me else MessageAuthorStyle.Bot
     val avatarSender = timelineAvatarSender(item, hasMultipleSenders)
@@ -331,6 +338,16 @@ private fun RenderedBody(
                     onDecline = { onAnswerGrant?.invoke(kind.eventID, kind.request, GrantDecision.DECLINE, emptyList()) },
                     keepLevel = grantKeepLevel?.invoke(kind.eventID, kind.request) ?: kind.request.keepLevel,
                     onKeepLevelChange = { level -> onGrantKeepLevelChange?.invoke(kind.eventID, level) },
+                )
+            }
+
+        is TimelineItem.Kind.ContactInviteAskCard ->
+            CappedCard(maxWidth = 360.dp) {
+                ContactInviteAskCard(
+                    ask = kind.ask,
+                    state = inviteAsks?.state?.invoke(kind.eventID) ?: InviteAskState.Unavailable,
+                    onApprove = { inviteAsks?.answer?.invoke(kind.eventID, kind.ask, true) },
+                    onDecline = { inviteAsks?.answer?.invoke(kind.eventID, kind.ask, false) },
                 )
             }
 
@@ -590,3 +607,10 @@ fun timelineDisplayName(senderID: String): String {
 /// media URL it came from, so the fullscreen viewer can locate the image in
 /// the conversation's gallery and step to its neighbours (apple #175).
 data class TappedImage(val url: String?, val model: Any, val name: String? = null)
+
+/// What an invite ask card in the timeline reads and calls: its state and
+/// the answer. An approved link is shown by the shell, not the card.
+class InviteAskHost(
+    val state: (eventID: String) -> InviteAskState,
+    val answer: (eventID: String, ask: ContactInviteAsk, approve: Boolean) -> Unit,
+)

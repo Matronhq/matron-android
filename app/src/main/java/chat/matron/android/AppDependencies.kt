@@ -86,6 +86,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -235,6 +236,9 @@ class AppDependencies(
          * the previous user's rows after the wipe.
          */
         var backfillJob: Job? = null,
+        /** Invite links waiting to be shown once; in memory only. */
+        val inviteLinks: chat.matron.android.journal.RevealedInviteLinks =
+            chat.matron.android.journal.RevealedInviteLinks(CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)),
     )
 
     private val cores: MutableMap<String, JournalCore> = mutableMapOf()
@@ -342,6 +346,9 @@ class AppDependencies(
             api, db, dbFile, store, engine, maintenance, itemsSync, missionsSync, memoriesSync,
             pinsSync = pinsSync, coordinatorSync = coordinatorSync,
         )
+        core.itemsSync.onInviteLink = { link ->
+            core.inviteLinks.show(link, chat.matron.android.journal.RevealedInviteLinks.Source.ASK)
+        }
         cores[session.userID] = core
         // Nothing proportional to store history runs on the launch path any
         // more (apple #212): the tool-output TTL sweep that used to be
@@ -684,6 +691,16 @@ class AppDependencies(
     /** Answers person-to-person grant cards (mission shares, hand-overs). */
     fun grantService(session: UserSession): chat.matron.android.journal.GrantAnswering = core(session).api
 
+    /** Answers an agent's invite-link ask from its card in a chat. */
+    fun inviteAskService(session: UserSession): chat.matron.android.journal.InviteAskAnswering = core(session).api
+
+    /** Settings → People: contacts and invite links. */
+    fun contactsService(session: UserSession): chat.matron.android.journal.ContactsProviding = core(session).api
+
+    /** Invite links waiting to be shown once, for the shell. Never stored. */
+    fun revealedInviteLinks(session: UserSession): chat.matron.android.journal.RevealedInviteLinks =
+        core(session).inviteLinks
+
     /** Stops a session the Coordinator let start, from its spawn card. */
     fun sessionStopper(session: UserSession): SessionStopping = OutboxSessionStopper(core(session).engine)
 
@@ -809,6 +826,9 @@ class AppDependencies(
                 // Stop the tracker sync BEFORE the engine: it awaits every
                 // in-flight refresh/refetch/drain, so nothing can resume after
                 // the wipe below and write the old account's items back.
+                core.itemsSync.onInviteLink = null
+                core.inviteLinks.clearAll()
+                core.inviteLinks.scope.cancel()
                 runCatching { core.itemsSync.stop() }
                     .onFailure { MatronDebug.breadcrumb("signOut: itemsSync.stop failed: $it") }
                 runCatching { core.missionsSync.stop() }

@@ -84,6 +84,8 @@ fun DeviceSettingsScreen(
     /// Settings → Pinned chats. `null` hides the row (a journal without
     /// pins, previews).
     onPinnedChats: (() -> Unit)? = null,
+    /// Settings → People (contacts and invite links). `null` hides it.
+    onPeople: (() -> Unit)? = null,
     /// Settings → For you's journal-held "notices" switch. `null` in hosts
     /// without a session (previews); the section also stays hidden until the
     /// journal answers, and for good on a journal without `/settings`.
@@ -166,6 +168,8 @@ fun DeviceSettingsScreen(
                     }
                 }
             }
+
+            if (onPeople != null) PeopleSection(onPeople)
 
             if (coordinator != null) CoordinatorSection(coordinator)
 
@@ -487,6 +491,22 @@ private fun CoordinatorConsentSwitch(model: CoordinatorConsentSettingViewModel) 
             color = MaterialTheme.colorScheme.error,
             modifier = Modifier.padding(bottom = 8.dp),
         )
+    }
+}
+
+@Composable
+private fun PeopleSection(onOpen: () -> Unit) {
+    SettingsSection("People") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onOpen)
+                .padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("People", modifier = Modifier.weight(1f))
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+        }
     }
 }
 

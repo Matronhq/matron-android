@@ -810,6 +810,8 @@ private fun TimelineRowView(
     // The owner's "Keep contributing" switches live in the view model; a
     // flip redraws the card through this.
     val grantKeepLevels by chatVM.grantKeepLevels.collectAsStateWithLifecycle()
+    val inviteAskStates by chatVM.inviteAskStates.collectAsStateWithLifecycle()
+    val inviteAskResolutions by chatVM.inviteAskResolutions.collectAsStateWithLifecycle()
     // A bridge queued_release lands as a hidden row, so no visible row changes;
     // collecting the memo is what recomposes the sibling queue cards' buttons
     // (apple #162; Bugbot #48).
@@ -890,6 +892,11 @@ private fun TimelineRowView(
                     },
                     grantKeepLevel = { eventID, request -> grantKeepLevels.let { chatVM.grantKeepLevel(eventID, request) } },
                     onGrantKeepLevelChange = { eventID, level -> chatVM.setGrantKeepLevel(eventID, level) },
+                    inviteAsks = InviteAskHost(
+                        // The flows read here are what make the card recompose.
+                        state = { eventID -> inviteAskStates.let { inviteAskResolutions }.let { chatVM.inviteAskState(eventID) } },
+                        answer = { eventID, ask, approve -> chatVM.answerInviteAsk(eventID, ask, approve) },
+                    ),
                 )
             }
         }

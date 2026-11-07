@@ -139,6 +139,13 @@ data class TimelineItem(
             val eventID: String,
             val request: chat.matron.android.events.PersonGrantRequest,
         ) : Kind
+        /// An agent's ask for an invite link (`kind: contact_invite`).
+        /// Answered over HTTP (`POST /contacts/invites/asks/:id/answer`);
+        /// `eventID` keys the local answer.
+        data class ContactInviteAskCard(
+            val eventID: String,
+            val ask: chat.matron.android.events.ContactInviteAsk,
+        ) : Kind
         /// A journal `spawn_outcome` event — the durable resolution of an
         /// [AgentSpawnRequestCard]. Correlated to its card by
         /// `outcome.requestId`, not by `eventID` (the outcome is a distinct

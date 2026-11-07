@@ -132,6 +132,10 @@ import chat.matron.android.viewmodels.SignInViewModel
 import chat.matron.android.platform.BrowserHandoff
 import chat.matron.android.platform.TrackerLinkUriHandler
 import chat.matron.android.platform.incomingViewLink
+import chat.matron.android.platform.isContactInviteLink
+import chat.matron.android.features.people.InviteLinkDialog
+import chat.matron.android.features.people.PeopleScreen
+import chat.matron.android.viewmodels.PeopleViewModel
 import chat.matron.android.platform.launchLink
 import chat.matron.android.viewmodels.TrackerLinkRouter
 import kotlinx.coroutines.CoroutineScope
@@ -538,6 +542,10 @@ private fun SignedInApp(
     // The Missions list VM (apple #209): the tab, its badge and the shell's
     // support gate read it while any tab shows.
     val missionsVM = remember(session.userID) { deps.makeMissionsListViewModel(session, sessionScope) }
+    // Settings → People; session-wide so an invite deep link can open its
+    // accept card before the screen is up.
+    val inviteLinks = remember(session.userID) { deps.revealedInviteLinks(session) }
+    val peopleVM = remember(session.userID) { PeopleViewModel(deps.contactsService(session), sessionScope, inviteLinks) }
     // The coordinator conversation (spec §5b): the journal's setting, mirrored
     // per session into a local cache that the tab, Settings and the nav
     // rules read (Coordinator redesign §3a).
@@ -602,7 +610,23 @@ private fun SignedInApp(
     LaunchedEffect(pendingLink, openTrackerLink) {
         val url = pendingLink ?: return@LaunchedEffect
         incomingLinks.compareAndSet(url, null)
+        // An invite link someone sent: People's accept card. Opening it
+        // sends nothing; the user decides there.
+        if (isContactInviteLink(url)) {
+            peopleVM.openLink(url)
+            // People lives in the Conversations tab's graph.
+            if (shell.tab.value != AppTab.CONVERSATIONS) shell.selectTab(AppTab.CONVERSATIONS)
+            nav.navigate("people") { launchSingleTop = true }
+            return@LaunchedEffect
+        }
         openTrackerLink(url)
+    }
+    // A link just made (People's invite, an agent's ask approved on its
+    // card or its tracker item) is shown once, here, wherever the user is.
+    // The store outlives this shell, so the app lock cannot lose it.
+    val pendingInviteLinks by inviteLinks.current.collectAsStateWithLifecycle()
+    pendingInviteLinks.firstOrNull()?.let { reveal ->
+        InviteLinkDialog(reveal = reveal, onDone = { inviteLinks.done(reveal) })
     }
 
     val groups by chatListVM.groups.collectAsStateWithLifecycle()
@@ -1067,6 +1091,7 @@ private fun SignedInApp(
                                 consent = coordinatorConsent,
                             ),
                             onPinnedChats = if (pins != null) ({ nav.navigate("pinned-chats") }) else null,
+                            onPeople = { nav.navigate("people") },
                             notices = noticesSetting,
                             autoArchive = autoArchiveSetting,
                             twoFactor = twoFactorSetting,
@@ -1074,6 +1099,10 @@ private fun SignedInApp(
                             accountEmail = accountEmail,
                             onBack = { nav.popBackStack() },
                         )
+                    }
+
+                    composable("people") {
+                        PeopleScreen(viewModel = peopleVM, onBack = { nav.popBackStack() })
                     }
 
                     composable("pinned-chats") {
