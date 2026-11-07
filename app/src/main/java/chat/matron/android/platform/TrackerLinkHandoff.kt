@@ -14,12 +14,18 @@ import chat.matron.android.models.MatronDebug
 // cannot show to a browser without the system handing them straight back.
 
 /// The http(s) URL an `ACTION_VIEW` intent carries — an App Link the system
-/// routed here — or `null` for any other intent (the launcher's MAIN).
+/// routed here — or a contact invite link, or `null` for any other intent
+/// (the launcher's MAIN).
 fun incomingViewLink(action: String?, data: String?): String? {
     if (action != Intent.ACTION_VIEW || data == null) return null
     val scheme = data.substringBefore(':', "").lowercase()
-    return data.takeIf { scheme == "https" || scheme == "http" }
+    return data.takeIf { scheme == "https" || scheme == "http" || isContactInviteLink(it) }
 }
+
+/// Whether [url] is a contact invite link (`matron://contact?…`), which
+/// opens People's accept card rather than a tracker page.
+fun isContactInviteLink(url: String): Boolean =
+    url.startsWith("matron://contact?", ignoreCase = true) || url.startsWith("matron://contact/?", ignoreCase = true)
 
 /// The link waiting to be opened when the activity is created. A restored
 /// activity is handed the intent it was first started with, already taken

@@ -8,6 +8,7 @@ import chat.matron.android.events.ItemMarkerEvent
 import chat.matron.android.events.LiveOutputEvent
 import chat.matron.android.events.MilestoneMarkerEvent
 import chat.matron.android.events.MissionMarkerEvent
+import chat.matron.android.events.ContactInviteAsk
 import chat.matron.android.events.PersonGrantRequest
 import chat.matron.android.events.RoutineMarkerEvent
 import chat.matron.android.events.ConsentDecisionEvent
@@ -169,9 +170,13 @@ object JournalTimelineMapper {
                 val agentChat = AgentChatRequest.parse(payload)
                 val agentSpawn = AgentSpawnRequest.parse(payload)
                 val personGrant = PersonGrantRequest.parse(payload)
+                val inviteAsk = ContactInviteAsk.parse(payload)
                 when {
                     personGrant != null ->
                         TimelineItem.Kind.PersonGrantCard(event.seq.toString(), personGrant)
+
+                    inviteAsk != null ->
+                        TimelineItem.Kind.ContactInviteAskCard(event.seq.toString(), inviteAsk)
 
                     // The other person-to-person cards (and a share or
                     // hand-over with no grant id) are answered on their

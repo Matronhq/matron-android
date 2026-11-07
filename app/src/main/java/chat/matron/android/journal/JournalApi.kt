@@ -370,7 +370,8 @@ class JournalApi(
 ) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
     TrackerSearching,
-    ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding {
+    ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding, ContactsProviding,
+    InviteAskAnswering {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -849,6 +850,49 @@ class JournalApi(
         )
     }
 
+    // MARK: Contacts on other journals
+
+    override suspend fun contacts(): List<Contact> = Contact.listFromJson(request(path = "/contacts"))
+
+    override suspend fun contactInvites(): List<ContactInvite> =
+        ContactInvite.openFromJson(request(path = "/contacts/invites", contactRefusals = true))
+
+    /// The link comes back this once: the caller shows it and keeps it in
+    /// memory only.
+    override suspend fun createContactInvite(): MintedInvite =
+        MintedInvite.fromJson(
+            request(path = "/contacts/invites", method = "POST", jsonBody = buildJsonObject {}, accept = setOf(201, 200), contactRefusals = true),
+        ) ?: throw JournalApiError.Transport("malformed invite response")
+
+    override suspend fun revokeContactInvite(id: String) {
+        request(path = "/contacts/invites/${pathSegment(id)}", method = "DELETE", contactRefusals = true)
+    }
+
+    override suspend fun openContactInvite(link: String): InvitePreview =
+        InvitePreview.fromJson(
+            request(
+                path = "/contacts/invites/open", method = "POST",
+                jsonBody = buildJsonObject { put("link", link) }, contactRefusals = true,
+            ),
+        ) ?: throw JournalApiError.Transport("malformed invite preview")
+
+    override suspend fun acceptContactInvite(link: String) {
+        request(
+            path = "/contacts/invites/accept", method = "POST",
+            jsonBody = buildJsonObject { put("link", link) }, accept = setOf(202, 200), contactRefusals = true,
+        )
+    }
+
+    /// Answers an agent's invite ask. An approve returns the link, this once.
+    override suspend fun answerInviteAsk(askId: String, approve: Boolean): InviteAskAnswer =
+        InviteAskAnswer.fromJson(
+            request(
+                path = "/contacts/invites/asks/${pathSegment(askId)}/answer", method = "POST",
+                jsonBody = buildJsonObject { put("decision", if (approve) "approve" else "decline") },
+                contactRefusals = true,
+            ),
+        )
+
     /// Previews a pairing code before approval. 404 = unknown/expired/approved.
     suspend fun pairPreview(code: String): PairPreview {
         val obj = request(path = "/pair/preview", method = "POST",
@@ -1027,7 +1071,8 @@ class JournalApi(
         )
         val comment = obj.objectOrNull("comment")?.let(TrackerComment::fromJson)
             ?: throw JournalApiError.Transport("malformed comment response")
-        return ItemCommentResult(decodeItem(obj), comment)
+        // A tap on an invite ask's mirror answers with the link, this once.
+        return ItemCommentResult(decodeItem(obj), comment, link = obj.stringOrNull("link")?.takeIf { it.isNotEmpty() })
     }
 
     override suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem =
@@ -1268,9 +1313,12 @@ class JournalApi(
         authenticated: Boolean = true,
         accept: Set<Int> = setOf(200),
         headers: Map<String, String> = emptyMap(),
+        /// A contacts route: a `409 blocked_by` or a `502` throws
+        /// [ContactRefusal] carrying the reason, instead of a bare `Conflict`.
+        contactRefusals: Boolean = false,
     ): JsonObject {
         val (status, data) = raw(path, method, jsonBody, query, authenticated, headers = headers)
-        if (status !in accept) throw error(status, data)
+        if (status !in accept) throw (if (contactRefusals) contactRefusal(status, data) else null) ?: error(status, data)
         return parseJsonObjectOrNull(String(data, Charsets.UTF_8))
             ?: throw JournalApiError.Transport("non-JSON response for $path")
     }
@@ -1337,6 +1385,16 @@ class JournalApi(
         /// caption text instead, so an old app never shows a broken link.
         const val ITEM_INLINE_HEADER = "X-Matron-Item-Inline"
         const val ITEM_INLINE_VALUE = "attachments"
+    }
+
+    private fun contactRefusal(status: Int, data: ByteArray): ContactRefusal? {
+        val obj = parseJsonObjectOrNull(String(data, Charsets.UTF_8)) ?: return null
+        val reason = when (status) {
+            409 -> obj.stringOrNull("blocked_by")
+            502 -> obj.stringOrNull("error")
+            else -> null
+        }
+        return reason?.takeIf { it.isNotEmpty() }?.let { ContactRefusal(status, it) }
     }
 
     private fun error(status: Int, data: ByteArray): JournalApiError {

@@ -684,6 +684,19 @@ class AppDependencies(
     /** Answers person-to-person grant cards (mission shares, hand-overs). */
     fun grantService(session: UserSession): chat.matron.android.journal.GrantAnswering = core(session).api
 
+    /** Answers an agent's invite-link ask from its card in a chat. */
+    fun inviteAskService(session: UserSession): chat.matron.android.journal.InviteAskAnswering = core(session).api
+
+    /** Settings → People: contacts and invite links. */
+    fun contactsService(session: UserSession): chat.matron.android.journal.ContactsProviding = core(session).api
+
+    /**
+     * Invite links an Approve tap on an invite ask's tracker item brought
+     * back, for the shell to show once. Never stored.
+     */
+    fun revealedInviteLinks(session: UserSession): kotlinx.coroutines.flow.SharedFlow<String> =
+        core(session).itemsSync.revealedInviteLinks
+
     /** Stops a session the Coordinator let start, from its spawn card. */
     fun sessionStopper(session: UserSession): SessionStopping = OutboxSessionStopper(core(session).engine)
 
