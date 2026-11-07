@@ -601,8 +601,15 @@ private fun SignedInApp(
         }
     }
     val platformUriHandler = LocalUriHandler.current
-    val trackerLinkUriHandler = remember(platformUriHandler, trackerLinks, openTrackerLink) {
-        TrackerLinkUriHandler(platformUriHandler, isTrackerLink = { trackerLinks.link(it) != null }, openTrackerLink = openTrackerLink)
+    val trackerLinkUriHandler = remember(platformUriHandler, trackerLinks, openTrackerLink, incomingLinks) {
+        TrackerLinkUriHandler(
+            platformUriHandler,
+            isTrackerLink = { trackerLinks.link(it) != null },
+            openTrackerLink = openTrackerLink,
+            // An invite link tapped in a message opens the accept card
+            // here, the way one opened from another app does.
+            openInviteLink = { incomingLinks.value = it },
+        )
     }
     // An App Link that started or resumed the activity. It waits in the
     // activity while signed out or locked, and is taken once the shell is up.

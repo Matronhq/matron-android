@@ -43,7 +43,9 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
             <!-- Contact invite links (matron://contact?…) open People's
-                 accept card. Opening one sends nothing. -->
+                 accept card. Opening one sends nothing. Their https form
+                 (https://<host>/contact#…) is claimed with the tracker
+                 links in src/appLinks/AndroidManifest.xml. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

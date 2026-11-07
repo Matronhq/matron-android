@@ -90,13 +90,31 @@ data class ContactInvite(
 
 /// A freshly made invite and its link. The link is shown once and never
 /// stored: hold it in memory only, and drop it when the user is done.
-data class MintedInvite(val invite: ContactInvite?, val link: String) {
+/// [link] is the `matron://` form, [webLink] the https one (null from a
+/// journal that does not send it yet).
+data class MintedInvite(val invite: ContactInvite?, val link: String, val webLink: String? = null) {
+    /// The link to show, copy, share and put in the QR code.
+    val shareLink: String get() = webLink ?: link
+
     companion object {
         fun fromJson(json: JsonObject): MintedInvite? {
             val link = json.stringOrNull("link")?.takeIf { it.isNotEmpty() } ?: return null
-            return MintedInvite(json.objectOrNull("invite")?.let(ContactInvite::fromJson), link)
+            return MintedInvite(json.objectOrNull("invite")?.let(ContactInvite::fromJson), link, InviteLinks.webLinkOf(json))
         }
     }
+}
+
+/// Which of the two forms an answer carrying a new link is shared in.
+object InviteLinks {
+    /// The https form when the journal sent it — chat apps and mail make it
+    /// tappable — else the `matron://` one.
+    fun shareable(link: String?, webLink: String?): String? = webLink ?: link
+
+    fun webLinkOf(json: JsonObject): String? = json.stringOrNull("web_link")?.takeIf { it.isNotEmpty() }
+
+    /// The link to show from an answer carrying `link` and maybe `web_link`.
+    fun shareableOf(json: JsonObject): String? =
+        shareable(json.stringOrNull("link")?.takeIf { it.isNotEmpty() }, webLinkOf(json))
 }
 
 /// `POST /contacts/invites/open`: who a link is from. Nothing is sent.
@@ -137,12 +155,13 @@ data class InvitePreview(
 }
 
 /// The answer to an agent's invite ask: the ask's new state and, on an
-/// approve, the link (shown once, on this device).
+/// approve, the link to share (shown once, on this device): the https form
+/// when the journal sends it, else the `matron://` one.
 data class InviteAskAnswer(val state: String?, val link: String?) {
     companion object {
         fun fromJson(json: JsonObject): InviteAskAnswer = InviteAskAnswer(
             state = json.objectOrNull("ask")?.stringOrNull("state"),
-            link = json.stringOrNull("link")?.takeIf { it.isNotEmpty() },
+            link = InviteLinks.shareableOf(json),
         )
     }
 }
@@ -168,48 +187,139 @@ interface InviteAskAnswering {
     suspend fun answerInviteAsk(askId: String, approve: Boolean): InviteAskAnswer
 }
 
-/// Reads an invite link: `matron://contact?v=1&j=<host>&u=<name>&t=<token>&fp=<fp>`.
+/// Reads an invite link, in either form the journal makes:
+///
+///   matron://contact?v=1&j=<host>&u=<name>&t=<token>&fp=<fp>
+///   https://<host>/contact#v=1&j=<host>&u=<name>&t=<token>&fp=<fp>
+///
+/// As strict as the journal's own reader (protocol.md "Contacts across
+/// journals"): exactly the five fields, each once and in its own shape. An
+/// https link must be on the journal it names, at `/contact` exactly, with
+/// no query or user info, every field in the fragment.
 object ContactInviteLink {
     private val FIELDS = setOf("v", "j", "u", "t", "fp")
+    private const val MAX_LENGTH = 1024
+    private val TOKEN = Regex("^[A-Za-z0-9_-]{43}$")
+    private val FINGERPRINT = Regex("^[a-z2-7]{26}$")
+    private val USER = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    private val LABEL = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    private val HOST = Regex("^(?=.{1,253}(?::\\d{1,5})?$)$LABEL(?:\\.$LABEL)*(?::\\d{1,5})?$")
 
-    /// The link inside pasted text (trimmed; the first `matron://contact?…`
-    /// run when the text carries more), or null when there is none.
+    /// A link's fields, read. [journal] and [fingerprint] are lowercased.
+    data class Fields(val journal: String, val user: String, val token: String, val fingerprint: String)
+
+    /// The link inside pasted text: the first invite link, in either form,
+    /// among its words (trimmed of quotes, brackets and trailing
+    /// punctuation), or null when there is none.
     fun extract(text: String): String? {
-        val trimmed = text.trim()
-        val start = trimmed.indexOf("matron://contact", ignoreCase = true)
-        if (start < 0) return null
-        val rest = trimmed.substring(start)
-        val end = rest.indexOfFirst { it.isWhitespace() || it == '"' || it == '\'' || it == '<' || it == '>' }
-        return if (end < 0) rest else rest.substring(0, end)
+        val words = text.split(Regex("[\\s\"'<>]+")).filter { it.isNotEmpty() }
+        for (word in words) {
+            var candidate = word.trimStart('(', '[', '{')
+            while (candidate.isNotEmpty()) {
+                if (parse(candidate) != null) return candidate
+                if (candidate.last() !in TRAILING) break
+                candidate = candidate.dropLast(1)
+            }
+        }
+        return null
     }
 
-    /// Whether [raw] is a well-formed invite link: scheme `matron`, host
-    /// `contact`, exactly the five fields once each, `v=1`, none empty. The
+    private const val TRAILING = ".,;:!?)]}"
+
+    /// Whether [raw] is a well-formed invite link in either form. The
     /// journal checks again; this only spares a round trip for a typo.
-    fun isValid(raw: String): Boolean = fields(raw) != null
+    fun isValid(raw: String): Boolean = parse(raw) != null
+
+    /// Whether [url] is meant as an invite link — `matron://contact…` or an
+    /// https link to `/contact` — well-formed or not. Such a link opens
+    /// People's accept card, which says when it is not a valid one, rather
+    /// than going anywhere else.
+    fun isInviteShaped(url: String): Boolean {
+        val trimmed = url.trim()
+        if (trimmed.startsWith("matron://contact", ignoreCase = true)) {
+            val rest = trimmed.substring("matron://contact".length)
+            return rest.isEmpty() || rest[0] == '?' || rest[0] == '/' || rest[0] == '#'
+        }
+        val uri = runCatching { URI(trimmed) }.getOrNull() ?: return false
+        return uri.scheme.equals("https", ignoreCase = true) && uri.rawPath == "/contact"
+    }
 
     /// The link's fields, or null when it is not a well-formed invite link.
-    fun fields(raw: String): Map<String, String>? {
+    fun parse(raw: String): Fields? {
+        if (raw.length > MAX_LENGTH) return null
         val uri = runCatching { URI(raw.trim()) }.getOrNull() ?: return null
-        if (!uri.scheme.equals("matron", ignoreCase = true)) return null
-        // `matron://contact?…`: an opaque-looking authority with no path.
-        if (!uri.host.equals("contact", ignoreCase = true) && !uri.rawAuthority.equals("contact", ignoreCase = true)) return null
-        val path = uri.rawPath.orEmpty()
-        if (path.isNotEmpty() && path != "/") return null
-        if (uri.rawFragment != null) return null
-        val query = uri.rawQuery ?: return null
+        val pairs: String = when {
+            uri.scheme.equals("matron", ignoreCase = true) -> {
+                // `matron://contact?…`: an opaque-looking authority with no path.
+                if (!uri.host.equals("contact", ignoreCase = true) && !uri.rawAuthority.equals("contact", ignoreCase = true)) return null
+                val path = uri.rawPath.orEmpty()
+                if (path.isNotEmpty() && path != "/") return null
+                if (uri.rawFragment != null) return null
+                uri.rawQuery ?: return null
+            }
+            uri.scheme.equals("https", ignoreCase = true) -> {
+                if (uri.rawPath != "/contact") return null
+                if (!uri.rawQuery.isNullOrEmpty() || !uri.rawUserInfo.isNullOrEmpty()) return null
+                uri.rawFragment?.takeIf { it.isNotEmpty() } ?: return null
+            }
+            else -> return null
+        }
+        val fields = fieldsOf(pairs) ?: return null
+        if (fields["v"] != "1") return null
+        val journal = fields["j"].orEmpty().lowercase(Locale.ROOT)
+        val user = fields["u"].orEmpty()
+        val token = fields["t"].orEmpty()
+        val fingerprint = fields["fp"].orEmpty().lowercase(Locale.ROOT)
+        if (!USER.matches(user) || !HOST.matches(journal) || !TOKEN.matches(token) || !FINGERPRINT.matches(fingerprint)) return null
+        if (uri.scheme.equals("https", ignoreCase = true)) {
+            val named = authorityOf(journal) ?: return null
+            if (authorityOf(uri) != named) return null
+        }
+        return Fields(journal, user, token, fingerprint)
+    }
+
+    /// `host[:port]` as a browser reads it: lowercased, the default port
+    /// dropped. Null for an authority that is not a host.
+    private fun authorityOf(uri: URI): String? {
+        val host = uri.host?.lowercase(Locale.ROOT) ?: return null
+        return withPort(host, uri.port)
+    }
+
+    /// A link's `j` as a URL writes its host, the way the journal compares
+    /// it: an explicit default port (`:443`) dropped, and null for a port a
+    /// URL cannot have (over 65535).
+    private fun authorityOf(journal: String): String? {
+        val colon = journal.lastIndexOf(':')
+        if (colon < 0) return journal
+        val port = journal.substring(colon + 1).toIntOrNull() ?: return null
+        return withPort(journal.substring(0, colon), port)
+    }
+
+    private fun withPort(host: String, port: Int): String? = when {
+        port == -1 || port == 443 -> host
+        port !in 0..65535 -> null
+        else -> "$host:$port"
+    }
+
+    /// `a=1&b=2` read like a browser's URLSearchParams (empty pairs
+    /// skipped), or null when a key is not one of the five or comes twice,
+    /// or one is missing.
+    private fun fieldsOf(pairs: String): Map<String, String>? {
         val out = linkedMapOf<String, String>()
-        for (pair in query.split('&')) {
+        for (pair in pairs.split('&')) {
+            if (pair.isEmpty()) continue
             val eq = pair.indexOf('=')
-            if (eq <= 0) return null
-            val key = pair.substring(0, eq)
-            val value = runCatching { URLDecoder.decode(pair.substring(eq + 1), "UTF-8") }.getOrNull() ?: return null
-            if (key !in FIELDS || key in out || value.isEmpty()) return null
+            val rawKey = if (eq < 0) pair else pair.substring(0, eq)
+            val rawValue = if (eq < 0) "" else pair.substring(eq + 1)
+            val key = decode(rawKey) ?: return null
+            val value = decode(rawValue) ?: return null
+            if (key !in FIELDS || key in out) return null
             out[key] = value
         }
-        if (out.keys != FIELDS || out["v"] != "1") return null
-        return out
+        return out.takeIf { it.keys == FIELDS }
     }
+
+    private fun decode(s: String): String? = runCatching { URLDecoder.decode(s, "UTF-8") }.getOrNull()
 }
 
 /// The plain words for a refused contacts call.

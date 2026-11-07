@@ -1071,8 +1071,9 @@ class JournalApi(
         )
         val comment = obj.objectOrNull("comment")?.let(TrackerComment::fromJson)
             ?: throw JournalApiError.Transport("malformed comment response")
-        // A tap on an invite ask's mirror answers with the link, this once.
-        return ItemCommentResult(decodeItem(obj), comment, link = obj.stringOrNull("link")?.takeIf { it.isNotEmpty() })
+        // A tap on an invite ask's mirror answers with the link, this once:
+        // the https form when the journal sends it, else the matron:// one.
+        return ItemCommentResult(decodeItem(obj), comment, link = InviteLinks.shareableOf(obj))
     }
 
     override suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem =
