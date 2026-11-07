@@ -6,6 +6,7 @@ import chat.matron.android.journal.ContactInviteLink
 import chat.matron.android.journal.ContactsProviding
 import chat.matron.android.journal.ContactsWording
 import chat.matron.android.journal.InvitePreview
+import chat.matron.android.journal.RevealedInviteLinks
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,11 +14,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-/// The invite sheet: making a link, then showing it once.
+/// The invite sheet while a link is being made, or why it could not be.
+/// The link itself goes to [RevealedInviteLinks], which shows it once.
 sealed class InviteSheetState {
     data object Making : InviteSheetState()
-    /// The link, in memory only, until the sheet closes.
-    data class Shown(val link: String) : InviteSheetState()
     data class Failed(val message: String) : InviteSheetState()
 }
 
@@ -39,7 +39,11 @@ sealed class AcceptCardState {
 /// invite sheet and the accept card. Pull-based: [refresh] on screen enter
 /// and after every change. Lives for the signed-in session, so a deep link
 /// can open the accept card before the screen is up.
-class PeopleViewModel(private val api: ContactsProviding, private val scope: CoroutineScope) {
+class PeopleViewModel(
+    private val api: ContactsProviding,
+    private val scope: CoroutineScope,
+    private val links: RevealedInviteLinks,
+) {
     private val _contacts = MutableStateFlow<List<Contact>>(emptyList())
     val contacts: StateFlow<List<Contact>> = _contacts.asStateFlow()
 
@@ -80,13 +84,16 @@ class PeopleViewModel(private val api: ContactsProviding, private val scope: Cor
     }
 
     /// "Invite someone on another Matron": make a link and show it once.
+    /// Runs on the link store's scope, so the app lock cannot cancel it
+    /// after the journal has made the link.
     fun makeInvite() {
         if (_inviteSheet.value is InviteSheetState.Making) return
         _inviteSheet.value = InviteSheetState.Making
-        scope.launch {
+        links.scope.launch {
             try {
                 val minted = api.createContactInvite()
-                _inviteSheet.value = InviteSheetState.Shown(minted.link)
+                links.show(minted.link, RevealedInviteLinks.Source.INVITE)
+                _inviteSheet.value = null
                 refreshInvites()
             } catch (cancel: CancellationException) {
                 _inviteSheet.value = null
@@ -97,7 +104,6 @@ class PeopleViewModel(private val api: ContactsProviding, private val scope: Cor
         }
     }
 
-    /// Done: the link is dropped and is not shown again.
     fun closeInviteSheet() {
         _inviteSheet.value = null
     }

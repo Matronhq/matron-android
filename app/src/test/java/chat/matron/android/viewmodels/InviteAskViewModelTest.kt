@@ -7,6 +7,7 @@ import chat.matron.android.events.InviteAskState
 import chat.matron.android.journal.ContactRefusal
 import chat.matron.android.journal.InviteAskAnswer
 import chat.matron.android.journal.InviteAskAnswering
+import chat.matron.android.journal.RevealedInviteLinks
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
@@ -45,8 +46,12 @@ class InviteAskViewModelTest {
         }
     }
 
-    private fun vm(scope: CoroutineScope, store: InMemoryKeyValueStore, answerer: InviteAskAnswering?) =
-        ChatViewModel("!r:s", FakeTimelineService(), FakeMediaService(), scope, store, inviteAsks = answerer)
+    private fun vm(
+        scope: CoroutineScope,
+        store: InMemoryKeyValueStore,
+        answerer: InviteAskAnswering?,
+        links: RevealedInviteLinks = RevealedInviteLinks(scope),
+    ) = ChatViewModel("!r:s", FakeTimelineService(), FakeMediaService(), scope, store, inviteAsks = answerer, inviteLinks = links)
 
     @Test
     fun readOnlyWithNoAnswerer() = vmTest { scope ->
@@ -54,23 +59,23 @@ class InviteAskViewModelTest {
     }
 
     @Test
-    fun approveShowsTheLinkOnceAndNeverStoresIt() = vmTest { scope ->
+    fun approveHandsTheLinkToTheStoreAndNeverStoresIt() = vmTest { scope ->
         val store = InMemoryKeyValueStore()
         val answerer = Answerer(link = link)
-        val first = vm(scope, store, answerer)
+        val links = RevealedInviteLinks(scope)
+        val first = vm(scope, store, answerer, links)
         assertEquals(InviteAskState.Idle, first.inviteAskState("10"))
         first.answerInviteAsk("10", ask, approve = true)
-        waitUntil { first.inviteAskState("10") is InviteAskState.Approved }
-        assertEquals(InviteAskState.Approved(link), first.inviteAskState("10"))
+        waitUntil { first.inviteAskState("10") == InviteAskState.Approved }
         assertEquals(listOf("ia_1" to true), answerer.calls)
+        assertEquals(listOf(RevealedInviteLinks.Reveal(link, RevealedInviteLinks.Source.ASK)), links.current.value)
         // Nothing written anywhere carries the link.
         assertFalse(store.getStringList("matron.inviteAskAnswers.!r:s").orEmpty().any { it.contains("matron://") })
 
-        first.dismissInviteLink("10")
-        assertEquals(InviteAskState.Approved(null), first.inviteAskState("10"))
-
+        links.done(links.current.value.single())
+        assertTrue(links.current.value.isEmpty())
         // A new view model remembers the answer, not the link.
-        assertEquals(InviteAskState.Approved(null), vm(scope, store, answerer).inviteAskState("10"))
+        assertEquals(InviteAskState.Approved, vm(scope, store, answerer).inviteAskState("10"))
     }
 
     @Test

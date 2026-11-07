@@ -17,7 +17,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -28,15 +27,13 @@ import chat.matron.android.events.ContactInviteAsk
 import chat.matron.android.events.InviteAskState
 
 /// An agent's ask for an invite link, inline in its conversation: Decline /
-/// Approve, and after Approve the link once (QR, Copy link, Share…) until
-/// [onDone].
+/// Approve. The link an approve brings back is shown once by the shell.
 @Composable
 fun ContactInviteAskCard(
     ask: ContactInviteAsk,
     state: InviteAskState,
     onApprove: () -> Unit,
     onDecline: () -> Unit,
-    onDone: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -53,11 +50,7 @@ fun ContactInviteAskCard(
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
 
-        val link = (state as? InviteAskState.Approved)?.link
-        if (link != null) {
-            InviteLinkReveal(link = link, note = ContactInviteAsk.SHOWN_ONCE)
-            TextButton(onClick = onDone, modifier = Modifier.align(Alignment.End)) { Text("Done") }
-        } else if (state.answerable || state is InviteAskState.Sending) {
+        if (state.answerable || state is InviteAskState.Sending) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 val busy = state is InviteAskState.Sending
                 OutlinedButton(onClick = onDecline, enabled = !busy) { Text("Decline") }

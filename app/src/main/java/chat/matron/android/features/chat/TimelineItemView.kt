@@ -348,7 +348,6 @@ private fun RenderedBody(
                     state = inviteAsks?.state?.invoke(kind.eventID) ?: InviteAskState.Unavailable,
                     onApprove = { inviteAsks?.answer?.invoke(kind.eventID, kind.ask, true) },
                     onDecline = { inviteAsks?.answer?.invoke(kind.eventID, kind.ask, false) },
-                    onDone = { inviteAsks?.done?.invoke(kind.eventID) },
                 )
             }
 
@@ -609,10 +608,9 @@ fun timelineDisplayName(senderID: String): String {
 /// the conversation's gallery and step to its neighbours (apple #175).
 data class TappedImage(val url: String?, val model: Any, val name: String? = null)
 
-/// What an invite ask card in the timeline reads and calls: its state, the
-/// answer, and dropping the link once the user is done with it.
+/// What an invite ask card in the timeline reads and calls: its state and
+/// the answer. An approved link is shown by the shell, not the card.
 class InviteAskHost(
     val state: (eventID: String) -> InviteAskState,
     val answer: (eventID: String, ask: ContactInviteAsk, approve: Boolean) -> Unit,
-    val done: (eventID: String) -> Unit,
 )

@@ -66,13 +66,13 @@ data class ContactInviteAsk(
     }
 }
 
-/// Where one invite ask card is. [Approved] holds the link while this
-/// device shows it; it is never written anywhere, and is dropped when the
-/// user is done with it ([Approved.link] null afterwards).
+/// Where one invite ask card is. The link an approve brings back is not
+/// part of it: it goes to the session's [chat.matron.android.journal.RevealedInviteLinks],
+/// which shows it once.
 sealed class InviteAskState {
     data object Idle : InviteAskState()
     data object Sending : InviteAskState()
-    data class Approved(val link: String?) : InviteAskState()
+    data object Approved : InviteAskState()
     data object ApprovedElsewhere : InviteAskState()
     data object Declined : InviteAskState()
     data object Expired : InviteAskState()
@@ -85,7 +85,7 @@ sealed class InviteAskState {
     /// The resolved line under an answered card; null while it waits.
     val resolvedText: String?
         get() = when (this) {
-            is Approved -> "Approved"
+            Approved -> "Approved"
             ApprovedElsewhere -> ContactInviteAsk.APPROVED_ELSEWHERE
             Declined -> ContactInviteAsk.DECLINED
             Expired -> ContactInviteAsk.EXPIRED

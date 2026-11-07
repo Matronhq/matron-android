@@ -544,7 +544,8 @@ private fun SignedInApp(
     val missionsVM = remember(session.userID) { deps.makeMissionsListViewModel(session, sessionScope) }
     // Settings → People; session-wide so an invite deep link can open its
     // accept card before the screen is up.
-    val peopleVM = remember(session.userID) { PeopleViewModel(deps.contactsService(session), sessionScope) }
+    val inviteLinks = remember(session.userID) { deps.revealedInviteLinks(session) }
+    val peopleVM = remember(session.userID) { PeopleViewModel(deps.contactsService(session), sessionScope, inviteLinks) }
     // The coordinator conversation (spec §5b): the journal's setting, mirrored
     // per session into a local cache that the tab, Settings and the nav
     // rules read (Coordinator redesign §3a).
@@ -613,19 +614,19 @@ private fun SignedInApp(
         // sends nothing; the user decides there.
         if (isContactInviteLink(url)) {
             peopleVM.openLink(url)
+            // People lives in the Conversations tab's graph.
+            if (shell.tab.value != AppTab.CONVERSATIONS) shell.selectTab(AppTab.CONVERSATIONS)
             nav.navigate("people") { launchSingleTop = true }
             return@LaunchedEffect
         }
         openTrackerLink(url)
     }
-    // An Approve tap on an invite ask's tracker item brings the link back
-    // once: show it here, wherever the tap was made. Held in memory only.
-    var revealedInviteLink by remember(session.userID) { mutableStateOf<String?>(null) }
-    LaunchedEffect(session.userID) {
-        deps.revealedInviteLinks(session).collect { revealedInviteLink = it }
-    }
-    revealedInviteLink?.let { link ->
-        InviteLinkDialog(link = link, onDone = { revealedInviteLink = null })
+    // A link just made (People's invite, an agent's ask approved on its
+    // card or its tracker item) is shown once, here, wherever the user is.
+    // The store outlives this shell, so the app lock cannot lose it.
+    val pendingInviteLinks by inviteLinks.current.collectAsStateWithLifecycle()
+    pendingInviteLinks.firstOrNull()?.let { reveal ->
+        InviteLinkDialog(reveal = reveal, onDone = { inviteLinks.done(reveal) })
     }
 
     val groups by chatListVM.groups.collectAsStateWithLifecycle()

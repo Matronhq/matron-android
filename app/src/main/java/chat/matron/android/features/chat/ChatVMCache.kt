@@ -51,6 +51,7 @@ class ChatVMCache(
             agentSpawn = deps.agentSpawnService(session),
             grants = deps.grantService(session),
             inviteAsks = deps.inviteAskService(session),
+            inviteLinks = deps.revealedInviteLinks(session),
             search = deps.search,
             sessionStopper = deps.sessionStopper(session),
         )

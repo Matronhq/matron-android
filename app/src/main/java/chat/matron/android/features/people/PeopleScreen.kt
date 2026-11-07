@@ -39,7 +39,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import chat.matron.android.designsystem.InviteLinkReveal
 import chat.matron.android.journal.Contact
 import chat.matron.android.journal.ContactInvite
 import chat.matron.android.journal.ContactsDates
@@ -227,10 +226,6 @@ private fun InviteSheet(state: InviteSheetState, onDone: () -> Unit) {
         when (state) {
             InviteSheetState.Making -> CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally))
             is InviteSheetState.Failed -> Text(state.message, color = MaterialTheme.colorScheme.error)
-            is InviteSheetState.Shown -> {
-                Text(PeopleWording.INVITE_BODY, style = MaterialTheme.typography.bodyMedium)
-                InviteLinkReveal(link = state.link)
-            }
         }
         TextButton(onClick = onDone, modifier = Modifier.align(Alignment.End)) { Text("Done") }
     }

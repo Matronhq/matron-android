@@ -896,7 +896,6 @@ private fun TimelineRowView(
                         // The flows read here are what make the card recompose.
                         state = { eventID -> inviteAskStates.let { inviteAskResolutions }.let { chatVM.inviteAskState(eventID) } },
                         answer = { eventID, ask, approve -> chatVM.answerInviteAsk(eventID, ask, approve) },
-                        done = { eventID -> chatVM.dismissInviteLink(eventID) },
                     ),
                 )
             }

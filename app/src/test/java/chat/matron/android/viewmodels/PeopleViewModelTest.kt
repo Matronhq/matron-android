@@ -6,6 +6,7 @@ import chat.matron.android.journal.ContactRefusal
 import chat.matron.android.journal.ContactsProviding
 import chat.matron.android.journal.InvitePreview
 import chat.matron.android.journal.MintedInvite
+import chat.matron.android.journal.RevealedInviteLinks
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
@@ -70,7 +71,7 @@ class PeopleViewModelTest {
 
     @Test
     fun refreshLoadsContactsAndOpenInvites() = vmTest { scope ->
-        val vm = PeopleViewModel(FakeContacts(), scope)
+        val vm = PeopleViewModel(FakeContacts(), scope, RevealedInviteLinks(scope))
         vm.refresh()
         assertTrue(vm.hasLoaded.value)
         assertEquals(listOf("bob@b.example"), vm.contacts.value.map { it.address })
@@ -82,7 +83,7 @@ class PeopleViewModelTest {
         val api = object : ContactsProviding by FakeContacts() {
             override suspend fun contactInvites(): List<ContactInvite> = throw ContactRefusal(409, "federation_off")
         }
-        val vm = PeopleViewModel(api, scope)
+        val vm = PeopleViewModel(api, scope, RevealedInviteLinks(scope))
         vm.refresh()
         assertEquals(1, vm.contacts.value.size)
         assertEquals(emptyList<ContactInvite>(), vm.invites.value)
@@ -90,20 +91,25 @@ class PeopleViewModelTest {
     }
 
     @Test
-    fun theInviteSheetShowsTheLinkUntilDone() = vmTest { scope ->
-        val vm = PeopleViewModel(FakeContacts(), scope)
+    fun aNewInvitesLinkGoesToTheStoreToBeShownOnce() = vmTest { scope ->
+        val links = RevealedInviteLinks(scope)
+        val vm = PeopleViewModel(FakeContacts(), scope, links)
         vm.makeInvite()
-        waitUntil { vm.inviteSheet.value is InviteSheetState.Shown }
-        assertEquals(InviteSheetState.Shown("matron://contact?minted"), vm.inviteSheet.value)
-        waitUntil { vm.invites.value.size == 2 }
-        vm.closeInviteSheet()
+        waitUntil { links.current.value.isNotEmpty() }
+        assertEquals(
+            listOf(RevealedInviteLinks.Reveal("matron://contact?minted", RevealedInviteLinks.Source.INVITE)),
+            links.current.value,
+        )
         assertNull(vm.inviteSheet.value)
+        waitUntil { vm.invites.value.size == 2 }
+        links.done(links.current.value.single())
+        assertTrue(links.current.value.isEmpty())
     }
 
     @Test
     fun aRefusedInviteSaysWhy() = vmTest { scope ->
         val api = FakeContacts().apply { mintError = ContactRefusal(409, "too_many_invites") }
-        val vm = PeopleViewModel(api, scope)
+        val vm = PeopleViewModel(api, scope, RevealedInviteLinks(scope))
         vm.makeInvite()
         waitUntil { vm.inviteSheet.value is InviteSheetState.Failed }
         assertEquals(
@@ -115,7 +121,7 @@ class PeopleViewModelTest {
     @Test
     fun withdrawRemovesTheInvite() = vmTest { scope ->
         val api = FakeContacts()
-        val vm = PeopleViewModel(api, scope)
+        val vm = PeopleViewModel(api, scope, RevealedInviteLinks(scope))
         vm.refresh()
         vm.withdraw(vm.invites.value.single())
         waitUntil { vm.invites.value.isEmpty() && vm.withdrawing.value.isEmpty() }
@@ -125,7 +131,7 @@ class PeopleViewModelTest {
     @Test
     fun anUnreadableLinkIsRefusedWithoutAsking() = vmTest { scope ->
         val api = FakeContacts()
-        val vm = PeopleViewModel(api, scope)
+        val vm = PeopleViewModel(api, scope, RevealedInviteLinks(scope))
         vm.openLink("hello")
         assertEquals(AcceptCardState.Refused("This is not a valid invite link."), vm.acceptCard.value)
         assertTrue(api.opened.isEmpty())
@@ -134,7 +140,7 @@ class PeopleViewModelTest {
     @Test
     fun openThenAccept() = vmTest { scope ->
         val api = FakeContacts()
-        val vm = PeopleViewModel(api, scope)
+        val vm = PeopleViewModel(api, scope, RevealedInviteLinks(scope))
         vm.openLink("Here: $link")
         waitUntil { vm.acceptCard.value is AcceptCardState.Preview }
         assertEquals(listOf(link), api.opened)
@@ -147,7 +153,7 @@ class PeopleViewModelTest {
     @Test
     fun cancelSendsNothing() = vmTest { scope ->
         val api = FakeContacts()
-        val vm = PeopleViewModel(api, scope)
+        val vm = PeopleViewModel(api, scope, RevealedInviteLinks(scope))
         vm.openLink(link)
         waitUntil { vm.acceptCard.value is AcceptCardState.Preview }
         vm.closeAcceptCard()
@@ -158,7 +164,7 @@ class PeopleViewModelTest {
     @Test
     fun refusalsReadInPlainWords() = vmTest { scope ->
         val api = FakeContacts().apply { openError = ContactRefusal(409, "own_journal") }
-        val vm = PeopleViewModel(api, scope)
+        val vm = PeopleViewModel(api, scope, RevealedInviteLinks(scope))
         vm.openLink(link)
         waitUntil { vm.acceptCard.value is AcceptCardState.Refused }
         assertEquals(
@@ -181,7 +187,7 @@ class PeopleViewModelTest {
     @Test
     fun aJournalNotAllowedNamesTheLinksJournal() = vmTest { scope ->
         val api = FakeContacts().apply { openError = ContactRefusal(409, "journal_not_allowed") }
-        val vm = PeopleViewModel(api, scope)
+        val vm = PeopleViewModel(api, scope, RevealedInviteLinks(scope))
         vm.openLink(link)
         waitUntil { vm.acceptCard.value is AcceptCardState.Refused }
         assertEquals(AcceptCardState.Refused("Your journal doesn't allow contacts on b.example."), vm.acceptCard.value)
@@ -192,7 +198,7 @@ class PeopleViewModelTest {
         val api = FakeContacts().apply {
             preview = preview.copy(existing = Contact("ct_1", "bob@b.example", "bob", "b.example", "bob", "blocked"))
         }
-        val vm = PeopleViewModel(api, scope)
+        val vm = PeopleViewModel(api, scope, RevealedInviteLinks(scope))
         vm.openLink(link)
         waitUntil { vm.acceptCard.value is AcceptCardState.Preview }
         vm.accept()

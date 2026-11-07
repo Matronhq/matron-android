@@ -27,6 +27,7 @@ import chat.matron.android.events.PersonGrantRequest
 import chat.matron.android.journal.ContactRefusal
 import chat.matron.android.journal.ContactsWording
 import chat.matron.android.journal.InviteAskAnswering
+import chat.matron.android.journal.RevealedInviteLinks
 import chat.matron.android.journal.SessionStopping
 import chat.matron.android.journal.AgentSpawnDecision
 import chat.matron.android.journal.JournalApiError
@@ -119,6 +120,10 @@ class ChatViewModel(
     /// Answers an agent's invite-link ask. Null (previews, tests) renders
     /// that card read-only.
     private val inviteAsks: InviteAskAnswering? = null,
+    /// Where an approved ask's link goes to be shown once. It also runs the
+    /// answer, so leaving the chat (or the app lock) cannot cancel it after
+    /// the journal has made the link.
+    private val inviteLinks: RevealedInviteLinks? = null,
 ) {
     // MARK: - In-conversation search (apple #172)
 
@@ -789,8 +794,7 @@ class ChatViewModel(
                 if (split <= 0) null else entry.substring(0, split) to entry.substring(split + 1)
             }.toMap().toMutableMap()
 
-    /// In-flight, failed and just-approved states. In memory only: the
-    /// approved state carries the link while it is on screen.
+    /// In-flight and failed states. In memory only.
     private val _inviteAskStates = MutableStateFlow<Map<String, InviteAskState>>(emptyMap())
     val inviteAskStates: StateFlow<Map<String, InviteAskState>> = _inviteAskStates.asStateFlow()
 
@@ -798,13 +802,13 @@ class ChatViewModel(
     private val _inviteAskResolutions = MutableStateFlow<Map<String, InviteAskState>>(emptyMap())
     val inviteAskResolutions: StateFlow<Map<String, InviteAskState>> = _inviteAskResolutions.asStateFlow()
 
-    /// Render state for one ask card: this device's own answer (with the
-    /// link while it is shown), then the timeline's record, then Idle.
+    /// Render state for one ask card: this device's own answer, then the
+    /// timeline's record, then Idle.
     fun inviteAskState(eventID: String): InviteAskState {
         _inviteAskStates.value[eventID]?.let { if (it !is InviteAskState.Idle) return it }
         val local = inviteAnswers[eventID]
         when (local) {
-            "approve" -> return InviteAskState.Approved(link = null)
+            "approve" -> return InviteAskState.Approved
             "decline" -> return InviteAskState.Declined
             EXPIRED_ANSWER -> return InviteAskState.Expired
         }
@@ -813,18 +817,18 @@ class ChatViewModel(
         return if (inviteAsks == null) InviteAskState.Unavailable else InviteAskState.Idle
     }
 
-    /// Answers an ask card. An approve shows the returned link on the card,
-    /// this once: it lives only in [inviteAskStates] until [dismissInviteLink].
+    /// Answers an ask card. An approve hands the returned link to
+    /// [inviteLinks], which shows it once.
     fun answerInviteAsk(eventID: String, ask: ContactInviteAsk, approve: Boolean) {
         val answerer = inviteAsks ?: return
         if (!inviteAskState(eventID).answerable) return
         _inviteAskStates.value = _inviteAskStates.value + (eventID to InviteAskState.Sending)
-        scope.launch {
+        (inviteLinks?.scope ?: scope).launch {
             try {
                 val answer = answerer.answerInviteAsk(ask.askId, approve)
+                answer.link?.let { inviteLinks?.show(it, RevealedInviteLinks.Source.ASK) }
                 rememberInviteAnswer(eventID, if (approve) "approve" else "decline")
-                _inviteAskStates.value = _inviteAskStates.value +
-                    (eventID to if (approve) InviteAskState.Approved(answer.link) else InviteAskState.Declined)
+                _inviteAskStates.value = _inviteAskStates.value - eventID
             } catch (cancel: CancellationException) {
                 _inviteAskStates.value = _inviteAskStates.value - eventID
                 throw cancel
@@ -841,12 +845,6 @@ class ChatViewModel(
                 _inviteAskStates.value = _inviteAskStates.value + (eventID to InviteAskState.Failed(ContactsWording.inviteError(error)))
             }
         }
-    }
-
-    /// The user is done with the link: forget it. The card keeps "Approved".
-    fun dismissInviteLink(eventID: String) {
-        val state = _inviteAskStates.value[eventID] as? InviteAskState.Approved ?: return
-        if (state.link != null) _inviteAskStates.value = _inviteAskStates.value + (eventID to InviteAskState.Approved(link = null))
     }
 
     /// Answered elsewhere (or expired): the timeline's record says which once

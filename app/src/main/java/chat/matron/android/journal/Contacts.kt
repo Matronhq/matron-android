@@ -7,6 +7,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Locale
+import kotlinx.coroutines.flow.update
 import kotlinx.serialization.json.JsonObject
 
 // Contacts, and contacts on other journals made by invite link
@@ -271,4 +272,39 @@ object ContactsDates {
 
     fun unreachable(since: Long, zone: ZoneId = ZoneId.systemDefault(), locale: Locale = Locale.getDefault()): String =
         "Their journal hasn't answered since ${format(since, zone, locale)}."
+}
+
+/// The invite links waiting to be shown, for one signed-in session. Held by
+/// the session's core, outside any screen, so a link survives the app lock
+/// (which takes the whole signed-in shell down) and a tap made while no
+/// screen is listening. In memory only: never stored, cached or logged.
+///
+/// [scope] runs the calls that bring a link back (making an invite,
+/// approving an agent's ask), so a lock mid-call cannot cancel it after the
+/// journal has made the link.
+class RevealedInviteLinks(val scope: kotlinx.coroutines.CoroutineScope) {
+    enum class Source { INVITE, ASK }
+
+    data class Reveal(val link: String, val source: Source)
+
+    private val _pending = kotlinx.coroutines.flow.MutableStateFlow<List<Reveal>>(emptyList())
+
+    /// The links waiting to be shown, oldest first: the first is on screen.
+    val current: kotlinx.coroutines.flow.StateFlow<List<Reveal>> = _pending
+
+    fun show(link: String, source: Source) {
+        _pending.update { it + Reveal(link, source) }
+    }
+
+    /// The user is done with [reveal]: it is dropped for good.
+    fun done(reveal: Reveal) {
+        _pending.update { list ->
+            val index = list.indexOf(reveal)
+            if (index < 0) list else list.toMutableList().apply { removeAt(index) }
+        }
+    }
+
+    fun clearAll() {
+        _pending.value = emptyList()
+    }
 }
