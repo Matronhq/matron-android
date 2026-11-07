@@ -15,6 +15,7 @@ import org.junit.Test
 class ContactsApiTest {
     private lateinit var server: MockWebServer
     private val link = "matron://contact?v=1&j=b.example&u=bob&t=${"A".repeat(43)}&fp=${"B".repeat(26)}"
+    private val webLink = "https://b.example/contact#v=1&j=b.example&u=bob&t=${"A".repeat(43)}&fp=${"B".repeat(26)}"
 
     @Before
     fun setUp() {
@@ -51,6 +52,24 @@ class ContactsApiTest {
         val req = server.takeRequest()
         assertEquals("POST", req.method)
         assertEquals("/contacts/invites", req.requestUrl!!.encodedPath)
+    }
+
+    @Test
+    fun aJournalSendingBothFormsHasTheHttpsOneShared() = runBlocking {
+        server.enqueue(json(201, """{"invite":{"id":"inv_1","state":"open","created_at":1,"expires_at":2},"link":"$link","web_link":"$webLink"}"""))
+        assertEquals(webLink, api().createContactInvite().shareLink)
+        server.enqueue(json(200, """{"ask":{"id":"ia_1","state":"approved"},"invite":{"id":"inv_1"},"link":"$link","web_link":"$webLink"}"""))
+        assertEquals(webLink, api().answerInviteAsk("ia_1", approve = true).link)
+    }
+
+    @Test
+    fun anHttpsLinkIsOpenedAndAcceptedAsGiven() = runBlocking {
+        server.enqueue(json(200, """{"inviter":{"address":"bob@b.example","name":"bob","journal":"b.example","fingerprint":"BBBB"}}"""))
+        api().openContactInvite(webLink)
+        assertEquals(webLink, parseJsonObjectOrNull(server.takeRequest().body.readUtf8())!!.stringOrNull("link"))
+        server.enqueue(json(202, """{}"""))
+        api().acceptContactInvite(webLink)
+        assertEquals(webLink, parseJsonObjectOrNull(server.takeRequest().body.readUtf8())!!.stringOrNull("link"))
     }
 
     @Test
@@ -133,5 +152,15 @@ class ContactsApiTest {
         val result = api().commentItem("it_1", "Approve", emptyList(), idempotencyKey = null, action = "Approve")
         assertEquals(link, result.link)
         assertEquals("it_1", result.comment.itemID)
+    }
+
+    @Test
+    fun aMirrorTapAnswerSharesTheHttpsFormWhenSent() = runBlocking {
+        val comment = """{"id":"ic_2","item_id":"it_1","user_id":1,"author":"user","device_id":9,"kind":"comment",
+            "body":"Approve","attachments":[],"meta":null,"idem_key":null,"created_at":1700000002000}"""
+        server.enqueue(json(200, """{"item":${chat.matron.android.models.TrackerItemTest.ITEM_JSON},"comment":$comment,
+            "ask":{"id":"ia_1","state":"approved"},"invite":{"id":"inv_1"},"link":"$link","web_link":"$webLink"}"""))
+        val result = api().commentItem("it_1", "Approve", emptyList(), idempotencyKey = null, action = "Approve")
+        assertEquals(webLink, result.link)
     }
 }

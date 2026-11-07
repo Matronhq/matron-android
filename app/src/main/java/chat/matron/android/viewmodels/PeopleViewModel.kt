@@ -95,7 +95,7 @@ class PeopleViewModel(
         links.scope.launch {
             try {
                 val minted = api.createContactInvite()
-                links.show(minted.link, RevealedInviteLinks.Source.INVITE)
+                links.show(minted.shareLink, RevealedInviteLinks.Source.INVITE)
                 _inviteSheet.value = null
                 refreshInvites()
             } catch (cancel: CancellationException) {
@@ -176,7 +176,7 @@ class PeopleViewModel(
         }
     }
 
-    private fun journalOf(link: String): String? = ContactInviteLink.fields(link)?.get("j")
+    private fun journalOf(link: String): String? = ContactInviteLink.parse(link)?.journal
 
     /// Cancel sends nothing.
     fun closeAcceptCard() {

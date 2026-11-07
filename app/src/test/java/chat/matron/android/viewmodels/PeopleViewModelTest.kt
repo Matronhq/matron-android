@@ -21,6 +21,7 @@ import org.junit.Test
 /// accept card.
 class PeopleViewModelTest {
     private val link = "matron://contact?v=1&j=b.example&u=bob&t=${"A".repeat(43)}&fp=${"B".repeat(26)}"
+    private val webLink = "https://b.example/contact#v=1&j=b.example&u=bob&t=${"A".repeat(43)}&fp=${"B".repeat(26)}"
 
     private fun vmTest(body: suspend CoroutineScope.(CoroutineScope) -> Unit) = runBlocking {
         val scope = CoroutineScope(coroutineContext + Job())
@@ -46,13 +47,14 @@ class PeopleViewModelTest {
         val accepted = mutableListOf<String>()
         val revoked = mutableListOf<String>()
         var preview = InvitePreview("bob@b.example", "bob", "b.example", "BBBB BBBB")
+        var mintedWebLink: String? = null
 
         override suspend fun contacts() = contactList
         override suspend fun contactInvites() = inviteList
         override suspend fun createContactInvite(): MintedInvite {
             mintError?.let { throw it }
             inviteList = listOf(ContactInvite("inv_2", "open", 3, 4)) + inviteList
-            return MintedInvite(inviteList.first(), "matron://contact?minted")
+            return MintedInvite(inviteList.first(), "matron://contact?minted", mintedWebLink)
         }
         override suspend fun revokeContactInvite(id: String) {
             revoked += id
@@ -104,6 +106,43 @@ class PeopleViewModelTest {
         waitUntil { vm.invites.value.size == 2 }
         links.done(links.current.value.single())
         assertTrue(links.current.value.isEmpty())
+    }
+
+    @Test
+    fun theHttpsFormIsTheOneShownWhenTheJournalSendsIt() = vmTest { scope ->
+        val links = RevealedInviteLinks(scope)
+        val vm = PeopleViewModel(FakeContacts().apply { mintedWebLink = webLink }, scope, links)
+        vm.makeInvite()
+        waitUntil { links.current.value.isNotEmpty() }
+        assertEquals(listOf(RevealedInviteLinks.Reveal(webLink, RevealedInviteLinks.Source.INVITE)), links.current.value)
+    }
+
+    @Test
+    fun aPastedHttpsLinkOpensTheCard() = vmTest { scope ->
+        val api = FakeContacts()
+        val vm = PeopleViewModel(api, scope, RevealedInviteLinks(scope))
+        vm.openLink("Join me on Matron: $webLink")
+        waitUntil { vm.acceptCard.value is AcceptCardState.Preview }
+        assertEquals("the link goes to the journal as given", listOf(webLink), api.opened)
+        vm.accept()
+        waitUntil { vm.acceptCard.value == AcceptCardState.Sent }
+        assertEquals(listOf(webLink), api.accepted)
+    }
+
+    @Test
+    fun anHttpsLinkWithABadFragmentIsRefusedWithoutAsking() = vmTest { scope ->
+        val api = FakeContacts()
+        val vm = PeopleViewModel(api, scope, RevealedInviteLinks(scope))
+        for (bad in listOf(
+            "https://b.example/contact#garbage",
+            "https://b.example/contact",
+            webLink.replace("https://b.example", "https://a.example"),
+            webLink.replace("/contact#", "/contact/#"),
+        )) {
+            vm.openLink(bad)
+            assertEquals(bad, AcceptCardState.Refused("This is not a valid invite link."), vm.acceptCard.value)
+        }
+        assertTrue(api.opened.isEmpty())
     }
 
     @Test

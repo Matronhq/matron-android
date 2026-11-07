@@ -22,10 +22,11 @@ fun incomingViewLink(action: String?, data: String?): String? {
     return data.takeIf { scheme == "https" || scheme == "http" || isContactInviteLink(it) }
 }
 
-/// Whether [url] is a contact invite link (`matron://contact?…`), which
-/// opens People's accept card rather than a tracker page.
-fun isContactInviteLink(url: String): Boolean =
-    url.startsWith("matron://contact?", ignoreCase = true) || url.startsWith("matron://contact/?", ignoreCase = true)
+/// Whether [url] is a contact invite link (`matron://contact?…` or
+/// `https://<journal>/contact#…`), which opens People's accept card rather
+/// than a tracker page — even a malformed one, so the card can say it is
+/// not a valid invite link.
+fun isContactInviteLink(url: String): Boolean = chat.matron.android.journal.ContactInviteLink.isInviteShaped(url)
 
 /// The link waiting to be opened when the activity is created. A restored
 /// activity is handed the intent it was first started with, already taken
@@ -38,14 +39,22 @@ fun launchLink(restored: Boolean, saved: String?, action: String?, data: String?
 /// link on this session's journal ([isTrackerLink]) opens in-app through
 /// [openTrackerLink]; everything else goes to [platform] as before. One
 /// override at the shell covers every link opener — markdown bodies,
-/// tables, item link chips — so none of them can miss it.
+/// tables, item link chips — so none of them can miss it. A contact invite
+/// link, in either form, goes to [openInviteLink] (People's accept card)
+/// when one is given, ahead of any tracker link check.
 class TrackerLinkUriHandler(
     private val platform: UriHandler,
     private val isTrackerLink: (String) -> Boolean,
     private val openTrackerLink: (String) -> Unit,
+    private val openInviteLink: ((String) -> Unit)? = null,
 ) : UriHandler {
     override fun openUri(uri: String) {
-        if (isTrackerLink(uri)) openTrackerLink(uri) else platform.openUri(uri)
+        val invite = openInviteLink
+        when {
+            invite != null && isContactInviteLink(uri) -> invite(uri)
+            isTrackerLink(uri) -> openTrackerLink(uri)
+            else -> platform.openUri(uri)
+        }
     }
 }
 

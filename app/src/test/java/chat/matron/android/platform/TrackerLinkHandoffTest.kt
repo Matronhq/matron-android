@@ -3,6 +3,8 @@ package chat.matron.android.platform
 import android.content.Intent
 import androidx.compose.ui.platform.UriHandler
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -47,6 +49,41 @@ class TrackerLinkHandoffTest {
         handler.openUri("https://example.com/docs")
         assertEquals(listOf("https://journal.example.com/u/alice/4"), inApp)
         assertEquals(listOf("https://example.com/docs"), platform)
+    }
+
+    @Test
+    fun anInviteLinkInEitherFormIsAnIncomingLink() {
+        val web = "https://b.example/contact#v=1&j=b.example&u=bob&t=${"A".repeat(43)}&fp=${"b".repeat(26)}"
+        assertEquals(web, incomingViewLink(Intent.ACTION_VIEW, web))
+        assertEquals("a bad fragment still arrives, to be refused on the card", "https://b.example/contact#x", incomingViewLink(Intent.ACTION_VIEW, "https://b.example/contact#x"))
+        assertEquals("matron://contact?x=1", incomingViewLink(Intent.ACTION_VIEW, "matron://contact?x=1"))
+        assertTrue(isContactInviteLink(web))
+        assertTrue(isContactInviteLink("https://b.example/contact#x"))
+        assertFalse("a tracker link is not one", isContactInviteLink("https://b.example/u/bob/4"))
+        assertFalse(isContactInviteLink("https://b.example/contact/x"))
+    }
+
+    @Test
+    fun anInviteLinkTappedInAppOpensTheCardNotTheTrackerOrTheBrowser() {
+        val platform = mutableListOf<String>()
+        val tracker = mutableListOf<String>()
+        val invites = mutableListOf<String>()
+        val handler = TrackerLinkUriHandler(
+            platform = object : UriHandler { override fun openUri(uri: String) { platform += uri } },
+            // A tracker matcher that would claim anything on the journal.
+            isTrackerLink = { it.startsWith("https://b.example/") },
+            openTrackerLink = { tracker += it },
+            openInviteLink = { invites += it },
+        )
+        val web = "https://b.example/contact#v=1&j=b.example&u=bob&t=${"A".repeat(43)}&fp=${"b".repeat(26)}"
+        handler.openUri(web)
+        handler.openUri("https://b.example/contact#bad")
+        handler.openUri("matron://contact?v=1")
+        handler.openUri("https://b.example/u/bob/4")
+        handler.openUri("https://a.example/docs")
+        assertEquals(listOf(web, "https://b.example/contact#bad", "matron://contact?v=1"), invites)
+        assertEquals(listOf("https://b.example/u/bob/4"), tracker)
+        assertEquals(listOf("https://a.example/docs"), platform)
     }
 
     @Test

@@ -60,7 +60,7 @@ object PeopleWording {
     const val PENDING = "Waiting for them to accept"
     const val KEY_CHANGED = "Their journal's key has changed. Nothing is shared until they send you a new invite."
     const val OPEN_INVITES = "Open invites"
-    const val INVITE_BODY = "Send this link to them yourself. It is shown only now, works once and lasts 7 days. " +
+    const val INVITE_BODY = "Send this link to them yourself, over any chat app or email. It is shown only now, works once and lasts 7 days. " +
         "Nobody becomes a contact until they open it and accept."
     const val ACCEPT_TITLE = "Contact invite"
     const val COMPARE_NOTE = "Compare this fingerprint with them another way, in person or on a call, before you accept."

@@ -22,10 +22,11 @@ class ContactsTest {
     @Test
     fun aWellFormedLinkIsValid() {
         assertTrue(ContactInviteLink.isValid(link))
-        val fields = ContactInviteLink.fields(link)!!
-        assertEquals("b.example", fields["j"])
-        assertEquals("bob", fields["u"])
-        assertEquals(fp, fields["fp"])
+        val fields = ContactInviteLink.parse(link)!!
+        assertEquals("b.example", fields.journal)
+        assertEquals("bob", fields.user)
+        assertEquals(token, fields.token)
+        assertEquals("the fingerprint is compared lowercased", fp.lowercase(), fields.fingerprint)
     }
 
     @Test
@@ -39,6 +40,93 @@ class ContactsTest {
         assertFalse(ContactInviteLink.isValid(link.replace("matron://", "https://")))
         assertFalse(ContactInviteLink.isValid("$link#frag"))
         assertFalse(ContactInviteLink.isValid("not a link"))
+    }
+
+    @Test
+    fun theMatronFormChecksEachFieldsShape() {
+        assertFalse("a short token", ContactInviteLink.isValid(link.replace("t=$token", "t=${"A".repeat(42)}")))
+        assertFalse("a long token", ContactInviteLink.isValid(link.replace("t=$token", "t=${"A".repeat(44)}")))
+        assertFalse("not base64url", ContactInviteLink.isValid(link.replace("t=$token", "t=${"A".repeat(42)}+")))
+        assertTrue(ContactInviteLink.isValid(link.replace("t=$token", "t=${"-_".repeat(21)}9")))
+        assertFalse("a short fingerprint", ContactInviteLink.isValid(link.replace("fp=$fp", "fp=${fp.drop(1)}")))
+        assertFalse("not base32", ContactInviteLink.isValid(link.replace("fp=$fp", "fp=${fp.dropLast(1)}1")))
+        assertFalse("not a name", ContactInviteLink.isValid(link.replace("u=bob", "u=.bob")))
+        assertFalse("not a host", ContactInviteLink.isValid(link.replace("j=b.example", "j=b_example")))
+        assertFalse("too long", ContactInviteLink.isValid(link + "&".repeat(1024)))
+    }
+
+    // MARK: - The https link
+
+    private val webLink = "https://b.example/contact#v=1&j=b.example&u=bob&t=$token&fp=$fp"
+
+    @Test
+    fun aWellFormedHttpsLinkIsValid() {
+        val fields = ContactInviteLink.parse(webLink)!!
+        assertEquals(ContactInviteLink.Fields("b.example", "bob", token, fp.lowercase()), fields)
+        assertEquals("both forms read alike", ContactInviteLink.parse(link), fields)
+        assertTrue("field order is free", ContactInviteLink.isValid("https://b.example/contact#fp=$fp&t=$token&u=bob&j=b.example&v=1"))
+        assertTrue("the host is compared case-insensitively", ContactInviteLink.isValid(webLink.replace("https://b.example", "https://B.Example")))
+        assertTrue(ContactInviteLink.isValid(webLink.replace("j=b.example", "j=B.EXAMPLE")))
+        assertTrue("the default port is the same host", ContactInviteLink.isValid(webLink.replace("b.example/", "b.example:443/")))
+        assertTrue("a journal on a port", ContactInviteLink.isValid("https://b.example:8443/contact#v=1&j=b.example:8443&u=bob&t=$token&fp=$fp"))
+        assertTrue(ContactInviteLink.isValid("  $webLink\n"))
+    }
+
+    @Test
+    fun anHttpsLinkAnywhereButItsJournalsContactPageIsRefused() {
+        val refused = mapOf(
+            "http" to webLink.replace("https://", "http://"),
+            "another scheme" to webLink.replace("https://", "ftp://"),
+            "another path" to webLink.replace("/contact#", "/contacts#"),
+            "a trailing slash" to webLink.replace("/contact#", "/contact/#"),
+            "a deeper path" to webLink.replace("/contact#", "/contact/x#"),
+            "no path" to webLink.replace("/contact#", "#"),
+            "a case-changed path" to webLink.replace("/contact#", "/Contact#"),
+            "a query" to webLink.replace("/contact#", "/contact?x=1#"),
+            "the fields in the query" to "https://b.example/contact?v=1&j=b.example&u=bob&t=$token&fp=$fp",
+            "user info" to webLink.replace("https://", "https://alice@"),
+            "user info with a password" to webLink.replace("https://", "https://alice:pw@"),
+            "another host than j" to webLink.replace("https://b.example", "https://a.example"),
+            "a j on another host" to webLink.replace("j=b.example", "j=a.example"),
+            "a subdomain of j" to webLink.replace("https://b.example", "https://x.b.example"),
+            "another port than j" to webLink.replace("b.example/", "b.example:8443/"),
+            "no fragment" to "https://b.example/contact",
+            "an empty fragment" to "https://b.example/contact#",
+            "a missing key" to webLink.replace("&u=bob", ""),
+            "an extra key" to "$webLink&x=1",
+            "a duplicate key" to "$webLink&u=carol",
+            "the same key twice with the same value" to "$webLink&v=1",
+            "v=2" to webLink.replace("v=1", "v=2"),
+            "a bad token" to webLink.replace("t=$token", "t=${"A".repeat(42)}"),
+            "a bad fingerprint" to webLink.replace("fp=$fp", "fp=${fp.dropLast(1)}0"),
+            "an empty user" to webLink.replace("u=bob", "u="),
+        )
+        for ((why, url) in refused) assertNull(why, ContactInviteLink.parse(url))
+    }
+
+    @Test
+    fun theHttpsLinkIsFoundInPastedText() {
+        assertEquals(webLink, ContactInviteLink.extract("Join me: $webLink"))
+        assertEquals(webLink, ContactInviteLink.extract("<$webLink>."))
+        assertEquals("trailing punctuation is not the link's", webLink, ContactInviteLink.extract("Here it is: $webLink."))
+        assertEquals(webLink, ContactInviteLink.extract("($webLink)"))
+        assertEquals("the first valid link", link, ContactInviteLink.extract("https://b.example/ then $link then $webLink"))
+        assertNull(ContactInviteLink.extract(webLink.replace("https://b.example", "https://a.example")))
+    }
+
+    @Test
+    fun anInviteShapedLinkOpensTheCardEvenWhenItIsNotValid() {
+        assertTrue(ContactInviteLink.isInviteShaped(webLink))
+        assertTrue(ContactInviteLink.isInviteShaped(link))
+        assertTrue(ContactInviteLink.isInviteShaped("https://b.example/contact#garbage"))
+        assertTrue(ContactInviteLink.isInviteShaped("https://b.example/contact"))
+        assertTrue(ContactInviteLink.isInviteShaped("matron://contact?x=1"))
+        assertFalse(ContactInviteLink.isInviteShaped("https://b.example/u/bob/4"))
+        assertFalse(ContactInviteLink.isInviteShaped("https://b.example/contact/"))
+        assertFalse(ContactInviteLink.isInviteShaped("https://b.example/contacts"))
+        assertFalse(ContactInviteLink.isInviteShaped("http://b.example/contact#v=1"))
+        assertFalse(ContactInviteLink.isInviteShaped("matron://contacts?x=1"))
+        assertFalse(ContactInviteLink.isInviteShaped("matron://item/4"))
     }
 
     @Test
@@ -108,6 +196,7 @@ class ContactsTest {
         assertEquals(link, minted.link)
         assertEquals("inv_1", minted.invite?.id)
         assertNull(MintedInvite.fromJson(obj("""{"invite":{"id":"inv_1"}}""")))
+        assertEquals("no web_link: the matron:// link is shared", link, minted.shareLink)
 
         val approved = InviteAskAnswer.fromJson(obj("""{"ask":{"id":"ia_1","state":"approved"},"invite":{"id":"inv_1"},"link":"$link"}"""))
         assertEquals("approved", approved.state)
@@ -115,6 +204,20 @@ class ContactsTest {
         val declined = InviteAskAnswer.fromJson(obj("""{"ask":{"id":"ia_1","state":"declined"}}"""))
         assertEquals("declined", declined.state)
         assertNull(declined.link)
+    }
+
+    @Test
+    fun theHttpsFormIsSharedWhenTheJournalSendsIt() {
+        val minted = MintedInvite.fromJson(obj("""{"invite":{"id":"inv_1","state":"open","created_at":1,"expires_at":2},"link":"$link","web_link":"$webLink"}"""))!!
+        assertEquals(link, minted.link)
+        assertEquals(webLink, minted.webLink)
+        assertEquals(webLink, minted.shareLink)
+        assertEquals("an empty web_link is no web_link", link, MintedInvite.fromJson(obj("""{"link":"$link","web_link":""}"""))!!.shareLink)
+
+        val approved = InviteAskAnswer.fromJson(obj("""{"ask":{"id":"ia_1","state":"approved"},"link":"$link","web_link":"$webLink"}"""))
+        assertEquals(webLink, approved.link)
+        assertEquals("a web_link alone is shared too", webLink, InviteLinks.shareableOf(obj("""{"web_link":"$webLink"}""")))
+        assertNull(InviteLinks.shareableOf(obj("""{"ask":{}}""")))
     }
 
     @Test
