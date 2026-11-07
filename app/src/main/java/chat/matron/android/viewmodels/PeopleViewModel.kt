@@ -9,6 +9,7 @@ import chat.matron.android.journal.InvitePreview
 import chat.matron.android.journal.RevealedInviteLinks
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -61,6 +62,8 @@ class PeopleViewModel(
 
     private val _inviteSheet = MutableStateFlow<InviteSheetState?>(null)
     val inviteSheet: StateFlow<InviteSheetState?> = _inviteSheet.asStateFlow()
+
+    private var previewJob: Job? = null
 
     private val _acceptCard = MutableStateFlow<AcceptCardState?>(null)
     val acceptCard: StateFlow<AcceptCardState?> = _acceptCard.asStateFlow()
@@ -134,17 +137,18 @@ class PeopleViewModel(
     /// A pasted or deep-linked invite link: ask the journal who it is from.
     /// Opening sends nothing to anyone.
     fun openLink(text: String) {
+        // A newer link (or Cancel) wins over an answer still on its way.
+        previewJob?.cancel()
         val link = ContactInviteLink.extract(text)
         if (link == null || !ContactInviteLink.isValid(link)) {
             _acceptCard.value = AcceptCardState.Refused(ContactsWording.INVALID_LINK)
             return
         }
         _acceptCard.value = AcceptCardState.Opening
-        scope.launch {
+        previewJob = scope.launch {
             _acceptCard.value = try {
                 AcceptCardState.Preview(link, api.openContactInvite(link))
             } catch (cancel: CancellationException) {
-                _acceptCard.value = null
                 throw cancel
             } catch (error: Throwable) {
                 AcceptCardState.Refused(ContactsWording.linkError(error, journalOf(link)))
@@ -176,6 +180,7 @@ class PeopleViewModel(
 
     /// Cancel sends nothing.
     fun closeAcceptCard() {
+        previewJob?.cancel()
         _acceptCard.value = null
     }
 }

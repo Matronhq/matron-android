@@ -151,6 +151,23 @@ class PeopleViewModelTest {
     }
 
     @Test
+    fun aDismissedLinksLateAnswerIsDropped() = vmTest { scope ->
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val api = object : ContactsProviding by FakeContacts() {
+            override suspend fun openContactInvite(link: String): InvitePreview {
+                gate.await()
+                return InvitePreview("bob@b.example", "bob", "b.example", "BBBB")
+            }
+        }
+        val vm = PeopleViewModel(api, scope, RevealedInviteLinks(scope))
+        vm.openLink(link)
+        vm.closeAcceptCard()
+        gate.complete(Unit)
+        delay(50)
+        assertNull(vm.acceptCard.value)
+    }
+
+    @Test
     fun cancelSendsNothing() = vmTest { scope ->
         val api = FakeContacts()
         val vm = PeopleViewModel(api, scope, RevealedInviteLinks(scope))
