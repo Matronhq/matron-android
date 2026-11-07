@@ -271,7 +271,10 @@ object ContactInviteLink {
         val token = fields["t"].orEmpty()
         val fingerprint = fields["fp"].orEmpty().lowercase(Locale.ROOT)
         if (!USER.matches(user) || !HOST.matches(journal) || !TOKEN.matches(token) || !FINGERPRINT.matches(fingerprint)) return null
-        if (uri.scheme.equals("https", ignoreCase = true) && authorityOf(uri) != journal) return null
+        if (uri.scheme.equals("https", ignoreCase = true)) {
+            val named = authorityOf(journal) ?: return null
+            if (authorityOf(uri) != named) return null
+        }
         return Fields(journal, user, token, fingerprint)
     }
 
@@ -279,7 +282,23 @@ object ContactInviteLink {
     /// dropped. Null for an authority that is not a host.
     private fun authorityOf(uri: URI): String? {
         val host = uri.host?.lowercase(Locale.ROOT) ?: return null
-        return if (uri.port == -1 || uri.port == 443) host else "$host:${uri.port}"
+        return withPort(host, uri.port)
+    }
+
+    /// A link's `j` as a URL writes its host, the way the journal compares
+    /// it: an explicit default port (`:443`) dropped, and null for a port a
+    /// URL cannot have (over 65535).
+    private fun authorityOf(journal: String): String? {
+        val colon = journal.lastIndexOf(':')
+        if (colon < 0) return journal
+        val port = journal.substring(colon + 1).toIntOrNull() ?: return null
+        return withPort(journal.substring(0, colon), port)
+    }
+
+    private fun withPort(host: String, port: Int): String? = when {
+        port == -1 || port == 443 -> host
+        port !in 0..65535 -> null
+        else -> "$host:$port"
     }
 
     /// `a=1&b=2` read like a browser's URLSearchParams (empty pairs

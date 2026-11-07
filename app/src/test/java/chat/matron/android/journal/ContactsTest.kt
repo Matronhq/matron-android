@@ -73,6 +73,22 @@ class ContactsTest {
     }
 
     @Test
+    fun theJournalsPortIsComparedAsAUrlWritesIt() {
+        val fields = "u=bob&t=$token&fp=$fp"
+        assertEquals(
+            "an explicit default port in j is the same host",
+            "b.example:443",
+            ContactInviteLink.parse("https://b.example/contact#v=1&j=b.example:443&$fields")?.journal,
+        )
+        assertTrue(ContactInviteLink.isValid("https://b.example:443/contact#v=1&j=b.example:443&$fields"))
+        assertNull("a port no URL can have", ContactInviteLink.parse("https://b.example/contact#v=1&j=b.example:99999&$fields"))
+        assertNull(ContactInviteLink.parse("https://b.example:99999/contact#v=1&j=b.example:99999&$fields"))
+        assertNull("another port than the link's", ContactInviteLink.parse("https://b.example/contact#v=1&j=b.example:8443&$fields"))
+        assertNull(ContactInviteLink.parse("https://b.example:8443/contact#v=1&j=b.example&$fields"))
+        assertTrue(ContactInviteLink.isValid("https://b.example:8443/contact#v=1&j=b.example:8443&$fields"))
+    }
+
+    @Test
     fun anHttpsLinkAnywhereButItsJournalsContactPageIsRefused() {
         val refused = mapOf(
             "http" to webLink.replace("https://", "http://"),
