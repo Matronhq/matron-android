@@ -402,7 +402,18 @@ class RevealedInviteLinks(val scope: kotlinx.coroutines.CoroutineScope) {
     /// The links waiting to be shown, oldest first: the first is on screen.
     val current: kotlinx.coroutines.flow.StateFlow<List<Reveal>> = _pending
 
-    fun show(link: String, source: Source) {
+    private val _approvedHere = kotlinx.coroutines.flow.MutableStateFlow<Set<String>>(emptySet())
+
+    /// The ids of the agents' asks this device approved in this session,
+    /// whichever screen the tap was on (the chat card or the ask's tracker
+    /// item), so the chat card reads "Approved" rather than "Approved on
+    /// another device". Ids only, never the link; never persisted.
+    val approvedHere: kotlinx.coroutines.flow.StateFlow<Set<String>> = _approvedHere
+
+    /// Queues [link] to be shown once. [askId] names the agent's ask it
+    /// answered, when there is one.
+    fun show(link: String, source: Source, askId: String? = null) {
+        askId?.let { id -> _approvedHere.update { it + id } }
         _pending.update { it + Reveal(link, source) }
     }
 
@@ -416,5 +427,6 @@ class RevealedInviteLinks(val scope: kotlinx.coroutines.CoroutineScope) {
 
     fun clearAll() {
         _pending.value = emptyList()
+        _approvedHere.value = emptySet()
     }
 }

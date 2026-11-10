@@ -157,8 +157,13 @@ private class FakeItems : ItemsProviding {
         synchronized(lock) { _commentErrorForItemID[id] }?.let { throw it }
         if (failComments) throw JournalApiError.Transport("offline")
         val item = TrackerItem(id = id, num = 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.AGENT, title = "Q", originConvoID = "c1")
-        return ItemCommentResult(item, TrackerComment("ic_srv", id, ItemAuthor.USER, body = body))
+        val answer = inviteAnswer
+        return ItemCommentResult(item, TrackerComment("ic_srv", id, ItemAuthor.USER, body = body), answer?.first, answer?.second)
     }
+
+    /// (link, ask id) every comment call answers with, as an Approve tap on
+    /// an invite ask's mirror does.
+    @Volatile var inviteAnswer: Pair<String, String?>? = null
 
     override suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem = error("unused")
     override suspend fun reopenItem(id: String, comment: String?): TrackerItem = error("unused")
@@ -428,6 +433,19 @@ class ItemsSyncTest {
         rig.sync.enqueueComment("it_1", "L2", "hello", emptyList())
         waitUntil { api.commentTaps.size == 3 }
         assertEquals(null to null, api.commentTaps.last())
+        rig.sync.stop()
+    }
+
+    @Test
+    fun anInviteAskApproveHandsOverTheLinkAndTheAskItAnswered() = runBlocking {
+        val api = FakeItems(); api.inviteAnswer = "matron://contact?v=1" to "ia_1"
+        val rig = make(api)
+        val received = java.util.concurrent.CopyOnWriteArrayList<Pair<String, String?>>()
+        rig.sync.onInviteLink = { link, askId -> received.add(link to askId) }
+        rig.sync.start()
+        rig.sync.enqueueComment("it_1", "L1", "Approve", emptyList(), action = "Approve")
+        waitUntil { received.isNotEmpty() }
+        assertEquals(listOf("matron://contact?v=1" to "ia_1"), received.toList())
         rig.sync.stop()
     }
 

@@ -802,9 +802,16 @@ class ChatViewModel(
     private val _inviteAskResolutions = MutableStateFlow<Map<String, InviteAskState>>(emptyMap())
     val inviteAskResolutions: StateFlow<Map<String, InviteAskState>> = _inviteAskResolutions.asStateFlow()
 
-    /// Render state for one ask card: this device's own answer, then the
-    /// timeline's record, then Idle.
-    fun inviteAskState(eventID: String): InviteAskState {
+    /// The asks this device approved this session, from the chat card or
+    /// the ask's tracker item. Collected by the chat so a tracker-item tap
+    /// redraws the card.
+    val inviteAsksApprovedHere: StateFlow<Set<String>> =
+        inviteLinks?.approvedHere ?: MutableStateFlow<Set<String>>(emptySet()).asStateFlow()
+
+    /// Render state for one ask card: this device's own answer (on the card,
+    /// or on [ask]'s tracker item this session), then the timeline's record,
+    /// then Idle.
+    fun inviteAskState(eventID: String, ask: ContactInviteAsk? = null): InviteAskState {
         _inviteAskStates.value[eventID]?.let { if (it !is InviteAskState.Idle) return it }
         val local = inviteAnswers[eventID]
         when (local) {
@@ -812,6 +819,9 @@ class ChatViewModel(
             "decline" -> return InviteAskState.Declined
             EXPIRED_ANSWER -> return InviteAskState.Expired
         }
+        // Approved on this device's tracker item: the mirror's close (and a
+        // later card tap's `not_pending`) cannot tell that from another device.
+        if (ask != null && ask.askId in inviteAsksApprovedHere.value) return InviteAskState.Approved
         _inviteAskResolutions.value[eventID]?.let { return it }
         if (local == INVITE_ELSEWHERE) return InviteAskState.ApprovedElsewhere
         return if (inviteAsks == null) InviteAskState.Unavailable else InviteAskState.Idle
@@ -821,12 +831,12 @@ class ChatViewModel(
     /// [inviteLinks], which shows it once.
     fun answerInviteAsk(eventID: String, ask: ContactInviteAsk, approve: Boolean) {
         val answerer = inviteAsks ?: return
-        if (!inviteAskState(eventID).answerable) return
+        if (!inviteAskState(eventID, ask).answerable) return
         _inviteAskStates.value = _inviteAskStates.value + (eventID to InviteAskState.Sending)
         (inviteLinks?.scope ?: scope).launch {
             try {
                 val answer = answerer.answerInviteAsk(ask.askId, approve)
-                answer.link?.let { inviteLinks?.show(it, RevealedInviteLinks.Source.ASK) }
+                answer.link?.let { inviteLinks?.show(it, RevealedInviteLinks.Source.ASK, ask.askId) }
                 rememberInviteAnswer(eventID, if (approve) "approve" else "decline")
                 _inviteAskStates.value = _inviteAskStates.value - eventID
             } catch (cancel: CancellationException) {

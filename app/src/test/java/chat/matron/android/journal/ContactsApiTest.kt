@@ -151,6 +151,7 @@ class ContactsApiTest {
             "ask":{"id":"ia_1","state":"approved"},"invite":{"id":"inv_1"},"link":"$link"}"""))
         val result = api().commentItem("it_1", "Approve", emptyList(), idempotencyKey = null, action = "Approve")
         assertEquals(link, result.link)
+        assertEquals("ia_1", result.askId)
         assertEquals("it_1", result.comment.itemID)
     }
 

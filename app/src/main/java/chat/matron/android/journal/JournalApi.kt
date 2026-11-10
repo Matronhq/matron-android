@@ -1073,7 +1073,11 @@ class JournalApi(
             ?: throw JournalApiError.Transport("malformed comment response")
         // A tap on an invite ask's mirror answers with the link, this once:
         // the https form when the journal sends it, else the matron:// one.
-        return ItemCommentResult(decodeItem(obj), comment, link = InviteLinks.shareableOf(obj))
+        return ItemCommentResult(
+            decodeItem(obj), comment,
+            link = InviteLinks.shareableOf(obj),
+            askId = obj.objectOrNull("ask")?.stringOrNull("id")?.takeIf { it.isNotEmpty() },
+        )
     }
 
     override suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem =

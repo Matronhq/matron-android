@@ -346,8 +346,8 @@ class AppDependencies(
             api, db, dbFile, store, engine, maintenance, itemsSync, missionsSync, memoriesSync,
             pinsSync = pinsSync, coordinatorSync = coordinatorSync,
         )
-        core.itemsSync.onInviteLink = { link ->
-            core.inviteLinks.show(link, chat.matron.android.journal.RevealedInviteLinks.Source.ASK)
+        core.itemsSync.onInviteLink = { link, askId ->
+            core.inviteLinks.show(link, chat.matron.android.journal.RevealedInviteLinks.Source.ASK, askId)
         }
         cores[session.userID] = core
         // Nothing proportional to store history runs on the launch path any

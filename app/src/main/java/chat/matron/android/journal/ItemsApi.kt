@@ -63,7 +63,14 @@ data class ItemDetail(val item: TrackerItem, val comments: List<TrackerComment>)
 /// [link] is an invite link, on the answer to an Approve tap on an agent's
 /// invite ask only — the https form when the journal sends it, else the
 /// `matron://` one: shown once on this device and never stored.
-data class ItemCommentResult(val item: TrackerItem, val comment: TrackerComment, val link: String? = null)
+/// [link] and [askId] come back only from an Approve tap on an agent's
+/// invite ask mirror: the link to show once, and which ask it answered.
+data class ItemCommentResult(
+    val item: TrackerItem,
+    val comment: TrackerComment,
+    val link: String? = null,
+    val askId: String? = null,
+)
 
 /// `POST /items` body. [awaiting] is tri-state like the Swift `ItemAwaiting??`:
 /// [awaitingSet] false ⇒ key omitted (server default), true with a null
