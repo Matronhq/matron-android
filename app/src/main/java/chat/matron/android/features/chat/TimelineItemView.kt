@@ -345,7 +345,7 @@ private fun RenderedBody(
             CappedCard(maxWidth = 360.dp) {
                 ContactInviteAskCard(
                     ask = kind.ask,
-                    state = inviteAsks?.state?.invoke(kind.eventID) ?: InviteAskState.Unavailable,
+                    state = inviteAsks?.state?.invoke(kind.eventID, kind.ask) ?: InviteAskState.Unavailable,
                     onApprove = { inviteAsks?.answer?.invoke(kind.eventID, kind.ask, true) },
                     onDecline = { inviteAsks?.answer?.invoke(kind.eventID, kind.ask, false) },
                 )
@@ -611,6 +611,6 @@ data class TappedImage(val url: String?, val model: Any, val name: String? = nul
 /// What an invite ask card in the timeline reads and calls: its state and
 /// the answer. An approved link is shown by the shell, not the card.
 class InviteAskHost(
-    val state: (eventID: String) -> InviteAskState,
+    val state: (eventID: String, ask: ContactInviteAsk) -> InviteAskState,
     val answer: (eventID: String, ask: ContactInviteAsk, approve: Boolean) -> Unit,
 )

@@ -185,9 +185,10 @@ class ItemsSync(
     private var stopped = false
 
     /// Receives the invite link an Approve tap on an agent's invite ask
-    /// mirror brings back, to show once. Never stored here.
+    /// mirror brings back, to show once, with the id of the ask it answered
+    /// (when the journal names it). Never stored here.
     @Volatile
-    var onInviteLink: ((String) -> Unit)? = null
+    var onInviteLink: ((link: String, askId: String?) -> Unit)? = null
 
     private val _isSupported = MutableStateFlow(true)
     override val isSupported: StateFlow<Boolean> = _isSupported.asStateFlow()
@@ -674,7 +675,7 @@ class ItemsSync(
                         // outbox — without this the reply would be invisible
                         // until the detail screen is reopened.
                         store.commitOutboxResult(result.item, result.comment, deletingLocalID = row.localID)
-                        result.link?.let { link -> onInviteLink?.invoke(link) }
+                        result.link?.let { link -> onInviteLink?.invoke(link, result.askId) }
                         refreshItem(itemID)
                     }
                     ItemOutboxEntity.OP_CREATE -> {
