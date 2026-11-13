@@ -278,9 +278,7 @@ class JournalStore(
                 val newRead = max(convo.readUpToSeq, upTo)
                 convo = convo.copy(
                     readUpToSeq = newRead,
-                    unreadCount = eventDao.countUnread(
-                        convo.id, newRead, JournalEventType.MESSAGE_TYPES, ownSender,
-                    ),
+                    unreadCount = recountUnread(convo.id, newRead),
                 )
             }
             event.type in JournalEventType.MESSAGE_TYPES -> {
@@ -301,7 +299,11 @@ class JournalStore(
                     lastMessageType = event.type,
                     expiredSnippet = expiredSnippet(event.type, payload),
                 )
-                if (event.sender != ownSender && event.seq > convo.readUpToSeq) {
+                // A silent event is shown and never counted (protocol "Silent
+                // events"); [recountUnread] leaves it out too.
+                if (event.sender != ownSender && event.seq > convo.readUpToSeq &&
+                    !JournalEventType.isSilent(event.payload)
+                ) {
                     convo = convo.copy(unreadCount = convo.unreadCount + 1)
                 }
                 // A message brings an archived conversation back, as the
@@ -368,9 +370,7 @@ class JournalStore(
                 val columns = historyColumns(convo)
                 conversationDao.upsert(
                     convo.copy(
-                        unreadCount = eventDao.countUnread(
-                            convoID, convo.readUpToSeq, JournalEventType.MESSAGE_TYPES, ownSender,
-                        ),
+                        unreadCount = recountUnread(convoID, convo.readUpToSeq),
                         lastMessageType = columns.first,
                         expiredSnippet = columns.second,
                     )
@@ -1443,6 +1443,17 @@ class JournalStore(
     private suspend fun newestMessageColumns(convoID: String): Pair<String?, String?> {
         val row = eventDao.newestMessageEvent(convoID, JournalEventType.MESSAGE_TYPES) ?: return null to null
         return row.type to expiredSnippet(row.type, parseJsonObjectOrNull(row.payload))
+    }
+
+    /// Unread = message rows from someone else above the read marker, less
+    /// the silent ones ([JournalEventType.isSilent]). Only rows whose payload
+    /// mentions the flag are parsed.
+    private suspend fun recountUnread(convoID: String, afterSeq: Long): Int {
+        val types = JournalEventType.MESSAGE_TYPES
+        val total = eventDao.countUnread(convoID, afterSeq, types, ownSender)
+        val silent = eventDao.unreadMentioningSilent(convoID, afterSeq, types, ownSender)
+            .count { JournalEventType.isSilent(it.toJournalEvent().payload) }
+        return max(0, total - silent)
     }
 
     /// The TTL columns after a history insert touched [convo]. A row whose
