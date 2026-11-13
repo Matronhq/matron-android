@@ -260,6 +260,19 @@ interface EventDao {
     )
     suspend fun countUnread(convoID: String, afterSeq: Long, messageTypes: Collection<String>, ownSender: String): Int
 
+    /// The rows [countUnread] counts whose payload mentions a `silent` key
+    /// at all. The store parses these few to take the silent ones off the
+    /// count (`JournalEventType.isSilent`); SQLite's JSON functions are not
+    /// on every device.
+    @Query(
+        "SELECT * FROM event WHERE convo_id = :convoID AND seq > :afterSeq " +
+            "AND type IN (:messageTypes) AND sender != :ownSender " +
+            "AND instr(payload, '\"silent\"') > 0"
+    )
+    suspend fun unreadMentioningSilent(
+        convoID: String, afterSeq: Long, messageTypes: Collection<String>, ownSender: String,
+    ): List<EventEntity>
+
     /// One page of a maintenance sweep: rows of the given [types] with
     /// `ts <= cutoff`, walking the `event_type_ts` index forward from the
     /// keyset `(afterTS, afterSeq)`. Keyset rather than OFFSET paging: rows

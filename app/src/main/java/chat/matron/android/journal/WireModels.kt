@@ -126,6 +126,14 @@ object JournalEventType {
     val MESSAGE_TYPES: Set<String> = setOf(
         TEXT, TOOL_OUTPUT, DIFF, PROMPT, PERMISSION_REQUEST, FILE, IMAGE, SPAWN_OUTCOME,
     )
+
+    /// A silent event is content the user can read in the chat but is never
+    /// told about: `silent: true` on the payload of any message type
+    /// (protocol "Silent events"). It is shown like any other row, but never
+    /// counts as unread. A bridge sets it on a card that only records
+    /// something, such as the one for a reminder an agent set itself. Only a
+    /// JSON `true` counts, as on the server.
+    fun isSilent(payload: JsonObject): Boolean = payload.boolOrNull("silent") == true
 }
 
 /// One durable journal row. `payload` keeps the raw JSON object so arbitrary

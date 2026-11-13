@@ -291,6 +291,32 @@ class JournalStoreTest {
     }
 
     @Test
+    fun aSilentEventIsStoredButNeverCountsAsUnread() = runBlocking {
+        val store = makeStore()
+        val card = buildJsonObject {
+            put("question", "Reminder set"); put("blocking", false); put("silent", true)
+        }
+        store.applyJournal(ev(1))
+        store.applyJournal(ev(2, type = "prompt", payload = card))
+        store.applyJournal(ev(3, payload = buildJsonObject { put("body", "done"); put("silent", true) }))
+        // Only a JSON true is silent, and a body that merely mentions the
+        // word is an ordinary message.
+        store.applyJournal(ev(4, payload = buildJsonObject { put("body", "x"); put("silent", 1) }))
+        store.applyJournal(ev(5, payload = body("the \"silent\" flag")))
+        assertEquals(3, store.conversations().first().unreadCount)
+        // Still content: it is the row's latest line.
+        store.applyJournal(ev(6, type = "prompt", payload = card))
+        assertEquals(3, store.conversations().first().unreadCount)
+        assertEquals("? Reminder set", store.conversations().first().snippet)
+        // A read marker recounts without them as well.
+        store.applyJournal(
+            ev(7, sender = "user:alice", type = "read_marker",
+                payload = buildJsonObject { put("convo_id", "c1"); put("up_to_seq", 1) })
+        )
+        assertEquals(2, store.conversations().first().unreadCount)
+    }
+
+    @Test
     fun sessionStatusUpdatesStateWithoutUnread() = runBlocking {
         val store = makeStore()
         store.applyJournal(ev(1, type = "session_status", payload = buildJsonObject { put("state", "waiting") }))
