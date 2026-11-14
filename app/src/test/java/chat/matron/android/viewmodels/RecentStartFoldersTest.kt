@@ -15,8 +15,8 @@ class RecentStartFoldersTest {
     @Test
     fun record_thenMatch_returnsRecordedFolder() {
         val store = makeStore()
-        store.record("~/yearly-app")
-        assertEquals(listOf("~/yearly-app"), store.matches("~/y"))
+        store.record("~/acme-app")
+        assertEquals(listOf("~/acme-app"), store.matches("~/a"))
     }
 
     @Test

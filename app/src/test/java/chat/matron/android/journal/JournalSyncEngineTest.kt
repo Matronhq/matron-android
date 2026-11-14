@@ -553,7 +553,7 @@ class JournalSyncEngineTest {
         val probe = FlowProbe(this, engine.newConversations())
         delay(50)
         socket.serve(journalLine(2, convo = "cTop", type = "session_status")) // first frame, title unknown
-        socket.serve(metaLine(3, convo = "cTop", title = "yearly-app")) // plain title → emit now
+        socket.serve(metaLine(3, convo = "cTop", title = "acme-app")) // plain title → emit now
         assertEquals("a status-first session must auto-open once its plain-titled meta arrives", "cTop", probe.next())
         probe.cancel()
         engine.endSync()

@@ -808,12 +808,12 @@ class ComposerViewModelTest {
     @Test
     fun send_recordsStartFolder_thenSuggested() = runBlocking {
         val vm = makeVM(roomID = "!r", commands = BotCommandCatalog.claudeBridge)
-        vm.input = "/start ~/yearly-app"
+        vm.input = "/start ~/acme-app"
         vm.send()
 
-        vm.input = "/start ~/y"
+        vm.input = "/start ~/a"
         assertTrue(vm.showPalette)
-        assertEquals(listOf("~/yearly-app"), vm.folderSuggestions)
+        assertEquals(listOf("~/acme-app"), vm.folderSuggestions)
     }
 
     @Test
@@ -843,9 +843,9 @@ class ComposerViewModelTest {
     @Test
     fun selectFolder_replacesTrailingPartial_noTrailingSpace() {
         val vm = makeVM(roomID = "!r", commands = BotCommandCatalog.claudeBridge)
-        vm.input = "/start ~/y"
-        vm.selectFolder("~/yearly-app")
-        assertEquals("/start ~/yearly-app", vm.input)
+        vm.input = "/start ~/a"
+        vm.selectFolder("~/acme-app")
+        assertEquals("/start ~/acme-app", vm.input)
     }
 
     @Test
@@ -859,38 +859,38 @@ class ComposerViewModelTest {
     @Test
     fun selectFolder_dismissesPalette() {
         val store = emptyRecentFolders()
-        store.record("~/yearly-app")
-        store.record("~/yearly-api")
+        store.record("~/acme-app")
+        store.record("~/acme-api")
         val vm = makeVM(roomID = "!r", commands = BotCommandCatalog.claudeBridge, recentFolders = store)
-        vm.input = "/start ~/y"
+        vm.input = "/start ~/a"
         assertFalse(vm.folderSuggestions.isEmpty())
 
-        vm.selectFolder("~/yearly-app")
+        vm.selectFolder("~/acme-app")
         assertTrue(vm.folderSuggestions.isEmpty())
         assertFalse(vm.showPalette)
 
-        vm.input = "/start ~/year"
+        vm.input = "/start ~/acme"
         assertFalse(vm.folderSuggestions.isEmpty())
     }
 
     @Test
     fun folderSuppression_clearsOnSendAndOnEdit() = runBlocking {
         val store = emptyRecentFolders()
-        store.record("~/yearly-app")
-        store.record("~/yearly-app-v2")
+        store.record("~/acme-app")
+        store.record("~/acme-app-v2")
         val vm = makeVM(roomID = "!r", commands = BotCommandCatalog.claudeBridge, recentFolders = store)
-        vm.input = "/start ~/year"
-        vm.selectFolder("~/yearly-app")
+        vm.input = "/start ~/acme"
+        vm.selectFolder("~/acme-app")
         assertTrue(vm.folderSuggestions.isEmpty())
         vm.send()
 
-        vm.input = "/start ~/yearly-app"
+        vm.input = "/start ~/acme-app"
         vm.handleInputChange()
-        assertEquals(listOf("~/yearly-app-v2"), vm.folderSuggestions)
+        assertEquals(listOf("~/acme-app-v2"), vm.folderSuggestions)
 
-        vm.selectFolder("~/yearly-app-v2")
+        vm.selectFolder("~/acme-app-v2")
         assertTrue(vm.folderSuggestions.isEmpty())
-        vm.input = "/start ~/yearly-app"
+        vm.input = "/start ~/acme-app"
         vm.handleInputChange()
         assertFalse(vm.folderSuggestions.isEmpty())
     }
@@ -898,9 +898,9 @@ class ComposerViewModelTest {
     @Test
     fun folderSuggestions_omitFullyTypedPath() {
         val store = emptyRecentFolders()
-        store.record("~/yearly-app")
+        store.record("~/acme-app")
         val vm = makeVM(roomID = "!r", commands = BotCommandCatalog.claudeBridge, recentFolders = store)
-        vm.input = "/start ~/YEARLY-APP"
+        vm.input = "/start ~/ACME-APP"
         assertTrue(vm.folderSuggestions.isEmpty())
         assertFalse(vm.showPalette)
     }
@@ -1191,9 +1191,9 @@ class ComposerViewModelTest {
     @Test
     fun selectSuggestion_folder_delegatesToFolderPick() {
         val vm = makeVM(commands = BotCommandCatalog.claudeBridge)
-        vm.input = "/start ~/y"
-        vm.selectSuggestion(PaletteSuggestion.Folder("~/yearly-app"))
-        assertEquals("/start ~/yearly-app", vm.input)
+        vm.input = "/start ~/a"
+        vm.selectSuggestion(PaletteSuggestion.Folder("~/acme-app"))
+        assertEquals("/start ~/acme-app", vm.input)
     }
 
     @Test
