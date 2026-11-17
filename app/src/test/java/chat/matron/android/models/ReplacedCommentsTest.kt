@@ -36,6 +36,14 @@ class ReplacedCommentsTest {
     }
 
     @Test
+    fun anotherPersonsReplyIsKeptEvenWhenAReplacesNamesIt() {
+        val contributors = reply("ic_c", "x").copy(contributor = Contributor("bob", Contributor.Via.USER))
+        val handedOver = reply("ic_h", "y").copy(attribution = "bob")
+        val thread = listOf(contributors, handedOver, reply("ic_7", "a", replaces = "ic_c"), reply("ic_6", "b", replaces = "ic_h"))
+        assertEquals(listOf("ic_c", "ic_h", "ic_7", "ic_6"), TrackerComment.hidingReplaced(thread).map { it.id })
+    }
+
+    @Test
     fun onlyTheUsersOwnRepliesAreEverLeftOut() {
         val agents = TrackerComment(id = "ic_a", itemID = "it_1", author = ItemAuthor.AGENT, body = "Noted")
         val status = TrackerComment(id = "ic_s", itemID = "it_1", author = ItemAuthor.USER, kind = TrackerComment.Kind.STATUS, body = "")

@@ -542,7 +542,12 @@ data class TrackerComment(
         fun hidingReplaced(comments: List<TrackerComment>): List<TrackerComment> {
             val replaced = comments.mapNotNullTo(HashSet()) { it.replaces }
             if (replaced.isEmpty()) return comments
-            return comments.filterNot { it.author == ItemAuthor.USER && it.kind == Kind.COMMENT && it.id in replaced }
+            // Another person's reply (a contributor's, or one copied in by a
+            // hand-over) also carries the user as author: never left out.
+            return comments.filterNot {
+                it.author == ItemAuthor.USER && it.kind == Kind.COMMENT && it.contributor == null &&
+                    it.attribution == null && it.id in replaced
+            }
         }
     }
 }
