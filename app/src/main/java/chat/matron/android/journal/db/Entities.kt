@@ -356,7 +356,8 @@ data class ItemEntity(
 /// One row of an item's thread. `meta_json` holds the `{from, to}` status
 /// snapshots of a synthetic `status` row, and a comment's action buttons
 /// (`actions`, `chosen`) or the tap it records (`action`, `reply_to`) —
-/// plus its author attribution (`device_name`, `convo_id`, `convo_title`).
+/// plus its author attribution (`device_name`, `convo_id`, `convo_title`)
+/// and the cancelled reply an edit stands in for (`replaces`).
 /// `null` for an ordinary comment with none of those. These ride in
 /// this existing column rather than in new ones so they need no migration:
 /// rows cached before this version read as "no buttons" until the thread's
@@ -390,6 +391,7 @@ data class ItemCommentEntity(
         @SerialName("contributor_name") val contributorName: String? = null,
         @SerialName("contributor_via") val contributorVia: String? = null,
         val attribution: String? = null,
+        val replaces: String? = null,
     )
 
     fun toComment(): TrackerComment {
@@ -412,6 +414,7 @@ data class ItemCommentEntity(
                 Contributor(it, Contributor.Via.parse(meta.contributorVia) ?: Contributor.Via.USER)
             },
             attribution = meta?.attribution,
+            replaces = meta?.replaces,
         )
     }
 
@@ -422,7 +425,7 @@ data class ItemCommentEntity(
             val hasButtons = c.actions.isNotEmpty() || c.chosenAction != null || c.action != null || c.replyTo != null
             val hasAuthor = c.deviceName != null || c.convoID != null || c.convoTitle != null ||
                 c.contributor != null || c.attribution != null
-            val meta = if (c.statusFrom != null || c.statusTo != null || hasButtons || hasAuthor) {
+            val meta = if (c.statusFrom != null || c.statusTo != null || hasButtons || hasAuthor || c.replaces != null) {
                 MatronJson.encodeToString(
                     Meta.serializer(),
                     Meta(
@@ -432,6 +435,7 @@ data class ItemCommentEntity(
                         deviceName = c.deviceName, convoID = c.convoID, convoTitle = c.convoTitle,
                         contributorName = c.contributor?.name, contributorVia = c.contributor?.via?.wire,
                         attribution = c.attribution,
+                        replaces = c.replaces,
                     ),
                 )
             } else {
