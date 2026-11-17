@@ -471,6 +471,11 @@ data class TrackerComment(
     /// contributor's comment and on every comment copied by a hand-over
     /// (which carries only this). Null on everything else.
     val attribution: String? = null,
+    /// The id of the user's own reply this one is the edited version of:
+    /// that reply was cancelled before it reached the agent and this one sent
+    /// in its place, so the thread shows this reply alone. Null on every
+    /// other comment.
+    val replaces: String? = null,
 ) {
     /// "by bob" / "by bob's agent" when someone other than this user's own
     /// side wrote it; null otherwise.
@@ -525,7 +530,19 @@ data class TrackerComment(
                 convoTitle = json.stringOrNull("convo_title"),
                 contributor = Contributor.on(json),
                 attribution = json.stringOrNull("attribution")?.takeIf { it.isNotBlank() },
+                replaces = json.stringOrNull("replaces")?.takeIf { it.isNotEmpty() },
             )
+        }
+
+        /// [comments] without the replies a later comment [replaces]: the
+        /// user cancelled a reply before it reached the agent and sent an
+        /// edited one in its place, so the thread shows the edit alone. Only
+        /// the user's own plain replies are ever left out, whatever a
+        /// `replaces` names.
+        fun hidingReplaced(comments: List<TrackerComment>): List<TrackerComment> {
+            val replaced = comments.mapNotNullTo(HashSet()) { it.replaces }
+            if (replaced.isEmpty()) return comments
+            return comments.filterNot { it.author == ItemAuthor.USER && it.kind == Kind.COMMENT && it.id in replaced }
         }
     }
 }

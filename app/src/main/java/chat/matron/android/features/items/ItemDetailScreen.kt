@@ -76,6 +76,7 @@ import chat.matron.android.journal.MissionsStoreReading
 import chat.matron.android.models.ItemState
 import chat.matron.android.models.Mission
 import chat.matron.android.models.TrackerAttachment
+import chat.matron.android.models.TrackerComment
 import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.ItemDetailViewModel
 import chat.matron.android.viewmodels.ItemReadMemory
@@ -164,6 +165,9 @@ fun ItemDetailScreen(
     val scope = rememberCoroutineScope()
     val item by viewModel.item.collectAsStateWithLifecycle()
     val comments by viewModel.comments.collectAsStateWithLifecycle()
+    // The thread as shown: a reply the user cancelled and then sent again
+    // edited is left out, so the edit stands alone in its place.
+    val thread = remember(comments) { TrackerComment.hidingReplaced(comments) }
     val openableCommentConvoIDs by viewModel.openableCommentConvoIDs.collectAsStateWithLifecycle()
     val pending by viewModel.pendingComments.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
@@ -198,8 +202,8 @@ fun ItemDetailScreen(
     val images = remember { mutableStateMapOf<String, Any>() }
     fun mediaURL(a: TrackerAttachment): String =
         serverURL.newBuilder().addPathSegment("media").addPathSegment(a.blobRef).build().toString()
-    val imageAttachments = remember(item, comments) {
-        (item?.attachments.orEmpty() + comments.flatMap { it.attachments }).filter { it.isImage }
+    val imageAttachments = remember(item, thread) {
+        (item?.attachments.orEmpty() + thread.flatMap { it.attachments }).filter { it.isImage }
     }
     LaunchedEffect(imageAttachments) {
         for (a in imageBlobsToLoad(imageAttachments, images.keys)) {
@@ -406,7 +410,7 @@ fun ItemDetailScreen(
                             ItemDetailView(
                                 model = ItemDetailModel(
                                     item = current,
-                                    comments = comments,
+                                    comments = thread,
                                     openableConvoIDs = openableCommentConvoIDs,
                                     pending = pending.map { row ->
                                         val payload = runCatching { MatronJson.decodeFromString(ItemsSync.CommentPayload.serializer(), row.payloadJson) }.getOrNull()
@@ -419,7 +423,8 @@ fun ItemDetailScreen(
                                     context = itemContext(current, currentConvoID, origin, mission),
                                     availableResolutions = viewModel.availableResolutions,
                                     isBusy = isBusy,
-                                    loadedCommentCount = loadedCount,
+                                    // Counted in the shown thread's terms.
+                                    loadedCommentCount = loadedCount?.let { maxOf(0, it - (comments.size - thread.size)) },
                                     pendingTaps = ItemDetailViewModel.pendingTaps(pending),
                                     pendingItemTap = ItemDetailViewModel.pendingItemTap(pending),
                                     working = working,
