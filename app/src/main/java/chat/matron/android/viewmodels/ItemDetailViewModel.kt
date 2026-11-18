@@ -176,7 +176,7 @@ class ItemDetailViewModel(
         val known = ownerSessionState
         _workingIndicator.value = when (working?.state) {
             null -> null
-            ItemWorking.State.QUEUED -> ItemWorkingIndicator.STARTING
+            ItemWorking.State.QUEUED -> if (working.behindTurn) ItemWorkingIndicator.BUSY_ELSEWHERE else ItemWorkingIndicator.STARTING
             // The stored copy is as old as its last fetch. A device that has
             // the owner conversation sets it against what it knows itself:
             // once it has seen the turn end, the copy is stale, and the

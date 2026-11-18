@@ -59,6 +59,21 @@ class ItemWorkingIndicatorTest {
         vm.stop()
     }
 
+    /// A tap made while the agent is mid-turn on something else waits for
+    /// that turn: the thread says so, not that the agent is working on it.
+    @Test
+    fun aReplyWaitingBehindAnotherTurnSaysTheAgentIsBusyElsewhere() = runBlocking {
+        val store = FakeItemsStore()
+        val vm = ItemDetailViewModel("it_1", store, FakeItemsApi(), FakeItemsSync(), this, staging)
+        vm.start()
+        store.item.emit(item(ItemWorking(ItemWorking.State.QUEUED, Instant.now(), behindTurn = true)))
+        waitUntil { vm.workingIndicator.value == ItemWorkingIndicator.BUSY_ELSEWHERE }
+        // Its own turn starts.
+        store.item.emit(item(running()))
+        waitUntil { vm.workingIndicator.value == ItemWorkingIndicator.WORKING }
+        vm.stop()
+    }
+
     @Test
     fun aQueuedStateAlreadyPastItsDeadlineShowsNothing() = runBlocking {
         val store = FakeItemsStore()
