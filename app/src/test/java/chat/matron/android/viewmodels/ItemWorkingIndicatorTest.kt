@@ -182,6 +182,22 @@ class ItemWorkingIndicatorTest {
         vm.stop()
     }
 
+    /// A behind-turn copy is as old as its fetch, like a running one: once
+    /// this device has seen the owner's turn end, it is not shown.
+    @Test
+    fun aBehindTurnCopyIsNotShownOnceTheTurnIsKnownToHaveEnded() = runBlocking {
+        val store = FakeItemsStore()
+        val vm = ItemDetailViewModel("it_1", store, FakeItemsApi(), FakeItemsSync(), this, staging)
+        vm.start()
+        store.ownerSession.emit("running")
+        store.item.emit(item(ItemWorking(ItemWorking.State.QUEUED, Instant.now(), behindTurn = true)))
+        waitUntil { vm.workingIndicator.value == ItemWorkingIndicator.BUSY_ELSEWHERE }
+
+        store.ownerSession.emit("waiting")
+        waitUntil { vm.workingIndicator.value == null }
+        vm.stop()
+    }
+
     /// A device without the owner conversation has no state of its own to set
     /// against the journal's.
     @Test
