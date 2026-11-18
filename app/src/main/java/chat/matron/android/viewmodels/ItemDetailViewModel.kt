@@ -174,18 +174,19 @@ class ItemDetailViewModel(
         // says whether its agent is busy.
         val working = _item.value?.takeIf { it.originConvoID.isNotEmpty() }?.working?.takeIf { it.isCurrent(now()) }
         val known = ownerSessionState
+        // The stored copy is as old as its last fetch. A device that has the
+        // owner conversation sets it against what it knows itself: once it
+        // has seen the turn end, the copy is stale, and the refetch that
+        // event started will say so. A device without the conversation waits
+        // for the opening read before it claims any work at all.
+        val midTurn = if (known != null) known == SessionState.RUNNING else _loadedCommentCount.value != null
         _workingIndicator.value = when (working?.state) {
             null -> null
-            ItemWorking.State.QUEUED -> ItemWorkingIndicator.STARTING
-            // The stored copy is as old as its last fetch. A device that has
-            // the owner conversation sets it against what it knows itself:
-            // once it has seen the turn end, the copy is stale, and the
-            // refetch that event started will say so. A device without the
-            // conversation waits for the opening read before it claims any
-            // work at all.
-            ItemWorking.State.RUNNING -> ItemWorkingIndicator.WORKING.takeIf {
-                if (known != null) known == SessionState.RUNNING else _loadedCommentCount.value != null
-            }
+            // Mid-turn on something else: as fresh as a running copy, so held
+            // to the same check. It has no `until` to lapse at.
+            ItemWorking.State.QUEUED ->
+                if (working.behindTurn) ItemWorkingIndicator.BUSY_ELSEWHERE.takeIf { midTurn } else ItemWorkingIndicator.STARTING
+            ItemWorking.State.RUNNING -> ItemWorkingIndicator.WORKING.takeIf { midTurn }
         }
     }
 

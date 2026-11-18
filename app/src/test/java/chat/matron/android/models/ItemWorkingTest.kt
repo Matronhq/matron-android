@@ -39,6 +39,19 @@ class ItemWorkingTest {
         )
     }
 
+    /// A reply that came after the running turn started waits behind it:
+    /// the journal says so, with no lapse while that turn runs.
+    @Test
+    fun aQueuedStateBehindARunningTurnParsesAndRoundTrips() {
+        val item = item("""{"state":"queued","since":5000,"until":null,"behind_turn":true}""")
+        val behind = ItemWorking(ItemWorking.State.QUEUED, Instant.ofEpochMilli(5_000), behindTurn = true)
+        assertEquals(behind, item?.working)
+        assertTrue(behind.isCurrent(Instant.MAX))
+        assertEquals(behind, ItemWorking.fromJson(behind.toJson()))
+        assertFalse("only a queued state is behind a turn",
+            item("""{"state":"running","since":5000,"behind_turn":true}""")?.working!!.behindTurn)
+    }
+
     @Test
     fun nothingToShowIsNull() {
         assertNotNull(item("null")); assertNull(item("null")?.working)
@@ -75,6 +88,7 @@ class ItemWorkingTest {
     @Test
     fun theIndicatorNamesTheTwoStates() {
         assertEquals("Starting…", ItemWorkingIndicator.STARTING.label)
+        assertEquals("Busy with something else. Yours is next.", ItemWorkingIndicator.BUSY_ELSEWHERE.label)
         assertEquals("Working…", ItemWorkingIndicator.WORKING.label)
     }
 }

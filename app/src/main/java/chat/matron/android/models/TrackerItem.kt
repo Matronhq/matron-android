@@ -178,8 +178,12 @@ data class ItemWorking(
     /// when the user wrote ([State.QUEUED]).
     val since: Instant? = null,
     /// When a [State.QUEUED] state lapses if nothing else happens; `null`
-    /// while [State.RUNNING].
+    /// while [State.RUNNING], and while [behindTurn].
     val until: Instant? = null,
+    /// [State.QUEUED] only: the session is mid-turn on something that
+    /// started before the user wrote, so the reply waits for that turn to
+    /// end. The journal's `behind_turn`; false from a journal without it.
+    val behindTurn: Boolean = false,
 ) {
     enum class State(val wire: String) {
         /// The owning conversation is mid-turn, whether or not the turn is
@@ -189,7 +193,7 @@ data class ItemWorking(
         /// The user wrote something on the item that reaches the agent as a
         /// turn, and no turn has started since: the box is being started,
         /// the session resumed, or the reply is waiting behind the turn in
-        /// flight.
+        /// flight ([behindTurn]).
         QUEUED("queued");
 
         companion object {
@@ -206,12 +210,14 @@ data class ItemWorking(
         put("state", state.wire)
         since?.let { put("since", it.toEpochMilli()) }
         until?.let { put("until", it.toEpochMilli()) }
+        if (behindTurn) put("behind_turn", true)
     }
 
     companion object {
         fun fromJson(json: JsonObject?): ItemWorking? {
             val state = State.fromWire(json?.stringOrNull("state")) ?: return null
-            return ItemWorking(state, msInstant(json?.longOrNull("since")), msInstant(json?.longOrNull("until")))
+            val behind = state == State.QUEUED && json?.boolOrNull("behind_turn") == true
+            return ItemWorking(state, msInstant(json?.longOrNull("since")), msInstant(json?.longOrNull("until")), behind)
         }
     }
 }
@@ -221,6 +227,10 @@ data class ItemWorking(
 enum class ItemWorkingIndicator(val label: String) {
     /// The reply is on its way to the agent; its turn has not started.
     STARTING("Starting…"),
+
+    /// The agent is mid-turn on something that started before the reply,
+    /// which waits for that turn to end and then goes next.
+    BUSY_ELSEWHERE("Busy with something else. Yours is next."),
 
     /// The agent is mid-turn.
     WORKING("Working…"),
