@@ -32,6 +32,7 @@ import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.ItemState
 import chat.matron.android.models.TrackerItem
 import chat.matron.android.models.inlineAttachmentRefsAsCaptions
+import androidx.compose.ui.platform.LocalContext
 import coil.compose.AsyncImage
 
 /// `#61` when the item belongs to a mission, else `null`. Deliberately bare:
@@ -160,7 +161,8 @@ fun ItemRow(
         }
         if (thumbnail != null) {
             AsyncImage(
-                model = thumbnail,
+                // A list-row thumbnail stays still.
+                model = AnimatedImages.still(LocalContext.current, thumbnail),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.size(40.dp).clip(RoundedCornerShape(6.dp)),

@@ -51,6 +51,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.chat.MediaService
 import chat.matron.android.designsystem.AttachmentFullscreenViewer
+import chat.matron.android.designsystem.ImageGallery
+import chat.matron.android.designsystem.itemThreadImages
 import chat.matron.android.designsystem.MarkdownPreview
 import chat.matron.android.designsystem.MarkdownPreviewState
 import chat.matron.android.designsystem.MarkdownPreviewTarget
@@ -69,7 +71,10 @@ import chat.matron.android.designsystem.rememberMessageLinkOpener
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.PendingCommentModel
 import chat.matron.android.features.chat.copyUriToTemp
+import chat.matron.android.designsystem.AttachmentPaste
 import chat.matron.android.features.chat.openAttachment
+import chat.matron.android.features.chat.attachmentMimeType
+import chat.matron.android.designsystem.rememberAttachmentSaver
 import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.MatronJson
 import chat.matron.android.journal.MissionsStoreReading
@@ -181,8 +186,7 @@ fun ItemDetailScreen(
     // value back, so this only fires on a restore.
     val vmDraft by viewModel.draftFlow.collectAsStateWithLifecycle()
     LaunchedEffect(vmDraft) { if (vmDraft != draft) draft = vmDraft }
-    var previewModel by remember { mutableStateOf<Any?>(null) }
-    var previewName by remember { mutableStateOf<String?>(null) }
+    var previewGallery by remember { mutableStateOf<ImageGallery?>(null) }
     var attachMenu by remember { mutableStateOf(false) }
     var openingBlob by remember { mutableStateOf<String?>(null) }
     val markdownPreview = remember { MarkdownPreviewState() }
@@ -243,9 +247,13 @@ fun ItemDetailScreen(
 
     // --- Attachment picking (the chat composer's wiring) -------------------
     // A pick is staged into the composer's tray; it goes with the next send.
-    fun attachUri(uri: Uri) {
+    fun attachUri(uri: Uri, pasted: Boolean = false) {
         scope.launch {
-            val picked = withContext(Dispatchers.IO) { copyUriToTemp(context, uri) }
+            val picked = withContext(Dispatchers.IO) {
+                // A pasted item with no name of its own is named for when it
+                // was pasted.
+                if (pasted) copyUriToTemp(context, uri, AttachmentPaste::fallbackName) else copyUriToTemp(context, uri)
+            }
             if (picked == null) {
                 viewModel.reportError("Couldn't read that file.")
                 return@launch
@@ -254,7 +262,7 @@ fun ItemDetailScreen(
                 viewModel.attachFiles(listOf(picked))
             } finally {
                 // The tray holds its own staged copy.
-                picked.delete()
+                picked.parentFile?.deleteRecursively()
             }
         }
     }
@@ -344,10 +352,14 @@ fun ItemDetailScreen(
         }
     }
 
+    // The file chips' Save button: the original file, where the user picks.
+    val fileSaver = rememberAttachmentSaver { attachmentMimeType(it) }
+
     fun openAttachment(a: TrackerAttachment) {
         if (a.isImage) {
-            previewModel = images[a.blobRef] ?: mediaURL(a)
-            previewName = a.name.ifEmpty { null }
+            previewGallery = itemThreadGallery(itemThreadImages(item, thread), a, images, ::mediaURL) { url ->
+                nullOnFailure { media.image(url) }
+            }
             return
         }
         // Markdown (≤ 2 MB) opens in the in-app preview; its Download
@@ -433,6 +445,10 @@ fun ItemDetailScreen(
                                 onDraftChange = { draft = it; viewModel.draft = it },
                                 image = { a -> images[a.blobRef] },
                                 onOpenAttachment = ::openAttachment,
+                                onSaveAttachment = { a ->
+                                    fileSaver.save(a.blobRef, a.name, a.mime) { nullOnFailure { media.image(mediaURL(a)) } }
+                                },
+                                isSavingAttachment = { a -> fileSaver.isSaving(a.blobRef) },
                                 // Through the shared policy, so an item link in a link chip opens
                                     // in-app and no matron:// URL is ever handed to the OS.
                                     onOpenLink = rememberMessageLinkOpener(),
@@ -478,6 +494,7 @@ fun ItemDetailScreen(
                                 onRetryPending = { id -> scope.launch { viewModel.retryComment(id) } },
                                 onDiscardPending = { id -> scope.launch { viewModel.discardComment(id) } },
                                 onAttach = { attachMenu = true },
+                                onPasteAttachments = { uris -> uris.forEach { attachUri(it, pasted = true) } },
                                 onVoiceNote = {
                                     // The composer disables the mic outside IDLE; this
                                     // also covers a tap racing that recomposition.
@@ -538,15 +555,31 @@ fun ItemDetailScreen(
         }
     }
 
-    if (previewModel != null) {
-        AttachmentFullscreenViewer(
-            model = previewModel,
-            name = previewName,
-            // Still a URL when the inline load hasn't landed: Download fetches it.
-            load = { url -> nullOnFailure { media.image(url) } },
-            onDismiss = { previewModel = null },
-        )
+    previewGallery?.let { gallery ->
+        AttachmentFullscreenViewer(gallery = gallery, onDismiss = { previewGallery = null })
     }
+}
+
+/// The viewer for a tapped image in an item thread: every image the thread
+/// shows ([itemThreadImages]), starting on [tapped], so a sideways swipe
+/// steps through them as it does in a chat. Images the thread already
+/// loaded ([loaded], by blob ref) open without a second fetch; the rest go
+/// through [fetch]. The tapped image opens on what the thread drew for it,
+/// or its URL while its load has not landed (Download then fetches it).
+internal fun itemThreadGallery(
+    shown: List<TrackerAttachment>,
+    tapped: TrackerAttachment,
+    loaded: Map<String, Any>,
+    mediaURL: (TrackerAttachment) -> String,
+    fetch: suspend (String) -> Any?,
+): ImageGallery {
+    val initial = loaded[tapped.blobRef] ?: mediaURL(tapped)
+    val blobByURL = shown.associate { mediaURL(it) to it.blobRef }
+    val load: suspend (String) -> Any? = { url -> blobByURL[url]?.let { loaded[it] } ?: fetch(url) }
+    val start = shown.indexOfFirst { it.blobRef == tapped.blobRef }
+    if (start < 0) return ImageGallery.single(initial, tapped.name.ifEmpty { null }, load)
+    val entries = shown.map { ImageGallery.Entry(it.blobRef, mediaURL(it), expired = false, name = it.name.ifEmpty { null }) }
+    return ImageGallery(entries, start, initial, load)
 }
 
 private fun Context.findActivity(): Activity? =

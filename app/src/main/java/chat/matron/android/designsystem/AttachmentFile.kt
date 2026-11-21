@@ -10,10 +10,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -40,6 +42,11 @@ import java.util.Locale
 /// media reaper) — permanently gone. The chip dims, the subtitle reads
 /// "Expired", and there is no tap affordance — a silent no-op tap is the exact
 /// bug this chip family exists to avoid.
+///
+/// [onSave] adds a Save button at the chip's trailing edge: it keeps the
+/// original file where the user picks ([AttachmentSaver]), while a tap on the
+/// chip still opens it. Hosts that pass none draw the chip as before. No Save
+/// on an expired chip (there is nothing to fetch) or while it is downloading.
 @Composable
 fun AttachmentFile(
     filename: String,
@@ -49,6 +56,7 @@ fun AttachmentFile(
     isLoading: Boolean = false,
     isExpired: Boolean = false,
     onTap: (() -> Unit)? = null,
+    onSave: (() -> Unit)? = null,
 ) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(
@@ -104,6 +112,16 @@ fun AttachmentFile(
                         subtitle,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            if (onSave != null && !isExpired) {
+                IconButton(onClick = onSave, enabled = !isLoading, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        Icons.Filled.Download,
+                        contentDescription = "Save $filename",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp),
                     )
                 }
             }

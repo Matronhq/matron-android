@@ -37,6 +37,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -227,6 +229,31 @@ data class ItemStatusRow(val line: String?, val note: String?)
 fun itemStatusRow(comment: TrackerComment): ItemStatusRow =
     ItemStatusRow(itemStatusLine(comment), comment.body.takeIf { it.isNotBlank() })
 
+/// Every image the thread shows, in the order it shows them: the item's
+/// own, then each comment's, oldest first; within a card, the images placed
+/// in its text first, in reading order, then the ones listed after it
+/// ([splitInlineAttachments]). What the fullscreen viewer swipes through
+/// from a tapped image. A status change with no note draws no card, so its
+/// attachments are not on screen and are left out. An image shown more than
+/// once (the same blob attached again later) is listed once, where it first
+/// appears: a tap on any copy of it then has one place in the gallery,
+/// rather than the counter and neighbours of whichever copy came first.
+fun itemThreadImages(item: TrackerItem?, comments: List<TrackerComment>): List<TrackerAttachment> {
+    fun shown(body: String, attachments: List<TrackerAttachment>): List<TrackerAttachment> {
+        val split = splitInlineAttachments(body, attachments)
+        val inline = split.segments.mapNotNull { (it as? InlineSegment.Attachment)?.attachment }
+        return (inline + split.trailing).filter { it.isImage }
+    }
+    val cards = buildList {
+        if (item != null) add(item.body to item.attachments)
+        for (c in comments) {
+            val body = if (c.kind == TrackerComment.Kind.STATUS) itemStatusRow(c).note ?: continue else c.body
+            add(body to c.attachments)
+        }
+    }
+    return cards.flatMap { (body, attachments) -> shown(body, attachments) }.distinctBy { it.blobRef }
+}
+
 /// Maps outbox progress to the shared send glyph: a fresh comment that hasn't
 /// attempted a send yet reads as "Sending…"; once at least one attempt has
 /// been made without an error it's genuinely waiting on connectivity
@@ -363,7 +390,14 @@ fun ItemDetailView(
     /// can persist it for next time.
     onBottomVisibilityChange: ((Boolean) -> Unit)? = null,
     listState: LazyListState = rememberLazyListState(),
-) {
+    /// Copied files or images pasted into the reply field
+    /// ([AttachmentPasteTarget]). `null` keeps text-only paste.
+    onPasteAttachments: ((List<android.net.Uri>) -> Unit)? = null,
+    /// The file chips' Save button, and whether an attachment is being
+    /// fetched for one. `null` draws the chips without it.
+    onSaveAttachment: ((TrackerAttachment) -> Unit)? = null,
+    isSavingAttachment: (TrackerAttachment) -> Boolean = { false },
+) = CompositionLocalProvider(LocalItemAttachmentSave provides ItemAttachmentSave(onSaveAttachment, isSavingAttachment)) {
     val item = model.item
     val rowCount = model.comments.size + model.pending.size
     var placed by remember(item.id) { mutableStateOf(false) }
@@ -466,6 +500,7 @@ fun ItemDetailView(
                 onSubmit = onSubmit, onAttach = onAttach, onVoiceNote = onVoiceNote,
                 attachments = attachments, onRemoveAttachment = onRemoveAttachment,
                 voice = voice, onCancelRecording = onCancelRecording,
+                onPasteAttachments = onPasteAttachments,
             )
         }
     }
@@ -579,6 +614,15 @@ internal fun AuthorCaption(
 /// Renders a list of attachments with the shared chat-timeline primitives so
 /// items match the conversation surface. Audio gets a bespoke transcript
 /// treatment — neither shared primitive covers audio playback yet.
+/// The thread's file-chip Save, read by every attachment row however deep
+/// in the body or a comment it sits.
+private class ItemAttachmentSave(
+    val save: ((TrackerAttachment) -> Unit)?,
+    val isSaving: (TrackerAttachment) -> Boolean,
+)
+
+private val LocalItemAttachmentSave = compositionLocalOf { ItemAttachmentSave(null) { false } }
+
 @Composable
 private fun Attachments(list: List<TrackerAttachment>, image: (TrackerAttachment) -> Any?, onOpen: (TrackerAttachment) -> Unit) {
     list.forEach { a ->
@@ -601,7 +645,16 @@ private fun Attachments(list: List<TrackerAttachment>, image: (TrackerAttachment
                     Text(caption, style = ItemTypography.bodyStyle(), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            else -> AttachmentFile(filename = a.name, sizeBytes = a.size.takeIf { it > 0 }, onTap = { onOpen(a) })
+            else -> {
+                val save = LocalItemAttachmentSave.current
+                AttachmentFile(
+                    filename = a.name,
+                    sizeBytes = a.size.takeIf { it > 0 },
+                    isLoading = save.isSaving(a),
+                    onTap = { onOpen(a) },
+                    onSave = save.save?.let { { it(a) } },
+                )
+            }
         }
     }
 }

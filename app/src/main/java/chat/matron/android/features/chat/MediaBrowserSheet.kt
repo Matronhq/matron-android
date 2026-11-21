@@ -23,6 +23,8 @@ import chat.matron.android.designsystem.MediaBrowserLinkRow
 import chat.matron.android.designsystem.rememberMessageLinkOpener
 import chat.matron.android.designsystem.MediaBrowserMediaCell
 import chat.matron.android.designsystem.MediaBrowserView
+import chat.matron.android.designsystem.rememberAttachmentSaver
+import chat.matron.android.chat.MediaFetchOutcome
 import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.MediaBrowserViewModel
 import kotlinx.coroutines.launch
@@ -90,6 +92,7 @@ fun MediaBrowserSheet(
     val markdownPreview = remember { MarkdownPreviewState() }
 
     val context = LocalContext.current
+    val fileSaver = rememberAttachmentSaver { attachmentMimeType(it) }
     // Links lifted from message text: the same policy as tapping them in
     // the message itself (only web and email links reach the OS).
     val openLink = rememberMessageLinkOpener()
@@ -117,7 +120,7 @@ fun MediaBrowserSheet(
                         name = entry.name,
                         sizeBytes = entry.sizeBytes,
                         expired = entry.expired || isUnavailable(entry.url),
-                        isLoading = entry.url != null && entry.url in downloadingFiles,
+                        isLoading = entry.url != null && (entry.url in downloadingFiles || fileSaver.isSaving(entry.url)),
                         mime = entry.mime,
                     )
                 },
@@ -159,6 +162,14 @@ fun MediaBrowserSheet(
                             } finally {
                                 openingMedia = openingMedia - url
                             }
+                        }
+                    }
+                },
+                onFileSave = { row ->
+                    val url = row.url
+                    if (url != null && !row.expired) {
+                        fileSaver.save(url, row.name, row.mime) {
+                            (chatVM.fetchAttachment(url) as? MediaFetchOutcome.Data)?.bytes
                         }
                     }
                 },
