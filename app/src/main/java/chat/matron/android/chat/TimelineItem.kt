@@ -12,6 +12,7 @@ import chat.matron.android.events.RoutineMarkerEvent
 import chat.matron.android.events.ConsentDecisionEvent
 import chat.matron.android.events.CoordinatorMarkerEvent
 import chat.matron.android.events.SpawnOutcome
+import chat.matron.android.events.SystemNoticeEvent
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.models.TimelineSendState
 import java.time.Instant
@@ -179,6 +180,9 @@ data class TimelineItem(
         /// The Coordinator approved or declined a consent card on the user's
         /// behalf (journal `consent_decision`) — a one-line row.
         data class ConsentDecision(val eventID: String, val decision: ConsentDecisionEvent) : Kind
+        /// A bridge notice about a turn it injected (a `text` event tagged
+        /// `payload.notice`) — one quiet line that expands to the full text.
+        data class SystemNotice(val eventID: String, val notice: SystemNoticeEvent) : Kind
         /// Transient typing / tool-use indicator. Not persisted; appended as a
         /// trailing overlay row while the agent is thinking or running a tool.
         data class ActivityIndicator(val label: String) : Kind
