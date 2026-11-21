@@ -31,6 +31,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import chat.matron.android.models.StagedAttachment
+import androidx.compose.ui.platform.LocalContext
 import coil.compose.AsyncImage
 
 private val CHIP_SIDE = 56.dp
@@ -81,7 +82,8 @@ private fun StagedAttachmentChip(attachment: StagedAttachment, onRemove: () -> U
         ) {
             if (attachment.isImage) {
                 AsyncImage(
-                    model = attachment.file,
+                    // A tray thumbnail stays still.
+                    model = AnimatedImages.still(LocalContext.current, attachment.file),
                     contentDescription = null,
                     modifier = Modifier.size(CHIP_SIDE),
                     contentScale = ContentScale.Crop,
