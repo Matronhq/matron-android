@@ -107,6 +107,8 @@ fun MediaBrowserView(
     thumbnailVersion: Int = 0,
     onMediaTap: (MediaBrowserMediaCell) -> Unit = {},
     onFileTap: (MediaBrowserFileRow) -> Unit = {},
+    /// The Files tab's Save button. `null` draws the rows without one.
+    onFileSave: ((MediaBrowserFileRow) -> Unit)? = null,
     onLinkTap: (MediaBrowserLinkRow) -> Unit = {},
 ) {
     var tab by remember { mutableStateOf(initialTab) }
@@ -126,7 +128,7 @@ fun MediaBrowserView(
             } else {
                 when (tab) {
                     MediaBrowserTab.Media -> MediaGrid(media, thumbnail, thumbnailVersion, onMediaTap)
-                    MediaBrowserTab.Files -> FileList(files, onFileTap)
+                    MediaBrowserTab.Files -> FileList(files, onFileTap, onFileSave)
                     MediaBrowserTab.Links -> LinkList(links, onLinkTap)
                 }
             }
@@ -170,6 +172,7 @@ private fun MediaGrid(
 private fun FileList(
     files: List<MediaBrowserFileRow>,
     onFileTap: (MediaBrowserFileRow) -> Unit,
+    onFileSave: ((MediaBrowserFileRow) -> Unit)?,
 ) {
     if (files.isEmpty()) {
         BrowserEmptyState(
@@ -187,6 +190,7 @@ private fun FileList(
                 isLoading = row.isLoading,
                 isExpired = row.expired,
                 onTap = { onFileTap(row) },
+                onSave = if (onFileSave != null && row.url != null) ({ onFileSave(row) }) else null,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             )
         }

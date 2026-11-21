@@ -70,6 +70,8 @@ import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.PendingCommentModel
 import chat.matron.android.features.chat.copyUriToTemp
 import chat.matron.android.features.chat.openAttachment
+import chat.matron.android.features.chat.attachmentMimeType
+import chat.matron.android.designsystem.rememberAttachmentSaver
 import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.MatronJson
 import chat.matron.android.journal.MissionsStoreReading
@@ -344,6 +346,9 @@ fun ItemDetailScreen(
         }
     }
 
+    // The file chips' Save button: the original file, where the user picks.
+    val fileSaver = rememberAttachmentSaver { attachmentMimeType(it) }
+
     fun openAttachment(a: TrackerAttachment) {
         if (a.isImage) {
             previewModel = images[a.blobRef] ?: mediaURL(a)
@@ -433,6 +438,10 @@ fun ItemDetailScreen(
                                 onDraftChange = { draft = it; viewModel.draft = it },
                                 image = { a -> images[a.blobRef] },
                                 onOpenAttachment = ::openAttachment,
+                                onSaveAttachment = { a ->
+                                    fileSaver.save(a.blobRef, a.name, a.mime) { nullOnFailure { media.image(mediaURL(a)) } }
+                                },
+                                isSavingAttachment = { a -> fileSaver.isSaving(a.blobRef) },
                                 // Through the shared policy, so an item link in a link chip opens
                                     // in-app and no matron:// URL is ever handed to the OS.
                                     onOpenLink = rememberMessageLinkOpener(),
