@@ -30,6 +30,14 @@ import chat.matron.android.events.AgentSpawnCardState
 import chat.matron.android.events.AgentSpawnRequest
 import chat.matron.android.events.CoordinatorConsentBadge
 import chat.matron.android.events.SpawnOutcome
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import chat.matron.android.events.compactLine
+import java.time.Instant
 
 /// The agent-spawn consent card, inline in the timeline — one agent asking
 /// to spawn a child session on another of the user's devices, and the two
@@ -57,6 +65,61 @@ fun AgentSpawnRequestCard(
     coordinatorBadge: CoordinatorConsentBadge? = null,
     /// Stops the spawned session the badge names. Null omits the button.
     onStopSession: ((convoID: String) -> Unit)? = null,
+    /// In a timeline: once settled, the card folds to one line
+    /// ([CompactCardRow]) that opens it again, with Open on the line when the
+    /// session started; the full card keeps to [CONSENT_CARD_TIMELINE_WIDTH]
+    /// itself. Off elsewhere (item detail).
+    foldsWhenSettled: Boolean = false,
+    /// The line's time, when folded.
+    timestamp: Instant? = null,
+    initiallyExpanded: Boolean = false,
+) {
+    if (!foldsWhenSettled) {
+        AgentSpawnRequestCardBody(request, state, onApprove, onDeny, onOpen, modifier, coordinatorBadge, onStopSession)
+        return
+    }
+    val line = request.compactLine(state)
+    if (line == null) {
+        AgentSpawnRequestCardBody(
+            request, state, onApprove, onDeny, onOpen, modifier.widthIn(max = CONSENT_CARD_TIMELINE_WIDTH), coordinatorBadge, onStopSession,
+        )
+        return
+    }
+    var expanded by rememberSaveable { mutableStateOf(initiallyExpanded) }
+    val roomId = (state as? AgentSpawnCardState.Resolved)?.outcome?.openRoomId
+    CompactCardRow(
+        line = line,
+        timestamp = timestamp,
+        expanded = expanded,
+        onToggle = { expanded = !expanded },
+        modifier = modifier,
+        trailing = {
+            if (roomId != null) {
+                TextButton(onClick = { onOpen(roomId) }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
+                    Text("Open", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        },
+    ) {
+        AgentSpawnRequestCardBody(
+            request, state, onApprove, onDeny, onOpen, Modifier.widthIn(max = CONSENT_CARD_TIMELINE_WIDTH), coordinatorBadge, onStopSession,
+        )
+    }
+}
+
+/// The width a consent card keeps to in a timeline.
+val CONSENT_CARD_TIMELINE_WIDTH = 360.dp
+
+@Composable
+private fun AgentSpawnRequestCardBody(
+    request: AgentSpawnRequest,
+    state: AgentSpawnCardState,
+    onApprove: () -> Unit,
+    onDeny: () -> Unit,
+    onOpen: (roomId: String) -> Unit,
+    modifier: Modifier,
+    coordinatorBadge: CoordinatorConsentBadge?,
+    onStopSession: ((convoID: String) -> Unit)?,
 ) {
     val busy = state is AgentSpawnCardState.Sending
 
