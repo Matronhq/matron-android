@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import androidx.biometric.BiometricManager
@@ -130,7 +131,19 @@ object BiometricPromptHost {
 /// device has one), usable for one signature per strong-biometric check.
 /// There is no screen-lock fallback, and enrolling a new fingerprint or face
 /// destroys the key, as "biometry, current set" does on iOS.
-class KeystoreApprovalKeyProvider(private val context: Context) : ApprovalKeyProviding {
+class KeystoreApprovalKeyProvider(
+    private val context: Context,
+    /// Debuggable builds only: also enrol a key the Keystore holds in
+    /// software (an emulator without secure hardware), so the flow can be
+    /// exercised there. A release build refuses such a key.
+    private val allowSoftwareKeys: Boolean = false,
+) : ApprovalKeyProviding {
+    /// Aliases whose key a real signature found destroyed by a biometric
+    /// change. Learnt at signing, not probed: a probe would start a keystore
+    /// operation it never finishes, holding one of the few slots (StrongBox
+    /// has very few) until it is collected.
+    private val invalidatedAliases = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
     override val availability: ApprovalKeyAvailability
         get() {
             val manager = BiometricManager.from(context)
@@ -157,11 +170,37 @@ class KeystoreApprovalKeyProvider(private val context: Context) : ApprovalKeyPro
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) generate(alias, strongBox = false) else throw it
             }
             .getOrElse { throw ApprovalKeyFailure.Other("Couldn't create the key: ${it.message ?: it}") }
+        // Only a key held in secure hardware (the TEE or StrongBox) is an
+        // approval key: one the Keystore keeps in software could be copied
+        // off a compromised device.
+        if (!inSecureHardware(alias) && !allowSoftwareKeys) {
+            runCatching { KeyStore.getInstance(KEYSTORE).apply { load(null) }.deleteEntry(alias) }
+            throw ApprovalKeyFailure.Other(
+                "This device's secure hardware can't hold the key, so it can't approve with one. Approve on another device.",
+            )
+        }
         return StoredApprovalKey(
             kind = StoredApprovalKey.Kind.KEYSTORE, alias = alias,
             publicKey = ApprovalKeyEncoding.base64URL(made), createdAt = System.currentTimeMillis(),
         )
     }
+
+    /// Whether the Keystore says the key lives in secure hardware: at least
+    /// the TEE (`KeyInfo.securityLevel` on Android 12 and later,
+    /// `isInsideSecureHardware` before).
+    private fun inSecureHardware(alias: String): Boolean = runCatching {
+        val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
+        val key = keyStore.getKey(alias, null) as PrivateKey
+        val info = KeyFactory.getInstance(key.algorithm, KEYSTORE).getKeySpec(key, KeyInfo::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            info.securityLevel == KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT ||
+                info.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX ||
+                info.securityLevel == KeyProperties.SECURITY_LEVEL_UNKNOWN_SECURE
+        } else {
+            @Suppress("DEPRECATION")
+            info.isInsideSecureHardware
+        }
+    }.getOrDefault(false)
 
     private fun generate(alias: String, strongBox: Boolean): ByteArray {
         val builder = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
@@ -188,16 +227,13 @@ class KeystoreApprovalKeyProvider(private val context: Context) : ApprovalKeyPro
     override fun signingKey(stored: StoredApprovalKey): ApprovalSigningKey {
         // A shipped app never signs with a key that asks for no biometric check.
         if (stored.kind != StoredApprovalKey.Kind.KEYSTORE) throw ApprovalKeyFailure.Invalidated
+        if (stored.alias in invalidatedAliases) throw ApprovalKeyFailure.Invalidated
         val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
         val privateKey = runCatching { keyStore.getKey(stored.alias, null) as? PrivateKey }.getOrNull()
             ?: throw ApprovalKeyFailure.Invalidated
-        // The probe: a key destroyed by a biometric change refuses initSign.
-        try {
-            Signature.getInstance(SIGNATURE).initSign(privateKey)
-        } catch (_: KeyPermanentlyInvalidatedException) {
-            throw ApprovalKeyFailure.Invalidated
-        }
-        return KeystoreApprovalKey(privateKey, stored.publicKeyBytes)
+        // No probe here (see [invalidatedAliases]): a key a biometric change
+        // destroyed is found by the signature itself, which reports it.
+        return KeystoreApprovalKey(privateKey, stored.publicKeyBytes) { invalidatedAliases += stored.alias }
     }
 
     override fun destroy(stored: StoredApprovalKey) {
@@ -229,6 +265,8 @@ fun uncompressedPoint(key: ECPublicKey): ByteArray {
 class KeystoreApprovalKey internal constructor(
     private val privateKey: PrivateKey,
     override val publicKey: ByteArray,
+    /// Told when the key turns out to be destroyed by a biometric change.
+    private val onInvalidated: () -> Unit = {},
 ) : ApprovalSigningKey {
     override suspend fun signature(data: ByteArray, reason: String): ByteArray = withContext(Dispatchers.Main.immediate) {
         val activity = BiometricPromptHost.activity ?: throw ApprovalKeyFailure.Other("The app isn't on screen.")
@@ -236,6 +274,7 @@ class KeystoreApprovalKey internal constructor(
         try {
             signature.initSign(privateKey)
         } catch (_: KeyPermanentlyInvalidatedException) {
+            onInvalidated()
             throw ApprovalKeyFailure.Invalidated
         }
         val authorised = suspendCancellableCoroutine { continuation ->
@@ -271,6 +310,7 @@ class KeystoreApprovalKey internal constructor(
             authorised.update(data)
             authorised.sign()
         } catch (e: KeyPermanentlyInvalidatedException) {
+            onInvalidated()
             throw ApprovalKeyFailure.Invalidated
         } catch (e: Exception) {
             throw ApprovalKeyFailure.Other("Couldn't sign: ${e.message ?: e}")

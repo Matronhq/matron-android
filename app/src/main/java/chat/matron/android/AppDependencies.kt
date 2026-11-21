@@ -358,7 +358,12 @@ class AppDependencies(
         )
         core.approvals = ApprovalCenter(
             api = api,
-            keys = KeystoreApprovalKeyProvider(context),
+            keys = KeystoreApprovalKeyProvider(
+                context,
+                // Debuggable builds also take a software-held key, for
+                // emulators without secure hardware; release builds refuse it.
+                allowSoftwareKeys = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0,
+            ),
             store = ApprovalKeyStore(preferences, ApprovalCenter.journalHost(session.homeserverURL) ?: session.homeserverURL, session.userID),
             user = session.userID,
             deviceID = session.deviceID.toLongOrNull(),
