@@ -1053,6 +1053,37 @@ class ChatViewModelTest {
         assertFalse("a release names one prompt; other queued cards stay actionable", vm.isPromptAnswered("\$2"))
     }
 
+    private fun editTapItem(id: String, promptEventID: String, choice: String) = TimelineItem(
+        id = id,
+        sender = "@me:s",
+        timestamp = Instant.now(),
+        kind = TimelineItem.Kind.AskUserAnswer(promptEventID, listOf(choice)),
+        isOwn = true,
+        inReplyToEventID = promptEventID,
+    )
+
+    /// Edit holds the queued message; a cancelled edit lets it go as it was.
+    /// Neither answers the card, which keeps its Send now and Cancel.
+    @Test
+    fun queuedEditTaps_leaveTheQueueCardLive() = vmTest { scope ->
+        val vm = makeAskVM(
+            scope,
+            listOf(queuedCardItem("\$1", "pr_a"), editTapItem("\$2", "\$1", "edit"), editTapItem("\$3", "\$1", "edit_cancel")),
+            InMemoryKeyValueStore(),
+        )
+        assertFalse(vm.isPromptAnswered("\$1"))
+        assertNull(vm.answerSummary("\$1"))
+        assertEquals("\$1", vm.pendingAsk()?.id)
+    }
+
+    /// On any other prompt an option called `edit` is an ordinary answer.
+    @Test
+    fun anEditOptionOnAnOrdinaryPrompt_answersIt() = vmTest { scope ->
+        val vm = makeAskVM(scope, listOf(askItem("\$1"), editTapItem("\$2", "\$1", "edit")), InMemoryKeyValueStore())
+        assertTrue(vm.isPromptAnswered("\$1"))
+        assertNull(vm.pendingAsk())
+    }
+
     @Test
     fun answerSummary_mapsReleaseActionThroughCardOptions() = vmTest { scope ->
         val vm = makeAskVM(scope, listOf(queuedCardItem("\$1", "pr_a"), releaseItem("\$9", "pr_a", "send")), InMemoryKeyValueStore())

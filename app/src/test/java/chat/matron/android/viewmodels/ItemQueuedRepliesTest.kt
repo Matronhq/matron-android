@@ -366,4 +366,27 @@ class ItemQueuedRepliesTest {
         assertNull(vm.editingQueuedReplyID.value)
         vm.stop()
     }
+
+    @Test
+    fun aVoiceNoteSentWhileTheHoldIsOnItsWayGoesBackInTheTray() = runBlocking {
+        val store = FakeItemsStore()
+        store.queuedRows.value = listOf(card(10, "pr_a", "ic_1"))
+        val release = Release()
+        val sync = FakeItemsSync()
+        val vm = ItemDetailViewModel("it_1", store, FakeItemsApi(), sync, this, staging, queuedRelease = release)
+        started(store, vm)
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        release.gate = gate
+        val editing = launch { vm.editQueuedReply("ic_1") }
+        waitUntil { vm.editHoldPending.value }
+        assertTrue(vm.isBusy.value)
+        val note = File.createTempFile("note", ".m4a").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        vm.sendVoiceNote(note)
+        assertTrue(sync.comments.isEmpty())
+        assertEquals(1, vm.stagedAttachments.value.size)
+        assertTrue(vm.error.value!!.contains("still being held"))
+        gate.complete(Unit)
+        editing.join()
+        vm.stop()
+    }
 }

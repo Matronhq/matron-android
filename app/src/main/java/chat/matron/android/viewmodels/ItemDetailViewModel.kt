@@ -345,8 +345,13 @@ class ItemDetailViewModel(
         // An edited queued reply replaces the held original, so the original
         // is withdrawn first; if that fails the edit stays in the reply box
         // (and a voice note goes back in the tray) to try again.
-        // The edit's text isn't in the box until its hold has landed.
-        if (_editHoldPending.value) return
+        // The edit's text isn't in the box until its hold has landed: nothing
+        // goes yet, and a voice note goes back in the tray rather than being lost.
+        if (_editHoldPending.value) {
+            if (leading != null) _stagedAttachments.value = listOf(leading) + _stagedAttachments.value
+            _error.value = "That reply is still being held for editing. Send again in a moment."
+            return
+        }
         if (_editingQueuedReplyID.value != null) {
             val failure = withdrawEditedOriginal()
             if (failure != null) {
@@ -698,6 +703,8 @@ class ItemDetailViewModel(
         // away while the hold is on its way and can't send the original.
         _editingQueuedReplyID.value = commentID
         _editHoldPending.value = true
+        // The composer waits for the hold too: its text is about to change.
+        _isBusy.value = true
         editTextInBox = false
         preEditDraft = draft
         try {
@@ -711,6 +718,7 @@ class ItemDetailViewModel(
             return@runSend
         } finally {
             _editHoldPending.value = false
+            _isBusy.value = false
         }
         // Released (or the edit cancelled) while the hold was on its way.
         if (_editingQueuedReplyID.value != commentID) return@runSend

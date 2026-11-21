@@ -1739,6 +1739,7 @@ class ChatViewModel(
         val promptIDsInTimeline = mutableSetOf<String>()
         for (item in _items.value) {
             val kind = item.kind
+            if (isQueuedEditTap(item)) continue
             if (kind is TimelineItem.Kind.AskUserAnswer && kind.promptEventID.isNotEmpty() && item.isOwn) {
                 answeredInTimeline.add(kind.promptEventID)
             }
@@ -1756,7 +1757,7 @@ class ChatViewModel(
     fun isPromptAnswered(eventID: String): Boolean {
         if (answeredPromptIDs.contains(eventID)) return true
         for (item in _items.value) {
-            if (!item.isOwn) continue
+            if (!item.isOwn || isQueuedEditTap(item)) continue
             val kind = item.kind
             if (kind is TimelineItem.Kind.AskUserAnswer && kind.promptEventID == eventID) return true
             if (item.inReplyToEventID == eventID) return true
@@ -1828,6 +1829,7 @@ class ChatViewModel(
     fun answerSummary(promptEventID: String): String? {
         for (item in _items.value) {
             val kind = item.kind
+            if (isQueuedEditTap(item)) continue
             if (kind is TimelineItem.Kind.AskUserAnswer && kind.promptEventID == promptEventID && item.isOwn) {
                 return mapValuesToLabels(kind.selectedValues, promptEventID)
             }
@@ -1848,10 +1850,22 @@ class ChatViewModel(
         return null
     }
 
+    /// An Edit tap, or a cancelled edit, on a busy-queue card (from this
+    /// conversation's card or an item's thread): the message is still queued,
+    /// so it doesn't answer the card, which keeps its buttons. Only on a
+    /// queue card: on any other prompt an `edit` option is an ordinary answer.
+    private fun isQueuedEditTap(item: TimelineItem): Boolean {
+        val kind = item.kind as? TimelineItem.Kind.AskUserAnswer ?: return false
+        val choice = kind.selectedValues.singleOrNull() ?: return false
+        if (choice != JournalTimelineMapper.QUEUED_EDIT_HOLD_CHOICE && choice != JournalTimelineMapper.QUEUED_EDIT_CANCEL_CHOICE) return false
+        return askEvent(kind.promptEventID)?.queuedReleasePromptID != null
+    }
+
     private fun collectOwnAnswers(): Set<String> {
         val answered = mutableSetOf<String>()
         for (item in _items.value) {
             val kind = item.kind
+            if (isQueuedEditTap(item)) continue
             if (kind is TimelineItem.Kind.AskUserAnswer && kind.promptEventID.isNotEmpty() && item.isOwn) {
                 answered.add(kind.promptEventID)
             }
