@@ -54,14 +54,12 @@ object JournalTimelineMapper {
     fun queuedReleaseAnswerKey(releasePromptID: String): String = "qr:$releasePromptID"
 
     /// The queue-card choices that hold a queued message for editing and
-    /// release that hold. Neither answers the card: the message is still
-    /// queued and the card keeps its buttons.
+    /// release that hold. On a busy-queue card neither answers it: the
+    /// message is still queued and the card keeps its buttons
+    /// (`ChatViewModel.isQueuedEditTap`). On any other prompt they are
+    /// ordinary answers.
     const val QUEUED_EDIT_HOLD_CHOICE = "edit"
     const val QUEUED_EDIT_CANCEL_CHOICE = "edit_cancel"
-
-    /// The hidden answer-row key an Edit tap or a cancelled edit on a queue
-    /// card is filed under: never the card's own answer.
-    fun queuedEditAnswerKey(targetSeq: String): String = "qe:$targetSeq"
 
     fun displayName(sender: String): String {
         val colon = sender.indexOf(':')
@@ -273,18 +271,6 @@ object JournalTimelineMapper {
                     val releasePromptID = payload.stringOrNull("prompt_id") ?: return null
                     val action = payload.stringOrNull("action") ?: return null
                     TimelineItem.Kind.AskUserAnswer(queuedReleaseAnswerKey(releasePromptID), listOf(action))
-                } else if (payload.stringOrNull("choice").let {
-                        it == QUEUED_EDIT_HOLD_CHOICE || it == QUEUED_EDIT_CANCEL_CHOICE
-                    } && payload.longOrNull("target_seq") != null
-                ) {
-                    // An Edit tap, or a cancelled edit, on a queue card doesn't
-                    // answer it: the message is still queued and the card keeps
-                    // its buttons. Kept out of the card's answer (and its reply
-                    // relation) under its own namespace.
-                    TimelineItem.Kind.AskUserAnswer(
-                        queuedEditAnswerKey(payload.longOrNull("target_seq")!!.toString()),
-                        listOf(payload.stringOrNull("choice")!!),
-                    )
                 } else {
                     val ir = payload.longOrNull("target_seq")?.toString()
                     inReplyTo = ir

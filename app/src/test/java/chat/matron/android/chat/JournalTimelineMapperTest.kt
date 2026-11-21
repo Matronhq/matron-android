@@ -364,16 +364,14 @@ class JournalTimelineMapperTest {
 
     // MARK: - Editing a queued message
 
-    @Test fun anEditTapOrCancelledEditDoesNotAnswerTheCard() {
-        for (choice in listOf("edit", "edit_cancel")) {
-            val item = map(ev(31, "prompt_reply", sender = "user:alice", payload = buildJsonObject {
-                put("target_seq", 30); put("choice", choice)
-            }))!!
-            val kind = item.kind as TimelineItem.Kind.AskUserAnswer
-            assertEquals("qe:30", kind.promptEventID)
-            assertEquals(listOf(choice), kind.selectedValues)
-            assertNull(item.inReplyToEventID)
-        }
+    /// The mapper can't tell a queue card from any other prompt, so an
+    /// `edit` choice maps like every answer; the conversation decides whether
+    /// it answers its card (`ChatViewModel.isQueuedEditTap`).
+    @Test fun anEditChoiceMapsLikeAnyAnswer() {
+        val item = map(ev(31, "prompt_reply", sender = "user:alice", payload = buildJsonObject {
+            put("target_seq", 30); put("choice", "edit")
+        }))!!
+        assertEquals(TimelineItem.Kind.AskUserAnswer("30", listOf("edit")), item.kind)
     }
 
     @Test fun imageBuildsMediaURL() {
