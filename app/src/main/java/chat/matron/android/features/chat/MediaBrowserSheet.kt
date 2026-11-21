@@ -13,7 +13,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.AttachmentFullscreenViewer
 import chat.matron.android.designsystem.MarkdownPreviewState
@@ -21,8 +20,11 @@ import chat.matron.android.designsystem.MarkdownPreviewTarget
 import chat.matron.android.designsystem.ImageGallery
 import chat.matron.android.designsystem.MediaBrowserFileRow
 import chat.matron.android.designsystem.MediaBrowserLinkRow
+import chat.matron.android.designsystem.rememberMessageLinkOpener
 import chat.matron.android.designsystem.MediaBrowserMediaCell
 import chat.matron.android.designsystem.MediaBrowserView
+import chat.matron.android.designsystem.rememberAttachmentSaver
+import chat.matron.android.chat.MediaFetchOutcome
 import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.MediaBrowserViewModel
 import kotlinx.coroutines.launch
@@ -90,7 +92,10 @@ fun MediaBrowserSheet(
     val markdownPreview = remember { MarkdownPreviewState() }
 
     val context = LocalContext.current
-    val uriHandler = LocalUriHandler.current
+    val fileSaver = rememberAttachmentSaver { attachmentMimeType(it) }
+    // Links lifted from message text: the same policy as tapping them in
+    // the message itself (only web and email links reach the OS).
+    val openLink = rememberMessageLinkOpener()
 
     fun isUnavailable(url: String?): Boolean =
         url != null && (url in browserUnavailable || url in timelineUnavailable)
@@ -115,7 +120,7 @@ fun MediaBrowserSheet(
                         name = entry.name,
                         sizeBytes = entry.sizeBytes,
                         expired = entry.expired || isUnavailable(entry.url),
-                        isLoading = entry.url != null && entry.url in downloadingFiles,
+                        isLoading = entry.url != null && (entry.url in downloadingFiles || fileSaver.isSaving(entry.url)),
                         mime = entry.mime,
                     )
                 },
@@ -160,6 +165,14 @@ fun MediaBrowserSheet(
                         }
                     }
                 },
+                onFileSave = { row ->
+                    val url = row.url
+                    if (url != null && !row.expired) {
+                        fileSaver.save(url, row.name, row.mime) {
+                            (chatVM.fetchAttachment(url) as? MediaFetchOutcome.Data)?.bytes
+                        }
+                    }
+                },
                 onFileTap = { row ->
                     val url = row.url
                     if (url != null && !row.expired && FileTap(url, row.name, row.mime, row.sizeBytes).isPreviewableMarkdown) {
@@ -177,7 +190,7 @@ fun MediaBrowserSheet(
                         }
                     }
                 },
-                onLinkTap = { row -> runCatching { uriHandler.openUri(row.url) } },
+                onLinkTap = { row -> openLink(row.url) },
             )
         }
 

@@ -25,6 +25,13 @@ import androidx.compose.ui.unit.dp
 import chat.matron.android.events.AgentChatCardState
 import chat.matron.android.events.AgentChatRequest
 import chat.matron.android.events.CoordinatorConsentBadge
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import chat.matron.android.events.compactLine
+import java.time.Instant
 
 /// The agent-chat consent card, inline in the timeline — one agent asking to
 /// talk to another, and the two buttons that answer it.
@@ -46,6 +53,37 @@ fun AgentChatRequestCard(
     /// The Coordinator's answer, when it gave one: its reason goes on the
     /// outcome line.
     coordinatorBadge: CoordinatorConsentBadge? = null,
+    /// In a timeline: once answered, the card folds to one line
+    /// ([CompactCardRow]) that opens it again, and the full card keeps to
+    /// [CONSENT_CARD_TIMELINE_WIDTH] itself. Off elsewhere.
+    foldsWhenSettled: Boolean = false,
+    /// The line's time, when folded.
+    timestamp: Instant? = null,
+    initiallyExpanded: Boolean = false,
+) {
+    if (!foldsWhenSettled) {
+        AgentChatRequestCardBody(request, state, onApprove, onDeny, modifier, coordinatorBadge)
+        return
+    }
+    val line = request.compactLine(state)
+    if (line == null) {
+        AgentChatRequestCardBody(request, state, onApprove, onDeny, modifier.widthIn(max = CONSENT_CARD_TIMELINE_WIDTH), coordinatorBadge)
+        return
+    }
+    var expanded by rememberSaveable { mutableStateOf(initiallyExpanded) }
+    CompactCardRow(line = line, timestamp = timestamp, expanded = expanded, onToggle = { expanded = !expanded }, modifier = modifier) {
+        AgentChatRequestCardBody(request, state, onApprove, onDeny, Modifier.widthIn(max = CONSENT_CARD_TIMELINE_WIDTH), coordinatorBadge)
+    }
+}
+
+@Composable
+private fun AgentChatRequestCardBody(
+    request: AgentChatRequest,
+    state: AgentChatCardState,
+    onApprove: () -> Unit,
+    onDeny: () -> Unit,
+    modifier: Modifier,
+    coordinatorBadge: CoordinatorConsentBadge?,
 ) {
     val busy = state is AgentChatCardState.Sending
 

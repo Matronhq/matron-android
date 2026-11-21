@@ -61,6 +61,7 @@ import androidx.navigation.compose.navigation
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import chat.matron.android.designsystem.AppLockShield
+import chat.matron.android.designsystem.BlockedLinkHost
 import chat.matron.android.designsystem.LocalAppLockActive
 import chat.matron.android.designsystem.LocalTrackerLinkTitles
 import chat.matron.android.designsystem.MatronAppearance
@@ -305,31 +306,37 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                         },
                     )
                 }
-                else -> SignedInApp(
-                    deps = deps,
-                    session = session!!,
-                    incomingLinks = incomingLinks,
-                    appearance = appearance,
-                    appLock = appLock,
-                    onAppearanceChange = { next ->
-                        appearance = next
-                        prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
-                    },
-                    // Refused while locked: signing out clears the lock, so it
-                    // must not be reachable from behind the shield. Unreachable
-                    // in practice (the menu isn't composed while locked) — the
-                    // guard belongs with the lock state regardless.
-                    onSignOut = {
-                        appLock.signOutIfUnlocked {
-                            OutboxCatchUpWorker.cancel(context)
-                            deps.signOut()
-                            // Per-account state, cleared like the rest: the next
-                            // account starts opted out.
-                            appLock.resetForSignOut()
-                            session = null
-                        }
-                    },
-                )
+                // Links in message and item text that are not web or email
+                // links are never opened; this shows the prompt that says so.
+                // Inside the theme and below the lock check, so a lock
+                // removes an open prompt along with everything else.
+                else -> BlockedLinkHost {
+                    SignedInApp(
+                        deps = deps,
+                        session = session!!,
+                        incomingLinks = incomingLinks,
+                        appearance = appearance,
+                        appLock = appLock,
+                        onAppearanceChange = { next ->
+                            appearance = next
+                            prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
+                        },
+                        // Refused while locked: signing out clears the lock, so it
+                        // must not be reachable from behind the shield. Unreachable
+                        // in practice (the menu isn't composed while locked) — the
+                        // guard belongs with the lock state regardless.
+                        onSignOut = {
+                            appLock.signOutIfUnlocked {
+                                OutboxCatchUpWorker.cancel(context)
+                                deps.signOut()
+                                // Per-account state, cleared like the rest: the next
+                                // account starts opted out.
+                                appLock.resetForSignOut()
+                                session = null
+                            }
+                        },
+                    )
+                }
             }
         }
     }

@@ -1,31 +1,19 @@
 package chat.matron.android.designsystem
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.time.Instant
@@ -64,7 +52,8 @@ object MessageBubbleMetrics {
 /// [copyText], when supplied, arms a long-press context menu offering a single
 /// Copy action that puts the raw text on the clipboard — the port of the Apple
 /// apps' Copy-only message context menu (matron-apple #92). Same long-press +
-/// menu shape as the chat-list rows' Mute/Leave menu. Rows without natural
+/// menu shape as the chat-list rows' Mute/Leave menu; the item thread's cards
+/// share it ([LongPressCopy]). Rows without natural
 /// text (tool cards, diffs) pass nothing and present no menu at all.
 @Composable
 fun MessageBubble(
@@ -78,9 +67,7 @@ fun MessageBubble(
     val colors = MatronThemeColors.current
     val alignment = if (style == MessageAuthorStyle.Me) Alignment.CenterEnd else Alignment.CenterStart
     val bubbleColor = if (style == MessageAuthorStyle.Me) colors.bubbleMe else colors.bubbleBot
-    var copyMenuOpen by remember { mutableStateOf(false) }
-    val clipboard = LocalClipboardManager.current
-    val haptics = LocalHapticFeedback.current
+    val copy = rememberLongPressCopy(copyText)
 
     // The bubble itself — chrome + content + timestamp + copy menu. Factored
     // out so both the avatar'd and plain paths share one definition (Apple's
@@ -95,20 +82,7 @@ fun MessageBubble(
                     .shadow(1.dp, RoundedCornerShape(8.dp))
                     .clip(RoundedCornerShape(8.dp))
                     .background(bubbleColor)
-                    // pointerInput, not combinedClickable: a plain tap on a
-                    // message has no action, so it should get no ripple.
-                    .then(
-                        if (copyText != null) {
-                            Modifier.pointerInput(Unit) {
-                                detectTapGestures(onLongPress = {
-                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    copyMenuOpen = true
-                                })
-                            }
-                        } else {
-                            Modifier
-                        },
-                    )
+                    .then(copy.modifier)
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 // Drop the time onto the baseline of the message's last line so a
                 // short message reads inline ("Hi  12:15") and a multi-line one
@@ -127,17 +101,7 @@ fun MessageBubble(
                     )
                 }
             }
-            if (copyText != null) {
-                DropdownMenu(expanded = copyMenuOpen, onDismissRequest = { copyMenuOpen = false }) {
-                    DropdownMenuItem(
-                        text = { Text("Copy") },
-                        onClick = {
-                            copyMenuOpen = false
-                            clipboard.setText(AnnotatedString(copyText))
-                        },
-                    )
-                }
-            }
+            copy.Menu()
         }
     }
 
