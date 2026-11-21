@@ -14,6 +14,7 @@ import chat.matron.android.events.RoutineMarkerEvent
 import chat.matron.android.events.ConsentDecisionEvent
 import chat.matron.android.events.CoordinatorMarkerEvent
 import chat.matron.android.events.SpawnOutcome
+import chat.matron.android.events.SystemNoticeEvent
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.journal.ActivityUpdate
 import chat.matron.android.journal.EventTombstone
@@ -80,7 +81,10 @@ object JournalTimelineMapper {
                 // the marker, so the twin is hidden — rendering both would
                 // show the same reply twice.
                 if (event.isItemFallbackText()) return null
-                TimelineItem.Kind.Text(event.body() ?: "", null)
+                // A bridge notice about a turn it injected carries a compact
+                // summary; it renders as one expandable row, not a bubble.
+                SystemNoticeEvent.parse(payload)?.let { TimelineItem.Kind.SystemNotice(event.seq.toString(), it) }
+                    ?: TimelineItem.Kind.Text(event.body() ?: "", null)
             }
 
             JournalEventType.ITEM -> {
