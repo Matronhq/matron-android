@@ -19,6 +19,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
+import java.time.Instant
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.chat.TimelineItem
@@ -58,6 +60,7 @@ import chat.matron.android.designsystem.ToolCallCard
 import chat.matron.android.designsystem.ToolStreamCard
 import chat.matron.android.designsystem.sendStateGlyphFrom
 import chat.matron.android.events.AskUserEvent
+import chat.matron.android.events.isReminderCard
 import chat.matron.android.models.TimelineSendState
 import chat.matron.android.viewmodels.AskUserSheetViewModel
 import kotlinx.coroutines.launch
@@ -296,32 +299,39 @@ private fun RenderedBody(
             ToolStreamCard(command = kind.command, text = kind.text, headTruncated = kind.headTruncated)
         }
 
+        // A reminder folds to one line as wide as the timeline's notices; any
+        // other ask keeps the card width.
         is TimelineItem.Kind.AskUser ->
-            CappedCard(maxWidth = 360.dp) {
+            CappedCard(maxWidth = if (kind.event.isReminderCard) Dp.Infinity else 360.dp) {
                 AskCard(
                     eventID = kind.eventID,
                     event = kind.event,
                     askViewModel = askViewModel,
                     isPromptAnswered = isPromptAnswered,
                     answerSummary = answerSummary,
+                    timestamp = item.timestamp,
                 )
             }
 
+        // A consent card folds to one line as wide as the timeline's notices
+        // once it is answered; until then it keeps the card width itself.
         is TimelineItem.Kind.AgentChatRequestCard ->
-            CappedCard(maxWidth = 360.dp) {
+            CappedCard(maxWidth = Dp.Infinity) {
                 AgentChatRequestCard(
                     request = kind.request,
                     state = agentChatState?.invoke(kind.eventID) ?: AgentChatCardState.Expired,
                     onApprove = { onAnswerAgentChat?.invoke(kind.eventID, kind.request, true) },
                     onDeny = { onAnswerAgentChat?.invoke(kind.eventID, kind.request, false) },
                     coordinatorBadge = coordinatorBadge?.invoke(kind.eventID, null),
+                    foldsWhenSettled = true,
+                    timestamp = item.timestamp,
                 )
             }
 
         is TimelineItem.Kind.AskUserAnswer -> Unit // bookkeeping, never rendered
 
         is TimelineItem.Kind.AgentSpawnRequestCard ->
-            CappedCard(maxWidth = 360.dp) {
+            CappedCard(maxWidth = Dp.Infinity) {
                 AgentSpawnRequestCard(
                     request = kind.request,
                     state = agentSpawnState?.invoke(kind.eventID, kind.request) ?: AgentSpawnCardState.Unavailable,
@@ -330,6 +340,8 @@ private fun RenderedBody(
                     onOpen = onOpenSpawnedRoom,
                     coordinatorBadge = coordinatorBadge?.invoke(kind.eventID, kind.request),
                     onStopSession = onStopSession,
+                    foldsWhenSettled = true,
+                    timestamp = item.timestamp,
                 )
             }
 
@@ -475,6 +487,7 @@ private fun AskCard(
     askViewModel: ((String) -> AskUserSheetViewModel?)?,
     isPromptAnswered: ((String) -> Boolean)?,
     answerSummary: ((String) -> String?)?,
+    timestamp: Instant?,
 ) {
     val vm = askViewModel?.invoke(eventID)
     if (vm == null || isPromptAnswered == null || answerSummary == null) {
@@ -491,6 +504,8 @@ private fun AskCard(
             isSending = false,
             isExpired = false,
             onSend = {},
+            foldsReminder = true,
+            timestamp = timestamp,
         )
         return
     }
@@ -498,6 +513,7 @@ private fun AskCard(
         viewModel = vm,
         isAnswered = isPromptAnswered(eventID),
         answerSummary = answerSummary(eventID),
+        timestamp = timestamp,
     )
 }
 
@@ -506,6 +522,7 @@ private fun AskUserCardHost(
     viewModel: AskUserSheetViewModel,
     isAnswered: Boolean,
     answerSummary: String?,
+    timestamp: Instant?,
 ) {
     val scope = rememberCoroutineScope()
     val isSending by viewModel.isSending.collectAsStateWithLifecycle()
@@ -545,6 +562,8 @@ private fun AskUserCardHost(
         isExpired = isExpired,
         onSend = { scope.launch { viewModel.send() } },
         error = error,
+        foldsReminder = true,
+        timestamp = timestamp,
     )
 }
 
