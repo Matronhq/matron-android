@@ -155,6 +155,14 @@ class StepUpTapTest {
     }
 
     @Test
+    fun aRefusedReadStillQueuesAnOrdinaryTap() = runTest {
+        withKey()
+        val api = Api(cached).apply { readError = JournalApiError.Http(503, "busy") }
+        assertEquals(StepUpTap.Outcome.Unsigned, StepUpTap.send(cached, null, "Deploy", api, sync, center.signer, true))
+        assertTrue(StepUpTap.send(cached.copy(stepUp = true), null, "Deploy", api, sync, center.signer, true) is StepUpTap.Outcome.Failed)
+    }
+
+    @Test
     fun offlineAConsentDeclineIsQueuedUnsigned() = runTest {
         withKey()
         val consent = cached.copy(stepUp = true, labels = listOf(TrackerItem.CONSENT_LABEL), actions = listOf("Approve", "Decline"))

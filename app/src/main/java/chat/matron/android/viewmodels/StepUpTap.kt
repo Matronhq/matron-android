@@ -86,17 +86,20 @@ object StepUpTap {
             // only a fresh read says whether this is step-up at all.
             val fresh = try {
                 api.item(item.id)
-            } catch (e: JournalApiError.Transport) {
-                // Offline. A tap the cache does not know to be step-up goes to
-                // the outbox as before, and so does a consent request's
-                // decline (never signed); a step-up one cannot wait.
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // Offline, or the read refused. A tap the cache does not know
+                // to be step-up goes to the outbox as before, and so does a
+                // consent request's decline (never signed); a step-up one
+                // cannot wait.
                 val consentDecline = (item.isConsentAsk || TrackerItem.CONSENT_LABEL in item.labels) &&
                     !TrackerItem.isAffirmativeAnswer(label)
-                return if ((item.stepUp || comment?.stepUp == true) && !consentDecline) {
-                    Outcome.Failed("This answer needs a signature and can't wait for a connection. ${e.message}")
-                } else {
-                    Outcome.Unsigned
+                if ((item.stepUp || comment?.stepUp == true) && !consentDecline) {
+                    val why = if (e is JournalApiError.Transport) "can't wait for a connection" else "couldn't be checked first"
+                    return Outcome.Failed("This answer needs a signature and $why. ${e.message}")
                 }
+                return Outcome.Unsigned
             }
             val freshComment = comment?.let { c -> fresh.comments.firstOrNull { it.id == c.id } }
             if (fresh.item.consentKind != null) {

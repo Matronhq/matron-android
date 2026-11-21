@@ -430,10 +430,17 @@ class ItemsPanelViewModel(
         }
         // A tap that needs a signature is confirmed and sent at once; the row
         // stays hidden behind the confirm sheet until the journal has it.
-        val outcome = StepUpTap.send(
-            item, null, label, api, sync,
-            signer = approvals?.signer, accountHasKey = approvals?.accountHasKey ?: false,
-        )
+        val outcome = try {
+            StepUpTap.send(
+                item, null, label, api, sync,
+                signer = approvals?.signer, accountHasKey = approvals?.accountHasKey ?: false,
+            )
+        } catch (cancel: CancellationException) {
+            // The list went away mid-approval: the row must not stay hidden.
+            answerPending = answerPending - item.id
+            publishAwaitingYou()
+            throw cancel
+        }
         if (outcome != StepUpTap.Outcome.Unsigned) {
             answerPending = answerPending - item.id
             publishAwaitingYou()
