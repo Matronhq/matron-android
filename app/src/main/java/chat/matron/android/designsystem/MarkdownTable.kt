@@ -71,7 +71,13 @@ fun MarkdownTableBlock(
     onLinkClick: ((String) -> Unit)? = null,
 ) {
     val uriHandler = LocalUriHandler.current
-    val click: (String) -> Unit = onLinkClick ?: { url -> runCatching { uriHandler.openUri(url) } }
+    val openItem = LocalOpenTrackerItem.current
+    val presentBlocked = LocalPresentBlockedLink.current
+    // Standalone (no caller handler) the table applies the same link policy
+    // as [MarkdownText]: only web and email links reach the OS.
+    val click: (String) -> Unit = onLinkClick ?: { url ->
+        handleMessageLink(url, openItem, presentBlocked) { external -> runCatching { uriHandler.openUri(external) } }
+    }
     val borderColor = MaterialTheme.colorScheme.outlineVariant
     val headerBg = MaterialTheme.colorScheme.onSurface.copy(alpha = tableHeaderTintAlpha)
     val cellStyle = textStyle.merge(MaterialTheme.typography.bodyLarge)
