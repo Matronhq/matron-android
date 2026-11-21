@@ -31,7 +31,7 @@ import kotlinx.serialization.json.JsonObject
 class FakeApprovalJournal(
     val journal: String = "journal.example",
     val user: String = "alice",
-    val callerDevice: Long = 7,
+    var callerDevice: Long = 7,
 ) : ApprovalKeysProviding {
     var enabled = true
     val keys = mutableListOf<ApprovalKeyDTO>()
@@ -59,24 +59,29 @@ class FakeApprovalJournal(
         if (password != "secret" || code != "123456") throw ApprovalKeyError.BadPassword
         val keyID = ApprovalKeyEncoding.keyID(ApprovalKeyEncoding.data(publicKey)!!)
         if (keys.any { it.keyID == keyID }) throw ApprovalKeyError.KeyExists
-        return ApprovalKeyDTO(keyID, publicKey, name, callerDevice).also { keys += it }
+        val key = ApprovalKeyDTO(keyID, publicKey, name, callerDevice).also { keys += it }
+        if (loseEnrolAnswer) { loseEnrolAnswer = false; throw JournalApiError.Transport("connection lost") }
+        return key
     }
+    /// The next enrolment is made, but its answer never arrives.
+    var loseEnrolAnswer = false
 
     override suspend fun requestApprovalKey(publicKey: String, name: String): String {
         val keyID = ApprovalKeyEncoding.keyID(ApprovalKeyEncoding.data(publicKey)!!)
         if (keys.any { it.keyID == keyID }) throw ApprovalKeyError.KeyExists
-        val id = "kr_${requests.size + 1}"
+        val id = "kr_${++requestCount}"
         requests += ApprovalKeyRequestDTO(id, keyID, name)
         pendingPublicKeys[id] = publicKey
         return id
     }
     private val pendingPublicKeys = mutableMapOf<String, String>()
+    private var requestCount = 0
 
     override suspend fun approveApprovalKeyRequest(id: String, approval: SignedApproval): ApprovalKeyDTO {
         val request = requests.firstOrNull { it.id == id } ?: throw JournalApiError.NotFound
         check(approval, "account", mapOf("op" to "enrol_key", "key_id" to request.keyID))
         requests.remove(request)
-        return ApprovalKeyDTO(request.keyID, pendingPublicKeys[id] ?: "", request.name, 99, ApprovalKeyDTO.EnrolledVia.DEVICE)
+        return ApprovalKeyDTO(request.keyID, pendingPublicKeys.remove(id) ?: "", request.name, 99, ApprovalKeyDTO.EnrolledVia.DEVICE)
             .also { keys += it }
     }
 

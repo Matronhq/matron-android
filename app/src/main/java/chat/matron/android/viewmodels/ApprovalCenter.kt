@@ -19,6 +19,8 @@ import chat.matron.android.platform.ApprovalKeyProviding
 import chat.matron.android.platform.ApprovalKeyStore
 import chat.matron.android.platform.StoredApprovalKey
 import java.util.UUID
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -146,15 +148,21 @@ class ApprovalCenter(
     }
 
     private suspend fun load(): ApprovalKeysState {
+        val mine = loads.incrementAndGet()
         try {
             val fresh = api.approvalKeys()
+            // Only the latest read publishes: an older answer arriving last
+            // must not rewind the list (a key just added or removed).
+            if (loads.get() != mine) return fresh
             _state.value = fresh
             _loadError.value = null
             recompute()
             return fresh
         } catch (_: JournalApiError.NotFound) {
             // A server from before approval keys has no such route: no
-            // account on it has a key, so nothing needs a signature.
+            // account on it has a key, so nothing needs a signature. (A
+            // server that has keys enforces them itself: an unsigned request
+            // it needed signed is refused, never applied.)
             val absent = ApprovalKeysState(enabled = false, journal = null, keys = emptyList())
             _state.value = absent
             _loadError.value = null
@@ -163,10 +171,11 @@ class ApprovalCenter(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            _loadError.value = e.message ?: e.toString()
+            if (loads.get() == mine) _loadError.value = e.message ?: e.toString()
             throw e
         }
     }
+    private val loads = java.util.concurrent.atomic.AtomicLong(0)
 
     private fun noteDeviceKey(stored: StoredApprovalKey?) {
         _deviceKeyID.value = stored?.keyID
@@ -249,11 +258,17 @@ class ApprovalCenter(
         journal: String,
         attached: Boolean,
     ): SignedApproval = turns.withLock {
-        var isAttached = attached
+        // What the sheet shows is what is signed: a copy the caller cannot
+        // change while the user reads it.
+        @Suppress("NAME_SHADOWING")
+        val request = request.copy(subject = request.subject.toMap())
+        // Another signature may have re-attached the key while this one
+        // waited for its turn.
+        var isAttached = attached || _state.value?.key(stored.keyID)?.let { it.deviceID == deviceID && deviceID != null } == true
         _promptError.value = null
         _prompt.value = Prompt(
             id = UUID.randomUUID().toString(), request = request, method = method ?: "biometrics",
-            fingerprint = ApprovalKeyEncoding.fingerprint(stored.keyID), attachesFirst = !attached,
+            fingerprint = ApprovalKeyEncoding.fingerprint(stored.keyID), attachesFirst = !isAttached,
         )
         try {
             while (true) {
@@ -322,11 +337,21 @@ class ApprovalCenter(
     // MARK: Keys
 
     /// The key this device will enrol: one made earlier that the account has
-    /// never seen (a refused try), else a new one.
-    private fun keyToEnrol(): StoredApprovalKey {
+    /// never seen (a refused try), else a new one. Null when the account
+    /// already lists this device's key as live: there is nothing to enrol,
+    /// and that key is never replaced behind the user's back. Read from a
+    /// fresh list, so a stale one can never destroy a key the account trusts.
+    private suspend fun keyToEnrol(): StoredApprovalKey? {
+        val state = load()
         val stored = store.load()
-        if (stored != null && _state.value?.key(stored.keyID) == null && usable(stored)) return stored
-        stored?.let(keys::destroy)
+        if (stored != null) {
+            val listed = state.key(stored.keyID)
+            if (listed?.isLive == true) return null
+            if (listed == null && usable(stored)) return stored
+            // Removed from the account (it can never be added back), or
+            // destroyed by a biometric change: a new one replaces it.
+            keys.destroy(stored)
+        }
         val made = keys.create()
         store.save(made)
         noteDeviceKey(made)
@@ -337,11 +362,11 @@ class ApprovalCenter(
     /// authenticator: the first key on an account, and the way back when no
     /// device with a key is left.
     suspend fun enrol(password: String, code: String) {
-        val stored = keyToEnrol()
+        val stored = keyToEnrol() ?: return refresh()
         try {
             api.enrolApprovalKey(stored.publicKey, deviceName, password, code)
         } catch (e: Throwable) {
-            dropIfExists(e, stored)
+            if (settledKeyExists(e, stored)) return
             refresh()
             throw e
         }
@@ -352,25 +377,33 @@ class ApprovalCenter(
     /// one. The other device shows this key's fingerprint; the user compares
     /// the two and approves there, within ten minutes.
     suspend fun requestFromAnotherDevice() {
-        val stored = keyToEnrol()
+        val stored = keyToEnrol() ?: return refresh()
         try {
             api.requestApprovalKey(stored.publicKey, deviceName)
         } catch (e: Throwable) {
-            dropIfExists(e, stored)
+            if (settledKeyExists(e, stored)) return
             refresh()
             throw e
         }
         refresh()
     }
 
-    /// `key_exists`: this key was enrolled before and removed, and can never
-    /// be added again. Drop it, so the next try makes a new one. Any other
-    /// refusal keeps the key for the next try.
-    private fun dropIfExists(error: Throwable, stored: StoredApprovalKey) {
-        if (error is ApprovalKeyError.KeyExists) {
+    /// `409 key_exists`: this key is, or was, enrolled. Decided on a fresh
+    /// read of the account's keys, never on the refusal alone: listed and live
+    /// (an earlier enrolment whose answer was lost), it is kept and the
+    /// enrolment counts as done (true); listed as removed, or not listed (it
+    /// can never be added here), it is dropped so the next try makes a new
+    /// one. When the keys cannot be read, the key is kept.
+    private suspend fun settledKeyExists(error: Throwable, stored: StoredApprovalKey): Boolean {
+        if (error !is ApprovalKeyError.KeyExists) return false
+        val state = runCatching { load() }.getOrNull() ?: return false
+        if (state.key(stored.keyID)?.isLive == true) return true
+        if (store.load()?.keyID == stored.keyID) {
             keys.destroy(stored)
             store.delete()
+            recompute()
         }
+        return false
     }
 
     /// Approves another device's request, signing for the fingerprint the
@@ -416,6 +449,8 @@ class ApprovalCenter(
         if (stored.keyID == key.keyID) {
             keys.destroy(stored)
             store.delete()
+            // Not a signer any more, whether or not the next read works.
+            recompute()
         }
     }
 
@@ -460,12 +495,11 @@ class ApprovalCenter(
         /// The journal as a statement names it: the server's host,
         /// lowercased, with a port that is not the scheme's default.
         fun journalHost(serverURL: String): String? {
-            val url = runCatching { java.net.URI(serverURL) }.getOrNull() ?: return null
-            val host = url.host?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
-            val port = url.port
-            if (port == -1) return host
-            val standard = if (url.scheme?.lowercase() == "http") 80 else 443
-            return if (port == standard) host else "$host:$port"
+            // HttpUrl canonicalises the host: lowercase, and an international
+            // name in its ASCII form, so every spelling of a server is one.
+            val url = serverURL.toHttpUrlOrNull() ?: return null
+            val host = url.host.takeIf { it.isNotEmpty() } ?: return null
+            return if (url.port == HttpUrl.defaultPort(url.scheme)) host else "$host:${url.port}"
         }
     }
 }

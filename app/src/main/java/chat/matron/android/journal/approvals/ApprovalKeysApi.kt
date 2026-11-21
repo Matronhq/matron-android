@@ -95,12 +95,19 @@ data class ApprovalKeysState(
     fun key(keyID: String): ApprovalKeyDTO? = keys.firstOrNull { it.keyID == keyID }
 
     companion object {
-        fun fromJson(obj: JsonObject): ApprovalKeysState = ApprovalKeysState(
-            enabled = obj.boolOrNull("enabled") ?: false,
-            journal = obj.stringOrNull("journal"),
-            keys = obj.arrayOrNull("keys")?.objects()?.mapNotNull(ApprovalKeyDTO::fromJson) ?: emptyList(),
-            requests = obj.arrayOrNull("requests")?.objects()?.mapNotNull(ApprovalKeyRequestDTO::fromJson) ?: emptyList(),
-        )
+        /// Null when the answer is malformed: no `keys` array, or a key that
+        /// cannot be read. The account's keys are then unknown, which must
+        /// never read as "no keys" (that would send a request unsigned).
+        fun fromJson(obj: JsonObject): ApprovalKeysState? {
+            val rawKeys = obj.arrayOrNull("keys") ?: return null
+            val keys = rawKeys.map { (it as? JsonObject)?.let(ApprovalKeyDTO::fromJson) ?: return null }
+            return ApprovalKeysState(
+                enabled = obj.boolOrNull("enabled") ?: false,
+                journal = obj.stringOrNull("journal"),
+                keys = keys,
+                requests = obj.arrayOrNull("requests")?.objects()?.mapNotNull(ApprovalKeyRequestDTO::fromJson) ?: emptyList(),
+            )
+        }
     }
 }
 

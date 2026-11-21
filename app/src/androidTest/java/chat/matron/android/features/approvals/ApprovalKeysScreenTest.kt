@@ -202,10 +202,19 @@ class ApprovalKeysScreenTest {
                     }
                 }
             }
-        }.use {
+        }.use { scenario ->
             node(By.text("Confirm with your fingerprint"))
             val cancel = node(By.text("Cancel"))
-            assertTrue(cancel.visibleBounds.bottom < device.displayHeight)
+            // The whole Cancel button sits above the navigation bar.
+            var navTop = 0
+            scenario.onActivity { activity ->
+                val decor = activity.window.decorView
+                val insets = androidx.core.view.ViewCompat.getRootWindowInsets(decor)!!
+                    .getInsets(androidx.core.view.WindowInsetsCompat.Type.navigationBars())
+                navTop = decor.height - insets.bottom
+            }
+            val parent = cancel.parent
+            assertTrue("Cancel ${parent.visibleBounds} vs bar at $navTop", parent.visibleBounds.bottom <= navTop)
             screenshot("06-confirm-hosted")
             center.cancel()
         }

@@ -61,6 +61,21 @@ class ApprovalKeysApiTest {
     }
 
     @Test
+    fun aMalformedKeyListIsNeverReadAsNoKeys() = runBlocking {
+        for (body in listOf("""{"enabled":true,"journal":"j"}""", """{"enabled":true,"keys":[{"name":"no id"}]}""")) {
+            server.enqueue(json(200, body))
+            try {
+                api().approvalKeys()
+                fail("expected a throw for $body")
+            } catch (e: JournalApiError.Transport) {
+                // expected
+            }
+        }
+        server.enqueue(json(200, """{"enabled":true,"journal":"j","keys":[]}"""))
+        assertEquals(false, api().approvalKeys().hasActiveKey)
+    }
+
+    @Test
     fun nonceIsAPost() = runBlocking {
         server.enqueue(json(200, """{"nonce":"n1","expires_at":5000}"""))
         assertEquals(ApprovalNonce("n1", Instant.ofEpochMilli(5000)), api().approvalNonce())

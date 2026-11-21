@@ -123,18 +123,51 @@ class ApprovalCenterTest {
     fun aKeyFromAnEarlierSignInIsReattachedFirst() = runTest {
         enrolled(center())
         // Signed in again: a new device id, the key still the account's.
+        journal.callerDevice = 8
         val center = center(deviceID = 8)
         center.refresh()
         assertEquals(ApprovalCenter.Status.NeedsAttach, center.status.value)
-        val fake = journal
         val signing = async { center.sign(tap) }
         runCurrent()
         assertEquals(true, center.prompt.value!!.attachesFirst)
         center.confirm()
         val approval = signing.await()!!
-        // The attach went first, signed by the key itself.
-        assertEquals("attach_key", fake.accepted.single().objectOrNull("subject")!!.stringOrNull("op"))
-        assertEquals("nonce-2", parseJsonObjectOrNull(approval.statement)!!.stringOrNull("nonce"))
+        // The attach went first, signed by the key itself, and moved the key
+        // to this sign-in.
+        assertEquals("attach_key", journal.accepted.single().objectOrNull("subject")!!.stringOrNull("op"))
+        assertEquals(8L, journal.keys.single().deviceID)
+        // The tap's own signature is one the journal takes from device 8.
+        journal.check(approval.copy(), "item_tap", mapOf("box" to "box-a"))
+        assertEquals(ApprovalCenter.Status.Ready, center.status.value)
+    }
+
+    @Test
+    fun aLostEnrolmentAnswerNeverCostsTheKey() = runTest {
+        val center = center()
+        center.refresh()
+        // The journal enrolled the key, but the answer never came.
+        journal.loseEnrolAnswer = true
+        assertTrue(runCatching { center.enrol("secret", "123456") }.isFailure)
+        val kept = store.load()!!
+        assertEquals(kept.keyID, journal.keys.single().keyID)
+        // Trying again finds it already on the account: kept, and ready.
+        center.enrol("secret", "123456")
+        assertEquals(kept, store.load())
+        assertEquals(ApprovalCenter.Status.Ready, center.status.value)
+    }
+
+    @Test
+    fun keyExistsForALiveKeyKeepsIt() = runTest {
+        val center = center()
+        center.refresh()
+        val made = SoftwareKeyProvider().create()
+        store.save(made)
+        // Listed live on the server, but this centre's last read predates it.
+        journal.keys += ApprovalKeyDTO(made.keyID, made.publicKey, "Pixel", 7)
+        journal.refuseEnrolWith = ApprovalKeyError.KeyExists
+        center.enrol("secret", "123456")
+        assertEquals(made, store.load())
+        assertEquals(ApprovalCenter.Status.Ready, center.status.value)
     }
 
     @Test

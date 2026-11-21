@@ -553,7 +553,8 @@ class JournalApi(
 
     // MARK: Approval keys (protocol "Approval keys (step-up)")
 
-    override suspend fun approvalKeys(): ApprovalKeysState = ApprovalKeysState.fromJson(request("/approval-keys"))
+    override suspend fun approvalKeys(): ApprovalKeysState =
+        ApprovalKeysState.fromJson(request("/approval-keys")) ?: throw malformed("approval keys")
 
     override suspend fun approvalNonce(): ApprovalNonce {
         val obj = approvalKeyRequest("/approvals/nonce", buildJsonObject {})

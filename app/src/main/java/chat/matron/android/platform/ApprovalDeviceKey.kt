@@ -6,7 +6,6 @@ import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
-import android.security.keystore.StrongBoxUnavailableException
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
 import androidx.biometric.BiometricPrompt
@@ -152,13 +151,10 @@ class KeystoreApprovalKeyProvider(private val context: Context) : ApprovalKeyPro
         if (!availability.isAvailable) throw ApprovalKeyFailure.Unavailable
         val alias = "matron-approval-" + UUID.randomUUID().toString()
         val made = runCatching { generate(alias, strongBox = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) }
-            .recoverCatching { error ->
-                // No StrongBox (or it refused the spec): the TEE-backed keystore.
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && error is StrongBoxUnavailableException) {
-                    generate(alias, strongBox = false)
-                } else {
-                    throw error
-                }
+            .recoverCatching {
+                // No StrongBox, or it refused the spec (some devices wrap that
+                // in a ProviderException): the TEE-backed keystore.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) generate(alias, strongBox = false) else throw it
             }
             .getOrElse { throw ApprovalKeyFailure.Other("Couldn't create the key: ${it.message ?: it}") }
         return StoredApprovalKey(
