@@ -204,13 +204,14 @@ fun itemDrawsBody(model: ItemDetailModel): Boolean =
 
 /// The placeholder's sentence while a spawn consent item's card has not
 /// reached this device. When the item carries its own Approve and Decline,
-/// those answer it exactly as the card would, and it says so.
-fun itemSpawnCardMissingText(answersBelow: Boolean): String =
-    "The request card hasn't reached this device yet. " + if (answersBelow) {
-        "Approve or Decline above answers it as the card would."
-    } else {
+/// those answer it exactly as the card would, and it says so. A closed item's
+/// request no longer waits for an answer, so nothing offers to approve it.
+fun itemSpawnCardMissingText(answersAbove: Boolean, isOpen: Boolean = true): String = when {
+    !isOpen -> "The request card isn't on this device. This request is no longer waiting for an answer."
+    answersAbove -> "The request card hasn't reached this device yet. Approve or Decline above answers it as the card would."
+    else -> "The request card hasn't reached this device yet. " +
         "It can be approved once it arrives, or from the conversation it was asked in."
-    }
+}
 
 /// The state pill's four values: Needs you / Closed · resolution / With the
 /// agent / Open.
@@ -487,6 +488,7 @@ fun ItemDetailView(
                         SpawnConsentCard(
                             consent,
                             answersAbove = item.actions.isNotEmpty() && item.state == ItemState.OPEN,
+                            isOpen = item.state == ItemState.OPEN,
                             onAnswer = onAnswerSpawn,
                             onOpen = onOpenSpawnedRoom,
                         )
@@ -896,6 +898,7 @@ private fun ItemCard(mine: Boolean, alpha: Float = 1f, copyText: String? = null,
 private fun SpawnConsentCard(
     consent: ItemSpawnConsent,
     answersAbove: Boolean,
+    isOpen: Boolean,
     onAnswer: ((Boolean) -> Unit)?,
     onOpen: (String) -> Unit,
 ) {
@@ -920,7 +923,7 @@ private fun SpawnConsentCard(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Agent spawn request", style = MaterialTheme.typography.titleSmall)
             Text(
-                itemSpawnCardMissingText(answersAbove),
+                itemSpawnCardMissingText(answersAbove, isOpen),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

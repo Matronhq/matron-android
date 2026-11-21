@@ -218,4 +218,13 @@ class ItemSpawnConsentTest {
         assertNull(vm.spawnConsent.value)
         vm.stop()
     }
+
+    @Test
+    fun thePlaceholderNeverOffersToApproveAClosedRequest() {
+        val closed = chat.matron.android.designsystem.itemSpawnCardMissingText(answersAbove = false, isOpen = false)
+        assertFalse(closed.contains("approved"))
+        assertTrue(closed.contains("no longer waiting"))
+        assertTrue(chat.matron.android.designsystem.itemSpawnCardMissingText(answersAbove = true).contains("Approve or Decline above"))
+        assertTrue(chat.matron.android.designsystem.itemSpawnCardMissingText(answersAbove = false).contains("once it arrives"))
+    }
 }
