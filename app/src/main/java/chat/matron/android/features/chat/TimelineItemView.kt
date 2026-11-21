@@ -515,6 +515,10 @@ private fun AskUserCardHost(
         viewModel.awaitExpiry { expiryTick++ }
     }
     val isExpired = remember(expiryTick) { viewModel.isExpired }
+    val isEditing by viewModel.isEditing.collectAsStateWithLifecycle()
+    val isSendingEdit by viewModel.isSendingEdit.collectAsStateWithLifecycle()
+    val editError by viewModel.editError.collectAsStateWithLifecycle()
+    var editText by remember(isEditing) { mutableStateOf(viewModel.editText) }
 
     AskUserCard(
         event = viewModel.event,
@@ -540,6 +544,22 @@ private fun AskUserCardHost(
         isExpired = isExpired,
         onSend = { scope.launch { viewModel.send() } },
         error = error,
+        edit = if (viewModel.offersEdit || isEditing) {
+            chat.matron.android.designsystem.QueuedEditControls(
+                text = editText,
+                onTextChange = { editText = it; viewModel.editText = it },
+                isEditing = isEditing,
+                isBusy = isSendingEdit,
+                canSave = editText.isNotBlank(),
+                error = editError,
+                holdMinutes = viewModel.holdMinutes,
+                onEdit = { scope.launch { viewModel.beginEdit() } },
+                onSave = { scope.launch { viewModel.saveEdit() } },
+                onCancel = { scope.launch { viewModel.cancelEdit() } },
+            )
+        } else {
+            null
+        },
     )
 }
 

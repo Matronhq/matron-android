@@ -26,6 +26,7 @@ import chat.matron.android.journal.boolOrNull
 import chat.matron.android.journal.intOrNull
 import chat.matron.android.journal.isItemFallbackText
 import chat.matron.android.journal.longOrNull
+import chat.matron.android.journal.objectOrNull
 import chat.matron.android.journal.stringOrNull
 import chat.matron.android.models.TimelineSendState
 import java.time.Instant
@@ -51,6 +52,16 @@ object JournalTimelineMapper {
     /// The hidden answer-row key a `queued_release` reply is filed under:
     /// namespaced so a bridge prompt id can never collide with an event seq.
     fun queuedReleaseAnswerKey(releasePromptID: String): String = "qr:$releasePromptID"
+
+    /// The queue-card choices that hold a queued message for editing and
+    /// release that hold. Neither answers the card: the message is still
+    /// queued and the card keeps its buttons.
+    const val QUEUED_EDIT_HOLD_CHOICE = "edit"
+    const val QUEUED_EDIT_CANCEL_CHOICE = "edit_cancel"
+
+    /// The hidden answer-row key an Edit tap or a cancelled edit on a queue
+    /// card is filed under: never the card's own answer.
+    fun queuedEditAnswerKey(targetSeq: String): String = "qe:$targetSeq"
 
     fun displayName(sender: String): String {
         val colon = sender.indexOf(':')
@@ -262,6 +273,18 @@ object JournalTimelineMapper {
                     val releasePromptID = payload.stringOrNull("prompt_id") ?: return null
                     val action = payload.stringOrNull("action") ?: return null
                     TimelineItem.Kind.AskUserAnswer(queuedReleaseAnswerKey(releasePromptID), listOf(action))
+                } else if (payload.stringOrNull("choice").let {
+                        it == QUEUED_EDIT_HOLD_CHOICE || it == QUEUED_EDIT_CANCEL_CHOICE
+                    } && payload.longOrNull("target_seq") != null
+                ) {
+                    // An Edit tap, or a cancelled edit, on a queue card doesn't
+                    // answer it: the message is still queued and the card keeps
+                    // its buttons. Kept out of the card's answer (and its reply
+                    // relation) under its own namespace.
+                    TimelineItem.Kind.AskUserAnswer(
+                        queuedEditAnswerKey(payload.longOrNull("target_seq")!!.toString()),
+                        listOf(payload.stringOrNull("choice")!!),
+                    )
                 } else {
                     val ir = payload.longOrNull("target_seq")?.toString()
                     inReplyTo = ir
@@ -414,7 +437,22 @@ object JournalTimelineMapper {
             replyChannel = if (options.isEmpty()) AskUserEvent.ReplyChannel.TEXT_REPLY
             else AskUserEvent.ReplyChannel.CHOICE_REPLY,
             queuedReleasePromptID = queuedReleasePromptID,
+            queuedEdit = if (queuedReleasePromptID == null) null else queuedEdit(payload),
         )
+    }
+
+    /// The edit a busy-queue card offers in the conversation: only an
+    /// in-place edit (`edit.mode == "replace"`), of a card that names one
+    /// message. A tracker reply's card (`item`) is edited from the item's
+    /// thread instead, where the reply box is.
+    fun queuedEdit(payload: JsonObject): AskUserEvent.QueuedEdit? {
+        val edit = payload.objectOrNull("edit") ?: return null
+        if (edit.stringOrNull("mode") != "replace" || payload["item"] != null) return null
+        val items = payload.arrayOrNull("items") ?: return null
+        if (items.size != 1) return null
+        val text = (items[0] as? JsonObject)?.stringOrNull("text")?.takeIf { it.isNotEmpty() } ?: return null
+        val hold = edit.longOrNull("hold_seconds")?.toInt() ?: 600
+        return AskUserEvent.QueuedEdit(text, hold.coerceAtLeast(0))
     }
 
     fun streamingItem(messageRef: String, text: String, convoTS: Instant): TimelineItem = TimelineItem(

@@ -574,6 +574,11 @@ class JournalTimelineService(
         )
     }
 
+    override suspend fun sendQueuedEdit(choice: String, text: String?, inReplyTo: String) {
+        val targetSeq = inReplyTo.toLongOrNull() ?: throw JournalChatError.InvalidPromptReference(inReplyTo)
+        engine.sendOp(ClientOp.PromptReply(convoID, targetSeq, choice = choice, text = text))
+    }
+
     override suspend fun sendImage(data: ByteArray, filename: String, mimeType: String, caption: String?) =
         sendMedia(data, filename, mimeType, type = MediaKind.IMAGE, caption = caption, progress = null)
 

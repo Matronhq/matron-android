@@ -362,6 +362,20 @@ class JournalTimelineMapperTest {
         })))
     }
 
+    // MARK: - Editing a queued message
+
+    @Test fun anEditTapOrCancelledEditDoesNotAnswerTheCard() {
+        for (choice in listOf("edit", "edit_cancel")) {
+            val item = map(ev(31, "prompt_reply", sender = "user:alice", payload = buildJsonObject {
+                put("target_seq", 30); put("choice", choice)
+            }))!!
+            val kind = item.kind as TimelineItem.Kind.AskUserAnswer
+            assertEquals("qe:30", kind.promptEventID)
+            assertEquals(listOf(choice), kind.selectedValues)
+            assertNull(item.inReplyToEventID)
+        }
+    }
+
     @Test fun imageBuildsMediaURL() {
         val item = map(ev(8, "image", payload = buildJsonObject {
             put("blob_ref", "b123"); put("content_type", "image/png")
@@ -678,5 +692,40 @@ class JournalTimelineMapperTest {
         val kind = item.kind as TimelineItem.Kind.Diff
         assertTrue(kind.event.expired)
         assertEquals("the row must still be able to name the file", "A.swift", kind.event.filename)
+    }
+
+    // MARK: - Editing a queued message in the conversation
+
+    private fun queuedCard(edit: kotlinx.serialization.json.JsonObject?, items: List<String> = listOf("fix the build"), item: Boolean = false) =
+        map(ev(30, "prompt", payload = buildJsonObject {
+            put("kind", "queued_release"); put("prompt_id", "pr_e")
+            put("question", "Queued: fix the build")
+            put("options", buildJsonArray { add(buildJsonObject { put("id", "send"); put("label", "Send now") }) })
+            put("items", buildJsonArray { items.forEachIndexed { i, t -> add(buildJsonObject { put("id", "pr_e::$i"); put("text", t) }) } })
+            if (edit != null) put("edit", edit)
+            if (item) put("item", buildJsonObject { put("item_id", "it_1"); put("comment_id", "ic_1") })
+        }))!!.let { (it.kind as TimelineItem.Kind.AskUser).event.queuedEdit }
+
+    @Test fun anInPlaceEditCardCarriesTheMessageAndItsHold() {
+        assertEquals(
+            chat.matron.android.events.AskUserEvent.QueuedEdit("fix the build", 300),
+            queuedCard(buildJsonObject { put("mode", "replace"); put("hold_seconds", 300) }),
+        )
+        assertEquals(600, queuedCard(buildJsonObject { put("mode", "replace") })!!.holdSeconds)
+    }
+
+    @Test fun onlyAnInPlaceEditOfOneConversationMessageIsOffered() {
+        assertNull(queuedCard(null))
+        assertNull(queuedCard(buildJsonObject { put("mode", "resend") }, item = true))
+        assertNull(queuedCard(buildJsonObject { put("mode", "replace") }, item = true))
+        assertNull(queuedCard(buildJsonObject { put("mode", "replace") }, items = listOf("a", "b")))
+        assertNull(queuedCard(buildJsonObject { put("mode", "replace") }, items = listOf("")))
+    }
+
+    @Test fun aSavedEditAnswersTheCard() {
+        val item = map(ev(32, "prompt_reply", sender = "user:alice", payload = buildJsonObject {
+            put("target_seq", 30); put("choice", "edit_save"); put("text", "fix the tests")
+        }))!!
+        assertEquals(TimelineItem.Kind.AskUserAnswer("30", listOf("edit_save")), item.kind)
     }
 }

@@ -1875,10 +1875,18 @@ class ChatViewModel(
             is AskUserEvent.InputKind.MultiChoice -> kind.options.forEach { labelByValue[it.value] = it.label }
             else -> {}
         }
+        // A saved edit retires the card for its replacement: the user's own
+        // `edit_save`, then the bridge's `edited` release. Neither is one of
+        // the card's buttons.
+        labelByValue.putIfAbsent(AskUserEvent.QueuedEdit.SAVE_CHOICE, EDITED_LABEL)
+        labelByValue.putIfAbsent(EDITED_RELEASE_ACTION, EDITED_LABEL)
         return values.joinToString(", ") { labelByValue[it] ?: it }
     }
 
     companion object {
+        private const val EDITED_LABEL = "✎ Edited"
+        private const val EDITED_RELEASE_ACTION = "edited"
+
         /// Cap for both [resolvedImages] and [failedRequests].
         const val MEDIA_CACHE_LIMIT = 100
 

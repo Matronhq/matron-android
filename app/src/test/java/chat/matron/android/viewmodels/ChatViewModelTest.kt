@@ -1069,6 +1069,15 @@ class ChatViewModelTest {
         assertNull(vm.answerSummary("\$1"))
     }
 
+    /// A saved edit retires the card for its replacement: the bridge's
+    /// `edited` release names no option, and reads as an edit.
+    @Test
+    fun answerSummary_editedRelease_saysEdited() = vmTest { scope ->
+        val vm = makeAskVM(scope, listOf(queuedCardItem("\$1", "pr_a"), releaseItem("\$9", "pr_a", "edited")), InMemoryKeyValueStore())
+        assertTrue(vm.isPromptAnswered("\$1"))
+        assertEquals("✎ Edited", vm.answerSummary("\$1"))
+    }
+
     @Test
     fun pendingAsk_skipsReleaseResolvedCard() = vmTest { scope ->
         val vm = makeAskVM(scope, listOf(queuedCardItem("\$1", "pr_a"), releaseItem("\$9", "pr_a")), InMemoryKeyValueStore())
