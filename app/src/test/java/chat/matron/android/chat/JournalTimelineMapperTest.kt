@@ -362,6 +362,20 @@ class JournalTimelineMapperTest {
         })))
     }
 
+    // MARK: - Editing a queued message
+
+    @Test fun anEditTapOrCancelledEditDoesNotAnswerTheCard() {
+        for (choice in listOf("edit", "edit_cancel")) {
+            val item = map(ev(31, "prompt_reply", sender = "user:alice", payload = buildJsonObject {
+                put("target_seq", 30); put("choice", choice)
+            }))!!
+            val kind = item.kind as TimelineItem.Kind.AskUserAnswer
+            assertEquals("qe:30", kind.promptEventID)
+            assertEquals(listOf(choice), kind.selectedValues)
+            assertNull(item.inReplyToEventID)
+        }
+    }
+
     @Test fun imageBuildsMediaURL() {
         val item = map(ev(8, "image", payload = buildJsonObject {
             put("blob_ref", "b123"); put("content_type", "image/png")

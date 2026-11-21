@@ -121,7 +121,10 @@ class ItemQueuedRepliesTest {
     /// Records each card answer; [onSend] lets a test land the bridge's release.
     private class Release(var fail: Boolean = false, val onSend: (String) -> Unit = {}) : QueuedReplySending {
         val sent = mutableListOf<Triple<String, Long, String>>()
+        /// When set, the next send waits here until completed.
+        var gate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
         override suspend fun sendQueuedRelease(convoID: String, targetSeq: Long, choice: String) {
+            gate?.let { gate = null; it.await() }
             if (fail) throw JournalApiError.Transport("offline")
             sent += Triple(convoID, targetSeq, choice)
             onSend(choice)
@@ -315,6 +318,52 @@ class ItemQueuedRepliesTest {
         vm.start()
         waitUntil { vm.item.value != null }
         assertTrue(vm.queuedReplies.value.isEmpty())
+        vm.stop()
+    }
+
+    @Test
+    fun cancelEditWaitsForTheHoldToLand() = runBlocking {
+        val store = FakeItemsStore()
+        store.queuedRows.value = listOf(card(10, "pr_a", "ic_1"))
+        val release = Release()
+        val vm = ItemDetailViewModel("it_1", store, FakeItemsApi(), FakeItemsSync(), this, staging, queuedRelease = release)
+        started(store, vm)
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        release.gate = gate
+        val editing = launch { vm.editQueuedReply("ic_1") }
+        waitUntil { vm.editHoldPending.value }
+        vm.cancelQueuedReplyEdit()
+        assertEquals("ic_1", vm.editingQueuedReplyID.value)
+        gate.complete(Unit)
+        editing.join()
+        assertTrue(!vm.editHoldPending.value)
+        assertEquals("Use the blue one", vm.draft)
+        vm.cancelQueuedReplyEdit()
+        assertEquals(listOf("edit", "edit_cancel"), release.sent.map { it.third })
+        vm.stop()
+    }
+
+    @Test
+    fun editAndResendWaitsWhileAQueuedReplyIsBeingEdited() = runBlocking {
+        val store = FakeItemsStore()
+        val cancelled = TrackerComment("ic_2", "it_1", ItemAuthor.USER, body = "Or maybe red")
+        store.queuedRows.value = listOf(card(10, "pr_a", "ic_1"), card(11, "pr_b", "ic_2"), release(20, "pr_b", "cancel"))
+        val vm = ItemDetailViewModel("it_1", store, FakeItemsApi(), FakeItemsSync(), this, staging, queuedRelease = Release())
+        store.storedComments = listOf(reply, cancelled)
+        store.comments.emit(listOf(reply, cancelled))
+        store.item.emit(item)
+        vm.start()
+        waitUntil { vm.queuedReplies.value.size == 2 }
+        vm.editQueuedReply("ic_1")
+        vm.editAndResend("ic_2")
+        assertEquals("Use the blue one", vm.draft)
+        assertNull(vm.replacingCommentID.value)
+        vm.cancelQueuedReplyEdit()
+        // And the other way round: a resend in the box blocks Edit.
+        vm.editAndResend("ic_2")
+        assertEquals("ic_2", vm.replacingCommentID.value)
+        vm.editQueuedReply("ic_1")
+        assertNull(vm.editingQueuedReplyID.value)
         vm.stop()
     }
 }

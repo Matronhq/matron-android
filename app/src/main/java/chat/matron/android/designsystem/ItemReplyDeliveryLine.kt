@@ -77,6 +77,8 @@ fun ItemReplyDeliveryLine(
     onEditAndResend: (() -> Unit)? = null,
     isEditing: Boolean = false,
     onCancelEdit: (() -> Unit)? = null,
+    /// Edit's hold is on its way: a spinner, and no buttons yet.
+    holdPending: Boolean = false,
 ) {
     val color = if (state.isFailure) MatronRed else MaterialTheme.colorScheme.onSurfaceVariant
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -88,10 +90,10 @@ fun ItemReplyDeliveryLine(
                 color = color,
                 modifier = Modifier.weight(1f, fill = false),
             )
-            if (state.isAwaitingBridge) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+            if (state.isAwaitingBridge || holdPending) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
         }
         when {
-            state.isAwaitingBridge -> Unit
+            state.isAwaitingBridge || holdPending -> Unit
             isEditing && state.canSendNow -> onCancelEdit?.let { cancelEdit ->
                 OutlinedButton(
                     onClick = cancelEdit,

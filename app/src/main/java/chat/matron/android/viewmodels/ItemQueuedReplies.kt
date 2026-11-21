@@ -97,8 +97,8 @@ object ItemQueuedReplies {
     const val CANCEL_CHOICE = "cancel"
 
     /// Edit holds the reply on the queue; a cancelled edit lets it go as it was.
-    const val EDIT_CHOICE = "edit"
-    const val EDIT_CANCEL_CHOICE = "edit_cancel"
+    const val EDIT_CHOICE = JournalTimelineMapper.QUEUED_EDIT_HOLD_CHOICE
+    const val EDIT_CANCEL_CHOICE = JournalTimelineMapper.QUEUED_EDIT_CANCEL_CHOICE
 
     private const val EXPIRED = "expired"
 }

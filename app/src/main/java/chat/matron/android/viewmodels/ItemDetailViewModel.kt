@@ -345,6 +345,8 @@ class ItemDetailViewModel(
         // An edited queued reply replaces the held original, so the original
         // is withdrawn first; if that fails the edit stays in the reply box
         // (and a voice note goes back in the tray) to try again.
+        // The edit's text isn't in the box until its hold has landed.
+        if (_editHoldPending.value) return
         if (_editingQueuedReplyID.value != null) {
             val failure = withdrawEditedOriginal()
             if (failure != null) {
@@ -537,6 +539,12 @@ class ItemDetailViewModel(
     private val _editingQueuedReplyID = MutableStateFlow<String?>(null)
     val editingQueuedReplyID: StateFlow<String?> = _editingQueuedReplyID.asStateFlow()
 
+    /// Edit's hold is on its way to the bridge: the reply shows as being
+    /// edited, but nothing else may answer its card until the hold lands
+    /// (a Cancel edit sent first could be overtaken by the hold).
+    private val _editHoldPending = MutableStateFlow(false)
+    val editHoldPending: StateFlow<Boolean> = _editHoldPending.asStateFlow()
+
     /// The cancelled reply the text in the reply box is an edit of: the next
     /// reply sent stands in for it (`replaces`), so the thread shows one
     /// reply, not the cancelled copy and its edit.
@@ -680,13 +688,16 @@ class ItemDetailViewModel(
     /// text in the reply box (what was typed there comes back on Cancel
     /// edit). Sending the reply replaces the original.
     suspend fun editQueuedReply(commentID: String) = runSend {
-        if (_editingQueuedReplyID.value != null || commentID !in _editableQueuedReplies.value) return@runSend
+        // One edit at a time, and not over a resend already in the box.
+        if (_editingQueuedReplyID.value != null || _replacingCommentID.value != null) return@runSend
+        if (commentID !in _editableQueuedReplies.value) return@runSend
         val comment = _comments.value.firstOrNull { it.id == commentID } ?: return@runSend
         val release = queuedRelease ?: return@runSend
         val card = _queuedReplies.value[commentID]?.card ?: return@runSend
         // Marked as being edited at the tap, so its Send now and Cancel go
         // away while the hold is on its way and can't send the original.
         _editingQueuedReplyID.value = commentID
+        _editHoldPending.value = true
         editTextInBox = false
         preEditDraft = draft
         try {
@@ -698,6 +709,8 @@ class ItemDetailViewModel(
             if (_editingQueuedReplyID.value == commentID) endEdit()
             _error.value = "Couldn't hold that reply for editing. Try again."
             return@runSend
+        } finally {
+            _editHoldPending.value = false
         }
         // Released (or the edit cancelled) while the hold was on its way.
         if (_editingQueuedReplyID.value != commentID) return@runSend
@@ -713,6 +726,9 @@ class ItemDetailViewModel(
     /// back what was typed before Edit.
     suspend fun cancelQueuedReplyEdit() = runSend {
         val commentID = _editingQueuedReplyID.value ?: return@runSend
+        // Not while the hold is still on its way: the release could reach the
+        // bridge first and leave the reply held with nothing editing it.
+        if (_editHoldPending.value) return@runSend
         draft = preEditDraft
         preEditDraft = ""
         endEdit()
@@ -802,6 +818,8 @@ class ItemDetailViewModel(
     /// send. A cancelled reply's resend takes its place in the thread; one
     /// whose session ended stays, marked as not sent.
     fun editAndResend(commentID: String) {
+        // Not while a queued reply is being edited: the box holds that edit.
+        if (_editingQueuedReplyID.value != null) return
         val state = _queuedReplies.value[commentID]
         if (state?.canResend != true) return
         val comment = _comments.value.firstOrNull { it.id == commentID } ?: return

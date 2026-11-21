@@ -175,6 +175,8 @@ fun ItemDetailScreen(
     val queuedReplies by viewModel.queuedReplies.collectAsStateWithLifecycle()
     val editableQueuedReplies by viewModel.editableQueuedReplies.collectAsStateWithLifecycle()
     val editingQueuedReplyID by viewModel.editingQueuedReplyID.collectAsStateWithLifecycle()
+    val editHoldPending by viewModel.editHoldPending.collectAsStateWithLifecycle()
+    val replacingCommentID by viewModel.replacingCommentID.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
     val staged by viewModel.stagedAttachments.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
@@ -436,6 +438,8 @@ fun ItemDetailScreen(
                                     queuedReplies = queuedReplies,
                                     editableQueuedReplies = editableQueuedReplies,
                                     editingQueuedReplyID = editingQueuedReplyID,
+                                    editHoldPending = editHoldPending,
+                                    replacingCommentID = replacingCommentID,
                                 ),
                                 replyDelivery = if (viewModel.answersQueuedReplies) {
                                     ItemReplyDeliveryActions(

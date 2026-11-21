@@ -192,6 +192,10 @@ data class ItemDetailModel(
     val editableQueuedReplies: Set<String> = emptySet(),
     /// The queued reply being edited in the reply box, if any.
     val editingQueuedReplyID: String? = null,
+    /// Edit's hold is still on its way to the agent's session.
+    val editHoldPending: Boolean = false,
+    /// The cancelled reply the reply box holds an edit of, if any.
+    val replacingCommentID: String? = null,
 )
 
 /// What a queued reply's buttons do, by comment id. A `null` handler draws no
@@ -719,11 +723,17 @@ private fun DeliveryLine(state: QueuedReplyState, c: TrackerComment, model: Item
         state = state,
         onSendNow = actions.sendNow?.let { send -> { send(c.id) } },
         onCancel = actions.cancel?.let { cancel -> { cancel(c.id) } },
-        onEdit = actions.edit?.takeIf { textOnly && c.id in model.editableQueuedReplies && model.editingQueuedReplyID == null }
-            ?.let { edit -> { edit(c.id) } },
-        onEditAndResend = actions.editAndResend?.takeIf { textOnly }?.let { resend -> { resend(c.id) } },
+        onEdit = actions.edit?.takeIf {
+            textOnly && c.id in model.editableQueuedReplies && model.editingQueuedReplyID == null && model.replacingCommentID == null
+        }?.let { edit -> { edit(c.id) } },
+        // Not while the box holds an edit of a queued reply.
+        onEditAndResend = actions.editAndResend?.takeIf { textOnly && model.editingQueuedReplyID == null }
+            ?.let { resend -> { resend(c.id) } },
         isEditing = isEditing,
-        onCancelEdit = actions.cancelEdit?.takeIf { isEditing },
+        // Only once the hold has landed: a release sent first could be
+        // overtaken by it.
+        onCancelEdit = actions.cancelEdit?.takeIf { isEditing && !model.editHoldPending },
+        holdPending = isEditing && model.editHoldPending,
     )
 }
 
