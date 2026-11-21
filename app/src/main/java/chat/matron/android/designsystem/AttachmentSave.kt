@@ -11,6 +11,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -75,7 +76,12 @@ fun rememberAttachmentSaver(typeForExtension: (String) -> String): AttachmentSav
                     savingKey = key
                     scope.launch {
                         val bytes = try {
-                            runCatching { fetch() }.getOrNull()
+                            fetch()
+                        } catch (e: CancellationException) {
+                            // The host left the screen: not a failed download.
+                            throw e
+                        } catch (e: Exception) {
+                            null
                         } finally {
                             savingKey = null
                         }
