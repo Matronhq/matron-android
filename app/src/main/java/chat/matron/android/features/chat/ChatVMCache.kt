@@ -64,6 +64,7 @@ class ChatVMCache(
             // Read through to the chat half so `/model` and `/effort` offer
             // whatever the bridge's latest status frame says (apple #163).
             sessionStatus = { chat.sessionStatus.value },
+            unsentReplies = deps.unsentReplies,
         )
         entries[roomID] = pair
         if (entries.size > limit) {
@@ -122,6 +123,7 @@ class ChatVMCache(
             sync = deps.itemsSync(session),
             scope = scope,
             stagingDirectory = deps.stagingDirectory,
+            unsentReplies = deps.unsentReplies,
         )
         itemDetailEntries[itemID] = vm
         if (itemDetailEntries.size > limit) {

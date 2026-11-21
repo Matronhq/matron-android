@@ -820,4 +820,63 @@ class ItemDetailViewModelTest {
         waitUntil { !vm.isBusy.value }
         assertEquals("keep me", vm.draftFlow.value)
     }
+
+    // MARK: - unsent reply kept on disk
+
+    private fun unsentStore(root: File) = UnsentReplyStore(File(root, "boxes"), File(root, "staging"))
+
+    @Test
+    fun theUnsentReplySurvivesANewViewModelAndStore() = runBlocking {
+        val root = Files.createTempDirectory("unsent-").toFile()
+        val store = unsentStore(root)
+        val vm = ItemDetailViewModel("it_1", FakeItemsStore(), Api(), Sync(), this, store.stagingDirectory, unsentReplies = store)
+        vm.draft = "half a reply"
+        vm.attachFiles(listOf(picked("a.png")))
+
+        val again = unsentStore(root)
+        val reopened = ItemDetailViewModel("it_1", FakeItemsStore(), Api(), Sync(), this, again.stagingDirectory, unsentReplies = again)
+        assertEquals("half a reply", reopened.draftFlow.value)
+        assertEquals(listOf("a.png"), reopened.stagedAttachments.value.map { it.filename })
+        val other = ItemDetailViewModel("it_2", FakeItemsStore(), Api(), Sync(), this, again.stagingDirectory, unsentReplies = again)
+        assertEquals("", other.draft)
+    }
+
+    @Test
+    fun aSentReplyIsNotKeptAndAFailedOneIs() = runBlocking {
+        val root = Files.createTempDirectory("unsent-").toFile()
+        val store = unsentStore(root)
+        val api = Api()
+        val vm = ItemDetailViewModel("it_1", FakeItemsStore(), api, Sync(), this, store.stagingDirectory, unsentReplies = store)
+        vm.draft = "goes out"
+        vm.submitComment()
+        assertEquals("", unsentStore(root).reply(UnsentReplyStore.Place.Item("it_1")).text)
+
+        api.failUpload = true
+        vm.draft = "stays"
+        vm.attachFiles(listOf(picked("a.png")))
+        vm.submitComment()
+        val kept = unsentStore(root).reply(UnsentReplyStore.Place.Item("it_1"))
+        assertEquals("stays", kept.text)
+        assertEquals(listOf("a.png"), kept.attachments.map { it.filename })
+    }
+
+    /// A reply still uploading when the app is killed is back in the box on
+    /// the next launch.
+    @Test
+    fun aReplyStillUploadingWhenTheAppStopsComesBack() = runBlocking {
+        val root = Files.createTempDirectory("unsent-").toFile()
+        val store = unsentStore(root)
+        val api = Api().apply { gate = CompletableDeferred() }
+        val scope = CoroutineScope(Job())
+        val vm = ItemDetailViewModel("it_1", FakeItemsStore(), api, Sync(), scope, store.stagingDirectory, unsentReplies = store)
+        vm.draft = "in flight"
+        vm.attachFiles(listOf(picked("a.png")))
+        scope.launch { vm.submitComment() }
+        withTimeout(5_000) { api.started.await() }
+        // The process dies here: a fresh store reads what was on disk.
+        val back = unsentStore(root).reply(UnsentReplyStore.Place.Item("it_1"))
+        scope.cancel()
+        assertEquals("in flight", back.text)
+        assertEquals(listOf("a.png"), back.attachments.map { it.filename })
+    }
 }

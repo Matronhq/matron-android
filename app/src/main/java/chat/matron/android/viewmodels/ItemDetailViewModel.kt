@@ -61,7 +61,13 @@ class ItemDetailViewModel(
     private val scope: CoroutineScope,
     private val stagingDirectory: File,
     private val now: () -> Instant = Instant::now,
+    /// Where the unsent reply (draft and tray) is kept on disk, so it
+    /// survives leaving the item, eviction and a restart. `null` keeps it in
+    /// memory only.
+    private val unsentReplies: UnsentReplyStore? = null,
 ) {
+    private val unsentPlace = UnsentReplyStore.Place.Item(itemID)
+    private val unsentEpoch = unsentReplies?.epoch ?: 0
     private val _item = MutableStateFlow<TrackerItem?>(null)
     val item: StateFlow<TrackerItem?> = _item.asStateFlow()
 
@@ -81,11 +87,27 @@ class ItemDetailViewModel(
     val draftFlow: StateFlow<String> = _draft.asStateFlow()
     var draft: String
         get() = _draft.value
-        set(value) { _draft.value = value }
+        set(value) { _draft.value = value; persistUnsent() }
 
     /// The tray: attachments picked but not yet sent, in send order.
     private val _stagedAttachments = MutableStateFlow<List<StagedAttachment>>(emptyList())
     val stagedAttachments: StateFlow<List<StagedAttachment>> = _stagedAttachments.asStateFlow()
+
+    /// Writes to the tray go through here so each change is saved.
+    private var tray: List<StagedAttachment>
+        get() = _stagedAttachments.value
+        set(value) { _stagedAttachments.value = value; persistUnsent() }
+
+    init {
+        unsentReplies?.reply(unsentPlace)?.let { saved ->
+            _draft.value = saved.text
+            _stagedAttachments.value = saved.attachments
+        }
+    }
+
+    private fun persistUnsent() {
+        unsentReplies?.save(unsentPlace, UnsentReply(_draft.value, _stagedAttachments.value), unsentEpoch)
+    }
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
@@ -327,7 +349,11 @@ class ItemDetailViewModel(
         val pending = draft
         val attachments = listOfNotNull(leading) + _stagedAttachments.value
         draft = ""
-        _stagedAttachments.value = emptyList()
+        tray = emptyList()
+        // Recorded until it is queued or back in the tray, so a reply still
+        // uploading when the app is killed comes back on the next visit.
+        val sendID = UUID.randomUUID().toString()
+        unsentReplies?.beginSend(unsentPlace, sendID, UnsentReply(pending, attachments), unsentEpoch)
         _isBusy.value = true
         var sent = false
         try {
@@ -341,9 +367,10 @@ class ItemDetailViewModel(
             _error.value = error.message ?: error.toString()
         } finally {
             if (!sent) {
-                _stagedAttachments.value = attachments + _stagedAttachments.value
+                tray = attachments + _stagedAttachments.value
                 if (draft.isEmpty()) draft = pending
             }
+            unsentReplies?.endSend(unsentPlace, sendID, unsentEpoch)
             _isBusy.value = false
         }
     }
@@ -354,7 +381,7 @@ class ItemDetailViewModel(
         for (file in files) {
             try {
                 val staged = withContext(Dispatchers.IO) { StagedAttachment.stage(file, stagingDirectory) }
-                _stagedAttachments.value = _stagedAttachments.value + staged
+                tray = _stagedAttachments.value + staged
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (error: Throwable) {
@@ -383,7 +410,7 @@ class ItemDetailViewModel(
     /// Drops one attachment from the tray (its ✕) and deletes its copy.
     fun removeAttachment(id: String) {
         val attachment = _stagedAttachments.value.firstOrNull { it.id == id } ?: return
-        _stagedAttachments.value = _stagedAttachments.value.filterNot { it.id == id }
+        tray = _stagedAttachments.value.filterNot { it.id == id }
         attachment.deleteStagedCopy()
     }
 
