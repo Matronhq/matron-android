@@ -43,6 +43,20 @@ class ItemThreadGalleryTest {
     }
 
     @Test
+    fun anImageShownTwiceIsListedOnceWhereItFirstAppears() {
+        val comments = listOf(
+            comment("c1", "First look.", png("c1-a")),
+            comment("c2", "Again, with the item's picture.", png("item-a"), png("c2-a")),
+        )
+        val shown = itemThreadImages(item, comments)
+        assertEquals(listOf("item-a", "c1-a", "c2-a"), shown.map { it.blobRef })
+        // A tap on the later copy opens on the one entry for that picture.
+        val gallery = itemThreadGallery(shown, png("item-a"), emptyMap(), ::url) { null }
+        assertEquals(0, gallery.startIndex)
+        assertEquals(3, gallery.entries.size)
+    }
+
+    @Test
     fun galleryStartsOnTheTappedImageAndReusesLoadedBytes() = runBlocking {
         val shown = listOf(png("a"), png("b"), png("c"))
         val fetched = mutableListOf<String>()

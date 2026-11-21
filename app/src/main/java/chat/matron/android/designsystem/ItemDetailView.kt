@@ -232,7 +232,10 @@ fun itemStatusRow(comment: TrackerComment): ItemStatusRow =
 /// in its text first, in reading order, then the ones listed after it
 /// ([splitInlineAttachments]). What the fullscreen viewer swipes through
 /// from a tapped image. A status change with no note draws no card, so its
-/// attachments are not on screen and are left out.
+/// attachments are not on screen and are left out. An image shown more than
+/// once (the same blob attached again later) is listed once, where it first
+/// appears: a tap on any copy of it then has one place in the gallery,
+/// rather than the counter and neighbours of whichever copy came first.
 fun itemThreadImages(item: TrackerItem?, comments: List<TrackerComment>): List<TrackerAttachment> {
     fun shown(body: String, attachments: List<TrackerAttachment>): List<TrackerAttachment> {
         val split = splitInlineAttachments(body, attachments)
@@ -246,7 +249,7 @@ fun itemThreadImages(item: TrackerItem?, comments: List<TrackerComment>): List<T
             add(body to c.attachments)
         }
     }
-    return cards.flatMap { (body, attachments) -> shown(body, attachments) }
+    return cards.flatMap { (body, attachments) -> shown(body, attachments) }.distinctBy { it.blobRef }
 }
 
 /// Maps outbox progress to the shared send glyph: a fresh comment that hasn't
