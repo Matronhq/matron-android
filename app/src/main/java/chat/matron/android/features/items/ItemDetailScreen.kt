@@ -259,8 +259,7 @@ fun ItemDetailScreen(
                 viewModel.attachFiles(listOf(picked))
             } finally {
                 // The tray holds its own staged copy.
-                picked.delete()
-                picked.parentFile?.delete()
+                picked.parentFile?.deleteRecursively()
             }
         }
     }

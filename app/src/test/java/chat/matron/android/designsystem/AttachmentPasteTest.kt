@@ -13,6 +13,7 @@ import java.time.LocalDateTime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -109,6 +110,15 @@ class AttachmentPasteTest {
         assertEquals(first.name, second.name)
         assertNotEquals("two copies of one name do not collide", first.parentFile, second.parentFile)
         assertEquals("x", second.readText())
+    }
+
+    @Test
+    fun anUnreadableItemLeavesNoDirectoryBehind() {
+        val context: Context = ApplicationProvider.getApplicationContext()
+        val picked = File(context.cacheDir, "picked")
+        val before = picked.list()?.toSet().orEmpty()
+        assertNull(copyUriToTemp(context, Uri.fromFile(File(context.cacheDir, "missing-${System.nanoTime()}"))))
+        assertEquals(before, picked.list()?.toSet().orEmpty())
     }
 
     @Test

@@ -540,7 +540,12 @@ private suspend fun attachUri(context: Context, viewModel: ComposerViewModel, ur
         viewModel.reportAttachmentError("Couldn't read that file.")
         return
     }
-    viewModel.attachFiles(listOf(file))
+    try {
+        viewModel.attachFiles(listOf(file))
+    } finally {
+        // The tray holds its own staged copy.
+        withContext(Dispatchers.IO) { file.parentFile?.deleteRecursively() }
+    }
 }
 
 /// Copies a picked or pasted content [Uri] into the cache under the name
@@ -565,9 +570,12 @@ internal fun copyUriToTemp(
     )
     val dir = File(File(context.cacheDir, "picked"), UUID.randomUUID().toString()).apply { mkdirs() }
     val out = File(dir, name)
-    resolver.openInputStream(uri)?.use { input -> out.outputStream().use { input.copyTo(it) } }
-        ?: return null
-    out
+    val copied = runCatching {
+        resolver.openInputStream(uri)?.use { input -> out.outputStream().use { input.copyTo(it) } }
+    }.getOrNull()
+    // An unreadable item leaves nothing behind, not even its directory.
+    if (copied == null) dir.deleteRecursively()
+    copied?.let { out }
 }.getOrNull()
 
 /// The staged filename for a picked item: the provider's display name when it
