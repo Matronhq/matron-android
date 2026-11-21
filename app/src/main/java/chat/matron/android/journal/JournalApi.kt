@@ -11,6 +11,15 @@ import chat.matron.android.models.Milestone
 import chat.matron.android.models.Mission
 import chat.matron.android.models.TrackerItem
 import chat.matron.android.viewmodels.BoxStatus
+import chat.matron.android.journal.approvals.ApprovalKeyDTO
+import chat.matron.android.journal.approvals.ApprovalKeyError
+import chat.matron.android.journal.approvals.ApprovalKeysProviding
+import chat.matron.android.journal.approvals.ApprovalKeysState
+import chat.matron.android.journal.approvals.ApprovalNonce
+import chat.matron.android.journal.approvals.SignedApproval
+import chat.matron.android.journal.approvals.malformed
+import chat.matron.android.journal.approvals.toJson
+import java.time.Instant
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -357,6 +366,16 @@ sealed class JournalApiError(message: String) : Exception(message) {
         val reason: String? = null,
         val max: Int? = null,
     ) : JournalApiError(serverMessage.ifEmpty { "Server error (HTTP $status)." })
+    /// 403 `approval_required`: the account has an approval key and this
+    /// request needed a signature it did not carry.
+    data object ApprovalRequired : JournalApiError(
+        "This needs a signature from an approval key. Approve it on a device that has one.",
+    )
+    /// 400 `approval_invalid`: the journal refused the signed approval.
+    /// [reason] is its own word: `mismatch`, `nonce`, `revoked_key`,
+    /// `wrong_device`, `unknown_key`, `signature`, `bad_statement`.
+    data class ApprovalInvalid(val reason: String) :
+        JournalApiError(chat.matron.android.journal.approvals.approvalInvalidText(reason))
     data class Transport(val detail: String) :
         JournalApiError(if (detail.isEmpty()) "Couldn't reach the server." else "Couldn't reach the server — $detail")
 }
@@ -371,7 +390,7 @@ class JournalApi(
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
     TrackerSearching,
     ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding, ContactsProviding,
-    InviteAskAnswering {
+    InviteAskAnswering, ApprovalKeysProviding {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -530,6 +549,69 @@ class JournalApi(
             },
         )
         return PasswordChange(signedOut = obj.intOrNull("signed_out") ?: 0)
+    }
+
+    // MARK: Approval keys (protocol "Approval keys (step-up)")
+
+    override suspend fun approvalKeys(): ApprovalKeysState = ApprovalKeysState.fromJson(request("/approval-keys"))
+
+    override suspend fun approvalNonce(): ApprovalNonce {
+        val obj = approvalKeyRequest("/approvals/nonce", buildJsonObject {})
+        val nonce = obj.stringOrNull("nonce")?.takeIf { it.isNotEmpty() } ?: throw malformed("nonce")
+        val expires = obj.longOrNull("expires_at")?.let(Instant::ofEpochMilli) ?: Instant.now().plusSeconds(300)
+        return ApprovalNonce(nonce, expires)
+    }
+
+    override suspend fun enrolApprovalKey(publicKey: String, name: String, password: String, code: String): ApprovalKeyDTO =
+        approvalKeyOf(
+            approvalKeyRequest(
+                "/approval-keys",
+                buildJsonObject {
+                    put("public_key", publicKey); put("name", name); put("password", password); put("code", code)
+                },
+            ),
+        )
+
+    override suspend fun requestApprovalKey(publicKey: String, name: String): String {
+        val obj = approvalKeyRequest(
+            "/approval-keys/requests",
+            buildJsonObject { put("public_key", publicKey); put("name", name) },
+        )
+        return obj.stringOrNull("id") ?: throw malformed("key request")
+    }
+
+    override suspend fun approveApprovalKeyRequest(id: String, approval: SignedApproval): ApprovalKeyDTO =
+        approvalKeyOf(
+            approvalKeyRequest(
+                "/approval-keys/requests/${pathSegment(id)}/approve",
+                buildJsonObject { put("approval", approval.toJson()) },
+            ),
+        )
+
+    override suspend fun revokeApprovalKey(keyID: String, approval: SignedApproval) {
+        approvalKeyRequest("/approval-keys/${pathSegment(keyID)}/revoke", buildJsonObject { put("approval", approval.toJson()) })
+    }
+
+    override suspend fun revokeApprovalKey(keyID: String, password: String, code: String) {
+        approvalKeyRequest(
+            "/approval-keys/${pathSegment(keyID)}/revoke",
+            buildJsonObject { put("password", password); put("code", code) },
+        )
+    }
+
+    override suspend fun attachApprovalKey(approval: SignedApproval): ApprovalKeyDTO =
+        approvalKeyOf(approvalKeyRequest("/approval-keys/attach", buildJsonObject { put("approval", approval.toJson()) }))
+
+    private fun approvalKeyOf(obj: JsonObject): ApprovalKeyDTO =
+        ApprovalKeyDTO.fromJson(obj.objectOrNull("key")) ?: throw malformed("approval key")
+
+    /// A key route's POST: its own refusals first ([ApprovalKeyError]), then
+    /// the generic table.
+    private suspend fun approvalKeyRequest(path: String, body: JsonObject): JsonObject {
+        val (status, data) = raw(path, "POST", body)
+        val obj = parseJsonObjectOrNull(String(data, Charsets.UTF_8))
+        if (status != 200 && status != 201) throw ApprovalKeyError.from(status, obj) ?: error(status, data)
+        return obj ?: throw JournalApiError.Transport("non-JSON response for $path")
     }
 
     // MARK: Password reset by email
@@ -1431,6 +1513,8 @@ class JournalApi(
             status == 429 && code == "locked_out" ->
                 JournalApiError.LockedOut(obj?.intOrNull("retry_after") ?: 60)
             status == 429 -> JournalApiError.RateLimited
+            status == 403 && code == "approval_required" -> JournalApiError.ApprovalRequired
+            status == 400 && code == "approval_invalid" -> JournalApiError.ApprovalInvalid(obj?.stringOrNull("reason") ?: "")
             status == 401 -> JournalApiError.Unauthenticated
             status == 403 -> JournalApiError.Forbidden
             status == 404 -> JournalApiError.NotFound

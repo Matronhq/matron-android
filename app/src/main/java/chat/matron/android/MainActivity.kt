@@ -100,6 +100,8 @@ import chat.matron.android.features.settings.CoordinatorSettingRowModel
 import chat.matron.android.features.settings.DeviceSettingsScreen
 import chat.matron.android.features.settings.AgentChatScreen
 import chat.matron.android.features.settings.DevicesScreen
+import chat.matron.android.features.settings.ApprovalKeysScreen
+import chat.matron.android.designsystem.ApprovalConfirmHost
 import chat.matron.android.features.settings.PinnedChatsScreen
 import chat.matron.android.features.chatlist.ArchivedChatsScreen
 import chat.matron.android.chat.ChatSummary
@@ -186,6 +188,8 @@ class MainActivity : FragmentActivity() {
         // behaviour uniform so screens can rely on imePadding() for the IME.
         enableEdgeToEdge()
         val deps = (application as MatronApplication).dependencies
+        // Approval keys sign behind a biometric prompt, which needs this activity.
+        chat.matron.android.platform.BiometricPromptHost.attach(this)
         appLock = AppLockController(
             auth = AndroidBiometricAuthenticator(this),
             store = deps.preferences,
@@ -220,6 +224,11 @@ class MainActivity : FragmentActivity() {
     override fun onStart() {
         super.onStart()
         appLock.noteForegrounded()
+    }
+
+    override fun onDestroy() {
+        chat.matron.android.platform.BiometricPromptHost.detach(this)
+        super.onDestroy()
     }
 
     override fun onStop() {
@@ -1085,6 +1094,7 @@ private fun SignedInApp(
                         val twoFactorSetting = remember(session.userID) { deps.makeTwoFactorSettingViewModel(session) }
                         val changePassword = remember(session.userID) { deps.makeChangePasswordViewModel(session) }
                         val accountEmail = remember(session.userID) { deps.makeAccountEmailViewModel(session) }
+                        val approvalKeys = remember(session.userID) { deps.makeApprovalKeysScreenModel(session) }
                         val coordinatorConsent = remember(session.userID) {
                             deps.makeCoordinatorConsentSettingViewModel(session, sessionScope)
                         }
@@ -1111,8 +1121,15 @@ private fun SignedInApp(
                             twoFactor = twoFactorSetting,
                             changePassword = changePassword,
                             accountEmail = accountEmail,
+                            approvalKeys = approvalKeys,
+                            onApprovalKeys = { nav.navigate("approval-keys") },
                             onBack = { nav.popBackStack() },
                         )
+                    }
+
+                    composable("approval-keys") {
+                        val approvalKeys = remember(session.userID) { deps.makeApprovalKeysScreenModel(session) }
+                        ApprovalKeysScreen(model = approvalKeys, onBack = { nav.popBackStack() })
                     }
 
                     composable("people") {
@@ -1378,6 +1395,13 @@ private fun SignedInApp(
             )
         }
     }
+
+    // Approval keys: after every sign-in and launch, is this device's key
+    // still attached to this sign-in? Then the confirm sheet, over whatever
+    // is on screen, for every request that needs a signature.
+    val approvals = remember(session.userID) { deps.approvalCenter(session) }
+    LaunchedEffect(approvals) { approvals.refresh() }
+    ApprovalConfirmHost(approvals)
 }
 
 /// Who asked for the New Chat sheet: the list (an ordinary chat) or the
