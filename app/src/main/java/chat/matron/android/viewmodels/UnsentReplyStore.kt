@@ -15,6 +15,12 @@ data class UnsentReply(
     val isEmpty: Boolean get() = text.isBlank() && attachments.isEmpty()
 }
 
+/// A send recorded on disk by an earlier run of the app that never reported
+/// back: the app stopped while it was uploading or being queued. [queuing]
+/// says it had reached the outbox insert, so it may have been queued (and
+/// even delivered) after all; the owner checks before putting it back.
+data class StrandedSend(val reply: UnsentReply, val queuing: Boolean)
+
 /// Keeps every reply box's unsent contents on disk, one small JSON file per
 /// item or conversation, so a reply survives leaving its page, its view model
 /// being evicted, and the app restarting. Only a successful send, or the user
@@ -23,8 +29,10 @@ data class UnsentReply(
 /// which box. Ported from matron-apple's `UnsentReplyStore`.
 ///
 /// A box also records the replies it is sending ([beginSend]/[endSend]) until
-/// each is queued or comes back. If the app dies in between, the next read
-/// puts those back in the box rather than losing them.
+/// each is queued or comes back, under the outbox local id the send uses. If
+/// the app dies in between, the next run finds them as [strandedSends]; the
+/// owner puts back the ones that never reached the outbox and drops the rest
+/// ([dropStranded]), so a queued reply is never offered for sending twice.
 ///
 /// Sign-out wipes it all ([wipeAll]) and bumps [epoch]: view models pass the
 /// epoch they were made under with every write, so a send that finishes after
@@ -54,8 +62,10 @@ class UnsentReplyStore(
 
     private data class Record(
         val box: UnsentReply = UnsentReply(),
-        /// Replies between Send and queued, by send id.
-        val sending: Map<String, UnsentReply> = emptyMap(),
+        /// Replies between Send and queued, by send id — this run's and,
+        /// until resolved, earlier runs' ([stranded] names those).
+        val sending: Map<String, StrandedSend> = emptyMap(),
+        val stranded: Set<String> = emptySet(),
     ) {
         val isEmpty: Boolean get() = box.isEmpty && sending.isEmpty()
     }
@@ -71,8 +81,7 @@ class UnsentReplyStore(
         stagingDirectory.mkdirs()
     }
 
-    /// What [place]'s box holds. The first read in a process also puts back
-    /// any reply that was still sending when the app last stopped.
+    /// What [place]'s box holds.
     @Synchronized
     fun reply(place: Place): UnsentReply = record(place).box
 
@@ -89,7 +98,34 @@ class UnsentReplyStore(
     fun beginSend(place: Place, id: String, reply: UnsentReply, epoch: Int) {
         if (epoch != this.epoch || reply.isEmpty) return
         val record = record(place)
-        write(place, record.copy(sending = record.sending + (id to reply)))
+        write(place, record.copy(sending = record.sending + (id to StrandedSend(reply, queuing = false))))
+    }
+
+    /// The send [id] is about to be written to the outbox: from here on, a
+    /// stranded copy may already be queued.
+    @Synchronized
+    fun markQueuing(place: Place, id: String, epoch: Int) {
+        if (epoch != this.epoch) return
+        val record = record(place)
+        val send = record.sending[id] ?: return
+        write(place, record.copy(sending = record.sending + (id to send.copy(queuing = true))))
+    }
+
+    /// Sends an earlier run of the app recorded and never finished, by id.
+    @Synchronized
+    fun strandedSends(place: Place): Map<String, StrandedSend> {
+        val record = record(place)
+        return record.sending.filterKeys { it in record.stranded }
+    }
+
+    /// A stranded send has been dealt with: put back by its owner, or found
+    /// queued.
+    @Synchronized
+    fun dropStranded(place: Place, id: String, epoch: Int) {
+        if (epoch != this.epoch) return
+        val record = record(place)
+        if (id !in record.stranded) return
+        write(place, record.copy(sending = record.sending - id, stranded = record.stranded - id))
     }
 
     /// The send [id] was queued, or has been put back in its box.
@@ -130,15 +166,9 @@ class UnsentReplyStore(
 
     private fun record(place: Place): Record {
         cache[place]?.let { return it }
-        var record = load(place)
-        // Sends this process never started: the app stopped before they were
-        // queued. They go back in the box.
-        if (record.sending.isNotEmpty()) {
-            var box = record.box
-            for ((_, reply) in record.sending.toSortedMap()) box = merge(reply, box)
-            record = Record(box = box)
-            write(place, record)
-        }
+        // Sends on disk were started by an earlier run: stranded.
+        val loaded = load(place)
+        val record = loaded.copy(stranded = loaded.sending.keys)
         cache[place] = record
         return record
     }
@@ -151,7 +181,8 @@ class UnsentReplyStore(
         // it is) just before the app stopped: not put back.
         val sending = saved.sending.mapNotNull { (id, send) ->
             val reply = send.toReply()
-            if (send.attachments.isNotEmpty() && reply.attachments.isEmpty()) null else id to reply
+            if (send.attachments.isNotEmpty() && reply.attachments.isEmpty()) null
+            else id to StrandedSend(reply, send.queuing)
         }.toMap()
         return Record(box = saved.box.toReply(), sending = sending)
     }
@@ -163,7 +194,10 @@ class UnsentReplyStore(
             file.delete()
             return
         }
-        val saved = SavedRecord(box = SavedReply.of(record.box), sending = record.sending.mapValues { SavedReply.of(it.value) })
+        val saved = SavedRecord(
+            box = SavedReply.of(record.box),
+            sending = record.sending.mapValues { SavedReply.of(it.value.reply, it.value.queuing) },
+        )
         runCatching {
             directory.mkdirs()
             val tmp = File(directory, "${place.fileName}.tmp")
@@ -204,10 +238,12 @@ class UnsentReplyStore(
     private data class SavedReply(
         val text: String,
         val attachments: List<SavedAttachment> = emptyList(),
+        val queuing: Boolean = false,
     ) {
         companion object {
-            fun of(reply: UnsentReply) = SavedReply(
+            fun of(reply: UnsentReply, queuing: Boolean = false) = SavedReply(
                 text = reply.text,
+                queuing = queuing,
                 attachments = reply.attachments.map {
                     SavedAttachment(
                         id = it.id, filename = it.file.name, mimeType = it.mimeType, sizeBytes = it.sizeBytes,

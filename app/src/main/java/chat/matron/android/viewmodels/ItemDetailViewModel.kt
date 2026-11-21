@@ -103,6 +103,40 @@ class ItemDetailViewModel(
             _draft.value = saved.text
             _stagedAttachments.value = saved.attachments
         }
+        if (unsentReplies?.strandedSends(unsentPlace)?.isNotEmpty() == true) {
+            scope.launch { recoverStrandedSends() }
+        }
+    }
+
+    /// Replies an earlier run was sending when the app stopped. One that
+    /// never reached the outbox goes back in the box. One that had reached
+    /// the outbox insert is put back only if it is neither in the outbox nor
+    /// already in the thread, so a queued reply is never offered twice. If
+    /// the outbox can't be read, it stays recorded for the next visit.
+    private suspend fun recoverStrandedSends() {
+        val stores = unsentReplies ?: return
+        for ((id, send) in stores.strandedSends(unsentPlace)) {
+            val putBack = if (!send.queuing) {
+                true
+            } else {
+                val queued = runCatching {
+                    store.itemOutboxRows(itemID).any { it.localID == id || it.localID.startsWith("$id-") }
+                }.getOrNull() ?: continue
+                val delivered = !queued && runCatching { store.comments(itemID) }.getOrDefault(emptyList()).any {
+                    it.author == ItemAuthor.USER && it.body.trim() == send.reply.text.trim()
+                }
+                !queued && !delivered
+            }
+            if (putBack) {
+                val merged = UnsentReplyStore.merge(send.reply, UnsentReply(_draft.value, _stagedAttachments.value))
+                _draft.value = merged.text
+                tray = merged.attachments
+            } else {
+                // Queued: the outbox holds what it needs.
+                send.reply.attachments.forEach { it.deleteStagedCopy() }
+            }
+            stores.dropStranded(unsentPlace, id, unsentEpoch)
+        }
     }
 
     private fun persistUnsent() {
@@ -350,15 +384,17 @@ class ItemDetailViewModel(
         val attachments = listOfNotNull(leading) + _stagedAttachments.value
         draft = ""
         tray = emptyList()
-        // Recorded until it is queued or back in the tray, so a reply still
-        // uploading when the app is killed comes back on the next visit.
+        // Recorded under the outbox local id until it is queued or back in
+        // the tray, so a reply still uploading when the app is killed comes
+        // back on the next visit ([recoverStrandedSends]).
         val sendID = UUID.randomUUID().toString()
         unsentReplies?.beginSend(unsentPlace, sendID, UnsentReply(pending, attachments), unsentEpoch)
         _isBusy.value = true
         var sent = false
         try {
             val uploaded = upload(attachments) ?: return
-            sync.enqueueComment(itemID, UUID.randomUUID().toString(), pending.trim(), uploaded)
+            unsentReplies?.markQueuing(unsentPlace, sendID, unsentEpoch)
+            sync.enqueueComment(itemID, sendID, pending.trim(), uploaded)
             sent = true
             attachments.forEach { it.deleteStagedCopy() }
         } catch (cancel: CancellationException) {

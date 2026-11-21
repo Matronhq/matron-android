@@ -860,8 +860,8 @@ class ItemDetailViewModelTest {
         assertEquals(listOf("a.png"), kept.attachments.map { it.filename })
     }
 
-    /// A reply still uploading when the app is killed is back in the box on
-    /// the next launch.
+    /// A reply still uploading when the app is killed is back in the box the
+    /// next time the item opens.
     @Test
     fun aReplyStillUploadingWhenTheAppStopsComesBack() = runBlocking {
         val root = Files.createTempDirectory("unsent-").toFile()
@@ -874,9 +874,35 @@ class ItemDetailViewModelTest {
         scope.launch { vm.submitComment() }
         withTimeout(5_000) { api.started.await() }
         // The process dies here: a fresh store reads what was on disk.
-        val back = unsentStore(root).reply(UnsentReplyStore.Place.Item("it_1"))
+        val again = unsentStore(root)
+        val reopened = ItemDetailViewModel("it_1", FakeItemsStore(), Api(), Sync(), this, again.stagingDirectory, unsentReplies = again)
+        waitUntil { reopened.draftFlow.value == "in flight" }
+        assertEquals(listOf("a.png"), reopened.stagedAttachments.value.map { it.filename })
+        assertTrue(unsentStore(root).strandedSends(UnsentReplyStore.Place.Item("it_1")).isEmpty())
         scope.cancel()
-        assertEquals("in flight", back.text)
-        assertEquals(listOf("a.png"), back.attachments.map { it.filename })
+    }
+
+    /// A send that had reached the outbox insert when the app stopped, and
+    /// is in the outbox, is not put back: that would offer it twice.
+    @Test
+    fun aStrandedSendFoundInTheOutboxIsNotPutBack() = runBlocking {
+        val root = Files.createTempDirectory("unsent-").toFile()
+        val first = unsentStore(root)
+        val place = UnsentReplyStore.Place.Item("it_1")
+        first.beginSend(place, "local-1", UnsentReply("queued already"), first.epoch)
+        first.markQueuing(place, "local-1", first.epoch)
+        first.beginSend(place, "local-2", UnsentReply("never queued"), first.epoch)
+        first.markQueuing(place, "local-2", first.epoch)
+
+        val items = FakeItemsStore().apply {
+            storedOutbox = listOf(
+                ItemOutboxEntity(localID = "local-1", itemID = "it_1", op = ItemOutboxEntity.OP_COMMENT,
+                    payloadJson = "{}", createdAt = 0, attempts = 0, lastError = null),
+            )
+        }
+        val again = unsentStore(root)
+        val vm = ItemDetailViewModel("it_1", items, Api(), Sync(), this, again.stagingDirectory, unsentReplies = again)
+        waitUntil { unsentStore(root).strandedSends(place).isEmpty() }
+        assertEquals("never queued", vm.draft)
     }
 }

@@ -62,32 +62,44 @@ class UnsentReplyStoreTest {
     }
 
     @Test
-    fun aSendStillInFlightWhenTheAppStoppedComesBack() {
+    fun aSendLeftByAnEarlierRunIsStrandedUntilDropped() {
         val a = staged("a.png")
         val s = store()
         s.beginSend(item, "send-1", UnsentReply("sending this", listOf(a)), s.epoch)
-        s.save(item, UnsentReply("typed after"), s.epoch)
+        s.beginSend(item, "send-2", UnsentReply("being queued"), s.epoch)
+        s.markQueuing(item, "send-2", s.epoch)
+        assertTrue("this run's own sends aren't stranded", s.strandedSends(item).isEmpty())
 
-        val back = store().reply(item)
-        assertEquals("typed after\n\nsending this", back.text)
-        assertEquals(listOf(a), back.attachments)
+        val next = store()
+        assertEquals(
+            mapOf(
+                "send-1" to StrandedSend(UnsentReply("sending this", listOf(a)), queuing = false),
+                "send-2" to StrandedSend(UnsentReply("being queued"), queuing = true),
+            ),
+            next.strandedSends(item),
+        )
+        assertEquals("the box itself is untouched", "", next.reply(item).text)
+        next.dropStranded(item, "send-1", next.epoch)
+        next.dropStranded(item, "send-2", next.epoch)
+        assertTrue(store().strandedSends(item).isEmpty())
+        assertTrue(boxes.listFiles().orEmpty().isEmpty())
     }
 
     @Test
-    fun aSendThatEndedIsNotPutBack() {
+    fun aSendThatEndedIsNotStranded() {
         val s = store()
         s.beginSend(item, "send-1", UnsentReply("sent"), s.epoch)
         s.endSend(item, "send-1", s.epoch)
-        assertEquals("", store().reply(item).text)
+        assertTrue(store().strandedSends(item).isEmpty())
     }
 
     @Test
-    fun aSendWhoseFilesWereDeletedOnQueueingIsNotPutBack() {
+    fun aSendWhoseFilesWereDeletedOnQueueingIsNotStranded() {
         val a = staged("a.png")
         val s = store()
         s.beginSend(item, "send-1", UnsentReply("sent", listOf(a)), s.epoch)
         a.deleteStagedCopy()
-        assertEquals(UnsentReply(), store().reply(item))
+        assertTrue(store().strandedSends(item).isEmpty())
     }
 
     @Test
