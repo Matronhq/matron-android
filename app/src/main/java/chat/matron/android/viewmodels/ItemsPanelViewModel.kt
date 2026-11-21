@@ -42,6 +42,9 @@ class ItemsPanelViewModel(
     private val api: ItemsProviding,
     private val sync: ItemsSyncing,
     private val scope: CoroutineScope,
+    /// Approval keys: signs Approve on a request that needs it. `null` in
+    /// hosts without one.
+    private val approvals: ApprovalCenter? = null,
 ) {
     data class Sections(
         val needsYou: List<TrackerItem> = emptyList(),
@@ -424,6 +427,18 @@ class ItemsPanelViewModel(
             answerPending = answerPending + (item.id to theirs.localID)
             publishAwaitingYou()
             return false
+        }
+        // A tap that needs a signature is confirmed and sent at once; the row
+        // stays hidden behind the confirm sheet until the journal has it.
+        val outcome = StepUpTap.send(
+            item, null, label, api, sync,
+            signer = approvals?.signer, accountHasKey = approvals?.accountHasKey ?: false,
+        )
+        if (outcome != StepUpTap.Outcome.Unsigned) {
+            answerPending = answerPending - item.id
+            publishAwaitingYou()
+            (outcome as? StepUpTap.Outcome.Failed)?.let { _error.value = it.message }
+            return outcome == StepUpTap.Outcome.Sent
         }
         val inserted = sync.enqueueComment(item.id, localID, label, emptyList(), action = label, replyTo = null)
         if (!inserted) {

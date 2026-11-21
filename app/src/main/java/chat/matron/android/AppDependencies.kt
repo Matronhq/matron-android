@@ -599,7 +599,9 @@ class AppDependencies(
      */
     fun makeItemsPanelViewModel(session: UserSession, convoID: String?, scope: CoroutineScope): ItemsPanelViewModel {
         val c = core(session)
-        return ItemsPanelViewModel(convoID = convoID, store = c.store, api = c.api, sync = c.itemsSync, scope = scope)
+        return ItemsPanelViewModel(
+            convoID = convoID, store = c.store, api = c.api, sync = c.itemsSync, scope = scope, approvals = c.approvals,
+        )
     }
 
     /**

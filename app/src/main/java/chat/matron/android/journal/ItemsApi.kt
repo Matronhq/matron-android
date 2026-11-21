@@ -8,6 +8,7 @@ import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
 import chat.matron.android.models.TrackerLink
+import chat.matron.android.journal.approvals.SignedApproval
 import java.time.Instant
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -149,6 +150,18 @@ interface ItemsProviding {
         action: String? = null,
         replyTo: String? = null,
     ): ItemCommentResult
+    /// A tap carrying the user's signed approval: a button on a step-up item
+    /// or follow-up question (an `item_tap` statement). Sent at once, never
+    /// queued: a nonce lives five minutes and a signature must not wait on
+    /// disk. A provider that cannot carry an approval refuses the tap rather
+    /// than sending it unsigned.
+    suspend fun tapItem(
+        id: String,
+        action: String,
+        replyTo: String?,
+        approval: SignedApproval,
+        idempotencyKey: String,
+    ): ItemCommentResult = throw JournalApiError.ApprovalRequired
     suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem
     suspend fun reopenItem(id: String, comment: String?): TrackerItem
     suspend fun rankItem(id: String, change: ItemRankChange): TrackerItem

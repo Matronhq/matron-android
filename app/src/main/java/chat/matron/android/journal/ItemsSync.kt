@@ -622,6 +622,11 @@ class ItemsSync(
         // A lost or rejected session, not a permanently-bad request.
         JournalApiError.Unauthenticated, JournalApiError.BadCredentials, JournalApiError.Forbidden -> FailureDisposition.PAUSE
         JournalApiError.Conflict -> FailureDisposition.POISON
+        // A tap the journal will not take unsigned (the item became step-up,
+        // or the account got a key, after it was queued): refused for good,
+        // with the reason shown, so the person can tap again and sign. Never
+        // a pause: the rest of the outbox must not wait behind it.
+        JournalApiError.ApprovalRequired, is JournalApiError.ApprovalInvalid -> FailureDisposition.POISON
         // The journal never deletes items server-side — a 404 on a write is
         // far likelier "this journal doesn't have the tracker routes yet" than
         // "the item was deleted out from under us". `refresh` catching its own
@@ -767,6 +772,10 @@ class ItemsSync(
         /// own `message`; else, for too many attachments, that in words; else
         /// its `reason`; else the bare status.
         fun rejectionReason(error: Throwable): String {
+            if (error === JournalApiError.ApprovalRequired) {
+                return "This answer needs a signature from your approval key. Tap the button again to approve it."
+            }
+            if (error is JournalApiError.ApprovalInvalid) return error.message ?: "The approval was refused."
             val http = error as? JournalApiError.Http
             http?.bodyMessage?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
             if (http?.code == TOO_MANY_ATTACHMENTS) {

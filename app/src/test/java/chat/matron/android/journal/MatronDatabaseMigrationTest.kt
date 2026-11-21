@@ -824,6 +824,39 @@ class MatronDatabaseMigrationTest {
         }
     }
 
+    /// MIGRATION_18_19: approval keys' step-up mark. A row cached before
+    /// reads "not step-up"; the mark and subject round-trip after it, and a
+    /// follow-up question's ride in the comment's meta.
+    @Test
+    fun migratesToV19AndKeepsTheStepUpMark() = runBlocking {
+        val file = File.createTempFile("migration-test-v8-v19", ".sqlite").also { it.delete() }
+        buildV8(file)
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:alice")
+            val item = chat.matron.android.models.TrackerItem(
+                id = "it_s", num = 3, kind = chat.matron.android.models.ItemKind.QUESTION, title = "Deploy?",
+                originConvoID = "c1", stepUp = true, subject = mapOf("box" to "box-a", "op" to "deploy"),
+            )
+            store.upsertItems(listOf(item))
+            assertEquals(true, store.item("it_s")?.stepUp)
+            assertEquals(mapOf("box" to "box-a", "op" to "deploy"), store.item("it_s")?.subject)
+            store.upsertItems(listOf(item.copy(stepUp = false, subject = null)))
+            assertEquals(false, store.item("it_s")?.stepUp)
+            assertNull(store.item("it_s")?.subject)
+            val comment = chat.matron.android.models.TrackerComment(
+                id = "cm_s", itemID = "it_s", author = chat.matron.android.models.ItemAuthor.AGENT, body = "Sure?",
+                actions = listOf("Yes"), stepUp = true, subject = mapOf("op" to "restart"),
+            )
+            val back = chat.matron.android.journal.db.ItemCommentEntity.from(comment).toComment()
+            assertEquals(true, back.stepUp)
+            assertEquals(mapOf("op" to "restart"), back.subject)
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
     /// `open(onOpened:)` reports how long the migration chain took on the
     /// open that ran it (the launch timeline's nested `migration` interval)
     /// and `null` on a later open of the same, now up-to-date file.

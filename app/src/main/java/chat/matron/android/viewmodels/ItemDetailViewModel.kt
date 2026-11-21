@@ -61,6 +61,9 @@ class ItemDetailViewModel(
     private val scope: CoroutineScope,
     private val stagingDirectory: File,
     private val now: () -> Instant = Instant::now,
+    /// Approval keys: signs a tap on a step-up item or question. `null` in
+    /// hosts without one; such a tap is then refused with the reason.
+    private val approvals: ApprovalCenter? = null,
 ) {
     private val _item = MutableStateFlow<TrackerItem?>(null)
     val item: StateFlow<TrackerItem?> = _item.asStateFlow()
@@ -410,6 +413,7 @@ class ItemDetailViewModel(
                 val stored = runCatching { store.comments(itemID) }.getOrNull()?.firstOrNull { it.id == comment.id } ?: comment
                 if (stored.chosenAction == label) return
             }
+            if (!sendSigned(_item.value ?: return, comment, label)) return
             sync.enqueueComment(itemID, UUID.randomUUID().toString(), label, emptyList(), action = label, replyTo = comment.id)
         }
     }
@@ -429,7 +433,28 @@ class ItemDetailViewModel(
             val pending = pendingItemTap(queued)
             if (pending == label) return
             if (pending == null && current.chosenAction == label) return
+            if (!sendSigned(current, null, label)) return
             sync.enqueueComment(itemID, UUID.randomUUID().toString(), label, emptyList(), action = label, replyTo = null)
+        }
+    }
+
+    /// A tap that needs a signature is confirmed, signed and posted here, at
+    /// once ([StepUpTap]). True when no signature applies and the outbox
+    /// should take the tap; false when it was sent, cancelled or refused
+    /// ([error] then says why).
+    private suspend fun sendSigned(item: TrackerItem, comment: TrackerComment?, label: String): Boolean {
+        if (item.kind == ItemKind.NOTICE) return true // a notice is never step-up
+        val outcome = StepUpTap.send(
+            item, comment, label, api, sync,
+            signer = approvals?.signer, accountHasKey = approvals?.accountHasKey ?: false,
+        )
+        return when (outcome) {
+            StepUpTap.Outcome.Unsigned -> true
+            StepUpTap.Outcome.Sent, StepUpTap.Outcome.Cancelled -> false
+            is StepUpTap.Outcome.Failed -> {
+                _error.value = outcome.message
+                false
+            }
         }
     }
 
