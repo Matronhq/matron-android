@@ -12,9 +12,11 @@ import java.io.File
 import java.util.UUID
 import kotlin.time.Duration
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 
 /// One row of the palette's argument-completion mode — a static argument
 /// suggestion (flag or enumerated value) or a recent folder. Ordered
@@ -522,12 +524,16 @@ class ComposerViewModel(
     /// [AttachmentLimits.oversizeMessage] before anything is copied.
     suspend fun attachFiles(files: List<File>) {
         for (file in files) {
-            if (AttachmentLimits.isOversize(file.length())) {
+            if (AttachmentLimits.isOversize(withContext(Dispatchers.IO) { file.length() })) {
                 _sendError.value = AttachmentLimits.oversizeMessage(file.name)
                 continue
             }
             try {
-                _stagedAttachments.value = _stagedAttachments.value + StagedAttachment.stage(file, stagingDirectory)
+                // Off the caller's (main) thread: staging copies the whole
+                // file, up to 100 MB. Appended after the copy so anything
+                // added meanwhile is kept.
+                val staged = withContext(Dispatchers.IO) { StagedAttachment.stage(file, stagingDirectory) }
+                _stagedAttachments.value = _stagedAttachments.value + staged
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (error: Throwable) {
