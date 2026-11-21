@@ -347,7 +347,22 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                     // "This account is locked" (or a warning left by an unlock)
                     // across the top; the app below it, its top bar clear of it.
                     val lockBanner = accountLock.isLocked && !accountLock.canUnlock
-                    Column(modifier = Modifier.fillMaxSize()) {
+                    // The lock froze this device: the locked screen, with
+                    // Unlock, replaces the app (as the app lock's shield
+                    // does), so nothing under it, a sheet, a dialog or the
+                    // keyboard, stays reachable.
+                    if (accountLock.canUnlock) {
+                        val unlock = remember(current.userID) { deps.makeAccountUnlockModel(current) }
+                        val phase by unlock.phase.collectAsStateWithLifecycle()
+                        AccountLockedScreen(
+                            since = accountLock.lock?.since,
+                            method = remember(current.userID) { deps.approvalCenter(current) }.method ?: "fingerprint",
+                            isUnlocking = phase == AccountUnlockModel.Phase.Unlocking,
+                            error = (phase as? AccountUnlockModel.Phase.Failed)?.message,
+                            onUnlock = { scope.launch { unlock.unlock() } },
+                            onSignOut = signOut,
+                        )
+                    } else Column(modifier = Modifier.fillMaxSize()) {
                         if (lockBanner) AccountLockedBanner()
                         accountWarning?.let {
                             AccountWarningBanner(it, onDismiss = deps.accountLock::dismissWarning, clearStatusBar = !lockBanner)
@@ -371,20 +386,6 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                                 onSignOut = signOut,
                             )
                         }
-                    }
-                    // The lock froze this device: the locked screen, with Unlock,
-                    // covers the app.
-                    if (accountLock.canUnlock) {
-                        val unlock = remember(current.userID) { deps.makeAccountUnlockModel(current) }
-                        val phase by unlock.phase.collectAsStateWithLifecycle()
-                        AccountLockedScreen(
-                            since = accountLock.lock?.since,
-                            method = remember(current.userID) { deps.approvalCenter(current) }.method ?: "fingerprint",
-                            isUnlocking = phase == AccountUnlockModel.Phase.Unlocking,
-                            error = (phase as? AccountUnlockModel.Phase.Failed)?.message,
-                            onUnlock = { scope.launch { unlock.unlock() } },
-                            onSignOut = signOut,
-                        )
                     }
                     // The approval confirm sheet, over every screen of the app.
                     ApprovalConfirmHost(remember(current.userID) { deps.approvalCenter(current) })

@@ -55,6 +55,16 @@ class AccountLockMonitorTest {
     }
 
     @Test
+    fun anHttpLockWithoutUnlockDoesNotUnfreezeTheDevice() {
+        monitor.noteLockedBySocket(AccountLock(5, true))
+        monitor.noteLock(AccountLock(null, false))
+        assertTrue(monitor.state.value.canUnlock)
+        // The socket's own word does.
+        monitor.noteLockedBySocket(AccountLock(5, false))
+        assertFalse(monitor.state.value.canUnlock)
+    }
+
+    @Test
     fun aRefusalWithoutSinceKeepsTheKnownOne() {
         monitor.noteLock(AccountLock(5, true))
         monitor.noteLock(AccountLock(null, true))

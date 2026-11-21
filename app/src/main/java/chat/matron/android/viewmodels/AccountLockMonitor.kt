@@ -56,12 +56,9 @@ class AccountLockMonitor(private val clock: () -> Long = System::nanoTime) : Acc
 
     override fun noteStatus(status: Int) {
         if (verdict(status) != false) return
-        synchronized(guard) {
-            // A frozen device's token can still fetch a nonce: that answer
-            // says nothing about the lock.
-            if (lockedBySocket || _state.value.lock?.canUnlock == true) return
-        }
-        set(false)
+        // A frozen device's token can still fetch a nonce: that answer says
+        // nothing about the lock. Nor can an HTTP answer undo the socket's word.
+        clearIf { !lockedBySocket && _state.value.lock?.canUnlock != true }
     }
 
     override fun noteLock(lock: AccountLock) = locked(lock, clock(), bySocket = false)
@@ -70,21 +67,23 @@ class AccountLockMonitor(private val clock: () -> Long = System::nanoTime) : Acc
 
     override fun noteSocketAccepted() {
         val at = clock()
-        synchronized(guard) {
-            // The journal greets no device of a locked account, so this ends a
-            // lock however it was learned; but not one reported after this
-            // hello was accepted (the lock came later).
+        // The journal greets no device of a locked account, so this ends a
+        // lock however it was learned; but not one reported after this hello
+        // was accepted (the lock came later).
+        clearIf {
             val reported = lockedAt
-            if (reported != null && reported > at) return
+            if (reported != null && reported > at) return@clearIf false
             lockedBySocket = false
+            true
         }
-        set(false)
     }
 
-    /// This device unlocked the account (or signed in again).
+    /// This device unlocked the account (or it is signing out).
     fun cleared() {
-        synchronized(guard) { lockedBySocket = false }
-        set(false)
+        clearIf {
+            lockedBySocket = false
+            true
+        }
     }
 
     fun warn(text: String) { _warning.value = text }
@@ -95,19 +94,26 @@ class AccountLockMonitor(private val clock: () -> Long = System::nanoTime) : Acc
             if (bySocket) lockedBySocket = true
             val previous = lockedAt
             if (previous == null || at > previous) lockedAt = at
-            // A refusal that leaves `since` out keeps the one already known.
-            val known = _state.value.lock?.since
-            _state.value = State(isLocked = true, lock = AccountLock(lock.since ?: known, lock.canUnlock))
+            val known = _state.value.lock
+            // A refusal that leaves `since` out keeps the one already known;
+            // and only the socket (whose refusal always says) can take a
+            // frozen device's unlock away: an HTTP answer without `unlock`
+            // (a proxy's 423, an empty body) cannot.
+            val canUnlock = lock.canUnlock || (!bySocket && known?.canUnlock == true)
+            _state.value = State(isLocked = true, lock = AccountLock(lock.since ?: known?.since, canUnlock))
         }
     }
 
-    private fun set(locked: Boolean) {
+    /// Clears the lock when [allowed], decided and done under one monitor so
+    /// a lock reported meanwhile is never wiped. The cleared handlers run
+    /// after, outside it.
+    private fun clearIf(allowed: () -> Boolean) {
         val handlers = synchronized(guard) {
-            if (_state.value.isLocked == locked) return
-            if (locked) {
-                _state.value = _state.value.copy(isLocked = true)
+            if (!_state.value.isLocked) {
+                allowed()
                 return
             }
+            if (!allowed()) return
             _state.value = State()
             lockedAt = null
             clearedHandlers.toList()

@@ -1,5 +1,6 @@
 package chat.matron.android.designsystem
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -115,6 +116,8 @@ fun AccountLockedScreen(
     onSignOut: (() -> Unit)? = null,
 ) {
     var confirmingSignOut by remember { mutableStateOf(false) }
+    // Back does nothing here: there is nothing behind the lock to go to.
+    BackHandler {}
     Surface(
         modifier = Modifier
             .fillMaxSize()

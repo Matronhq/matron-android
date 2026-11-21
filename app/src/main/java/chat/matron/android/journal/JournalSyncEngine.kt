@@ -306,6 +306,7 @@ class JournalSyncEngine(
     fun beginSync() {
         synchronized(lock) {
             if (runJob != null) return
+            stoppedForAuth = false
             attempt = 0
             runJob = scope.launch { runLoop() }
         }
@@ -408,8 +409,14 @@ class JournalSyncEngine(
     /// and the next hello carries the new one.
     fun replaceToken(newToken: String) {
         token = newToken
-        onNetworkAvailable()
+        // A hello sent with the old token just before the swap may have been
+        // refused as a sign-out and stopped the loop: the new token restarts it.
+        val restart = synchronized(lock) { stoppedForAuth.also { stoppedForAuth = false } }
+        if (restart) beginSync() else onNetworkAvailable()
     }
+
+    /// The loop stopped because the server refused this device's token.
+    private var stoppedForAuth = false
 
     fun onNetworkAvailable() {
         val conn = synchronized(lock) {
@@ -1175,12 +1182,18 @@ class JournalSyncEngine(
                     continue
                 }
                 MatronDebug.breadcrumb("server rejected auth — stopping sync (signed out by server)")
-                synchronized(lock) { liveConnection = null; runJob = null }
+                synchronized(lock) { liveConnection = null; runJob = null; stoppedForAuth = true }
                 setState(SyncConnectionState.Offline("Signed out by server"))
                 failReadyWaiters(JournalSyncError.AuthRevoked)
                 failAllRPC(RPCRequestError.Offline)
                 return
             } catch (e: JournalConnectionError.AccountLocked) {
+                if (attemptToken != token) {
+                    // Refused for the token an unlock has since replaced: it
+                    // says nothing about the account now. Retry at once.
+                    closeLive()
+                    continue
+                }
                 // Refused because the whole account is locked: said so, then
                 // the usual backoff, so the lock's clearing is noticed.
                 accountLock?.noteLockedBySocket(AccountLock(e.since, e.canUnlock))
