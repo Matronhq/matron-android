@@ -2,6 +2,7 @@ package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.TimelineService
 import chat.matron.android.models.AttachmentBatchTag
+import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.ArgSuggestion
 import chat.matron.android.models.BotCommand
 import chat.matron.android.models.BotCommandCatalog
@@ -11,11 +12,9 @@ import java.io.File
 import java.util.UUID
 import kotlin.time.Duration
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.withContext
 
 /// One row of the palette's argument-completion mode — a static argument
 /// suggestion (flag or enumerated value) or a recent folder. Ordered
@@ -414,19 +413,12 @@ class ComposerViewModel(
                         ?: _uploadProgress.value
                 }
                 try {
-                    // Off-main file read: a multi-MB staged screenshot loaded
-                    // synchronously on the main dispatcher froze the composer
-                    // for visible fractions of a second.
-                    val data = withContext(Dispatchers.IO) { attachment.file.readBytes() }
-                    if (attachment.isImage) {
-                        timeline.sendImage(
-                            data, attachment.filename, attachment.mimeType, itemCaption, batch, onProgress,
-                        )
-                    } else {
-                        timeline.sendFile(
-                            data, attachment.filename, attachment.mimeType, itemCaption, batch, onProgress,
-                        )
-                    }
+                    // Straight from the staged file: the upload streams it
+                    // from disk, so a 100 MB video is never held in memory.
+                    timeline.sendAttachment(
+                        attachment.file, attachment.filename, attachment.mimeType, attachment.isImage,
+                        itemCaption, batch, onProgress,
+                    )
                 } catch (cancel: CancellationException) {
                     throw AttachmentSendCancelled(
                         unsent = planned.subList(index, planned.size).toList(),
@@ -526,8 +518,14 @@ class ComposerViewModel(
 
     /// Stages each file into the tray rather than sending it. Unreadable files
     /// are reported via [sendError] and staged nothing.
+    /// A file over [AttachmentLimits.MAX_BYTES] is refused with
+    /// [AttachmentLimits.oversizeMessage] before anything is copied.
     suspend fun attachFiles(files: List<File>) {
         for (file in files) {
+            if (AttachmentLimits.isOversize(file.length())) {
+                _sendError.value = AttachmentLimits.oversizeMessage(file.name)
+                continue
+            }
             try {
                 _stagedAttachments.value = _stagedAttachments.value + StagedAttachment.stage(file, stagingDirectory)
             } catch (cancel: CancellationException) {
@@ -580,7 +578,8 @@ class ComposerViewModel(
     /// data loss with nothing to show for it.
     private suspend fun sendUnstagedVoiceNote(file: File) {
         try {
-            timeline.sendFile(file.readBytes(), "voice-note.m4a", "audio/mp4", null)
+            timeline.sendAttachment(file, "voice-note.m4a", "audio/mp4", isImage = false, caption = null,
+                batch = null, progress = null)
             _sendError.value = null
             runCatching { file.delete() }
         } catch (cancel: CancellationException) {

@@ -61,6 +61,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.AttachmentTray
 import chat.matron.android.designsystem.LocalAppLockActive
 import chat.matron.android.designsystem.UploadProgressBar
+import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.BotCommand
 import chat.matron.android.platform.AudioFocusInterruptions
 import chat.matron.android.platform.AudioInputDiagnostics
@@ -74,12 +75,16 @@ import chat.matron.android.viewmodels.VoiceRecorderBindings
 import chat.matron.android.viewmodels.VoiceRecorderHandoff
 import chat.matron.android.viewmodels.VoiceRecorderHost
 import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.UUID
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Message composer. Ports the Features/Chat/Composer Swift views: a growing text field
@@ -518,26 +523,64 @@ fun SlashCommandPalette(
 
 /** Copies a picked content [Uri] to a temp file and stages it on the composer. */
 private suspend fun attachUri(context: Context, viewModel: ComposerViewModel, uri: Uri) {
-    val file = copyUriToTemp(context, uri) ?: run {
-        viewModel.reportAttachmentError("Couldn't read that file.")
-        return
+    when (val picked = withContext(Dispatchers.IO) { copyUriToTemp(context, uri) }) {
+        PickedCopy.Unreadable -> viewModel.reportAttachmentError("Couldn't read that file.")
+        is PickedCopy.TooLarge -> viewModel.reportAttachmentError(AttachmentLimits.oversizeMessage(picked.filename))
+        is PickedCopy.Copied -> try {
+            viewModel.attachFiles(listOf(picked.file))
+        } finally {
+            // The tray holds its own staged copy.
+            picked.file.delete()
+        }
     }
-    viewModel.attachFiles(listOf(file))
+}
+
+/// What came of copying a picked item: the copy, a refusal because it is
+/// over [AttachmentLimits.MAX_BYTES], or nothing readable.
+internal sealed interface PickedCopy {
+    data class Copied(val file: File) : PickedCopy
+    data class TooLarge(val filename: String) : PickedCopy
+    data object Unreadable : PickedCopy
 }
 
 /// Copies a picked content [Uri] into the cache under the name [pickedFilename]
-/// gives it, ready to stage. `null` when unreadable. Shared with the item
-/// comment composer's pickers.
-internal fun copyUriToTemp(context: Context, uri: Uri): File? = runCatching {
+/// gives it, ready to stage. Shared with the item comment composer's pickers.
+///
+/// An item over [AttachmentLimits.MAX_BYTES] is refused before it is copied
+/// when the provider reports its size, and part-way through the copy when it
+/// doesn't, so an oversized pick never fills the cache.
+internal fun copyUriToTemp(context: Context, uri: Uri): PickedCopy = runCatching {
     val resolver = context.contentResolver
     val declaredExt = resolver.getType(uri)?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
     val name = pickedFilename(displayName(context, uri), declaredExt)
+    val declaredSize = declaredSize(context, uri)
+    if (declaredSize != null && AttachmentLimits.isOversize(declaredSize)) return PickedCopy.TooLarge(name)
     val dir = File(context.cacheDir, "picked").apply { mkdirs() }
     val out = File(dir, "${UUID.randomUUID()}-$name")
-    resolver.openInputStream(uri)?.use { input -> out.outputStream().use { input.copyTo(it) } }
-        ?: return null
-    out
-}.getOrNull()
+    val fits = resolver.openInputStream(uri)?.use { input ->
+        out.outputStream().use { copyWithinLimit(input, it, AttachmentLimits.MAX_BYTES) }
+    } ?: return PickedCopy.Unreadable
+    if (!fits) {
+        out.delete()
+        return PickedCopy.TooLarge(name)
+    }
+    PickedCopy.Copied(out)
+}.getOrElse { PickedCopy.Unreadable }
+
+/// Copies [input] to [output], stopping as soon as more than [maxBytes] have
+/// come through. `true` when the whole input fit; `false` when it was cut
+/// off (the caller deletes the partial copy).
+internal fun copyWithinLimit(input: InputStream, output: OutputStream, maxBytes: Long): Boolean {
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var total = 0L
+    while (true) {
+        val read = input.read(buffer)
+        if (read < 0) return true
+        total += read
+        if (total > maxBytes) return false
+        output.write(buffer, 0, read)
+    }
+}
 
 /// The staged filename for a picked item: the provider's display name when it
 /// carries an extension; otherwise the name (or a generated one) with the
@@ -555,6 +598,18 @@ internal fun pickedFilename(displayName: String?, extensionFromMime: String?): S
 /// ContextThemeWrapper), so a composable can reach the window flags.
 private fun Context.findActivity(): Activity? =
     generateSequence(this) { (it as? ContextWrapper)?.baseContext }.filterIsInstance<Activity>().firstOrNull()
+
+/// The provider's reported size, or null when it doesn't say.
+private fun declaredSize(context: Context, uri: Uri): Long? = runCatching {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) {
+            val index = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (index >= 0 && !cursor.isNull(index)) cursor.getLong(index) else null
+        } else {
+            null
+        }
+    }
+}.getOrNull()
 
 private fun displayName(context: Context, uri: Uri): String? = runCatching {
     context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
