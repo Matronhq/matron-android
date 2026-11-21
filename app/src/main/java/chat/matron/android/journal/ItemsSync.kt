@@ -68,6 +68,12 @@ interface ItemsSyncing {
     /// closed. Landing the returned item first makes the local state honest
     /// whatever the refetch does.
     suspend fun applyItem(item: TrackerItem)
+
+    /// Writes a tap the journal has just taken, posted directly rather than
+    /// through the outbox (a signed step-up tap): the item, the tap's
+    /// comment, and the asking comment's choice, in one write, as a drained
+    /// outbox row lands. The refetch that follows can fail.
+    suspend fun applyTapResult(item: TrackerItem, comment: chat.matron.android.models.TrackerComment) = applyItem(item)
     /// [action] + [replyTo] make the comment a tap on one of the buttons the
     /// comment [replyTo] offers (see [ItemsProviding.commentItem]). Returns
     /// whether the outbox insert itself succeeded, like [enqueueCreate].
@@ -383,6 +389,19 @@ class ItemsSync(
         }
         run.start()
         run.join()
+    }
+
+    override suspend fun applyTapResult(item: TrackerItem, comment: chat.matron.android.models.TrackerComment) {
+        if (stopped) return
+        synchronized(lock) { localItemWrites[item.id] = (localItemWrites[item.id] ?: 0) + 1 }
+        try {
+            // No outbox row to remove: the tap never went through it.
+            store.commitOutboxResult(item, comment, deletingLocalID = "")
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            MatronDebug.breadcrumb("ItemsSync: applying a signed tap on ${item.id} failed: $error")
+        }
     }
 
     override suspend fun applyItem(item: TrackerItem) {

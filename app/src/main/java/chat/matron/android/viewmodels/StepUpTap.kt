@@ -78,6 +78,9 @@ object StepUpTap {
     ): Outcome {
         if (!mayNeedSignature(item, comment, accountHasKey)) return Outcome.Unsigned
         if (signer == null) return Outcome.Failed(ApprovalError.NoKeyOnThisDevice.message!!)
+        // Whatever happens short of a sent tap, the item is read again after,
+        // so its thread and step-up mark are the journal's.
+        var landed = false
         try {
             // The current words: the digest must be over the stored text, and
             // only a fresh read says whether this is step-up at all.
@@ -85,15 +88,16 @@ object StepUpTap {
                 api.item(item.id)
             } catch (e: JournalApiError.Transport) {
                 // Offline. A tap the cache does not know to be step-up goes to
-                // the outbox as before; a step-up one cannot wait.
-                return if (item.stepUp || comment?.stepUp == true) {
+                // the outbox as before, and so does a consent request's
+                // decline (never signed); a step-up one cannot wait.
+                val consentDecline = (item.isConsentAsk || TrackerItem.CONSENT_LABEL in item.labels) &&
+                    !TrackerItem.isAffirmativeAnswer(label)
+                return if ((item.stepUp || comment?.stepUp == true) && !consentDecline) {
                     Outcome.Failed("This answer needs a signature and can't wait for a connection. ${e.message}")
                 } else {
                     Outcome.Unsigned
                 }
             }
-            // Keep the step-up mark the read brought for the next tap.
-            sync.applyItem(fresh.item)
             val freshComment = comment?.let { c -> fresh.comments.firstOrNull { it.id == c.id } }
             if (fresh.item.consentKind != null) {
                 // A consent ask is answered with a `consent` statement over
@@ -115,7 +119,10 @@ object StepUpTap {
             if (request == null) return Outcome.Unsigned
             val approval = signer(request) ?: return Outcome.Unsigned
             val result = api.tapItem(item.id, label, comment?.id, approval, UUID.randomUUID().toString())
-            sync.applyItem(result.item)
+            // The tap and the asking comment's choice land now; the refetch
+            // below can fail.
+            sync.applyTapResult(result.item, result.comment)
+            landed = true
             sync.refreshItem(item.id)
             return Outcome.Sent
         } catch (e: CancellationException) {
@@ -123,7 +130,6 @@ object StepUpTap {
         } catch (_: ApprovalKeyFailure.Cancelled) {
             return Outcome.Cancelled
         } catch (e: Throwable) {
-            runCatching { sync.refreshItem(item.id) }
             if (e is JournalApiError.ApprovalInvalid && e.reason == "mismatch") {
                 return Outcome.Failed("The question changed while you were approving it. Read it again, then approve.")
             }
@@ -131,6 +137,8 @@ object StepUpTap {
                 return Outcome.Failed("This answer needs a signature and can't wait for a connection. ${e.message}")
             }
             return Outcome.Failed(e.message ?: e.toString())
+        } finally {
+            if (!landed) runCatching { sync.refreshItem(item.id) }
         }
     }
 }

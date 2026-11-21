@@ -132,6 +132,8 @@ class StepUpTapTest {
         val api = Api(cached.copy(stepUp = true))
         assertEquals(StepUpTap.Outcome.Cancelled, sendConfirming(api, null, "Deploy", confirm = false))
         assertTrue(api.taps.isEmpty())
+        // The thread is read again, so backing out leaves it as it stands.
+        assertEquals(listOf("it_1"), sync.refetched)
     }
 
     @Test
@@ -150,6 +152,15 @@ class StepUpTapTest {
         assertEquals(StepUpTap.Outcome.Unsigned, StepUpTap.send(cached, null, "Deploy", api, sync, center.signer, true))
         val outcome = StepUpTap.send(cached.copy(stepUp = true), null, "Deploy", api, sync, center.signer, true)
         assertTrue(outcome is StepUpTap.Outcome.Failed)
+    }
+
+    @Test
+    fun offlineAConsentDeclineIsQueuedUnsigned() = runTest {
+        withKey()
+        val consent = cached.copy(stepUp = true, labels = listOf(TrackerItem.CONSENT_LABEL), actions = listOf("Approve", "Decline"))
+        val api = Api(consent).apply { readError = JournalApiError.Transport("offline") }
+        assertEquals(StepUpTap.Outcome.Unsigned, StepUpTap.send(consent, null, "Decline", api, sync, center.signer, true))
+        assertTrue(StepUpTap.send(consent, null, "Approve", api, sync, center.signer, true) is StepUpTap.Outcome.Failed)
     }
 
     @Test
