@@ -37,6 +37,7 @@ import chat.matron.android.viewmodels.ApprovalKeysScreenModel
 import chat.matron.android.viewmodels.SharedPreferencesKeyValueStore
 import java.io.File
 import java.time.Instant
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -166,6 +167,49 @@ class ApprovalKeysScreenTest {
                 screenshot("04-confirm-tap-${appearance.rawValue}")
             }
         }
+    }
+
+    /// The sheet as the app hosts it (a dialog over the screen), from a real
+    /// request waiting on the approval centre: every row, Cancel included,
+    /// is on screen above the navigation bar.
+    @Test
+    fun confirmSheetAsHosted() {
+        val model = model({ mine ->
+            ApprovalKeysState(true, "journal.example", listOf(key(mine, "Pixel 8", 7, ApprovalKeyDTO.EnrolledVia.PASSWORD)))
+        }, holdsKey = true)
+        val center = model.center
+        val signing = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
+            runCatching {
+                center.sign(
+                    chat.matron.android.journal.approvals.ApprovalRequest(
+                        kind = chat.matron.android.journal.approvals.ApprovalStatement.Kind.ItemTap("it_1", 7, null, "Deploy", "d"),
+                        subject = mapOf("box" to "box-a", "build" to "412", "op" to "deploy"),
+                        headline = "Deploy the new build to box-a?", reference = "#7", button = "Deploy",
+                        detail = "Roll out build 412 to box-a. The service restarts and is down for about a minute.",
+                    ),
+                )
+            }
+        }
+        // As the app hosts it: over the whole window, edge to edge.
+        ActivityScenario.launch(MainActivity::class.java).also { scenario ->
+            scenario.onActivity { activity ->
+                activity.setContent {
+                    MatronTheme(MatronAppearance.Light) {
+                        androidx.compose.material3.Surface(Modifier.fillMaxSize()) {
+                            ApprovalKeysScreen(model, onBack = {}, poll = false)
+                            chat.matron.android.designsystem.ApprovalConfirmHost(center)
+                        }
+                    }
+                }
+            }
+        }.use {
+            node(By.text("Confirm with your fingerprint"))
+            val cancel = node(By.text("Cancel"))
+            assertTrue(cancel.visibleBounds.bottom < device.displayHeight)
+            screenshot("06-confirm-hosted")
+            center.cancel()
+        }
+        runBlocking { signing.join() }
     }
 
     @Test

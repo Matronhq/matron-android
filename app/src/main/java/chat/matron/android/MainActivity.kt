@@ -345,6 +345,8 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                             }
                         },
                     )
+                    // The approval confirm sheet, over every screen of the app.
+                    ApprovalConfirmHost(remember(session!!.userID) { deps.approvalCenter(session!!) })
                 }
             }
         }
@@ -1401,7 +1403,6 @@ private fun SignedInApp(
     // is on screen, for every request that needs a signature.
     val approvals = remember(session.userID) { deps.approvalCenter(session) }
     LaunchedEffect(approvals) { approvals.refresh() }
-    ApprovalConfirmHost(approvals)
 }
 
 /// Who asked for the New Chat sheet: the list (an ordinary chat) or the

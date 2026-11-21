@@ -1,6 +1,9 @@
 package chat.matron.android.designsystem
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,8 +11,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,8 +40,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.viewmodels.ApprovalCenter
 
@@ -216,27 +217,29 @@ private fun Note(text: String, icon: ImageVector, tint: Color = MaterialTheme.co
     }
 }
 
-/// Shows the confirm sheet whenever [center] has a request waiting, over
-/// whatever is on screen (a dialog window, so it also covers another dialog
-/// or sheet). Only the sheet's own Cancel, or back, ends it: a stray tap
-/// outside must not be read as an answer either way.
+/// Shows the confirm sheet whenever [center] has a request waiting, covering
+/// the whole app. Composed last at the app's root, so it lies over every
+/// screen. Not a dialog window: those can be sized to run under the
+/// navigation bar, hiding the Cancel row. Only the sheet's own Cancel, or
+/// back, ends it: a stray tap must not be read as an answer either way.
 @Composable
 fun ApprovalConfirmHost(center: ApprovalCenter) {
     val prompt by center.prompt.collectAsStateWithLifecycle()
     val isSigning by center.isSigning.collectAsStateWithLifecycle()
     val error by center.promptError.collectAsStateWithLifecycle()
     val current = prompt ?: return
-    Dialog(
-        onDismissRequest = { if (!isSigning) center.cancel() },
-        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false, decorFitsSystemWindows = false),
+    BackHandler { if (!isSigning) center.cancel() }
+    Surface(
+        modifier = Modifier
+            .fillMaxSize()
+            // Swallow taps, so nothing under the sheet can be reached.
+            .pointerInput(Unit) { detectTapGestures { } },
     ) {
-        Surface(modifier = Modifier.fillMaxSize()) {
-            ApprovalConfirmView(
-                model = ApprovalConfirm.Model.of(current, isSigning, error),
-                onConfirm = center::confirm,
-                onCancel = center::cancel,
-                modifier = Modifier.safeDrawingPadding(),
-            )
-        }
+        ApprovalConfirmView(
+            model = ApprovalConfirm.Model.of(current, isSigning, error),
+            onConfirm = center::confirm,
+            onCancel = center::cancel,
+            modifier = Modifier.systemBarsPadding(),
+        )
     }
 }
