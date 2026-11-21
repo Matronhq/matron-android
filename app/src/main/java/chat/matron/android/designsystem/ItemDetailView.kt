@@ -363,6 +363,9 @@ fun ItemDetailView(
     /// can persist it for next time.
     onBottomVisibilityChange: ((Boolean) -> Unit)? = null,
     listState: LazyListState = rememberLazyListState(),
+    /// Copied files or images pasted into the reply field
+    /// ([AttachmentPasteTarget]). `null` keeps text-only paste.
+    onPasteAttachments: ((List<android.net.Uri>) -> Unit)? = null,
 ) {
     val item = model.item
     val rowCount = model.comments.size + model.pending.size
@@ -466,6 +469,7 @@ fun ItemDetailView(
                 onSubmit = onSubmit, onAttach = onAttach, onVoiceNote = onVoiceNote,
                 attachments = attachments, onRemoveAttachment = onRemoveAttachment,
                 voice = voice, onCancelRecording = onCancelRecording,
+                onPasteAttachments = onPasteAttachments,
             )
         }
     }

@@ -58,6 +58,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import chat.matron.android.designsystem.AttachmentPaste
+import chat.matron.android.designsystem.AttachmentPasteTarget
 import chat.matron.android.designsystem.AttachmentTray
 import chat.matron.android.designsystem.LocalAppLockActive
 import chat.matron.android.designsystem.UploadProgressBar
@@ -65,6 +67,7 @@ import chat.matron.android.models.BotCommand
 import chat.matron.android.platform.AudioFocusInterruptions
 import chat.matron.android.platform.AudioInputDiagnostics
 import chat.matron.android.platform.VoiceRecordingService
+import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.ComposerDraftMemory
 import chat.matron.android.viewmodels.ComposerViewModel
 import chat.matron.android.viewmodels.MediaRecorderAudioRecording
@@ -80,6 +83,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Message composer. Ports the Features/Chat/Composer Swift views: a growing text field
@@ -266,6 +271,16 @@ fun ComposerView(viewModel: ComposerViewModel) {
                     )
                 }
 
+                // Taken here, in the row's scope: the paste target adds no
+                // layout node, so the field is still the row's child.
+                val fieldWeight = Modifier.weight(1f)
+                // A copied file or image pasted into the field goes to the
+                // tray, under its own name.
+                AttachmentPasteTarget(
+                    onPasteAttachments = if (ComposerViewModel.MEDIA_AVAILABLE) ({ uris ->
+                        scope.launch { uris.forEach { attachUri(context, viewModel, it, pasted = true) } }
+                    }) else null,
+                ) {
                 OutlinedTextField(
                     value = text,
                     onValueChange = { new ->
@@ -283,8 +298,9 @@ fun ComposerView(viewModel: ComposerViewModel) {
                         focusedContainerColor = MaterialTheme.colorScheme.surface,
                         unfocusedContainerColor = MaterialTheme.colorScheme.surface,
                     ),
-                    modifier = Modifier.weight(1f),
+                    modifier = fieldWeight,
                 )
+                }
 
                 val canSend = viewModel.canSend
                 // The mic stays available beside a draft: a voice note sends the
@@ -517,23 +533,38 @@ fun SlashCommandPalette(
 }
 
 /** Copies a picked content [Uri] to a temp file and stages it on the composer. */
-private suspend fun attachUri(context: Context, viewModel: ComposerViewModel, uri: Uri) {
-    val file = copyUriToTemp(context, uri) ?: run {
+private suspend fun attachUri(context: Context, viewModel: ComposerViewModel, uri: Uri, pasted: Boolean = false) {
+    val file = withContext(Dispatchers.IO) {
+        if (pasted) copyUriToTemp(context, uri, AttachmentPaste::fallbackName) else copyUriToTemp(context, uri)
+    } ?: run {
         viewModel.reportAttachmentError("Couldn't read that file.")
         return
     }
     viewModel.attachFiles(listOf(file))
 }
 
-/// Copies a picked content [Uri] into the cache under the name [pickedFilename]
-/// gives it, ready to stage. `null` when unreadable. Shared with the item
-/// comment composer's pickers.
-internal fun copyUriToTemp(context: Context, uri: Uri): File? = runCatching {
+/// Copies a picked or pasted content [Uri] into the cache under the name
+/// [pickedFilename] gives it, ready to stage. `null` when unreadable. Shared
+/// with the item comment composer's pickers.
+///
+/// The copy keeps the file's own name: uniqueness comes from a fresh
+/// directory per copy, not a prefix on the name, because the staged name is
+/// the name the attachment is sent with. [fallbackName] names an item whose
+/// provider gives none (a pasted screenshot); the name is reduced to its last
+/// path segment, so a provider cannot aim the write outside the directory.
+internal fun copyUriToTemp(
+    context: Context,
+    uri: Uri,
+    fallbackName: (mimeType: String?) -> String = { "picked-${UUID.randomUUID()}" },
+): File? = runCatching {
     val resolver = context.contentResolver
-    val declaredExt = resolver.getType(uri)?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
-    val name = pickedFilename(displayName(context, uri), declaredExt)
-    val dir = File(context.cacheDir, "picked").apply { mkdirs() }
-    val out = File(dir, "${UUID.randomUUID()}-$name")
+    val mime = resolver.getType(uri)
+    val declaredExt = mime?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
+    val name = ChatViewModel.sanitisedAttachmentFilename(
+        pickedFilename(displayName(context, uri), declaredExt) { fallbackName(mime) },
+    )
+    val dir = File(File(context.cacheDir, "picked"), UUID.randomUUID().toString()).apply { mkdirs() }
+    val out = File(dir, name)
     resolver.openInputStream(uri)?.use { input -> out.outputStream().use { input.copyTo(it) } }
         ?: return null
     out
@@ -545,8 +576,12 @@ internal fun copyUriToTemp(context: Context, uri: Uri): File? = runCatching {
 /// extension is what `StagedAttachment` types the attachment by, so a video
 /// that arrives without one must not fall through as an untyped blob — or
 /// worse, be relabelled an image (port of apple #160's class-aware fallback).
-internal fun pickedFilename(displayName: String?, extensionFromMime: String?): String {
-    val base = displayName?.takeIf { it.isNotBlank() } ?: "picked-${UUID.randomUUID()}"
+internal fun pickedFilename(
+    displayName: String?,
+    extensionFromMime: String?,
+    fallbackName: () -> String = { "picked-${UUID.randomUUID()}" },
+): String {
+    val base = displayName?.takeIf { it.isNotBlank() } ?: fallbackName()
     if (base.substringAfterLast('.', "").isNotEmpty()) return base
     return extensionFromMime?.let { "$base.$it" } ?: base
 }

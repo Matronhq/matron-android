@@ -69,6 +69,7 @@ import chat.matron.android.designsystem.rememberMessageLinkOpener
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.PendingCommentModel
 import chat.matron.android.features.chat.copyUriToTemp
+import chat.matron.android.designsystem.AttachmentPaste
 import chat.matron.android.features.chat.openAttachment
 import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.MatronJson
@@ -243,9 +244,13 @@ fun ItemDetailScreen(
 
     // --- Attachment picking (the chat composer's wiring) -------------------
     // A pick is staged into the composer's tray; it goes with the next send.
-    fun attachUri(uri: Uri) {
+    fun attachUri(uri: Uri, pasted: Boolean = false) {
         scope.launch {
-            val picked = withContext(Dispatchers.IO) { copyUriToTemp(context, uri) }
+            val picked = withContext(Dispatchers.IO) {
+                // A pasted item with no name of its own is named for when it
+                // was pasted.
+                if (pasted) copyUriToTemp(context, uri, AttachmentPaste::fallbackName) else copyUriToTemp(context, uri)
+            }
             if (picked == null) {
                 viewModel.reportError("Couldn't read that file.")
                 return@launch
@@ -255,6 +260,7 @@ fun ItemDetailScreen(
             } finally {
                 // The tray holds its own staged copy.
                 picked.delete()
+                picked.parentFile?.delete()
             }
         }
     }
@@ -478,6 +484,7 @@ fun ItemDetailScreen(
                                 onRetryPending = { id -> scope.launch { viewModel.retryComment(id) } },
                                 onDiscardPending = { id -> scope.launch { viewModel.discardComment(id) } },
                                 onAttach = { attachMenu = true },
+                                onPasteAttachments = { uris -> uris.forEach { attachUri(it, pasted = true) } },
                                 onVoiceNote = {
                                     // The composer disables the mic outside IDLE; this
                                     // also covers a tap racing that recomposition.
