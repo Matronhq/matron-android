@@ -366,6 +366,37 @@ class ItemsPanelViewModelTest {
     }
 
     @Test
+    fun spareAllowanceIsTheOpenLabelledTasksInRankOrder() = runBlocking {
+        val store = FakeItemsStore(); val sync = FakeItemsSync()
+        val vm = ItemsPanelViewModel(null, store, FakeItemsApi(), sync, this)
+        vm.start()
+        waitUntil { store.itemsSubscriptions == 1 }
+        val label = listOf(TrackerItem.SPARE_ALLOWANCE_LABEL)
+        store.items.emit(listOf(
+            t("late", 1, rank = 9.0).copy(labels = label),
+            t("next", 2, rank = 1.0, convo = "c2").copy(labels = label + "dispatched"),
+            t("plain", 3, rank = 2.0),
+            t("done", 4, state = ItemState.CLOSED, rank = 0.0, closedMs = 5).copy(labels = label),
+            t("q", 5, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 0.0).copy(labels = label),
+        ))
+        waitUntil { vm.spareAllowance.value.isNotEmpty() }
+        assertEquals(listOf("next", "late"), vm.spareAllowance.value.map { it.id })
+        vm.stop()
+    }
+
+    @Test
+    fun aConversationsTasksPageLeavesTheBacklogEmpty() = runBlocking {
+        val store = FakeItemsStore(); val sync = FakeItemsSync()
+        val vm = ItemsPanelViewModel("c1", store, FakeItemsApi(), sync, this)
+        vm.start()
+        waitUntil { store.itemsSubscriptions == 1 }
+        store.items.emit(listOf(t("a", 1, rank = 1.0).copy(labels = listOf(TrackerItem.SPARE_ALLOWANCE_LABEL))))
+        waitUntil { vm.sections.value.tasks.isNotEmpty() }
+        assertTrue(vm.spareAllowance.value.isEmpty())
+        vm.stop()
+    }
+
+    @Test
     fun nullConvoStartsInAllScope() {
         val vm = ItemsPanelViewModel(null, FakeItemsStore(), FakeItemsApi(), FakeItemsSync(), kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined))
         assertNull(vm.convoID)

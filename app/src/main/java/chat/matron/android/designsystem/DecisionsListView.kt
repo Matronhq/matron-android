@@ -30,6 +30,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material.icons.outlined.HourglassEmpty
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.Warning
@@ -80,6 +81,10 @@ object ForYouCopy {
     const val CLOSED_EMPTY_DESCRIPTION =
         "Questions and decisions move here once they are closed, and notices once you have seen them. " +
             "Newest first by your last reply."
+    /// The Spare allowance tab with no backlog.
+    const val SPARE_EMPTY_TITLE = "The backlog is empty"
+    const val SPARE_EMPTY_DESCRIPTION =
+        "Tasks labelled spare-allowance run on a box whose weekly limit is about to reset with room left, in this order."
     /// The row under the Done tab's visible window.
     const val SHOW_MORE = "Show more"
     /// The search field above the Needs you | Done control.
@@ -129,9 +134,13 @@ data class DecisionsListModel(
     /// Every locally known closed question, decision and notice, however
     /// many of them [closed] currently shows.
     val closedTotalCount: Int = 0,
-    /// The search field's text. The host has already filtered [rows] and
-    /// [closed] by it; a non-blank query only changes the empty state.
+    /// The search field's text. The host has already filtered [rows],
+    /// [closed] and [spare] by it; a non-blank query only changes the empty
+    /// state.
     val query: String = "",
+    /// The Spare allowance tab's rows, in backlog order — left empty by the
+    /// host while another tab shows.
+    val spare: List<DecisionsRow> = emptyList(),
 ) {
     /// Whether "Show more" renders under the visible window — purely local;
     /// there is no server page to reach for.
@@ -141,21 +150,30 @@ data class DecisionsListModel(
 /// Which body the list shows. Pure so the precedence (unsupported wins over
 /// empty; an unknown support state shows the list; each tab has its own
 /// empty state) is unit-tested.
-enum class DecisionsListState { UNSUPPORTED, EMPTY, POPULATED, CLOSED_EMPTY, CLOSED_POPULATED, NO_MATCHES }
+enum class DecisionsListState {
+    UNSUPPORTED, EMPTY, POPULATED, CLOSED_EMPTY, CLOSED_POPULATED, SPARE_EMPTY, SPARE_POPULATED, NO_MATCHES
+}
 
 fun decisionsListState(model: DecisionsListModel): DecisionsListState = when {
     model.isSupported == false -> DecisionsListState.UNSUPPORTED
     model.query.isNotBlank() &&
-        (if (model.tab == ForYouTab.CLOSED) model.closedTotalCount == 0 else model.rows.isEmpty()) ->
+        when (model.tab) {
+            ForYouTab.OPEN -> model.rows.isEmpty()
+            ForYouTab.CLOSED -> model.closedTotalCount == 0
+            ForYouTab.SPARE -> model.spare.isEmpty()
+        } ->
         DecisionsListState.NO_MATCHES
     model.tab == ForYouTab.CLOSED ->
         if (model.closedTotalCount == 0) DecisionsListState.CLOSED_EMPTY else DecisionsListState.CLOSED_POPULATED
+    model.tab == ForYouTab.SPARE ->
+        if (model.spare.isEmpty()) DecisionsListState.SPARE_EMPTY else DecisionsListState.SPARE_POPULATED
     model.rows.isEmpty() -> DecisionsListState.EMPTY
     else -> DecisionsListState.POPULATED
 }
 
-/// Whether the Needs you | Done control shows: with every state but the
-/// unsupported journal's, which has nothing on either tab.
+/// Whether the Needs you | Done | Spare allowance control shows: with every
+/// state but the unsupported journal's, which has nothing on any tab. Every
+/// tab shows even when empty, each with its own empty state.
 fun decisionsShowsTabs(model: DecisionsListModel): Boolean = model.isSupported != false
 
 /// The origin caption a Decisions row always shows — the same fallback the
@@ -170,10 +188,11 @@ fun decisionsRowAnswers(row: DecisionsRow): List<String> = row.item.rowConsentAn
 /// same: open notices only — everything else in For you needs an answer.
 fun decisionsRowOffersSeen(row: DecisionsRow): Boolean = row.item.canMarkSeen
 
-/// The For you list, on two tabs. Needs you: every open item awaiting the
+/// The For you list, on three tabs. Needs you: every open item awaiting the
 /// user, across every conversation, newest first, with its origin
 /// conversation (app shell, spec §2). Done: every closed question, decision
-/// and notice, newest first by the user's own last input. A pure leaf
+/// and notice, newest first by the user's own last input. Spare allowance:
+/// the backlog of open tasks labelled `spare-allowance`, next first. A pure leaf
 /// view: the host maps the view model into [DecisionsListModel]. Rows reuse
 /// [ItemRow] with the origin subtitle always on — the same rendering
 /// [ItemsListView] uses in its All scope. Pull to refresh in every state
@@ -192,7 +211,7 @@ fun DecisionsListView(
     onMarkSeen: (TrackerItem) -> Unit = {},
     /// A consent request's Approve or Decline, tapped on its row.
     onAnswerConsent: (TrackerItem, String) -> Unit = { _, _ -> },
-    /// The Needs you | Done control.
+    /// The Needs you | Done | Spare allowance control.
     onSelectTab: (ForYouTab) -> Unit = {},
     /// "Show more" under the Done tab — a local window grow.
     onShowMoreClosed: () -> Unit = {},
@@ -286,6 +305,21 @@ fun DecisionsListView(
                         }
                     }
                 }
+                DecisionsListState.SPARE_EMPTY -> Placeholder(
+                    icon = { Icon(Icons.Outlined.HourglassEmpty, contentDescription = null, modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                    title = ForYouCopy.SPARE_EMPTY_TITLE,
+                    description = ForYouCopy.SPARE_EMPTY_DESCRIPTION,
+                )
+                // The same row chrome as the open list, in backlog order. These
+                // are tasks: no Seen button and no consent answers to offer.
+                DecisionsListState.SPARE_POPULATED -> LazyColumn(Modifier.fillMaxSize()) {
+                    items(model.spare, key = { it.id }) { row ->
+                        Column(Modifier.fillMaxWidth()) {
+                            DecisionsRowContent(row, onSelect, onOpenConversation, onMarkSeen)
+                            HorizontalDivider()
+                        }
+                    }
+                }
             }
         }
     }
@@ -319,7 +353,7 @@ private fun ForYouSearchField(query: String, onQueryChange: (String) -> Unit) {
     )
 }
 
-/// The Needs you | Done control, above whichever tab's list shows — the
+/// The Needs you | Done | Spare allowance control, above whichever tab's list shows — the
 /// tracker's own segmented control ([ItemsListView]'s This chat | All). A
 /// control rather than a section under the open list: with many open items
 /// the closed ones were a long scroll away.
@@ -331,7 +365,10 @@ private fun ForYouTabPicker(tab: ForYouTab, onSelectTab: (ForYouTab) -> Unit) {
                 selected = tab == entry,
                 onClick = { onSelectTab(entry) },
                 shape = SegmentedButtonDefaults.itemShape(index, ForYouTab.entries.size),
-            ) { Text(entry.title) }
+                // No checkmark: with three tabs it pushed "Spare allowance"
+                // past its segment's edge. The fill marks the selection.
+                icon = {},
+            ) { Text(entry.title, maxLines = 1, softWrap = false) }
         }
     }
 }

@@ -47,6 +47,7 @@ import chat.matron.android.designsystem.DiffCard
 import chat.matron.android.designsystem.ItemInlineCard
 import chat.matron.android.designsystem.MilestoneCard
 import chat.matron.android.designsystem.MissionNotice
+import chat.matron.android.designsystem.SystemNoticeRow
 import chat.matron.android.designsystem.LiveOutputCard
 import chat.matron.android.designsystem.LiveOutputSessionStore
 import chat.matron.android.designsystem.MarkdownText
@@ -400,6 +401,12 @@ private fun RenderedBody(
         is TimelineItem.Kind.CoordinatorMarker -> AmbientNotice(kind.marker.text)
 
         is TimelineItem.Kind.ConsentDecision -> AmbientNotice(kind.decision.text)
+
+        is TimelineItem.Kind.SystemNotice -> SystemNoticeRow(
+            notice = kind.notice,
+            timestamp = item.timestamp,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
 
         is TimelineItem.Kind.ActivityIndicator -> ActivityIndicatorRow(label = kind.label)
 

@@ -42,8 +42,9 @@ fun rememberMatronMarkdownColors(): MarkdownColors {
 /// Link policy mirrors the Swift `MarkdownText.handle` ([handleMessageLink]):
 /// `matron://item/<n>` opens that tracker item through [LocalOpenTrackerItem]
 /// and is swallowed when no host installed one (the scheme is not registered
-/// with the OS); `http(s)` links open via [onLinkClick] or the platform URI
-/// handler; `matrix:`/`mxc:` links carry no click annotation (rendered as
+/// with the OS); web and email links (`http(s)`, `mailto`) open via
+/// [onLinkClick] or the platform URI handler; any other scheme is never
+/// opened and shows [BlockedLinkPrompt] instead; `matrix:`/`mxc:` links carry no click annotation (rendered as
 /// accent text) so they no-op until in-app resolution lands.
 ///
 /// Text size: with no [textStyle] the body renders at the parser's base size
@@ -72,7 +73,8 @@ fun MarkdownText(
     val uriHandler = LocalUriHandler.current
     val openItem = LocalOpenTrackerItem.current
     val external: (String) -> Unit = onLinkClick ?: { url -> runCatching { uriHandler.openUri(url) } }
-    val click: (String) -> Unit = { url -> handleMessageLink(url, openItem, external) }
+    val presentBlocked = LocalPresentBlockedLink.current
+    val click: (String) -> Unit = { url -> handleMessageLink(url, openItem, presentBlocked, external) }
     // Each tracker link shows what its number points at (TrackerLinkChips):
     // looked up per target, the chips appear as the answers arrive.
     val titles = LocalTrackerLinkTitles.current
