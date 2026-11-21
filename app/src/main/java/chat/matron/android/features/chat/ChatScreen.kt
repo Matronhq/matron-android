@@ -62,6 +62,8 @@ import chat.matron.android.journal.AgentChatDecision
 import chat.matron.android.designsystem.ActivityIndicatorRow
 import chat.matron.android.designsystem.AttachmentFullscreenViewer
 import chat.matron.android.designsystem.MarkdownPreviewState
+import chat.matron.android.designsystem.rememberAttachmentSaver
+import chat.matron.android.chat.MediaFetchOutcome
 import chat.matron.android.designsystem.MarkdownPreviewTarget
 import chat.matron.android.designsystem.ChatSearchBar
 import chat.matron.android.designsystem.ImageGallery
@@ -543,6 +545,13 @@ fun TimelineList(
         if (tap.isPreviewableMarkdown && !chatVM.isMediaUnavailable(tap.url)) markdownPreview.open(MarkdownPreviewTarget(tap.url, tap.filename))
         else downloadFile(tap.url, tap.filename)
     }
+    // The file chip's Save button: the original file, where the user picks.
+    val fileSaver = rememberAttachmentSaver { attachmentMimeType(it) }
+    val onSaveFile: (FileTap) -> Unit = { tap ->
+        fileSaver.save(tap.url, tap.filename, tap.mime) {
+            (chatVM.fetchAttachment(tap.url) as? MediaFetchOutcome.Data)?.bytes
+        }
+    }
     markdownPreview.target?.let { target ->
         MarkdownPreviewSheet(
             target = target,
@@ -685,6 +694,8 @@ fun TimelineList(
                         onOpenConversation = onOpenConversation,
                         onPreviewImage = onPreviewImage,
                         onTapFile = onTapFile,
+                        onSaveFile = onSaveFile,
+                        isSavingFile = fileSaver::isSaving,
                         onOpenItem = onOpenItem,
                         onOpenMission = onOpenMission,
                     )
@@ -781,6 +792,8 @@ private fun TimelineRowView(
     onOpenConversation: (String) -> Unit,
     onPreviewImage: (Any) -> Unit,
     onTapFile: (FileTap) -> Unit,
+    onSaveFile: (FileTap) -> Unit,
+    isSavingFile: (String) -> Boolean,
     onOpenItem: ((String) -> Unit)?,
     onOpenMission: ((String) -> Unit)?,
 ) {
@@ -841,7 +854,8 @@ private fun TimelineRowView(
                     onRetry = { id -> chatVM.retrySend(id) },
                     onTapImage = { model -> onPreviewImage(model) },
                     onTapFile = onTapFile,
-                    isDownloadingFile = { url -> url in downloadingFiles },
+                    onSaveFile = onSaveFile,
+                    isDownloadingFile = { url -> url in downloadingFiles || isSavingFile(url) },
                     isMediaUnavailable = { url -> url in unavailableMedia },
                     askViewModel = { id -> chatVM.askViewModel(id) },
                     // Read through the view model; releaseResolvedAnswers above

@@ -37,6 +37,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -363,7 +365,11 @@ fun ItemDetailView(
     /// can persist it for next time.
     onBottomVisibilityChange: ((Boolean) -> Unit)? = null,
     listState: LazyListState = rememberLazyListState(),
-) {
+    /// The file chips' Save button, and whether an attachment is being
+    /// fetched for one. `null` draws the chips without it.
+    onSaveAttachment: ((TrackerAttachment) -> Unit)? = null,
+    isSavingAttachment: (TrackerAttachment) -> Boolean = { false },
+) = CompositionLocalProvider(LocalItemAttachmentSave provides ItemAttachmentSave(onSaveAttachment, isSavingAttachment)) {
     val item = model.item
     val rowCount = model.comments.size + model.pending.size
     var placed by remember(item.id) { mutableStateOf(false) }
@@ -579,6 +585,15 @@ internal fun AuthorCaption(
 /// Renders a list of attachments with the shared chat-timeline primitives so
 /// items match the conversation surface. Audio gets a bespoke transcript
 /// treatment — neither shared primitive covers audio playback yet.
+/// The thread's file-chip Save, read by every attachment row however deep
+/// in the body or a comment it sits.
+private class ItemAttachmentSave(
+    val save: ((TrackerAttachment) -> Unit)?,
+    val isSaving: (TrackerAttachment) -> Boolean,
+)
+
+private val LocalItemAttachmentSave = compositionLocalOf { ItemAttachmentSave(null) { false } }
+
 @Composable
 private fun Attachments(list: List<TrackerAttachment>, image: (TrackerAttachment) -> Any?, onOpen: (TrackerAttachment) -> Unit) {
     list.forEach { a ->
@@ -601,7 +616,16 @@ private fun Attachments(list: List<TrackerAttachment>, image: (TrackerAttachment
                     Text(caption, style = ItemTypography.bodyStyle(), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            else -> AttachmentFile(filename = a.name, sizeBytes = a.size.takeIf { it > 0 }, onTap = { onOpen(a) })
+            else -> {
+                val save = LocalItemAttachmentSave.current
+                AttachmentFile(
+                    filename = a.name,
+                    sizeBytes = a.size.takeIf { it > 0 },
+                    isLoading = save.isSaving(a),
+                    onTap = { onOpen(a) },
+                    onSave = save.save?.let { { it(a) } },
+                )
+            }
         }
     }
 }

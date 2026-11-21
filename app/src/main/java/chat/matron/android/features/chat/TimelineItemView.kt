@@ -77,6 +77,9 @@ fun TimelineItemView(
     onRetry: ((String) -> Unit)? = null,
     onTapImage: ((Any) -> Unit)? = null,
     onTapFile: ((FileTap) -> Unit)? = null,
+    /// Save for a file attachment (the chip's Save button). `null` draws the
+    /// chip without one.
+    onSaveFile: ((FileTap) -> Unit)? = null,
     /// Whether a file attachment's blob download is in flight — drives the
     /// chip's spinner ([ChatViewModel.isDownloadingFile]). `null` keeps
     /// previews/tests compiling (port of apple #138).
@@ -165,7 +168,7 @@ fun TimelineItemView(
                 askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
                 agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, coordinatorBadge, onStopSession,
                 onOpenItem, onOpenMission, hasMultipleSenders, grantState, onAnswerGrant,
-                grantKeepLevel, onGrantKeepLevelChange, inviteAsks,
+                grantKeepLevel, onGrantKeepLevelChange, inviteAsks, onSaveFile,
             )
             SendStateIndicator(
                 state = sendStateGlyphFrom(item.sendState),
@@ -179,7 +182,7 @@ fun TimelineItemView(
             askViewModel, isPromptAnswered, answerSummary, agentChatState, onAnswerAgentChat,
             agentSpawnState, onAnswerAgentSpawn, onOpenSpawnedRoom, coordinatorBadge, onStopSession,
                 onOpenItem, onOpenMission, hasMultipleSenders, grantState, onAnswerGrant,
-                grantKeepLevel, onGrantKeepLevelChange, inviteAsks,
+                grantKeepLevel, onGrantKeepLevelChange, inviteAsks, onSaveFile,
         )
     }
 }
@@ -223,6 +226,7 @@ private fun RenderedBody(
     grantKeepLevel: ((eventID: String, request: PersonGrantRequest) -> KeepLevel)?,
     onGrantKeepLevelChange: ((eventID: String, level: KeepLevel) -> Unit)?,
     inviteAsks: InviteAskHost?,
+    onSaveFile: ((FileTap) -> Unit)?,
 ) {
     val style = if (item.isOwn) MessageAuthorStyle.Me else MessageAuthorStyle.Bot
     val avatarSender = timelineAvatarSender(item, hasMultipleSenders)
@@ -269,6 +273,7 @@ private fun RenderedBody(
                     isLoading = isLoading,
                     isExpired = isExpired,
                     onTap = if (fileURL != null && onTapFile != null) ({ onTapFile(FileTap(fileURL, kind.filename, kind.mime, kind.sizeBytes)) }) else null,
+                    onSave = if (fileURL != null && onSaveFile != null) ({ onSaveFile(FileTap(fileURL, kind.filename, kind.mime, kind.sizeBytes)) }) else null,
                 )
             }
         }
