@@ -495,9 +495,16 @@ class AppDependencies(
      * `panic` frame or a refused hello). One for the app: one account is
      * signed in at a time.
      */
+    @Volatile
+    private var signingOut = false
+
     val accountLock: AccountLockMonitor = AccountLockMonitor().also { monitor ->
         // Replies held while the account was locked go once it is cleared.
-        monitor.whenCleared { cores.values.toList().forEach { core -> appScope.launch { core.itemsSync.drainOutbox() } } }
+        monitor.whenCleared {
+            // Not the outbox of a sign-in that is going.
+            if (signingOut) return@whenCleared
+            cores.values.toList().forEach { core -> appScope.launch { core.itemsSync.drainOutbox() } }
+        }
     }
 
     /**
@@ -872,10 +879,19 @@ class AppDependencies(
     }
 
     fun signOut() {
-        // A lock (or its warning) belongs to the sign-in that is going.
-        accountLock.cleared()
-        accountLock.dismissWarning()
         val oldCores = cores.values.toList()
+        // A lock (or its warning) belongs to the sign-in that is going. Its
+        // clients stop reporting first: teardown's own requests (push
+        // deregistration) would otherwise answer 423 and put the old
+        // account's lock back for the next sign-in.
+        for (core in oldCores) {
+            core.api.accountLock = null
+            core.engine.accountLock = null
+        }
+        signingOut = true
+        accountLock.cleared()
+        signingOut = false
+        accountLock.dismissWarning()
         val oldUserIDs = cores.keys.toList()
         // Chain onto any previous teardown: overwriting the job would leave
         // awaitPendingTeardown() watching only the newest one while an older
