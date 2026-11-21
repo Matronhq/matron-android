@@ -227,6 +227,28 @@ data class ItemStatusRow(val line: String?, val note: String?)
 fun itemStatusRow(comment: TrackerComment): ItemStatusRow =
     ItemStatusRow(itemStatusLine(comment), comment.body.takeIf { it.isNotBlank() })
 
+/// Every image the thread shows, in the order it shows them: the item's
+/// own, then each comment's, oldest first; within a card, the images placed
+/// in its text first, in reading order, then the ones listed after it
+/// ([splitInlineAttachments]). What the fullscreen viewer swipes through
+/// from a tapped image. A status change with no note draws no card, so its
+/// attachments are not on screen and are left out.
+fun itemThreadImages(item: TrackerItem?, comments: List<TrackerComment>): List<TrackerAttachment> {
+    fun shown(body: String, attachments: List<TrackerAttachment>): List<TrackerAttachment> {
+        val split = splitInlineAttachments(body, attachments)
+        val inline = split.segments.mapNotNull { (it as? InlineSegment.Attachment)?.attachment }
+        return (inline + split.trailing).filter { it.isImage }
+    }
+    val cards = buildList {
+        if (item != null) add(item.body to item.attachments)
+        for (c in comments) {
+            val body = if (c.kind == TrackerComment.Kind.STATUS) itemStatusRow(c).note ?: continue else c.body
+            add(body to c.attachments)
+        }
+    }
+    return cards.flatMap { (body, attachments) -> shown(body, attachments) }
+}
+
 /// Maps outbox progress to the shared send glyph: a fresh comment that hasn't
 /// attempted a send yet reads as "Sending…"; once at least one attempt has
 /// been made without an error it's genuinely waiting on connectivity
