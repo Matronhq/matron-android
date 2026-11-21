@@ -8,7 +8,6 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -46,7 +45,9 @@ val LocalPresentBlockedLink = staticCompositionLocalOf<(String) -> Unit> {
 /// Installs the blocked-link prompt for everything in [content].
 @Composable
 fun BlockedLinkHost(content: @Composable () -> Unit) {
-    var blocked by rememberSaveable { mutableStateOf<String?>(null) }
+    // Plain `remember`, not saveable: the link can be megabytes long (a
+    // `data:` URL), too big for saved instance state.
+    var blocked by remember { mutableStateOf<String?>(null) }
     val present: (String) -> Unit = remember { { url -> blocked = url } }
     CompositionLocalProvider(LocalPresentBlockedLink provides present) { content() }
     blocked?.let { url -> BlockedLinkDialog(url, onDismiss = { blocked = null }) }
