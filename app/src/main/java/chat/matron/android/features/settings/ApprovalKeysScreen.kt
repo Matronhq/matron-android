@@ -288,6 +288,9 @@ private fun ApprovalKeyPasswordForm(model: ApprovalKeysScreenModel, form: Approv
     val busy by model.isBusy.collectAsStateWithLifecycle()
     val error by model.error.collectAsStateWithLifecycle()
     val method = model.center.method ?: "fingerprint"
+    // Read from the collected values, not the model's getter: the top bar's
+    // actions only recompose when what they capture changes.
+    val canSubmit = !busy && password.isNotEmpty() && code.length >= 6
     val (title, explanation, button) = when (form) {
         ApprovalKeysScreenModel.Form.SetUp -> Triple(
             "Set Up a Key",
@@ -314,7 +317,7 @@ private fun ApprovalKeyPasswordForm(model: ApprovalKeysScreenModel, form: Approv
                     actions = {
                         TextButton(
                             onClick = { scope.launch { model.submitForm() } },
-                            enabled = model.canSubmitForm,
+                            enabled = canSubmit,
                             modifier = Modifier.testTag("approvalKeyForm.submit"),
                         ) { Text(button) }
                     },
