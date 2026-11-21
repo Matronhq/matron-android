@@ -421,7 +421,7 @@ fun ItemDetailView(
                 if (hasMeta) item(key = "meta") { Meta(item, onOpenLink) }
                 if (hasBody) {
                     item(key = "body") {
-                        ItemCard(mine = item.createdBy == ItemAuthor.USER) {
+                        ItemCard(mine = item.createdBy == ItemAuthor.USER, copyText = itemCardCopyText(item.body, item.attachments)) {
                             AuthorCaption(item.attributionText ?: if (item.createdBy == ItemAuthor.USER) "You" else "Agent", item.createdAt, now)
                             ItemContent(item.body, item.attachments, image, onOpenAttachment, onOpenLink)
                         }
@@ -668,14 +668,14 @@ private fun CommentView(
                 )
             }
             row.note?.let { note ->
-                ItemCard(mine = c.author == ItemAuthor.USER) {
+                ItemCard(mine = c.author == ItemAuthor.USER, copyText = itemCardCopyText(note, c.attachments)) {
                     AuthorCaption(c.attributionText ?: c.authorName, c.createdAt, now, c.authorConversation, openableConvoIDs, onOpenConversation)
                     ItemContent(note, c.attachments, image, onOpen, onOpenLink)
                 }
             }
         }
     } else {
-        ItemCard(mine = c.author == ItemAuthor.USER) {
+        ItemCard(mine = c.author == ItemAuthor.USER, copyText = itemCardCopyText(c.body, c.attachments)) {
             AuthorCaption(c.attributionText ?: c.authorName, c.createdAt, now, c.authorConversation, openableConvoIDs, onOpenConversation)
             ItemContent(c.body, c.attachments, image, onOpen, onOpenLink)
             ActionButtons(c.actions, chosen, actionsEnabled, onTapAction)
@@ -752,18 +752,41 @@ private fun ItemBody(markdown: String, onOpenLink: (String) -> Unit) {
     )
 }
 
+/// What a card's long-press Copy copies: the body's markdown as written,
+/// without its inline attachment refs, each text part trimmed and the parts
+/// a blank line apart. `null` (no Copy) for a card with no text, such as
+/// one that only carries attachments.
+fun itemCardCopyText(body: String, attachments: List<TrackerAttachment>): String? =
+    splitInlineAttachments(body, attachments).segments
+        .mapNotNull { (it as? InlineSegment.Text)?.markdown?.trim()?.takeIf(String::isNotEmpty) }
+        .joinToString("\n\n")
+        .ifEmpty { null }
+
 /// The thread's card chrome — the chat bubble surfaces on a rounded
 /// rectangle with the bubble shadow — shared by the body card, the comment
 /// cards and the pending rows so they read as one thread.
+///
+/// With [copyText], a long-press beside the card's words (the space past a
+/// short line, between paragraphs, its padding or its caption) offers Copy
+/// for the whole text, as a chat bubble does ([LongPressCopy]). The words
+/// themselves keep their own taps (links); code blocks keep their own copy
+/// button.
 @Composable
-private fun ItemCard(mine: Boolean, alpha: Float = 1f, content: @Composable () -> Unit) {
+private fun ItemCard(mine: Boolean, alpha: Float = 1f, copyText: String? = null, content: @Composable () -> Unit) {
     val colors = MatronThemeColors.current
+    val copy = rememberLongPressCopy(copyText)
     Surface(
         shape = RoundedCornerShape(10.dp),
         color = (if (mine) colors.bubbleMe else colors.bubbleBot).copy(alpha = alpha),
         shadowElevation = 1.dp,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(Modifier.padding(ItemTypography.cardPadding), verticalArrangement = Arrangement.spacedBy(6.dp)) { content() }
+        Box {
+            Column(
+                Modifier.fillMaxWidth().then(copy.modifier).padding(ItemTypography.cardPadding),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) { content() }
+            copy.Menu()
+        }
     }
 }
