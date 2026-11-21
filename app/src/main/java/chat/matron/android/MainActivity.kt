@@ -61,6 +61,7 @@ import androidx.navigation.compose.navigation
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import chat.matron.android.designsystem.AppLockShield
+import chat.matron.android.designsystem.BlockedLinkHost
 import chat.matron.android.designsystem.LocalAppLockActive
 import chat.matron.android.designsystem.LocalTrackerLinkTitles
 import chat.matron.android.designsystem.MatronAppearance
@@ -193,7 +194,9 @@ class MainActivity : FragmentActivity() {
             // Read lazily by dispose handlers that must tell the lock shield's
             // teardown from the user's (see LocalAppLockActive).
             CompositionLocalProvider(LocalAppLockActive provides { appLock.isLocked.value }) {
-                MatronApp(deps, appLock, incomingLinks)
+                // Links in message and item text that are not web or email
+                // links are never opened; this shows the prompt that says so.
+                BlockedLinkHost { MatronApp(deps, appLock, incomingLinks) }
             }
         }
     }

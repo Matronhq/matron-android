@@ -73,7 +73,41 @@ class MatronItemLinkTest {
         assertEquals(MatronItemLink.Action.System("https://matron.chat"), MatronItemLink.action("https://matron.chat"))
         assertEquals(MatronItemLink.Action.Swallow, MatronItemLink.action("mxc://server/abc"))
         assertEquals(MatronItemLink.Action.Swallow, MatronItemLink.action("matrix://room/abc"))
-        assertEquals("unknown schemes still go to the OS", MatronItemLink.Action.System("mailto:alice@example.com"), MatronItemLink.action("mailto:alice@example.com"))
+        assertEquals(MatronItemLink.Action.System("mailto:alice@example.com"), MatronItemLink.action("mailto:alice@example.com"))
+        assertEquals(MatronItemLink.Action.System("HTTP://example.com"), MatronItemLink.action("HTTP://example.com"))
+    }
+
+    /// Only web and email links reach the OS. Every other scheme is blocked
+    /// (the copy prompt), never opened.
+    @Test
+    fun actionBlocksEveryOtherScheme() {
+        for (string in listOf(
+            "tel:+15550100", "sms:+15550100", "intent://scan/#Intent;scheme=zxing;end", "file:///sdcard/a.txt",
+            "content://com.example.provider/x", "javascript:alert(1)", "data:text/html,hi", "otherapp://open?x=1",
+            "market://details?id=com.example", "geo:0,0", "example.com/no-scheme",
+        )) {
+            assertEquals("$string must be blocked", MatronItemLink.Action.Blocked(string), MatronItemLink.action(string))
+        }
+    }
+
+    @Test
+    fun handleSendsBlockedLinksToThePromptNotTheOS() {
+        val external = mutableListOf<String>()
+        val blocked = mutableListOf<String>()
+        for (string in listOf("tel:+15550100", "https://example.com", "mailto:bob@example.com", "matron://item/xyz")) {
+            handleMessageLink(string, null, { blocked += it }) { external += it }
+        }
+        assertEquals(listOf("tel:+15550100"), blocked)
+        assertEquals(listOf("https://example.com", "mailto:bob@example.com"), external)
+    }
+
+    @Test
+    fun blockedPromptShortensLongLinks() {
+        assertEquals("tel:1", BlockedLinkPrompt.message("tel:1"))
+        val long = "data:" + "a".repeat(1000)
+        val shown = BlockedLinkPrompt.message(long)
+        assertEquals(BlockedLinkPrompt.MAX_SHOWN_LENGTH + 1, shown.length)
+        assertTrue(shown.endsWith("…"))
     }
 
     /// No `matron://` URL may ever reach the OS: the scheme is registered
