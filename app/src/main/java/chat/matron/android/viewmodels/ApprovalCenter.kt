@@ -163,6 +163,7 @@ class ApprovalCenter(
             // account on it has a key, so nothing needs a signature. (A
             // server that has keys enforces them itself: an unsigned request
             // it needed signed is refused, never applied.)
+            if (loads.get() != mine) return ApprovalKeysState(enabled = false, journal = null, keys = emptyList())
             val absent = ApprovalKeysState(enabled = false, journal = null, keys = emptyList())
             _state.value = absent
             _loadError.value = null
@@ -198,7 +199,9 @@ class ApprovalCenter(
             }
             return
         }
-        if (stored != null && state.requests.any { it.keyID == stored.keyID }) {
+        // Waiting only while the key it asked for still works: one a
+        // biometric change destroyed must not be approved.
+        if (stored != null && state.requests.any { it.keyID == stored.keyID } && usable(stored)) {
             _status.value = Status.WaitingForApproval
             return
         }
@@ -282,6 +285,8 @@ class ApprovalCenter(
                     if (!isAttached) {
                         attach(key, journal)
                         isAttached = true
+                        // A further try signs only the request itself.
+                        _prompt.value = _prompt.value?.copy(attachesFirst = false)
                     }
                     return@withLock statement(request, key, journal)
                 } catch (e: CancellationException) {

@@ -48,7 +48,12 @@ class FakeApprovalJournal(
         return ApprovalKeysState(enabled, if (enabled) journal else null, keys.toList(), requests.toList())
     }
 
+    /// After the next attach, the following nonce request fails once.
+    var failNextNonceCheck = false
+    private var failNextNonce = false
+
     override suspend fun approvalNonce(): ApprovalNonce {
+        if (failNextNonce) { failNextNonce = false; throw JournalApiError.Transport("offline") }
         val nonce = "nonce-${++nonceCount}"
         issued += nonce
         return ApprovalNonce(nonce, Instant.now().plusSeconds(300))
@@ -106,6 +111,7 @@ class FakeApprovalJournal(
         check(approval, "account", mapOf("op" to "attach_key", "key_id" to signer), anyDevice = true)
         val i = keys.indexOfFirst { it.keyID == signer }
         keys[i] = keys[i].copy(deviceID = callerDevice)
+        if (failNextNonceCheck) { failNextNonceCheck = false; failNextNonce = true }
         return keys[i]
     }
 

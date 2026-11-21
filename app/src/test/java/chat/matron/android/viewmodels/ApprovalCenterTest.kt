@@ -280,6 +280,36 @@ class ApprovalCenterTest {
     }
 
     @Test
+    fun aRequestForAKeySinceDestroyedIsNotWaitedOn() = runTest {
+        journal.keys += ApprovalKeyDTO("ab".repeat(32), "", "Tablet", 99)
+        val center = center()
+        center.refresh()
+        center.requestFromAnotherDevice()
+        assertEquals(ApprovalCenter.Status.WaitingForApproval, center.status.value)
+        keys.invalidated += store.load()!!.keyID
+        center.refresh()
+        assertEquals(ApprovalCenter.Status.NoDeviceKey, center.status.value)
+    }
+
+    @Test
+    fun theReattachNoteGoesOnceTheKeyIsAttached() = runTest {
+        enrolled(center())
+        journal.callerDevice = 8
+        val center = center(deviceID = 8)
+        center.refresh()
+        val signing = async { runCatching { center.sign(tap) } }
+        runCurrent()
+        assertEquals(true, center.prompt.value!!.attachesFirst)
+        // The attach goes through; the tap's own nonce is refused once.
+        journal.failNextNonceCheck = true
+        center.confirm()
+        runCurrent()
+        assertEquals(false, center.prompt.value!!.attachesFirst)
+        center.cancel()
+        signing.await()
+    }
+
+    @Test
     fun journalHostKeepsOnlyANonDefaultPort() {
         assertEquals("journal.example", ApprovalCenter.journalHost("https://Journal.Example/"))
         assertEquals("journal.example", ApprovalCenter.journalHost("https://journal.example:443"))
