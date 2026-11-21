@@ -1,5 +1,6 @@
 package chat.matron.android.designsystem
 
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -177,6 +178,9 @@ fun ItemCommentComposer(
     onRemoveAttachment: (String) -> Unit = {},
     voice: ItemCommentVoice = ItemCommentVoice.IDLE,
     onCancelRecording: () -> Unit = {},
+    /// A copied file or image pasted into the field goes to the tray
+    /// ([AttachmentPasteTarget]). `null` keeps text-only paste.
+    onPasteAttachments: ((List<Uri>) -> Unit)? = null,
 ) {
     val hasAttachments = attachments.isNotEmpty()
     val sendable = itemCommentCanSubmit(draft, hasAttachments, voice)
@@ -204,6 +208,10 @@ fun ItemCommentComposer(
             IconButton(onClick = onAttach, enabled = !isBusy) {
                 Icon(Icons.Filled.AttachFile, contentDescription = "Attach", tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            // Taken here, in the row's scope: the paste target adds no layout
+            // node, so the field is still the row's child.
+            val fieldWeight = Modifier.weight(1f)
+            AttachmentPasteTarget(onPasteAttachments) {
             OutlinedTextField(
                 value = draft,
                 onValueChange = onDraftChange,
@@ -215,8 +223,7 @@ fun ItemCommentComposer(
                     focusedContainerColor = MaterialTheme.colorScheme.surface,
                     unfocusedContainerColor = MaterialTheme.colorScheme.surface,
                 ),
-                modifier = Modifier
-                    .weight(1f)
+                modifier = fieldWeight
                     // Attached keyboard: Enter sends, Shift+Enter newlines.
                     .onPreviewKeyEvent { event ->
                         if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
@@ -238,6 +245,7 @@ fun ItemCommentComposer(
                         }
                     },
             )
+            }
             // Never a second send: while a note records (or starts) the
             // mic does nothing — the send beside it carries the note.
             val micEnabled = !isBusy && voice == ItemCommentVoice.IDLE
