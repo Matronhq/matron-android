@@ -128,7 +128,7 @@ class JournalSyncEngine(
     private val api: SnapshotSource,
     private val store: JournalStore,
     private val connector: WebSocketConnecting,
-    private val token: String,
+    token: String,
     private val ownSender: String,
     private val search: SearchIndexer? = null,
     private val backoffBaseSeconds: Double = 1.0,
@@ -390,6 +390,27 @@ class JournalSyncEngine(
     /// Android network-availability seam (analogue of the Apple path monitor).
     /// Mid-backoff, retry now on the fresh path; otherwise close the live
     /// socket and route the run loop straight back to `.connecting`.
+    /// The device token the next hello sends. Replaced when unlocking the
+    /// account gives this device a new one ([replaceToken]).
+    @Volatile
+    private var token: String = token
+
+    /// Told what the socket says about the account lock (a `panic` frame, a
+    /// refused or accepted hello). Null in hosts that do not watch for it.
+    @Volatile
+    var accountLock: AccountLockListening? = null
+
+    /// The token the current connect attempt's hello carries.
+    @Volatile
+    private var attemptToken: String = token
+
+    /// Starts using [newToken]: the socket opened with the old one is closed
+    /// and the next hello carries the new one.
+    fun replaceToken(newToken: String) {
+        token = newToken
+        onNetworkAvailable()
+    }
+
     fun onNetworkAvailable() {
         val conn = synchronized(lock) {
             if (liveConnection == null) return@synchronized null
@@ -1026,12 +1047,15 @@ class JournalSyncEngine(
                 setState(SyncConnectionState.Connecting)
                 coldStartIfNeeded()
                 val cursor = store.cursor()
+                attemptToken = token
                 val (connection, hello) = JournalConnection.establishWithHello(
                     connector = connector, wsUrl = api.wsUrl, token = token, cursor = cursor,
                     archiveSince = archive?.helloArchiveSince(),
                 )
                 val headSeq = hello.headSeq
                 synchronized(lock) { liveConnection = connection; attempt = 0 }
+                // The journal greets no device of a locked account.
+                accountLock?.noteSocketAccepted()
                 // Before the replay: a message the replay brings back is then
                 // judged against the archive as the journal has it.
                 archive?.applyHello(hello.archive)
@@ -1143,12 +1167,24 @@ class JournalSyncEngine(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: JournalConnectionError.AuthRejected) {
+                if (attemptToken != token) {
+                    // A hello sent with a token since replaced (an unlock
+                    // gave this device a new one): retry with the new one,
+                    // never taken as a sign-out.
+                    closeLive()
+                    continue
+                }
                 MatronDebug.breadcrumb("server rejected auth — stopping sync (signed out by server)")
                 synchronized(lock) { liveConnection = null; runJob = null }
                 setState(SyncConnectionState.Offline("Signed out by server"))
                 failReadyWaiters(JournalSyncError.AuthRevoked)
                 failAllRPC(RPCRequestError.Offline)
                 return
+            } catch (e: JournalConnectionError.AccountLocked) {
+                // Refused because the whole account is locked: said so, then
+                // the usual backoff, so the lock's clearing is noticed.
+                accountLock?.noteLockedBySocket(AccountLock(e.since, e.canUnlock))
+                MatronDebug.breadcrumb("hello refused: account locked")
             } catch (e: Throwable) {
                 // Fall through to backoff — but never silently.
                 val n = synchronized(lock) { attempt + 1 }
@@ -1283,6 +1319,7 @@ class JournalSyncEngine(
                 // fails its outbox row; other post-hello control frames are
                 // advisory.
                 val requestID = frame.requestID
+                if (frame.code == "account_locked") accountLock?.noteLockedBySocket(AccountLock(frame.since, frame.unlock))
                 when {
                     requestID != null -> failRPC(requestID, frame.code, frame.detail)
                     frame.ref == "send" -> handleSendRejected(frame.code, frame.detail)
@@ -1326,6 +1363,7 @@ class JournalSyncEngine(
             }
             is ServerFrame.SettingsFrame -> fanOutSettings(frame.settings)
             is ServerFrame.ArchiveFrame -> archive?.apply(frame.delta)
+            is ServerFrame.Panic -> if (frame.on) accountLock?.noteLockedBySocket(AccountLock(frame.since, frame.unlock))
             is ServerFrame.HelloOK, is ServerFrame.UnknownControl -> Unit // post-hello control frames are advisory
         }
         return appliedSinceAck

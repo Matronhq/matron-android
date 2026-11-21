@@ -155,6 +155,7 @@ class ApprovalCenter(
             // must not rewind the list (a key just added or removed).
             if (loads.get() != mine) return fresh
             _state.value = fresh
+            fresh.journal?.let { if (store.lastJournal != it) store.lastJournal = it }
             _loadError.value = null
             recompute()
             return fresh
@@ -243,7 +244,7 @@ class ApprovalCenter(
     /// already attached to it).
     suspend fun signUnlock(since: Long, detail: String): SignedApproval {
         val stored = store.load() ?: throw ApprovalError.NoKeyOnThisDevice
-        val journal = _state.value?.journal ?: journalHost ?: throw ApprovalError.Disabled
+        val journal = _state.value?.journal ?: store.lastJournal ?: journalHost ?: throw ApprovalError.Disabled
         val key = keys.signingKey(stored)
         val request = ApprovalRequest(
             kind = ApprovalStatement.Kind.Account, subject = ApprovalSubjects.clearPanic(since),

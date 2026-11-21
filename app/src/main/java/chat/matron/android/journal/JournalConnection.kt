@@ -84,8 +84,13 @@ class JournalConnection internal constructor(
                             null -> continue
                             is ServerFrame.HelloOK -> return@withTimeout JournalConnection(socket, frame.settings) to frame
                             is ServerFrame.Error ->
-                                throw if (frame.code == "auth") JournalConnectionError.AuthRejected
-                                else JournalConnectionError.BadHandshake
+                                throw when (frame.code) {
+                                    "auth" -> JournalConnectionError.AuthRejected
+                                    "account_locked" -> JournalConnectionError.AccountLocked(frame.since, frame.unlock)
+                                    else -> JournalConnectionError.BadHandshake
+                                }
+                            // The lock's own frame can come first; its error follows.
+                            is ServerFrame.Panic -> continue
                             else -> throw JournalConnectionError.BadHandshake
                         }
                     }

@@ -646,6 +646,9 @@ class ItemsSync(
         // with the reason shown, so the person can tap again and sign. Never
         // a pause: the rest of the outbox must not wait behind it.
         JournalApiError.ApprovalRequired, is JournalApiError.ApprovalInvalid -> FailureDisposition.POISON
+        // The whole account is locked: nothing is wrong with the row. Left
+        // queued until the lock is cleared.
+        is JournalApiError.AccountLocked -> FailureDisposition.PAUSE
         // The journal never deletes items server-side — a 404 on a write is
         // far likelier "this journal doesn't have the tracker routes yet" than
         // "the item was deleted out from under us". `refresh` catching its own

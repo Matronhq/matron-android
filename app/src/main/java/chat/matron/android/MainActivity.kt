@@ -5,6 +5,12 @@ import android.os.Bundle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.statusBars
+import chat.matron.android.designsystem.AccountLockedBanner
+import chat.matron.android.designsystem.AccountLockedScreen
+import chat.matron.android.designsystem.AccountWarningBanner
+import chat.matron.android.viewmodels.AccountUnlockModel
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -320,33 +326,68 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                 // Inside the theme and below the lock check, so a lock
                 // removes an open prompt along with everything else.
                 else -> BlockedLinkHost {
-                    SignedInApp(
-                        deps = deps,
-                        session = session!!,
-                        incomingLinks = incomingLinks,
-                        appearance = appearance,
-                        appLock = appLock,
-                        onAppearanceChange = { next ->
-                            appearance = next
-                            prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
-                        },
-                        // Refused while locked: signing out clears the lock, so it
-                        // must not be reachable from behind the shield. Unreachable
-                        // in practice (the menu isn't composed while locked) — the
-                        // guard belongs with the lock state regardless.
-                        onSignOut = {
-                            appLock.signOutIfUnlocked {
-                                OutboxCatchUpWorker.cancel(context)
-                                deps.signOut()
-                                // Per-account state, cleared like the rest: the next
-                                // account starts opted out.
-                                appLock.resetForSignOut()
-                                session = null
-                            }
-                        },
-                    )
+                    val current = session!!
+                    // Refused while locked: signing out clears the lock, so it
+                    // must not be reachable from behind the shield. Unreachable
+                    // in practice (the menu isn't composed while locked) — the
+                    // guard belongs with the lock state regardless.
+                    val signOut: () -> Unit = {
+                        appLock.signOutIfUnlocked {
+                            OutboxCatchUpWorker.cancel(context)
+                            deps.signOut()
+                            // Per-account state, cleared like the rest: the next
+                            // account starts opted out.
+                            appLock.resetForSignOut()
+                            session = null
+                        }
+                        Unit
+                    }
+                    val accountLock by deps.accountLock.state.collectAsStateWithLifecycle()
+                    val accountWarning by deps.accountLock.warning.collectAsStateWithLifecycle()
+                    // "This account is locked" (or a warning left by an unlock)
+                    // across the top; the app below it, its top bar clear of it.
+                    val lockBanner = accountLock.isLocked && !accountLock.canUnlock
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        if (lockBanner) AccountLockedBanner()
+                        accountWarning?.let {
+                            AccountWarningBanner(it, onDismiss = deps.accountLock::dismissWarning, clearStatusBar = !lockBanner)
+                        }
+                        val topTaken = lockBanner || accountWarning != null
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .then(if (topTaken) Modifier.consumeWindowInsets(WindowInsets.statusBars) else Modifier),
+                        ) {
+                            SignedInApp(
+                                deps = deps,
+                                session = current,
+                                incomingLinks = incomingLinks,
+                                appearance = appearance,
+                                appLock = appLock,
+                                onAppearanceChange = { next ->
+                                    appearance = next
+                                    prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
+                                },
+                                onSignOut = signOut,
+                            )
+                        }
+                    }
+                    // The lock froze this device: the locked screen, with Unlock,
+                    // covers the app.
+                    if (accountLock.canUnlock) {
+                        val unlock = remember(current.userID) { deps.makeAccountUnlockModel(current) }
+                        val phase by unlock.phase.collectAsStateWithLifecycle()
+                        AccountLockedScreen(
+                            since = accountLock.lock?.since,
+                            method = remember(current.userID) { deps.approvalCenter(current) }.method ?: "fingerprint",
+                            isUnlocking = phase == AccountUnlockModel.Phase.Unlocking,
+                            error = (phase as? AccountUnlockModel.Phase.Failed)?.message,
+                            onUnlock = { scope.launch { unlock.unlock() } },
+                            onSignOut = signOut,
+                        )
+                    }
                     // The approval confirm sheet, over every screen of the app.
-                    ApprovalConfirmHost(remember(session!!.userID) { deps.approvalCenter(session!!) })
+                    ApprovalConfirmHost(remember(current.userID) { deps.approvalCenter(current) })
                 }
             }
         }

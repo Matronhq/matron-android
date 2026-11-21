@@ -37,6 +37,8 @@ import chat.matron.android.viewmodels.MissionDetailViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
 import chat.matron.android.viewmodels.ApprovalCenter
+import chat.matron.android.viewmodels.AccountLockMonitor
+import chat.matron.android.viewmodels.AccountUnlockModel
 import chat.matron.android.viewmodels.ApprovalKeysScreenModel
 import chat.matron.android.platform.ApprovalKeyStore
 import chat.matron.android.platform.KeystoreApprovalKeyProvider
@@ -356,6 +358,9 @@ class AppDependencies(
             api, db, dbFile, store, engine, maintenance, itemsSync, missionsSync, memoriesSync,
             pinsSync = pinsSync, coordinatorSync = coordinatorSync,
         )
+        // The account lock: every answer and the socket say whether it holds.
+        api.accountLock = accountLock
+        engine.accountLock = accountLock
         core.approvals = ApprovalCenter(
             api = api,
             keys = KeystoreApprovalKeyProvider(context),
@@ -484,6 +489,41 @@ class AppDependencies(
     }
 
     fun syncService(session: UserSession): SyncService = core(session).engine
+
+    /**
+     * Whether the journal says the account is locked (HTTP 423, the socket's
+     * `panic` frame or a refused hello). One for the app: one account is
+     * signed in at a time.
+     */
+    val accountLock: AccountLockMonitor = AccountLockMonitor().also { monitor ->
+        // Replies held while the account was locked go once it is cleared.
+        monitor.whenCleared { cores.values.toList().forEach { core -> appScope.launch { core.itemsSync.drainOutbox() } } }
+    }
+
+    /**
+     * Unlocking the account from this device, when the lock froze it: the
+     * confirm sheet and signature, `POST /panic/unlock`, then the new token
+     * saved and swapped into the API client and the socket. An answer that
+     * comes back after a sign-out (or a new sign-in) is thrown away.
+     */
+    fun makeAccountUnlockModel(session: UserSession): AccountUnlockModel {
+        val core = core(session)
+        val center = approvalCenter(session)
+        return AccountUnlockModel(
+            monitor = accountLock,
+            api = core.api,
+            sign = { since -> center.signUnlock(since, AccountUnlockModel.unlockDetail(since)) },
+            adoptToken = { token ->
+                // Saved first, so the next launch has it; then every client of
+                // this session uses it.
+                val saved = runCatching { auth.persist(session.copy(accessToken = token)) }.isSuccess
+                core.api.setToken(token)
+                core.engine.replaceToken(token)
+                saved
+            },
+            isCurrent = { cores[session.userID] === core },
+        )
+    }
 
     /** The session's approval centre: keys, and the confirm sheet signing goes through. */
     fun approvalCenter(session: UserSession): ApprovalCenter = core(session).approvals!!
@@ -832,6 +872,9 @@ class AppDependencies(
     }
 
     fun signOut() {
+        // A lock (or its warning) belongs to the sign-in that is going.
+        accountLock.cleared()
+        accountLock.dismissWarning()
         val oldCores = cores.values.toList()
         val oldUserIDs = cores.keys.toList()
         // Chain onto any previous teardown: overwriting the job would leave

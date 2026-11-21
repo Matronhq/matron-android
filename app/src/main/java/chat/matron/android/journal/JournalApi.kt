@@ -368,6 +368,9 @@ sealed class JournalApiError(message: String) : Exception(message) {
     ) : JournalApiError(serverMessage.ifEmpty { "Server error (HTTP $status)." })
     /// 403 `approval_required`: the account has an approval key and this
     /// request needed a signature it did not carry.
+    /// 423 `account_locked`: the whole account is locked; nothing is
+    /// accepted until it is cleared.
+    data class AccountLocked(val lock: AccountLock) : JournalApiError("This account is locked.")
     data object ApprovalRequired : JournalApiError(
         "This needs a signature from an approval key. Approve it on a device that has one.",
     )
@@ -390,7 +393,7 @@ class JournalApi(
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
     TrackerSearching,
     ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding, ContactsProviding,
-    InviteAskAnswering, ApprovalKeysProviding {
+    InviteAskAnswering, ApprovalKeysProviding, AccountUnlocking {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -400,6 +403,11 @@ class JournalApi(
     fun setToken(token: String?) {
         this.token = token
     }
+
+    /// Told what every answered, authenticated request says about the
+    /// account lock (HTTP 423). Null in hosts that do not watch for it.
+    @Volatile
+    var accountLock: AccountLockListening? = null
 
     enum class PushEnvironment(val wire: String) { SANDBOX("sandbox"), PROD("prod") }
 
@@ -602,6 +610,17 @@ class JournalApi(
 
     override suspend fun attachApprovalKey(approval: SignedApproval): ApprovalKeyDTO =
         approvalKeyOf(approvalKeyRequest("/approval-keys/attach", buildJsonObject { put("approval", approval.toJson()) }))
+
+    // MARK: Account unlock (protocol "Panic lock")
+
+    override suspend fun unlockAccount(approval: SignedApproval): AccountUnlockResult {
+        val (status, data) = raw("/panic/unlock", "POST", buildJsonObject { put("approval", approval.toJson()) })
+        val obj = parseJsonObjectOrNull(String(data, Charsets.UTF_8))
+        if (status == 409 && obj?.stringOrNull("error") == "not_locked") throw AccountNotLockedError()
+        if (status != 200) throw error(status, data)
+        val token = obj?.stringOrNull("token")?.takeIf { it.isNotEmpty() } ?: throw malformed("unlock")
+        return AccountUnlockResult(token, obj.intOrNull("devices_revoked") ?: 0)
+    }
 
     private fun approvalKeyOf(obj: JsonObject): ApprovalKeyDTO =
         ApprovalKeyDTO.fromJson(obj.objectOrNull("key")) ?: throw malformed("approval key")
@@ -1461,7 +1480,17 @@ class JournalApi(
             else -> null
         }
         builder.method(method, body)
-        return execute(client.newCall(builder.build()))
+        val sentToken = if (authenticated) token else null
+        val answer = execute(client.newCall(builder.build()))
+        // Only an answer to the token in use now says anything about this
+        // sign-in: one sent with a token since replaced is ignored.
+        if (sentToken != null && sentToken == token) {
+            val (status, bytes) = answer
+            accountLock?.let { listener ->
+                AccountLock.fromHttp(status, bytes)?.let(listener::noteLock) ?: listener.noteStatus(status)
+            }
+        }
+        return answer
     }
 
     private suspend fun execute(call: Call): Pair<Int, ByteArray> =
@@ -1533,6 +1562,8 @@ class JournalApi(
                 JournalApiError.TwoFactorConflict(code)
             status == 429 && code == "locked_out" ->
                 JournalApiError.LockedOut(obj?.intOrNull("retry_after") ?: 60)
+            status == 423 || code == "account_locked" ->
+                JournalApiError.AccountLocked(AccountLock.fromHttp(423, data) ?: AccountLock(null, false))
             status == 429 -> JournalApiError.RateLimited
             status == 403 && code == "approval_required" -> JournalApiError.ApprovalRequired
             status == 400 && code == "approval_invalid" -> JournalApiError.ApprovalInvalid(obj?.stringOrNull("reason") ?: "")
