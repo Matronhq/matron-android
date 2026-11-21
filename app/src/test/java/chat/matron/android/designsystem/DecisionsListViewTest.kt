@@ -45,7 +45,7 @@ class DecisionsListViewTest {
     fun theListOpensOnNeedsYou() {
         val model = DecisionsListModel(rows = emptyList(), isSupported = true, isRefreshing = false)
         assertEquals(ForYouTab.OPEN, model.tab)
-        assertEquals(listOf("Needs you", "Done"), ForYouTab.entries.map { it.title })
+        assertEquals(listOf("Needs you", "Done", "Spare allowance"), ForYouTab.entries.map { it.title })
         assertTrue(decisionsShowsTabs(model))
         assertTrue("an unknown support state shows the tabs", decisionsShowsTabs(model.copy(isSupported = null)))
         assertFalse("nothing to switch between without a tracker", decisionsShowsTabs(model.copy(isSupported = false)))
@@ -62,6 +62,34 @@ class DecisionsListViewTest {
         assertEquals("unsupported wins on the Done tab too", DecisionsListState.UNSUPPORTED, decisionsListState(populated.copy(isSupported = false)))
         assertEquals("closed rows do not fill Needs you", DecisionsListState.EMPTY, decisionsListState(populated.copy(tab = ForYouTab.OPEN, rows = emptyList())))
         assertEquals(DecisionsListState.POPULATED, decisionsListState(populated.copy(tab = ForYouTab.OPEN)))
+    }
+
+    @Test
+    fun spareTabStatePrecedence() {
+        val open = DecisionsRow(t("q1", 12, ItemKind.QUESTION, "c1"), "auth refactor")
+        val task = DecisionsRow(
+            t("t1", 14, ItemKind.TASK, "c2").copy(awaiting = null, labels = listOf(TrackerItem.SPARE_ALLOWANCE_LABEL)), null,
+        )
+        val model = DecisionsListModel(rows = listOf(open), isSupported = true, isRefreshing = false, tab = ForYouTab.SPARE)
+        assertEquals("open rows do not fill the backlog", DecisionsListState.SPARE_EMPTY, decisionsListState(model))
+        assertTrue("the tab shows even with an empty backlog", decisionsShowsTabs(model))
+        val populated = model.copy(spare = listOf(task))
+        assertEquals(DecisionsListState.SPARE_POPULATED, decisionsListState(populated))
+        assertEquals("unsupported wins on the backlog too", DecisionsListState.UNSUPPORTED, decisionsListState(populated.copy(isSupported = false)))
+        assertEquals("a search with no match", DecisionsListState.NO_MATCHES, decisionsListState(model.copy(query = "zzz")))
+        assertEquals("a matching search", DecisionsListState.SPARE_POPULATED, decisionsListState(populated.copy(query = "T14")))
+        assertEquals("backlog rows do not fill Needs you", DecisionsListState.POPULATED, decisionsListState(populated.copy(tab = ForYouTab.OPEN)))
+    }
+
+    @Test
+    fun onlyOpenLabelledTasksAreInTheBacklog() {
+        val label = listOf(TrackerItem.SPARE_ALLOWANCE_LABEL)
+        val task = t("t1", 1, ItemKind.TASK, "c1").copy(awaiting = null)
+        assertTrue(task.copy(labels = label).isSpareAllowanceTask)
+        assertTrue("a started one stays", task.copy(labels = label + "dispatched").isSpareAllowanceTask)
+        assertFalse("unlabelled", task.isSpareAllowanceTask)
+        assertFalse("closed", task.copy(labels = label, state = ItemState.CLOSED).isSpareAllowanceTask)
+        assertFalse("not a task", t("q1", 2, ItemKind.QUESTION, "c1").copy(labels = label).isSpareAllowanceTask)
     }
 
     @Test
