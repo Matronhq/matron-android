@@ -19,7 +19,9 @@ data class UnsentReply(
 /// back: the app stopped while it was uploading or being queued. [queuing]
 /// says it had reached the outbox insert, so it may have been queued (and
 /// even delivered) after all; the owner checks before putting it back.
-data class StrandedSend(val reply: UnsentReply, val queuing: Boolean)
+/// [startedAt] (epoch ms) is when the send began, so the owner only matches
+/// it against comments posted since.
+data class StrandedSend(val reply: UnsentReply, val queuing: Boolean, val startedAt: Long = 0)
 
 /// Keeps every reply box's unsent contents on disk, one small JSON file per
 /// item or conversation, so a reply survives leaving its page, its view model
@@ -98,7 +100,8 @@ class UnsentReplyStore(
     fun beginSend(place: Place, id: String, reply: UnsentReply, epoch: Int) {
         if (epoch != this.epoch || reply.isEmpty) return
         val record = record(place)
-        write(place, record.copy(sending = record.sending + (id to StrandedSend(reply, queuing = false))))
+        val send = StrandedSend(reply, queuing = false, startedAt = System.currentTimeMillis())
+        write(place, record.copy(sending = record.sending + (id to send)))
     }
 
     /// The send [id] is about to be written to the outbox: from here on, a
@@ -182,7 +185,7 @@ class UnsentReplyStore(
         val sending = saved.sending.mapNotNull { (id, send) ->
             val reply = send.toReply()
             if (send.attachments.isNotEmpty() && reply.attachments.isEmpty()) null
-            else id to StrandedSend(reply, send.queuing)
+            else id to StrandedSend(reply, send.queuing, send.startedAt)
         }.toMap()
         return Record(box = saved.box.toReply(), sending = sending)
     }
@@ -196,7 +199,7 @@ class UnsentReplyStore(
         }
         val saved = SavedRecord(
             box = SavedReply.of(record.box),
-            sending = record.sending.mapValues { SavedReply.of(it.value.reply, it.value.queuing) },
+            sending = record.sending.mapValues { SavedReply.of(it.value.reply, it.value.queuing, it.value.startedAt) },
         )
         runCatching {
             directory.mkdirs()
@@ -239,11 +242,13 @@ class UnsentReplyStore(
         val text: String,
         val attachments: List<SavedAttachment> = emptyList(),
         val queuing: Boolean = false,
+        val startedAt: Long = 0,
     ) {
         companion object {
-            fun of(reply: UnsentReply, queuing: Boolean = false) = SavedReply(
+            fun of(reply: UnsentReply, queuing: Boolean = false, startedAt: Long = 0) = SavedReply(
                 text = reply.text,
                 queuing = queuing,
+                startedAt = startedAt,
                 attachments = reply.attachments.map {
                     SavedAttachment(
                         id = it.id, filename = it.file.name, mimeType = it.mimeType, sizeBytes = it.sizeBytes,

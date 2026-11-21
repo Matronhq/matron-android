@@ -122,10 +122,9 @@ class ItemDetailViewModel(
                 val queued = runCatching {
                     store.itemOutboxRows(itemID).any { it.localID == id || it.localID.startsWith("$id-") }
                 }.getOrNull() ?: continue
-                val delivered = !queued && runCatching { store.comments(itemID) }.getOrDefault(emptyList()).any {
-                    it.author == ItemAuthor.USER && it.body.trim() == send.reply.text.trim()
-                }
-                !queued && !delivered
+                val delivered = queued || (runCatching { store.comments(itemID) }.getOrNull() ?: continue)
+                    .any { isDelivery(it, send) }
+                !delivered
             }
             if (putBack) {
                 val merged = UnsentReplyStore.merge(send.reply, UnsentReply(_draft.value, _stagedAttachments.value))
@@ -136,6 +135,23 @@ class ItemDetailViewModel(
                 send.reply.attachments.forEach { it.deleteStagedCopy() }
             }
             stores.dropStranded(unsentPlace, id, unsentEpoch)
+        }
+    }
+
+    /// Whether [comment] is [send] already delivered (it left the outbox): a
+    /// plain reply of the user's, posted since the send began (a minute's
+    /// grace for clock skew), with the same text and, when the send carried
+    /// files, only files from it — a split reply's first part carries some.
+    private fun isDelivery(comment: TrackerComment, send: StrandedSend): Boolean {
+        if (comment.author != ItemAuthor.USER || comment.kind != TrackerComment.Kind.COMMENT) return false
+        if (comment.action != null) return false
+        if (comment.createdAt.toEpochMilli() < send.startedAt - 60_000) return false
+        if (comment.body.trim() != send.reply.text.trim()) return false
+        val names = send.reply.attachments.map { it.filename }.toSet()
+        return if (names.isEmpty()) {
+            comment.attachments.isEmpty()
+        } else {
+            comment.attachments.isNotEmpty() && comment.attachments.all { it.name in names }
         }
     }
 

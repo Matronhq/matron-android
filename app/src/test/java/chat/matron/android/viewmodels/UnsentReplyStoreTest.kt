@@ -71,13 +71,15 @@ class UnsentReplyStoreTest {
         assertTrue("this run's own sends aren't stranded", s.strandedSends(item).isEmpty())
 
         val next = store()
+        val stranded = next.strandedSends(item)
         assertEquals(
             mapOf(
-                "send-1" to StrandedSend(UnsentReply("sending this", listOf(a)), queuing = false),
-                "send-2" to StrandedSend(UnsentReply("being queued"), queuing = true),
+                "send-1" to (UnsentReply("sending this", listOf(a)) to false),
+                "send-2" to (UnsentReply("being queued") to true),
             ),
-            next.strandedSends(item),
+            stranded.mapValues { it.value.reply to it.value.queuing },
         )
+        assertTrue(stranded.values.all { it.startedAt > 0 })
         assertEquals("the box itself is untouched", "", next.reply(item).text)
         next.dropStranded(item, "send-1", next.epoch)
         next.dropStranded(item, "send-2", next.epoch)

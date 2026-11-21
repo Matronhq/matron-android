@@ -905,4 +905,35 @@ class ItemDetailViewModelTest {
         waitUntil { unsentStore(root).strandedSends(place).isEmpty() }
         assertEquals("never queued", vm.draft)
     }
+
+    /// A queued stranded send that left the outbox counts as delivered only
+    /// for a matching reply posted since it began: an older reply with the
+    /// same words doesn't.
+    @Test
+    fun aStrandedSendIsDeliveredOnlyByAMatchingNewerComment() = runBlocking {
+        val root = Files.createTempDirectory("unsent-").toFile()
+        val first = unsentStore(root)
+        val place = UnsentReplyStore.Place.Item("it_1")
+        first.beginSend(place, "local-1", UnsentReply("ok"), first.epoch)
+        first.markQueuing(place, "local-1", first.epoch)
+
+        val old = TrackerComment(id = "cm_old", itemID = "it_1", author = ItemAuthor.USER, body = "ok",
+            createdAt = java.time.Instant.now().minusSeconds(3_600))
+        val again = unsentStore(root)
+        val vm = ItemDetailViewModel("it_1", FakeItemsStore().apply { storedComments = listOf(old) }, Api(), Sync(),
+            this, again.stagingDirectory, unsentReplies = again)
+        waitUntil { unsentStore(root).strandedSends(place).isEmpty() }
+        assertEquals("an older reply with the same words isn't this one", "ok", vm.draft)
+
+        val third = unsentStore(root)
+        third.save(place, UnsentReply(), third.epoch)
+        third.beginSend(place, "local-2", UnsentReply("ok"), third.epoch)
+        third.markQueuing(place, "local-2", third.epoch)
+        val fresh = old.copy(id = "cm_new", createdAt = java.time.Instant.now())
+        val fourth = unsentStore(root)
+        val vm2 = ItemDetailViewModel("it_1", FakeItemsStore().apply { storedComments = listOf(fresh) }, Api(), Sync(),
+            this, fourth.stagingDirectory, unsentReplies = fourth)
+        waitUntil { unsentStore(root).strandedSends(place).isEmpty() }
+        assertEquals("", vm2.draft)
+    }
 }
