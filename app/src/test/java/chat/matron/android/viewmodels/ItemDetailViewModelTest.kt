@@ -936,4 +936,29 @@ class ItemDetailViewModelTest {
         waitUntil { unsentStore(root).strandedSends(place).isEmpty() }
         assertEquals("", vm2.draft)
     }
+
+    /// A hand-over copy or a contributor's reply with the same words isn't
+    /// this send; nor is one whose files differ in size.
+    @Test
+    fun aStrandedSendIgnoresOtherPeoplesAndMismatchedReplies() = runBlocking {
+        val root = Files.createTempDirectory("unsent-").toFile()
+        val first = unsentStore(root)
+        val place = UnsentReplyStore.Place.Item("it_1")
+        val note = chat.matron.android.models.StagedAttachment.stage(picked("voice-note.m4a", ByteArray(10)), first.stagingDirectory)
+        first.beginSend(place, "local-1", UnsentReply("see note", listOf(note)), first.epoch)
+        first.markQueuing(place, "local-1", first.epoch)
+
+        val now = java.time.Instant.now()
+        fun reply(id: String, size: Long, attribution: String? = null) = TrackerComment(
+            id = id, itemID = "it_1", author = ItemAuthor.USER, body = "see note", createdAt = now,
+            attribution = attribution,
+            attachments = listOf(TrackerAttachment(blobRef = "b-$id", mime = "audio/mp4", name = "voice-note.m4a", size = size)),
+        )
+        val again = unsentStore(root)
+        val items = FakeItemsStore().apply { storedComments = listOf(reply("c1", 10, attribution = "bob"), reply("c2", 99)) }
+        val vm = ItemDetailViewModel("it_1", items, Api(), Sync(), this, again.stagingDirectory, unsentReplies = again)
+        waitUntil { unsentStore(root).strandedSends(place).isEmpty() }
+        assertEquals("see note", vm.draft)
+        assertEquals(listOf("voice-note.m4a"), vm.stagedAttachments.value.map { it.filename })
+    }
 }

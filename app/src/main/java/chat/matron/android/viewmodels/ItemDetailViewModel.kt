@@ -138,21 +138,21 @@ class ItemDetailViewModel(
         }
     }
 
-    /// Whether [comment] is [send] already delivered (it left the outbox): a
-    /// plain reply of the user's, posted since the send began (a minute's
-    /// grace for clock skew), with the same text and, when the send carried
-    /// files, only files from it — a split reply's first part carries some.
+    /// Whether [comment] is [send] already delivered (it left the outbox): the
+    /// user's own plain reply (not a contributor's or a hand-over copy, not a
+    /// button tap), posted since the send began (a minute's grace for clock
+    /// skew), with the same text and, when the send carried files, files
+    /// drawn from them by name and size — a split reply's first part carries
+    /// some of them, and a file is counted once.
     private fun isDelivery(comment: TrackerComment, send: StrandedSend): Boolean {
         if (comment.author != ItemAuthor.USER || comment.kind != TrackerComment.Kind.COMMENT) return false
-        if (comment.action != null) return false
+        if (comment.action != null || comment.contributor != null || comment.attribution != null) return false
         if (comment.createdAt.toEpochMilli() < send.startedAt - 60_000) return false
         if (comment.body.trim() != send.reply.text.trim()) return false
-        val names = send.reply.attachments.map { it.filename }.toSet()
-        return if (names.isEmpty()) {
-            comment.attachments.isEmpty()
-        } else {
-            comment.attachments.isNotEmpty() && comment.attachments.all { it.name in names }
-        }
+        if (send.files.isEmpty()) return comment.attachments.isEmpty()
+        if (comment.attachments.isEmpty()) return false
+        val left = send.files.toMutableList()
+        return comment.attachments.all { left.remove(it.name to it.size) }
     }
 
     private fun persistUnsent() {

@@ -20,8 +20,14 @@ data class UnsentReply(
 /// says it had reached the outbox insert, so it may have been queued (and
 /// even delivered) after all; the owner checks before putting it back.
 /// [startedAt] (epoch ms) is when the send began, so the owner only matches
-/// it against comments posted since.
-data class StrandedSend(val reply: UnsentReply, val queuing: Boolean, val startedAt: Long = 0)
+/// it against comments posted since. [files] names every file the send
+/// carried, as (name, size), even any whose staged copy has since gone.
+data class StrandedSend(
+    val reply: UnsentReply,
+    val queuing: Boolean,
+    val startedAt: Long = 0,
+    val files: List<Pair<String, Long>> = reply.attachments.map { it.filename to it.sizeBytes },
+)
 
 /// Keeps every reply box's unsent contents on disk, one small JSON file per
 /// item or conversation, so a reply survives leaving its page, its view model
@@ -185,7 +191,7 @@ class UnsentReplyStore(
         val sending = saved.sending.mapNotNull { (id, send) ->
             val reply = send.toReply()
             if (send.attachments.isNotEmpty() && reply.attachments.isEmpty()) null
-            else id to StrandedSend(reply, send.queuing, send.startedAt)
+            else id to StrandedSend(reply, send.queuing, send.startedAt, send.attachments.map { it.filename to it.sizeBytes })
         }.toMap()
         return Record(box = saved.box.toReply(), sending = sending)
     }
