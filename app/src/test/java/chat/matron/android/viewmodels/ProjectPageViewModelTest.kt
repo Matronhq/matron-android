@@ -190,6 +190,18 @@ class ProjectPageViewModelTest {
     }
 
     @Test
+    fun aCursorThatDoesNotMoveOnEndsTheHistory() = runBlocking {
+        val timeline = object : FakeTimelineBase() {
+            override suspend fun timelineProjectHistory(id: String, before: String?, limit: Int?): TimelineHistoryPage =
+                if (before == null) TimelineHistoryPage(listOf(history("2026-11-16")), "c1") else TimelineHistoryPage(emptyList(), "c1")
+        }
+        val vm = ProjectPageViewModel("pj_docs", timeline, FakeProjects())
+        vm.loadHistory()
+        vm.loadMoreHistory()
+        assertFalse(vm.state.value.hasMoreHistory)
+    }
+
+    @Test
     fun missionsSplitOpenByActivityAndDoneByClose() = runBlocking {
         val t = Instant.parse("2026-11-20T10:00:00Z")
         fun m(id: String, state: MissionState = MissionState.OPEN, last: Instant? = null, closed: Instant? = null) =

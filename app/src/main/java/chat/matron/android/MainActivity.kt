@@ -721,6 +721,10 @@ private fun SignedInApp(
     // The Projects timeline (the Missions tab's root): session-long, so the
     // picked week survives a tab switch. It reads when the tab first shows.
     val timelineVM = remember(session.userID) { deps.makeTimelineViewModel(session, sessionScope) }
+    // One view model per project for the session: its page and its sections
+    // share it, and coming back to a page shows what was loaded while it
+    // re-reads, rather than starting over from a spinner.
+    val projectVMs = remember(session.userID) { mutableMapOf<String, chat.matron.android.viewmodels.ProjectPageViewModel>() }
     // Settings → People; session-wide so an invite deep link can open its
     // accept card before the screen is up.
     val inviteLinks = remember(session.userID) { deps.revealedInviteLinks(session) }
@@ -1473,7 +1477,7 @@ private fun SignedInApp(
                         arguments = listOf(navArgument("projectID") { type = NavType.StringType }),
                     ) { entry ->
                         val projectID = entry.arguments?.getString("projectID") ?: return@composable
-                        val projectVM = remember(projectID) { deps.makeProjectPageViewModel(session, projectID) }
+                        val projectVM = remember(projectID) { projectVMs.getOrPut(projectID) { deps.makeProjectPageViewModel(session, projectID) } }
                         ProjectScreen(
                             viewModel = projectVM,
                             media = deps.mediaService(session),
@@ -1492,7 +1496,7 @@ private fun SignedInApp(
                     ) { entry ->
                         val projectID = entry.arguments?.getString("projectID") ?: return@composable
                         val section = ProjectSection.fromWire(entry.arguments?.getString("section")) ?: return@composable
-                        val projectVM = remember(projectID) { deps.makeProjectPageViewModel(session, projectID) }
+                        val projectVM = remember(projectID) { projectVMs.getOrPut(projectID) { deps.makeProjectPageViewModel(session, projectID) } }
                         ProjectSectionScreen(
                             viewModel = projectVM,
                             section = section,

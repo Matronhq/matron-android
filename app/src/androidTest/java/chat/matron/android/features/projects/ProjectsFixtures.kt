@@ -146,7 +146,6 @@ object ProjectsFixtures {
         ),
     )
 
-    private val now = Instant.parse("2026-11-20T12:00:00Z")
 
     val docsMissions = listOf(
         Mission(id = "ms_20", num = 20, title = "Docs search", originConvoID = "c20", status = "Indexing the guides; the API pages are next.",
