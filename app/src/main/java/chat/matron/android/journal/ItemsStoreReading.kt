@@ -50,6 +50,11 @@ interface ItemsStoreReading {
     /// draws its ask's card from them. Defaulted to none, so fakes that
     /// don't care skip it.
     fun consentEventsFlow(convoID: String): Flow<List<JournalEvent>> = flowOf(emptyList())
+    /// The conversation's busy-queue cards and their releases
+    /// (`queued_release` prompts and replies), oldest first, followed live:
+    /// `ItemQueuedReplies` reads which of an item's replies still wait on the
+    /// agent from them. Defaulted to none, so fakes that don't care skip it.
+    fun queuedReleaseEventsFlow(convoID: String): Flow<List<JournalEvent>> = flowOf(emptyList())
 }
 
 /// Reads one tracker item by its human-facing NUMBER (`#65`) — the single

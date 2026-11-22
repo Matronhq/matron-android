@@ -58,6 +58,7 @@ import chat.matron.android.designsystem.MarkdownPreviewState
 import chat.matron.android.designsystem.MarkdownPreviewTarget
 import chat.matron.android.features.chat.MarkdownPreviewSheet
 import chat.matron.android.designsystem.ItemDetailModel
+import chat.matron.android.designsystem.ItemReplyDeliveryActions
 import chat.matron.android.designsystem.ItemDetailView
 import chat.matron.android.designsystem.ItemCommentSendRoute
 import chat.matron.android.designsystem.ItemCommentVoice
@@ -70,13 +71,16 @@ import chat.matron.android.designsystem.TrackerItemLinkOutcome
 import chat.matron.android.designsystem.rememberMessageLinkOpener
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.PendingCommentModel
+import chat.matron.android.features.chat.PickedCopy
 import chat.matron.android.features.chat.copyUriToTemp
+import chat.matron.android.designsystem.AttachmentPaste
 import chat.matron.android.features.chat.openAttachment
 import chat.matron.android.features.chat.attachmentMimeType
 import chat.matron.android.designsystem.rememberAttachmentSaver
 import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.MatronJson
 import chat.matron.android.journal.MissionsStoreReading
+import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.ItemState
 import chat.matron.android.models.Mission
 import chat.matron.android.models.TrackerAttachment
@@ -171,9 +175,15 @@ fun ItemDetailScreen(
     val comments by viewModel.comments.collectAsStateWithLifecycle()
     // The thread as shown: a reply the user cancelled and then sent again
     // edited is left out, so the edit stands alone in its place.
-    val thread = remember(comments) { TrackerComment.hidingReplaced(comments) }
-    val openableCommentConvoIDs by viewModel.openableCommentConvoIDs.collectAsStateWithLifecycle()
     val pending by viewModel.pendingComments.collectAsStateWithLifecycle()
+    // An edit still in the outbox already stands in for the reply it replaces.
+    val thread = remember(comments, pending) { TrackerComment.hidingReplaced(comments, ItemDetailViewModel.pendingReplaces(pending)) }
+    val openableCommentConvoIDs by viewModel.openableCommentConvoIDs.collectAsStateWithLifecycle()
+    val queuedReplies by viewModel.queuedReplies.collectAsStateWithLifecycle()
+    val editableQueuedReplies by viewModel.editableQueuedReplies.collectAsStateWithLifecycle()
+    val editingQueuedReplyID by viewModel.editingQueuedReplyID.collectAsStateWithLifecycle()
+    val editHoldPending by viewModel.editHoldPending.collectAsStateWithLifecycle()
+    val replacingCommentID by viewModel.replacingCommentID.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
     val staged by viewModel.stagedAttachments.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
@@ -247,18 +257,22 @@ fun ItemDetailScreen(
 
     // --- Attachment picking (the chat composer's wiring) -------------------
     // A pick is staged into the composer's tray; it goes with the next send.
-    fun attachUri(uri: Uri) {
+    fun attachUri(uri: Uri, pasted: Boolean = false) {
         scope.launch {
-            val picked = withContext(Dispatchers.IO) { copyUriToTemp(context, uri) }
-            if (picked == null) {
-                viewModel.reportError("Couldn't read that file.")
-                return@launch
+            val picked = withContext(Dispatchers.IO) {
+                // A pasted item with no name of its own is named for when it
+                // was pasted.
+                if (pasted) copyUriToTemp(context, uri, AttachmentPaste::fallbackName) else copyUriToTemp(context, uri)
             }
-            try {
-                viewModel.attachFiles(listOf(picked))
-            } finally {
-                // The tray holds its own staged copy.
-                picked.delete()
+            when (picked) {
+                PickedCopy.Unreadable -> viewModel.reportError("Couldn't read that file.")
+                is PickedCopy.TooLarge -> viewModel.reportError(AttachmentLimits.oversizeMessage(picked.filename))
+                is PickedCopy.Copied -> try {
+                    viewModel.attachFiles(listOf(picked.file))
+                } finally {
+                    // The tray holds its own staged copy.
+                    picked.file.parentFile?.deleteRecursively()
+                }
             }
         }
     }
@@ -437,8 +451,24 @@ fun ItemDetailScreen(
                                     pendingItemTap = ItemDetailViewModel.pendingItemTap(pending),
                                     working = working,
                                     spawnConsent = spawnConsent,
+                                    queuedReplies = queuedReplies,
+                                    editableQueuedReplies = editableQueuedReplies,
+                                    editingQueuedReplyID = editingQueuedReplyID,
+                                    editHoldPending = editHoldPending,
+                                    replacingCommentID = replacingCommentID,
                                 ),
                                 onAnswerSpawn = { approve -> scope.launch { viewModel.answerSpawn(approve) } },
+                                replyDelivery = if (viewModel.answersQueuedReplies) {
+                                    ItemReplyDeliveryActions(
+                                        sendNow = { id -> scope.launch { viewModel.sendQueuedReplyNow(id) } },
+                                        cancel = { id -> scope.launch { viewModel.cancelQueuedReply(id) } },
+                                        edit = { id -> scope.launch { viewModel.editQueuedReply(id) } },
+                                        cancelEdit = { scope.launch { viewModel.cancelQueuedReplyEdit() } },
+                                        editAndResend = { id -> viewModel.editAndResend(id) },
+                                    )
+                                } else {
+                                    ItemReplyDeliveryActions()
+                                },
                                 draft = draft,
                                 onDraftChange = { draft = it; viewModel.draft = it },
                                 image = { a -> images[a.blobRef] },
@@ -492,6 +522,7 @@ fun ItemDetailScreen(
                                 onRetryPending = { id -> scope.launch { viewModel.retryComment(id) } },
                                 onDiscardPending = { id -> scope.launch { viewModel.discardComment(id) } },
                                 onAttach = { attachMenu = true },
+                                onPasteAttachments = { uris -> uris.forEach { attachUri(it, pasted = true) } },
                                 onVoiceNote = {
                                     // The composer disables the mic outside IDLE; this
                                     // also covers a tap racing that recomposition.

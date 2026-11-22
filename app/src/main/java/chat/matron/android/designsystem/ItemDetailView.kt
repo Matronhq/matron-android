@@ -70,6 +70,7 @@ import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.ItemState
 import chat.matron.android.models.ItemWorkingIndicator
+import chat.matron.android.models.QueuedReplyState
 import chat.matron.android.models.StagedAttachment
 import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
@@ -190,6 +191,17 @@ data class ItemDetailModel(
     /// The spawn ask a consent item mirrors (`ItemDetailViewModel.spawnConsent`),
     /// drawn as its live card near the top of the thread.
     val spawnConsent: ItemSpawnConsent? = null,
+    /// The user's replies the agent hasn't got yet, by comment id
+    /// (`ItemDetailViewModel.queuedReplies`): each draws a delivery line.
+    val queuedReplies: Map<String, QueuedReplyState> = emptyMap(),
+    /// Queued replies whose card can be edited from the thread.
+    val editableQueuedReplies: Set<String> = emptySet(),
+    /// The queued reply being edited in the reply box, if any.
+    val editingQueuedReplyID: String? = null,
+    /// Edit's hold is still on its way to the agent's session.
+    val editHoldPending: Boolean = false,
+    /// The cancelled reply the reply box holds an edit of, if any.
+    val replacingCommentID: String? = null,
 ) {
     /// The live spawn card is drawn: it carries the request in full, so the
     /// item's body (the same request as plain text, written for places that
@@ -212,6 +224,16 @@ fun itemSpawnCardMissingText(answersAbove: Boolean, isOpen: Boolean = true): Str
     else -> "The request card hasn't reached this device yet. " +
         "It can be approved once it arrives, or from the conversation it was asked in."
 }
+
+/// What a queued reply's buttons do, by comment id. A `null` handler draws no
+/// button (a view model with nothing to answer the card with).
+data class ItemReplyDeliveryActions(
+    val sendNow: ((String) -> Unit)? = null,
+    val cancel: ((String) -> Unit)? = null,
+    val edit: ((String) -> Unit)? = null,
+    val cancelEdit: (() -> Unit)? = null,
+    val editAndResend: ((String) -> Unit)? = null,
+)
 
 /// The state pill's four values: Needs you / Closed · resolution / With the
 /// agent / Open.
@@ -412,6 +434,8 @@ fun ItemDetailView(
     onAnswerSpawn: ((Boolean) -> Unit)? = null,
     /// Opens the session a started spawn runs in.
     onOpenSpawnedRoom: (String) -> Unit = onOpenConversation,
+    /// Send now / Cancel / Edit under a reply the agent hasn't got yet.
+    replyDelivery: ItemReplyDeliveryActions = ItemReplyDeliveryActions(),
     now: Instant = Instant.now(),
     /// Whether the reader had previously scrolled to the bottom of this
     /// item's thread (`ItemReadMemory.wasAtBottom`, read once by the host).
@@ -420,6 +444,9 @@ fun ItemDetailView(
     /// can persist it for next time.
     onBottomVisibilityChange: ((Boolean) -> Unit)? = null,
     listState: LazyListState = rememberLazyListState(),
+    /// Copied files or images pasted into the reply field
+    /// ([AttachmentPasteTarget]). `null` keeps text-only paste.
+    onPasteAttachments: ((List<android.net.Uri>) -> Unit)? = null,
     /// The file chips' Save button, and whether an attachment is being
     /// fetched for one. `null` draws the chips without it.
     onSaveAttachment: ((TrackerAttachment) -> Unit)? = null,
@@ -512,6 +539,8 @@ fun ItemDetailView(
                         onTapAction = { label -> onTapAction(c, label) },
                         openableConvoIDs = model.openableConvoIDs,
                         onOpenConversation = onOpenConversation,
+                        delivery = model.queuedReplies[c.id]?.takeIf { c.author == ItemAuthor.USER && c.kind == TrackerComment.Kind.COMMENT }
+                            ?.let { state -> { DeliveryLine(state, c, model, replyDelivery) } },
                     )
                 }
                 items(model.pending.size, key = { "p-${model.pending[it].id}" }) { i ->
@@ -541,6 +570,7 @@ fun ItemDetailView(
                 onSubmit = onSubmit, onAttach = onAttach, onVoiceNote = onVoiceNote,
                 attachments = attachments, onRemoveAttachment = onRemoveAttachment,
                 voice = voice, onCancelRecording = onCancelRecording,
+                onPasteAttachments = onPasteAttachments,
             )
         }
     }
@@ -751,6 +781,7 @@ private fun CommentView(
     onTapAction: (String) -> Unit = {},
     openableConvoIDs: Set<String> = emptySet(),
     onOpenConversation: (String) -> Unit = {},
+    delivery: (@Composable () -> Unit)? = null,
 ) {
     if (c.kind == TrackerComment.Kind.STATUS) {
         val row = itemStatusRow(c)
@@ -776,8 +807,35 @@ private fun CommentView(
             AuthorCaption(c.attributionText ?: c.authorName, c.createdAt, now, c.authorConversation, openableConvoIDs, onOpenConversation)
             ItemContent(c.body, c.attachments, image, onOpen, onOpenLink)
             ActionButtons(c.actions, chosen, actionsEnabled, onTapAction)
+            delivery?.invoke()
         }
     }
+}
+
+/// The delivery line under one of the user's replies, with the buttons that
+/// apply to it. Edit and Edit and resend only on a text-only reply: the reply
+/// box can't take back an uploaded attachment, and resending half a reply
+/// would read as the whole of it. One edit at a time: the reply box holds one.
+@Composable
+private fun DeliveryLine(state: QueuedReplyState, c: TrackerComment, model: ItemDetailModel, actions: ItemReplyDeliveryActions) {
+    val textOnly = c.attachments.isEmpty() && c.body.isNotBlank()
+    val isEditing = model.editingQueuedReplyID == c.id
+    ItemReplyDeliveryLine(
+        state = state,
+        onSendNow = actions.sendNow?.let { send -> { send(c.id) } },
+        onCancel = actions.cancel?.let { cancel -> { cancel(c.id) } },
+        onEdit = actions.edit?.takeIf {
+            textOnly && c.id in model.editableQueuedReplies && model.editingQueuedReplyID == null && model.replacingCommentID == null
+        }?.let { edit -> { edit(c.id) } },
+        // Not while the box holds an edit of a queued reply.
+        onEditAndResend = actions.editAndResend?.takeIf { textOnly && model.editingQueuedReplyID == null }
+            ?.let { resend -> { resend(c.id) } },
+        isEditing = isEditing,
+        // Only once the hold has landed: a release sent first could be
+        // overtaken by it.
+        onCancelEdit = actions.cancelEdit?.takeIf { isEditing && !model.editHoldPending },
+        holdPending = isEditing && model.editHoldPending,
+    )
 }
 
 @Composable
