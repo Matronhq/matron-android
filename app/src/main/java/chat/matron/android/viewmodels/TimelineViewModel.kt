@@ -95,6 +95,9 @@ data class TimelineState(
     val canAsk: Boolean = false,
     /// The paged lists whose last next-page read failed: their end offers Retry.
     val pagingFailed: Set<TimelinePlace> = emptySet(),
+    /// What went wrong on one of the lists below the weeks (a read, or an
+    /// Ask), kept apart from [error] so the week page never says it.
+    val listError: String? = null,
 ) {
     /// Whether "All projects" is offered: until the journal says it has no such list.
     val showsAllProjects: Boolean get() = projectsSupported != false
@@ -143,7 +146,7 @@ sealed interface TimelineListContent {
 
 /// [place]'s list as [state] has it.
 fun TimelineState.listContent(place: TimelinePlace): TimelineListContent {
-    val unloaded = if (error != null) TimelineListContent.Failed else TimelineListContent.Loading
+    val unloaded = if (listError != null) TimelineListContent.Failed else TimelineListContent.Loading
     return when (place) {
         TimelinePlace.Projects -> allProjects?.let { TimelineListContent.Projects(it) } ?: unloaded
         TimelinePlace.Quiet -> quiet?.let { TimelineListContent.Stalled(place, it) } ?: unloaded
@@ -199,6 +202,7 @@ class TimelineViewModel(
     private var projectsGeneration = 0
     private var isLoadingFinished = false
     private var isLoadingProjects = false
+    private val askingProjectIDs = mutableSetOf<String>()
     private var showJob: Job? = null
 
     /// The tab came on screen: the first time loads the weeks and the newest
@@ -442,7 +446,7 @@ class TimelineViewModel(
     /// A list came on screen: read it unless it was read since the last refresh.
     suspend fun loadList(place: TimelinePlace) {
         if (place is TimelinePlace.Week || place in fresh) return
-        _state.update { it.copy(error = null) }
+        _state.update { it.copy(listError = null) }
         val epoch = refreshEpoch
         try {
             when (place) {
@@ -479,7 +483,7 @@ class TimelineViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            _state.update { it.copy(error = error.message) }
+            _state.update { it.copy(listError = error.message) }
         }
     }
 
@@ -504,7 +508,7 @@ class TimelineViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            if (generation == finishedGeneration) _state.update { it.copy(error = error.message, pagingFailed = it.pagingFailed + TimelinePlace.Finished) }
+            if (generation == finishedGeneration) _state.update { it.copy(pagingFailed = it.pagingFailed + TimelinePlace.Finished) }
         } finally {
             isLoadingFinished = false
         }
@@ -525,7 +529,7 @@ class TimelineViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            if (generation == projectsGeneration) _state.update { it.copy(error = error.message, pagingFailed = it.pagingFailed + TimelinePlace.Projects) }
+            if (generation == projectsGeneration) _state.update { it.copy(pagingFailed = it.pagingFailed + TimelinePlace.Projects) }
         } finally {
             isLoadingProjects = false
         }
@@ -544,15 +548,25 @@ class TimelineViewModel(
     /// Hands a stalled project to the Coordinator as a question.
     suspend fun ask(stalled: StalledProject) {
         val send = askCoordinator ?: return
+        val id = stalled.project.id
+        // One question per project: a second tap while the first is on its
+        // way, or after it went, sends nothing.
+        if (id in _state.value.askedProjectIDs || !askingProjectIDs.add(id)) return
         val moved = stalled.lastMovedAt?.let { "It last moved ${TimelineListFormat.daysAgo(it, now())}." } ?: "It hasn't moved yet."
         try {
             send("What should we do with the project “${stalled.project.title}”? $moved")
-            _state.update { it.copy(askedProjectIDs = it.askedProjectIDs + stalled.project.id) }
+            _state.update { it.copy(askedProjectIDs = it.askedProjectIDs + id) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            _state.update { it.copy(error = error.message) }
+            _state.update { it.copy(listError = error.message) }
+        } finally {
+            askingProjectIDs.remove(id)
         }
+    }
+
+    fun dismissListError() {
+        _state.update { it.copy(listError = null) }
     }
 
     fun askInBackground(stalled: StalledProject) {

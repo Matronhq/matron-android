@@ -7,6 +7,7 @@ import chat.matron.android.models.MissionState
 import chat.matron.android.models.Project
 import chat.matron.android.models.TimelineProjectPage
 import chat.matron.android.models.TimelineProjectRef
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -115,6 +116,33 @@ class ProjectActionsTest {
         failing = false
         vm.refresh()
         assertTrue(vm.state.value.actions.merge)
+    }
+
+    @Test
+    fun aListsReadStartedBeforeAMergeNeverLandsAfterIt() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var reads = 0
+        val pages = Pages().apply {
+            pages["pj_docs"] = TimelineProjectPage(docs)
+            pages["pj_promo"] = TimelineProjectPage(promo)
+        }
+        val projects = object : FakeProjects() {
+            override suspend fun listProjects(openOnly: Boolean): List<Project> {
+                reads += 1
+                val mine = reads
+                if (mine == 2) hold.await()
+                // Before the merge both are open; after it only the survivor.
+                return if (mine <= 2) listOf(Project(id = "pj_docs", num = 12, title = "Docs site launch"), Project(id = "pj_promo", num = 14, title = "Promo launch"))
+                else listOf(Project(id = "pj_promo", num = 14, title = "Promo launch"))
+            }
+        }
+        val vm = ProjectPageViewModel("pj_docs", pages, projects)
+        vm.refreshPage(); vm.loadActionTargets()
+        val stale = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined).launch { vm.loadActionTargets() }
+        vm.merge("pj_promo")
+        hold.complete(Unit)
+        stale.join()
+        assertEquals(emptyList<String>(), vm.state.value.mergeTargets.map { it.id })
     }
 
     @Test

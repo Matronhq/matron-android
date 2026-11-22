@@ -198,6 +198,33 @@ class TimelineListsTest {
     }
 
     @Test
+    fun aSecondTapWhileTheQuestionIsOnItsWaySendsNothing() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val sent = mutableListOf<String>()
+        val vm = TimelineViewModel(Lists(), scope, askCoordinator = { hold.await(); sent += it }, now = { now })
+        val row = StalledProject(TimelineFixtures.promo)
+        val first = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined).launch { vm.ask(row) }
+        vm.ask(row)
+        hold.complete(Unit)
+        first.join()
+        vm.ask(row)
+        assertEquals(1, sent.size)
+    }
+
+    @Test
+    fun aListsErrorNeverReachesTheWeekPage() = runBlocking {
+        val lists = object : FakeTimelineBase() {
+            override suspend fun openLong(): StalledList = throw JournalApiError.Transport("offline")
+        }
+        val vm = TimelineViewModel(lists, scope)
+        vm.loadList(TimelinePlace.Long)
+        assertEquals(TimelineListContent.Failed, vm.state.value.listContent(TimelinePlace.Long))
+        assertNull(vm.state.value.error)
+        vm.dismissListError()
+        assertNull(vm.state.value.listError)
+    }
+
+    @Test
     fun listWordsAndChart() {
         assertEquals("yesterday", TimelineListFormat.daysAgo(now.minusSeconds(86_400), now))
         assertEquals("3h ago", TimelineListFormat.daysAgo(now.minusSeconds(3 * 3600), now))

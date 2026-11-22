@@ -133,7 +133,7 @@ class ProjectPageViewModel(
     private var pageGeneration = 0
     private var historyGeneration = 0
     private var historyNextBefore: String? = null
-    private var isLoadingMoreHistory = false
+    private var loadingMoreHistoryGeneration: Int? = null
     private var isReloadingHistory = false
     /// The sections the reader opened: a refresh (or Try again) reads them
     /// again even when their first read failed.
@@ -142,6 +142,7 @@ class ProjectPageViewModel(
     private var missionsGeneration = 0
     private var filesAsked = false
     private var actionsAsked = false
+    private var actionsGeneration = 0
     private var filesGeneration = 0
     private var isReloadingFiles = false
     /// The files list a next-page read is in flight for: a read of a list
@@ -215,9 +216,11 @@ class ProjectPageViewModel(
 
     suspend fun loadMoreHistory() {
         val before = historyNextBefore ?: return
-        if (isLoadingMoreHistory || isReloadingHistory) return
-        isLoadingMoreHistory = true
+        // A read of a list a reload has since replaced does not hold up the
+        // new list's paging.
+        if (isReloadingHistory || loadingMoreHistoryGeneration == historyGeneration) return
         val generation = historyGeneration
+        loadingMoreHistoryGeneration = generation
         _state.update { it.copy(historyPagingFailed = false) }
         try {
             val loaded = timeline.timelineProjectHistory(projectID, before = before)
@@ -232,9 +235,10 @@ class ProjectPageViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            if (generation == historyGeneration) _state.update { it.copy(error = error.message, historyPagingFailed = true) }
+            // Said by the Retry at the end of the list, not in an alert.
+            if (generation == historyGeneration) _state.update { it.copy(historyPagingFailed = true) }
         } finally {
-            isLoadingMoreHistory = false
+            if (loadingMoreHistoryGeneration == generation) loadingMoreHistoryGeneration = null
         }
     }
 
@@ -268,7 +272,12 @@ class ProjectPageViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            if (generation == filesGeneration) _state.update { it.copy(error = error.message) }
+            // With files already on screen the reload's failure is a Retry
+            // at the grid's end (paging on from the list shown); before any,
+            // the screen offers Try again.
+            if (generation == filesGeneration) {
+                _state.update { if (it.files != null) it.copy(filesPagingFailed = true) else it.copy(error = error.message) }
+            }
         } finally {
             if (generation == filesGeneration) isReloadingFiles = false
         }
@@ -289,7 +298,8 @@ class ProjectPageViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            if (generation == filesGeneration) _state.update { it.copy(error = error.message, filesPagingFailed = true) }
+            // Said by the Retry at the grid's end, not in an alert.
+            if (generation == filesGeneration) _state.update { it.copy(filesPagingFailed = true) }
         } finally {
             if (loadingMoreFilesGeneration == generation) loadingMoreFilesGeneration = null
         }
@@ -301,12 +311,17 @@ class ProjectPageViewModel(
     /// open projects.
     suspend fun loadActionTargets() {
         actionsAsked = true
+        // Only the newest read lands: one started before a merge never
+        // writes the old project's lists over the new one's.
+        val generation = ++actionsGeneration
+        val forProject = projectID
         try {
             val open = projects.listProjects(openOnly = true)
             val unfiled = unfiledMissions()
+            if (generation != actionsGeneration || forProject != projectID) return
             _state.update { s ->
                 s.copy(
-                    mergeTargets = open.filter { it.id != projectID && it.state == MissionState.OPEN }.sortedBy { it.title.lowercase() },
+                    mergeTargets = open.filter { it.id != forProject && it.state == MissionState.OPEN }.sortedBy { it.title.lowercase() },
                     unfiled = unfiled.filter { it.state == MissionState.OPEN && it.projectID == null },
                     actionsLoaded = true,
                 )
@@ -314,7 +329,7 @@ class ProjectPageViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            _state.update { it.copy(error = error.message) }
+            if (generation == actionsGeneration) _state.update { it.copy(error = error.message) }
         }
     }
 
