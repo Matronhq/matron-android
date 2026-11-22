@@ -93,6 +93,8 @@ data class TimelineState(
     val askedProjectIDs: Set<String> = emptySet(),
     /// Whether a stalled project's row can ask the Coordinator about it.
     val canAsk: Boolean = false,
+    /// The paged lists whose last next-page read failed: their end offers Retry.
+    val pagingFailed: Set<TimelinePlace> = emptySet(),
 ) {
     /// Whether "All projects" is offered: until the journal says it has no such list.
     val showsAllProjects: Boolean get() = projectsSupported != false
@@ -480,6 +482,7 @@ class TimelineViewModel(
         if (isLoadingFinished) return
         isLoadingFinished = true
         val generation = finishedGeneration
+        _state.update { it.copy(pagingFailed = it.pagingFailed - TimelinePlace.Finished) }
         try {
             val page = timeline.finishedProjects(before = before)
             if (generation != finishedGeneration) return
@@ -491,7 +494,7 @@ class TimelineViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            if (generation == finishedGeneration) _state.update { it.copy(error = error.message) }
+            if (generation == finishedGeneration) _state.update { it.copy(error = error.message, pagingFailed = it.pagingFailed + TimelinePlace.Finished) }
         } finally {
             isLoadingFinished = false
         }
@@ -503,6 +506,7 @@ class TimelineViewModel(
         if (isLoadingProjects) return
         isLoadingProjects = true
         val generation = projectsGeneration
+        _state.update { it.copy(pagingFailed = it.pagingFailed - TimelinePlace.Projects) }
         try {
             val page = timeline.timelineProjects(before = before)
             if (generation != projectsGeneration) return
@@ -511,7 +515,7 @@ class TimelineViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            if (generation == projectsGeneration) _state.update { it.copy(error = error.message) }
+            if (generation == projectsGeneration) _state.update { it.copy(error = error.message, pagingFailed = it.pagingFailed + TimelinePlace.Projects) }
         } finally {
             isLoadingProjects = false
         }
