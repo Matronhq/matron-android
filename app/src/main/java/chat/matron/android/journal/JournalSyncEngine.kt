@@ -408,10 +408,13 @@ class JournalSyncEngine(
     /// Starts using [newToken]: the socket opened with the old one is closed
     /// and the next hello carries the new one.
     fun replaceToken(newToken: String) {
-        token = newToken
         // A hello sent with the old token just before the swap may have been
-        // refused as a sign-out and stopped the loop: the new token restarts it.
-        val restart = synchronized(lock) { stoppedForAuth.also { stoppedForAuth = false } }
+        // refused as a sign-out and stopped the loop: the new token restarts
+        // it. Swapped and checked under the lock the refusal handlers take.
+        val restart = synchronized(lock) {
+            token = newToken
+            stoppedForAuth.also { stoppedForAuth = false }
+        }
         if (restart) beginSync() else onNetworkAvailable()
     }
 
@@ -1054,9 +1057,9 @@ class JournalSyncEngine(
                 setState(SyncConnectionState.Connecting)
                 coldStartIfNeeded()
                 val cursor = store.cursor()
-                attemptToken = token
+                val helloToken = synchronized(lock) { token.also { attemptToken = it } }
                 val (connection, hello) = JournalConnection.establishWithHello(
-                    connector = connector, wsUrl = api.wsUrl, token = token, cursor = cursor,
+                    connector = connector, wsUrl = api.wsUrl, token = helloToken, cursor = cursor,
                     archiveSince = archive?.helloArchiveSince(),
                 )
                 val headSeq = hello.headSeq
@@ -1174,7 +1177,17 @@ class JournalSyncEngine(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: JournalConnectionError.AuthRejected) {
-                if (attemptToken != token) {
+                // Decided under the lock replaceToken takes, so a token swapped
+                // in meanwhile is either seen here or sees this stop.
+                val stale = synchronized(lock) {
+                    if (attemptToken != token) {
+                        true
+                    } else {
+                        liveConnection = null; runJob = null; stoppedForAuth = true
+                        false
+                    }
+                }
+                if (stale) {
                     // A hello sent with a token since replaced (an unlock
                     // gave this device a new one): retry with the new one,
                     // never taken as a sign-out.
@@ -1182,21 +1195,31 @@ class JournalSyncEngine(
                     continue
                 }
                 MatronDebug.breadcrumb("server rejected auth — stopping sync (signed out by server)")
-                synchronized(lock) { liveConnection = null; runJob = null; stoppedForAuth = true }
                 setState(SyncConnectionState.Offline("Signed out by server"))
                 failReadyWaiters(JournalSyncError.AuthRevoked)
                 failAllRPC(RPCRequestError.Offline)
                 return
             } catch (e: JournalConnectionError.AccountLocked) {
-                if (attemptToken != token) {
+                // Checked and told under the lock replaceToken takes: an
+                // unlock that swaps the token in clears the lock after that,
+                // so a stale refusal can never be told after the clear.
+                val stale = synchronized(lock) {
+                    if (attemptToken != token) {
+                        true
+                    } else {
+                        // Refused because the whole account is locked: said
+                        // so, then the usual backoff, so the lock's clearing
+                        // is noticed.
+                        accountLock?.noteLockedBySocket(AccountLock(e.since, e.canUnlock))
+                        false
+                    }
+                }
+                if (stale) {
                     // Refused for the token an unlock has since replaced: it
                     // says nothing about the account now. Retry at once.
                     closeLive()
                     continue
                 }
-                // Refused because the whole account is locked: said so, then
-                // the usual backoff, so the lock's clearing is noticed.
-                accountLock?.noteLockedBySocket(AccountLock(e.since, e.canUnlock))
                 MatronDebug.breadcrumb("hello refused: account locked")
             } catch (e: Throwable) {
                 // Fall through to backoff — but never silently.
