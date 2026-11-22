@@ -807,6 +807,18 @@ class AppDependencies(
      */
     fun agentSpawnService(session: UserSession): AgentSpawnAnswering = core(session).api
 
+    /**
+     * Answers a reply's busy-queue card from an item thread (Send now,
+     * Cancel, Edit): the same `prompt_reply` a tap on the card in the
+     * conversation sends.
+     */
+    fun queuedReplySender(session: UserSession): chat.matron.android.viewmodels.QueuedReplySending {
+        val engine = core(session).engine
+        return chat.matron.android.viewmodels.QueuedReplySending { convoID, targetSeq, choice ->
+            engine.sendOp(chat.matron.android.journal.ClientOp.PromptReply(convoID, targetSeq, choice = choice, text = null))
+        }
+    }
+
     /** Answers person-to-person grant cards (mission shares, hand-overs). */
     fun grantService(session: UserSession): chat.matron.android.journal.GrantAnswering = core(session).api
 

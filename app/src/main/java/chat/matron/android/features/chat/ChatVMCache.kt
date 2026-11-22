@@ -122,6 +122,7 @@ class ChatVMCache(
             sync = deps.itemsSync(session),
             scope = scope,
             stagingDirectory = deps.stagingDirectory,
+            queuedRelease = deps.queuedReplySender(session),
         )
         itemDetailEntries[itemID] = vm
         if (itemDetailEntries.size > limit) {

@@ -345,10 +345,10 @@ class ItemDetailViewModelTest {
         // The enqueue is slow, and only once it returns is the row in the outbox.
         val sync = object : Sync() {
             override suspend fun enqueueComment(
-                itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>, action: String?, replyTo: String?,
+                itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>, action: String?, replyTo: String?, replaces: String?,
             ): Boolean {
                 kotlinx.coroutines.delay(50)
-                super.enqueueComment(itemID, localID, body, attachments, action, replyTo)
+                super.enqueueComment(itemID, localID, body, attachments, action, replyTo, replaces)
                 store.storedOutbox = store.storedOutbox + outboxTap(localID, action!!, replyTo!!)
                 return true
             }

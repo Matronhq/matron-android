@@ -143,7 +143,8 @@ interface ItemsProviding {
     suspend fun updateItem(id: String, patch: ItemPatch): TrackerItem
     /// [action] is a tap on a one-tap answer button; with [replyTo] (the id
     /// of the comment that offered it) the tap answers that comment's
-    /// buttons, without it the item's own.
+    /// buttons, without it the item's own. [replaces] names the user's own
+    /// cancelled reply this one is the edited version of.
     suspend fun commentItem(
         id: String,
         body: String,
@@ -151,6 +152,7 @@ interface ItemsProviding {
         idempotencyKey: String?,
         action: String? = null,
         replyTo: String? = null,
+        replaces: String? = null,
     ): ItemCommentResult
     suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem
     suspend fun reopenItem(id: String, comment: String?): TrackerItem

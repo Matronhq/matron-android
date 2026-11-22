@@ -58,6 +58,7 @@ import chat.matron.android.designsystem.MarkdownPreviewState
 import chat.matron.android.designsystem.MarkdownPreviewTarget
 import chat.matron.android.features.chat.MarkdownPreviewSheet
 import chat.matron.android.designsystem.ItemDetailModel
+import chat.matron.android.designsystem.ItemReplyDeliveryActions
 import chat.matron.android.designsystem.ItemDetailView
 import chat.matron.android.designsystem.ItemCommentSendRoute
 import chat.matron.android.designsystem.ItemCommentVoice
@@ -174,9 +175,15 @@ fun ItemDetailScreen(
     val comments by viewModel.comments.collectAsStateWithLifecycle()
     // The thread as shown: a reply the user cancelled and then sent again
     // edited is left out, so the edit stands alone in its place.
-    val thread = remember(comments) { TrackerComment.hidingReplaced(comments) }
-    val openableCommentConvoIDs by viewModel.openableCommentConvoIDs.collectAsStateWithLifecycle()
     val pending by viewModel.pendingComments.collectAsStateWithLifecycle()
+    // An edit still in the outbox already stands in for the reply it replaces.
+    val thread = remember(comments, pending) { TrackerComment.hidingReplaced(comments, ItemDetailViewModel.pendingReplaces(pending)) }
+    val openableCommentConvoIDs by viewModel.openableCommentConvoIDs.collectAsStateWithLifecycle()
+    val queuedReplies by viewModel.queuedReplies.collectAsStateWithLifecycle()
+    val editableQueuedReplies by viewModel.editableQueuedReplies.collectAsStateWithLifecycle()
+    val editingQueuedReplyID by viewModel.editingQueuedReplyID.collectAsStateWithLifecycle()
+    val editHoldPending by viewModel.editHoldPending.collectAsStateWithLifecycle()
+    val replacingCommentID by viewModel.replacingCommentID.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
     val staged by viewModel.stagedAttachments.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
@@ -442,7 +449,23 @@ fun ItemDetailScreen(
                                     pendingTaps = ItemDetailViewModel.pendingTaps(pending),
                                     pendingItemTap = ItemDetailViewModel.pendingItemTap(pending),
                                     working = working,
+                                    queuedReplies = queuedReplies,
+                                    editableQueuedReplies = editableQueuedReplies,
+                                    editingQueuedReplyID = editingQueuedReplyID,
+                                    editHoldPending = editHoldPending,
+                                    replacingCommentID = replacingCommentID,
                                 ),
+                                replyDelivery = if (viewModel.answersQueuedReplies) {
+                                    ItemReplyDeliveryActions(
+                                        sendNow = { id -> scope.launch { viewModel.sendQueuedReplyNow(id) } },
+                                        cancel = { id -> scope.launch { viewModel.cancelQueuedReply(id) } },
+                                        edit = { id -> scope.launch { viewModel.editQueuedReply(id) } },
+                                        cancelEdit = { scope.launch { viewModel.cancelQueuedReplyEdit() } },
+                                        editAndResend = { id -> viewModel.editAndResend(id) },
+                                    )
+                                } else {
+                                    ItemReplyDeliveryActions()
+                                },
                                 draft = draft,
                                 onDraftChange = { draft = it; viewModel.draft = it },
                                 image = { a -> images[a.blobRef] },

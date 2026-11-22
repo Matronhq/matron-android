@@ -1078,11 +1078,13 @@ class JournalApi(
         idempotencyKey: String?,
         action: String?,
         replyTo: String?,
+        replaces: String?,
     ): ItemCommentResult {
         val json = buildJsonObject {
             put("body", body)
             action?.let { put("action", it) }
             replyTo?.let { put("reply_to", it) }
+            replaces?.let { put("replaces", it) }
             if (attachments.isNotEmpty()) {
                 put("attachments", kotlinx.serialization.json.buildJsonArray { attachments.forEach { add(it.outgoingJson()) } })
             }
