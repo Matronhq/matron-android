@@ -217,6 +217,25 @@ class TimelineListsTest {
     }
 
     @Test
+    fun noPageIsReadOffTheOldCursorAfterARefresh() = runBlocking {
+        val asks = mutableListOf<String?>()
+        val lists = object : FakeTimelineBase() {
+            override suspend fun finishedProjects(before: String?, limit: Int?): TimelineFinishedPage {
+                asks += before
+                return TimelineFinishedPage(listOf(FinishedProject(TimelineFixtures.docs, now)), if (before == null) "c1" else null)
+            }
+        }
+        val vm = TimelineViewModel(lists, scope)
+        vm.loadList(TimelinePlace.Finished)
+        vm.refresh()
+        vm.loadMoreFinished()
+        assertEquals(listOf<String?>(null), asks)
+        vm.loadList(TimelinePlace.Finished)
+        vm.loadMoreFinished()
+        assertEquals(listOf(null, null, "c1"), asks)
+    }
+
+    @Test
     fun aNextPageOvertakenByARefreshIsDropped() = runBlocking {
         val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
         val lists = object : FakeTimelineBase() {
