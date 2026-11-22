@@ -284,6 +284,10 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                     .getOrNull()
                 // Never publish a sign-in a revoke has just signed out.
                 session = publishableRestoredSession(restored, revokedSession)
+                // The notice belongs to the sign-in screen it led to: once a
+                // session is up again (a sign-in that finished while the
+                // activity was being recreated), it is over.
+                if (session != null) revokedSession = null
                 bootstrapped = true
             }
 
@@ -376,6 +380,9 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                                 // Per-account state, cleared like the rest: the next
                                 // account starts opted out.
                                 appLock.resetForSignOut()
+                                // The user's own sign-out: no "signed out from
+                                // another device" notice.
+                                revokedSession = null
                                 session = null
                             }
                         },
