@@ -235,11 +235,13 @@ internal fun projectGallery(files: List<ProjectFile>, tapped: ProjectFile, image
     val blobIDs = projectPictureBlobIDs(files)
     val names = files.filter { it.isImage }.associate { it.blobID to it.name }
     fun url(blobID: String) = serverURL.newBuilder().addPathSegment("media").addPathSegment(blobID).build().toString()
+    val byURL = blobIDs.associateBy(::url)
     return ImageGallery(
         entries = blobIDs.map { ImageGallery.Entry(id = it, url = url(it), expired = false, name = names[it]) },
         startIndex = blobIDs.indexOf(tapped.blobID).coerceAtLeast(0),
         initial = images[tapped.blobID],
-        load = { u -> media.image(u) },
+        // A neighbour the grid already loaded opens from its bytes.
+        load = { u -> byURL[u]?.let { images[it] } ?: media.image(u) },
     )
 }
 

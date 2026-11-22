@@ -11,6 +11,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +48,8 @@ fun TimelineListScreen(
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     LaunchedEffect(viewModel, place) { viewModel.loadList(place) }
+    // A list's error is its own: nothing of it follows Back to the week page.
+    DisposableEffect(viewModel) { onDispose { viewModel.dismissListError() } }
     val now = Instant.now()
 
     ProjectScaffold(title = TimelineListCopy.title(place), onBack = onBack) {
@@ -84,11 +87,11 @@ fun TimelineListScreen(
         }
     }
     // A failed Ask, or a failed later page, over a list already on screen.
-    val error = state.error
+    val error = state.listError
     if (error != null && listShowsError(state.listContent(place))) {
         AlertDialog(
-            onDismissRequest = { viewModel.dismissError() },
-            confirmButton = { TextButton(onClick = { viewModel.dismissError() }) { Text("OK") } },
+            onDismissRequest = { viewModel.dismissListError() },
+            confirmButton = { TextButton(onClick = { viewModel.dismissListError() }) { Text("OK") } },
             title = { Text(TimelineListCopy.title(place)) },
             text = { Text(error) },
         )

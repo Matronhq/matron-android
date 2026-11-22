@@ -35,6 +35,20 @@ class ProjectFilesTest {
     }
 
     @Test
+    fun theViewerOpensNeighboursFromTheGridsBytes() = runBlocking {
+        val files = listOf(file("a", type = "image/png"), file("b", type = "image/png"))
+        var fetched = 0
+        val media = object : chat.matron.android.chat.MediaService {
+            override suspend fun image(url: String): ByteArray { fetched += 1; return ByteArray(1) }
+        }
+        val gallery = chat.matron.android.features.projects.projectGallery(
+            files, files[0], mapOf("a" to "A", "b" to "B"), okhttp3.HttpUrl.Builder().scheme("https").host("journal.example.com").build(), media,
+        )
+        assertEquals("B", gallery.load(gallery.entries[1].url!!))
+        assertEquals(0, fetched)
+    }
+
+    @Test
     fun picturesOpenInTheViewerAndTheRestWhereTheyWerePosted() {
         val files = listOf(file("a", type = "image/png"), file("v", type = "video/mp4"), file("a", type = "image/png", source = ProjectFileSource.Chat("c1", 3)), file("d", "x.pdf", "application/pdf"))
         assertEquals(ProjectFileOpening.PICTURE, projectFileOpening(files[0]))
@@ -79,6 +93,7 @@ class ProjectFilesTest {
         val version = vm.state.value.filesVersion
         vm.loadMoreFiles()
         assertTrue(vm.state.value.filesPagingFailed)
+        kotlin.test.assertNull(vm.state.value.error)
         vm.refresh()
         assertFalse(vm.state.value.filesPagingFailed)
         assertEquals(version + 1, vm.state.value.filesVersion)
