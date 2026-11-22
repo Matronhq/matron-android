@@ -1765,9 +1765,12 @@ private fun ChatRoute(
             }
             // The mission and project under the title: read when the room opens
             // and again whenever the cache says its mission changed.
-            val missionLine by produceState<ChatMissionLine?>(initialValue = null, convoID, missionID) {
-                value = deps.chatMissionLine(session, convoID)
-            }
+            // Held per room: a reused route never shows the previous room's
+            // line while this one's is read; a mission change in the same
+            // room keeps the old line until the new one lands.
+            val missionLineState = remember(convoID) { mutableStateOf<ChatMissionLine?>(null) }
+            LaunchedEffect(convoID, missionID) { missionLineState.value = deps.chatMissionLine(session, convoID) }
+            val missionLine = missionLineState.value
             ChatScreen(
                 chatVM = chatVM,
                 composerVM = composerVM,
