@@ -254,6 +254,12 @@ class StepUpTapTest {
         // A later, new tap gets a new key.
         assertEquals(StepUpTap.Outcome.Sent, sendConfirming(api, null, "Deploy"))
         assertTrue(api.keys[2] != api.keys[0])
+        // A refused tap leaves no key behind: the next try is a new tap.
+        api.tapError = JournalApiError.ApprovalInvalid("mismatch")
+        assertTrue(sendConfirming(api, null, "Deploy") is StepUpTap.Outcome.Failed)
+        api.tapError = null
+        assertEquals(StepUpTap.Outcome.Sent, sendConfirming(api, null, "Deploy"))
+        assertTrue(api.keys[4] != api.keys[3])
     }
 
     @Test
