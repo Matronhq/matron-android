@@ -26,6 +26,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
@@ -131,6 +132,9 @@ object ProjectFormat {
     /// The text, or null when it has no words.
     fun words(text: String?): String? = text?.trim()?.takeIf { it.isNotEmpty() }
 }
+
+/// The end of a project section whose older page failed to load.
+const val PAGING_FAILED = "Couldn't load the rest."
 
 /// A small grey heading over part of a project's page: "NEXT", "NEEDS YOU".
 @Composable
@@ -267,6 +271,10 @@ fun ProjectHistoryView(
     onOpenMilestone: (ProjectMilestone) -> Unit,
     onLoadMore: () -> Unit,
     modifier: Modifier = Modifier,
+    /// Bumped by each page that lands, so the end asks again.
+    version: Int = 0,
+    /// The last older-page read failed: the end offers Retry instead.
+    pagingFailed: Boolean = false,
 ) {
     LazyColumn(modifier.fillMaxSize().testTag("projects.history"), contentPadding = PaddingValues(16.dp)) {
         items(weeks, key = { it.week }) { week ->
@@ -303,9 +311,16 @@ fun ProjectHistoryView(
                 }
             }
         }
-        if (hasMore) {
-            item(key = "more:${weeks.size}") {
-                LaunchedEffect(weeks.size) { onLoadMore() }
+        if (hasMore && pagingFailed) {
+            item(key = "retry:${weeks.size}") {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                    Text(PAGING_FAILED, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TextButton(onClick = onLoadMore, modifier = Modifier.testTag("projects.history.retry")) { Text(TimelineFormat.RETRY) }
+                }
+            }
+        } else if (hasMore) {
+            item(key = "more:$version:${weeks.size}") {
+                LaunchedEffect(version, weeks.size) { onLoadMore() }
                 Spacer(Modifier.height(1.dp))
             }
         }

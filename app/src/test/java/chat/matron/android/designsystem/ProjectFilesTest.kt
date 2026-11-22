@@ -85,5 +85,6 @@ class ProjectFilesTest {
         fail = false
         vm.loadMoreFiles()
         assertEquals(listOf("a", "b"), vm.state.value.files?.rows?.map { it.blobID })
+        assertEquals(version + 2, vm.state.value.filesVersion)
     }
 }
