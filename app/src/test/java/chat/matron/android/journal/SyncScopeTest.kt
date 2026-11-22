@@ -273,6 +273,20 @@ class SyncScopeTest {
     }
 
     @Test
+    fun aChatFirstStoredByAReadWhileTheSnapshotWasOutKeepsItsCount() = runBlocking {
+        val store = seededStore()
+        val marks = store.readMarks() // c3 has no row yet
+        store.applyJournal(JournalEvent.fromFrame(parseJsonObjectOrNull(
+            """{"kind":"journal","seq":4,"convo_id":"c3","ts":4000,"sender":"user:alice","type":"read_marker","payload":{"up_to_seq":4}}""",
+        )!!)!!)
+        store.refreshSummaries(
+            listOf(ConvoSummaryDTO("c3", "", "waiting", 4, "", 0, unreadCount = 6)),
+            adoptUnread = true, readMarksAtRequest = marks,
+        )
+        assertEquals(0, store.conversations().single { it.id == "c3" }.unreadCount)
+    }
+
+    @Test
     fun tailBelowAGapDropsTheStrandedOlderEvents() = runBlocking {
         val store = seededStore()
         store.insertHistory(listOf(event(1), event(2), event(3, convo = "c2")))
