@@ -377,7 +377,7 @@ class JournalApi(
     /// token has been revoked. Not told about requests sent without a token,
     /// transport failures, or answers to a token since replaced.
     private val authResponses: ((Int) -> Unit)? = null,
-) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding, RoutinesProviding,
+) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding, RoutinesProviding, NewChatDefaultsProviding,
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NotifySettingsProviding, NumberLookupProviding,
     TrackerSearching, JournalSearching,
     ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding, ContactsProviding,
@@ -1274,6 +1274,23 @@ class JournalApi(
 
     override suspend fun deleteMemory(name: String): Memory =
         MemoriesDecoding.memory(request(path = "/memories/${pathSegment(name)}", method = "DELETE"))
+
+    // MARK: New chat defaults
+    //
+    // The user's default model and effort for new chats. A journal that
+    // predates them 404s `GET /defaults`.
+
+    override suspend fun newChatDefaults(): NewChatDefaults =
+        NewChatDefaults.decode(request(path = "/defaults"))
+            ?: throw JournalApiError.Transport("malformed /defaults response")
+
+    override suspend fun setNewChatDefault(key: NewChatDefaults.Key, value: String?): NewChatDefaults =
+        NewChatDefaults.decode(
+            request(
+                path = "/defaults", method = "PUT",
+                jsonBody = buildJsonObject { put(key.wire, value?.let { JsonPrimitive(it) } ?: JsonNull) },
+            ),
+        ) ?: throw JournalApiError.Transport("malformed /defaults response")
 
     // MARK: Routines
     //

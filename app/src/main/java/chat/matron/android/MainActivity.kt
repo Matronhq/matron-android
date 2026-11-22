@@ -646,6 +646,8 @@ private fun SignedInApp(
     var coordinatorError by remember { mutableStateOf<String?>(null) }
     // Pinned desk chats (journal "Pinned desk chats"): the Pinned section,
     // the pin menus and Settings → Pinned chats share one controller.
+    // Session-level so a save started in Settings outlives the screen.
+    val newChatDefaults = remember(session.userID) { deps.makeNewChatDefaultsStore(session, sessionScope) }
     val routinesVM = remember(session.userID) { deps.makeRoutinesViewModel(session, sessionScope) }
     val pinsController = remember(session.userID) { PinsController(deps.pinsSync(session), sessionScope) }
     val pins by pinsController.sync.pins.collectAsStateWithLifecycle()
@@ -1256,6 +1258,7 @@ private fun SignedInApp(
                             twoFactor = twoFactorSetting,
                             changePassword = changePassword,
                             accountEmail = accountEmail,
+                            newChatDefaults = newChatDefaults,
                             onBack = { nav.popBackStack() },
                         )
                     }
