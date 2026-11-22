@@ -29,6 +29,9 @@ data class TimelineState(
     val weekProjectsKey: String? = null,
     val weekProjects: List<TimelineWeekProject> = emptyList(),
     val weekProjectsStatus: TimelineWeekExtras.Status = TimelineWeekExtras.Status.DONE,
+    /// Bumped by each page of the week's projects that lands, so the page's
+    /// end asks for the next even when one added no new project.
+    val weekProjectsPages: Int = 0,
     /// null before the first weeks read; false once the journal answered
     /// 404 (it has no timeline: the tab keeps the missions list).
     val isSupported: Boolean? = null,
@@ -50,7 +53,7 @@ data class TimelineState(
             if (weekProjectsKey != shown.week) {
                 return TimelineWeekExtras(shown.week, status = TimelineWeekExtras.Status.DONE)
             }
-            return TimelineWeekExtras(shown.week, weekProjects, weekProjectsStatus)
+            return TimelineWeekExtras(shown.week, weekProjects, weekProjectsStatus, pages = weekProjectsPages)
         }
 
     /// What the week page draws.
@@ -196,6 +199,7 @@ class TimelineViewModel(
                 // a list that shifted between pages repeats none.
                 val seen = ((current.week?.stories ?: emptyList()).map { it.project.id } + current.weekProjects.map { it.project.id }).toMutableSet()
                 current.copy(
+                    weekProjectsPages = current.weekProjectsPages + 1,
                     weekProjects = current.weekProjects + page.projects.filter { seen.add(it.project.id) },
                     // An offset that does not move on would read the same page forever.
                     weekProjectsStatus = if (next != null) TimelineWeekExtras.Status.MORE else TimelineWeekExtras.Status.DONE,

@@ -5,6 +5,7 @@ import chat.matron.android.models.TimelineProjectRef
 import chat.matron.android.models.TimelineStory
 import chat.matron.android.models.TimelineWeek
 import chat.matron.android.models.TimelineWeekExtras
+import chat.matron.android.models.TimelineWeekSummary
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
@@ -62,12 +63,13 @@ object TimelineFormat {
         return "$first – ${end.format(full)}"
     }
 
-    /// The journal lists weeks newest first from the current one, so the
-    /// first is this week and the second last week.
-    fun menuTitle(index: Int, week: String): String = when (index) {
-        0 -> THIS_WEEK
-        1 -> LAST_WEEK
-        else -> shortRange(week) ?: week
+    /// A week's name in the menu, from its dates: the week [now] falls in is
+    /// this week, the one before it last week, any other its dates — never
+    /// from its place in the list, which a dropped row would shift.
+    fun menuTitle(week: TimelineWeekSummary, now: Instant): String = when {
+        !now.isBefore(week.start) && now.isBefore(week.end) -> THIS_WEEK
+        !now.isBefore(week.end) && now.isBefore(week.end.plus(Duration.ofDays(7))) -> LAST_WEEK
+        else -> shortRange(week.week) ?: week.week
     }
 
     /// The page title: the week still being written is this week, the one

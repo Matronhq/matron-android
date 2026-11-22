@@ -91,6 +91,15 @@ class TimelineApiTest {
     }
 
     @Test
+    fun aWeekWithoutItsStoriesIsMalformedButAnEmptyOneIsNot() {
+        try {
+            TimelineDecoding.week(obj("""{"week":"2026-11-16","start":1,"end":2}""")); fail("expected Transport")
+        } catch (_: JournalApiError.Transport) {
+        }
+        assertTrue(TimelineDecoding.week(obj("""{"week":"2026-11-16","start":1,"end":2,"stories":[]}""")).stories.isEmpty())
+    }
+
+    @Test
     fun weekProjectsPageDecodesItsPaging() {
         val page = TimelineDecoding.weekProjects(obj("""{"week":"2026-11-16","total":30,"offset":0,"next_offset":24,"projects":[
             {"project":{"id":"pj_app","num":16,"title":"App store listing"},"moved":5,"sentence":"Screens uploaded.",

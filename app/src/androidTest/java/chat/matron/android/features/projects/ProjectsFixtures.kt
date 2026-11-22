@@ -29,6 +29,9 @@ import java.time.Instant
 
 /// Made-up projects for the Projects screen tests: no server, no account.
 object ProjectsFixtures {
+    /// The clock the week page reads in tests: mid-week of the fixtures' newest week.
+    val now: Instant = Instant.parse("2026-11-18T12:00:00Z")
+
     val docs = TimelineProjectRef("pj_docs", 12, "Docs site launch")
     val promo = TimelineProjectRef("pj_promo", 14, "Promo launch")
     val app = TimelineProjectRef("pj_app", 16, "App store listing")
