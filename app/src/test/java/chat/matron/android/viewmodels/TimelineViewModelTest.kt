@@ -180,6 +180,22 @@ class TimelineViewModelTest {
     }
 
     @Test
+    fun aRefreshAfterSeveralNewWeeksReadsOnUntilTheMenuHasNoHole() = runBlocking {
+        val timeline = fake()
+        val vm = TimelineViewModel(timeline, scope)
+        vm.start()
+        vm.select("2026-11-09")
+        // Three weeks later: the first page no longer reaches the weeks known.
+        timeline.weeksPages[null] = TimelineWeeksPage(listOf(TimelineFixtures.summary("2026-12-07"), TimelineFixtures.summary("2026-11-30")), "2026-11-30")
+        timeline.weeksPages["2026-11-30"] = TimelineWeeksPage(listOf(TimelineFixtures.summary("2026-11-23"), TimelineFixtures.summary("2026-11-16")), "2026-11-16")
+        vm.refresh()
+        assertEquals(listOf("2026-12-07", "2026-11-30", "2026-11-23", "2026-11-16", "2026-11-09"), vm.state.value.weeks.map { it.week })
+        assertEquals("2026-11-09", vm.state.value.shownWeek?.week)
+        assertTrue(TimelineViewModel.weeksAdjoin("2026-11-16", "2026-11-09"))
+        assertFalse(TimelineViewModel.weeksAdjoin("2026-11-30", "2026-11-16"))
+    }
+
+    @Test
     fun theWeeksOtherProjectsPageInOnceEach() = runBlocking {
         val timeline = fake().apply {
             weeks["2026-11-16"] = TimelineFixtures.week("2026-11-16", also = listOf(TimelineFixtures.promo, TimelineFixtures.app, TimelineFixtures.pricing))

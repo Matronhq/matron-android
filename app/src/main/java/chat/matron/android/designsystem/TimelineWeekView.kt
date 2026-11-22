@@ -53,6 +53,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.SemanticsPropertyReceiver
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -245,6 +247,14 @@ private fun PageEnd(extras: TimelineWeekExtras, onLoadMore: () -> Unit) {
     }
 }
 
+/// A whole card or row read as one element: its label, and the action that
+/// opens it (kept explicitly, since clearing the semantics below drops the
+/// click's own).
+internal fun SemanticsPropertyReceiver.openable(label: String, open: (() -> Unit)?, actionLabel: String = "Open project") {
+    contentDescription = label
+    if (open != null) onClick(label = actionLabel) { open(); true }
+}
+
 /// One project's week on a week page: its picture or video (no media area
 /// when there is none), the project's name, one sentence on what was done,
 /// and its marks. The whole card opens its project when [onOpen] is set.
@@ -255,7 +265,7 @@ fun TimelineStoryCard(story: TimelineStory, image: Any?, onOpen: ((String) -> Un
         modifier = modifier
             .testTag("timeline.story.${story.project.num}")
             .then(if (onOpen != null) Modifier.clickable(onClickLabel = "Open project") { onOpen(story.project.id) } else Modifier)
-            .clearAndSetSemantics { contentDescription = label },
+            .clearAndSetSemantics { openable(label, onOpen?.let { open -> { open(story.project.id) } }) },
         shape = RoundedCornerShape(12.dp),
     ) {
         Column(Modifier.fillMaxWidth()) {
@@ -280,7 +290,7 @@ fun TimelineWeekRow(story: TimelineStory, image: Any?, onOpen: ((String) -> Unit
             .fillMaxWidth()
             .testTag("timeline.week.row.${story.project.num}")
             .then(if (onOpen != null) Modifier.clickable(onClickLabel = "Open project") { onOpen(story.project.id) } else Modifier)
-            .clearAndSetSemantics { contentDescription = label }
+            .clearAndSetSemantics { openable(label, onOpen?.let { open -> { open(story.project.id) } }) }
             .padding(vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
