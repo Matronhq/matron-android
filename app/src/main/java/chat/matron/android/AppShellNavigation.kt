@@ -21,10 +21,13 @@ import kotlinx.coroutines.flow.asStateFlow
 /// The For you tab keeps its old `DECISIONS` / `decisions` identifiers: only
 /// what the user reads was renamed.
 /// The Missions tab is in the bar only while the journal is known to
-/// support `/missions` — see [AppShellNavigation.missionsSupported].
+/// support `/missions` — see [AppShellNavigation.missionsSupported]. It is
+/// labelled Projects: its root is the weekly projects timeline, with the
+/// missions list pushed from its toolbar (and at the root on a journal too
+/// old for the timeline). Its identifiers keep the old name, as For you's do.
 enum class AppTab(val route: String, val rootRoute: String, val label: String, val routePrefix: String) {
     COORDINATOR("coordinator", "coordinator/root", "Coordinator", "coordinator/"),
-    MISSIONS("missions", "missions/list", "Missions", "missions/"),
+    MISSIONS("missions", "missions/list", "Projects", "missions/"),
     DECISIONS("decisions", "decisions/list", ForYouCopy.TITLE, "decisions/"),
     CONVERSATIONS("conversations", "chats", "Chats", ""),
     SEARCH("searchtab", "searchtab/root", "Search", "searchtab/"),
@@ -75,6 +78,9 @@ class AppShellNavigation(var host: Host? = null) {
         fun pushItem(tab: AppTab, itemID: String)
         /// Push the Memories list on the Missions stack (spec 2026-09-27).
         fun pushMemories()
+        /// Push the missions list on the Missions stack (the Projects
+        /// root's toolbar entry).
+        fun pushMissionsList() = Unit
         /// Push the editor for memory [name] — `null` = a new memory — on
         /// the Missions stack.
         fun pushMemory(name: String?)
@@ -260,6 +266,15 @@ class AppShellNavigation(var host: Host? = null) {
         if (missionsPath.lastOrNull() == MEMORIES_ROUTE) return
         missionsPath = missionsPath + MEMORIES_ROUTE
         navigateExpecting(AppTab.MISSIONS, MEMORIES_ROUTE) { host?.pushMemories() }
+    }
+
+    /// Push the missions list on the Missions stack (the Projects root's
+    /// toolbar entry). Idempotent for a list already on top. Never changes
+    /// the tab.
+    fun openMissionsList() {
+        if (missionsPath.lastOrNull() == MISSIONS_LIST_ROUTE) return
+        missionsPath = missionsPath + MISSIONS_LIST_ROUTE
+        navigateExpecting(AppTab.MISSIONS, MISSIONS_LIST_ROUTE) { host?.pushMissionsList() }
     }
 
     /// Push the editor for one memory (`null` = new) on the Missions stack.
@@ -542,6 +557,9 @@ class AppShellNavigation(var host: Host? = null) {
         /// the sentinel carries an underscore, which a memory name can
         /// never hold, so no real memory is ever mistaken for the form).
         const val MEMORIES_ROUTE = "memories"
+        /// The missions list's path value on the Missions stack, under the
+        /// Projects timeline.
+        const val MISSIONS_LIST_ROUTE = "missionlist"
         const val NEW_MEMORY_SEGMENT = "__new"
         fun memoryRoute(name: String?): String = "memory/${name ?: NEW_MEMORY_SEGMENT}"
 

@@ -18,7 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Forum
-import androidx.compose.material.icons.filled.SportsScore
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SupervisorAccount
 import androidx.compose.material3.AlertDialog
@@ -93,6 +93,7 @@ import chat.matron.android.features.missions.MissionOpenConversationOutcome
 import chat.matron.android.features.memories.MemoriesScreen
 import chat.matron.android.features.memories.MemoryEditorScreen
 import chat.matron.android.features.missions.MissionsScreen
+import chat.matron.android.features.projects.ProjectsScreen
 import chat.matron.android.features.missions.missionOpenConversationOutcome
 import chat.matron.android.features.chat.ChatScreen
 import chat.matron.android.features.chat.ChatVMCache
@@ -641,6 +642,10 @@ private class NavControllerShellHost(private val nav: NavHostController) : AppSh
         nav.navigate("${AppTab.MISSIONS.routePrefix}${AppShellNavigation.MEMORIES_ROUTE}")
     }
 
+    override fun pushMissionsList() {
+        nav.navigate("${AppTab.MISSIONS.routePrefix}${AppShellNavigation.MISSIONS_LIST_ROUTE}")
+    }
+
     override fun pushMemory(name: String?) {
         nav.navigate("${AppTab.MISSIONS.routePrefix}${AppShellNavigation.memoryRoute(name)}")
     }
@@ -699,6 +704,9 @@ private fun SignedInApp(
     // The Missions list VM (apple #209): the tab, its badge and the shell's
     // support gate read it while any tab shows.
     val missionsVM = remember(session.userID) { deps.makeMissionsListViewModel(session, sessionScope) }
+    // The Projects timeline (the Missions tab's root): session-long, so the
+    // picked week survives a tab switch. It reads when the tab first shows.
+    val timelineVM = remember(session.userID) { deps.makeTimelineViewModel(session, sessionScope) }
     // Settings → People; session-wide so an invite deep link can open its
     // accept card before the screen is up.
     val inviteLinks = remember(session.userID) { deps.revealedInviteLinks(session) }
@@ -1422,11 +1430,32 @@ private fun SignedInApp(
                 // unsupported.
                 navigation(route = AppTab.MISSIONS.route, startDestination = AppTab.MISSIONS.rootRoute) {
                     composable(AppTab.MISSIONS.rootRoute) {
+                        ProjectsScreen(
+                            viewModel = timelineVM,
+                            media = deps.mediaService(session),
+                            serverURL = session.homeserverURL.toHttpUrl(),
+                            layoutStore = deps.preferences,
+                            onOpenMissions = { shell.openMissionsList() },
+                            onOpenMemories = { shell.openMemories() },
+                            rootGesture = rootSwipe,
+                        ) {
+                            // A journal without the timeline keeps the missions list here.
+                            MissionsScreen(
+                                viewModel = missionsVM,
+                                onSelect = { shell.pushMission(it) },
+                                onOpenMemories = { shell.openMemories() },
+                                title = "Projects",
+                                rootGesture = rootSwipe,
+                            )
+                        }
+                    }
+                    // The missions list, pushed from the Projects toolbar.
+                    composable("${AppTab.MISSIONS.routePrefix}${AppShellNavigation.MISSIONS_LIST_ROUTE}") {
                         MissionsScreen(
                             viewModel = missionsVM,
                             onSelect = { shell.pushMission(it) },
                             onOpenMemories = { shell.openMemories() },
-                            rootGesture = rootSwipe,
+                            onBack = { nav.popBackStack() },
                         )
                     }
                     // Memories (spec 2026-09-27): the list and the editor, pushed
@@ -1675,7 +1704,7 @@ private fun AppTabBar(
                 icon = {
                     val icon = when (tab) {
                         AppTab.COORDINATOR -> Icons.Filled.SupervisorAccount
-                        AppTab.MISSIONS -> Icons.Filled.SportsScore
+                        AppTab.MISSIONS -> Icons.Filled.Layers
                         AppTab.CONVERSATIONS -> Icons.Filled.Forum
                         AppTab.DECISIONS -> Icons.Filled.CheckCircle
                         AppTab.SEARCH -> Icons.Filled.Search
