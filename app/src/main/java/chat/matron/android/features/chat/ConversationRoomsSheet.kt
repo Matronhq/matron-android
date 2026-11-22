@@ -127,7 +127,12 @@ fun ConversationRoomsSheet(
                 onDone = onDone,
             )
             HorizontalDivider()
-            ConversationRoomsList(rooms = rooms, onOpen = { path = path.openRoom(it) })
+            // The space left under the header, so the list scrolls inside it.
+            ConversationRoomsList(
+                rooms = rooms,
+                onOpen = { path = path.openRoom(it) },
+                modifier = Modifier.weight(1f, fill = false),
+            )
         } else {
             key(top.id) {
                 if (top.isRoom) {
