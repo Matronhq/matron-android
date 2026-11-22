@@ -29,6 +29,19 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/// Every read answers empty (or 404 for a project); tests override what they need.
+internal open class FakeTimelineBase : TimelineProviding {
+    override suspend fun timelineWeeks(before: String?, limit: Int?) = TimelineWeeksPage(emptyList(), null)
+    override suspend fun timelineWeek(week: String): TimelineWeek = throw JournalApiError.NotFound
+    override suspend fun timelineWeekProjects(week: String, offset: Int, limit: Int?): TimelineWeekProjectsPage = throw JournalApiError.NotFound
+    override suspend fun wentQuiet(): StalledList = StalledList(0, emptyList())
+    override suspend fun openLong(): StalledList = StalledList(0, emptyList())
+    override suspend fun finishedProjects(before: String?, limit: Int?) = TimelineFinishedPage(emptyList(), null)
+    override suspend fun timelineProjects(before: String?, limit: Int?) = TimelineProjectList(0, emptyList())
+    override suspend fun timelineProject(id: String): TimelineProjectPage = throw JournalApiError.NotFound
+    override suspend fun timelineProjectHistory(id: String, before: String?, limit: Int?) = TimelineHistoryPage(emptyList(), null)
+}
+
 /// A timeline whose answers a test sets per call.
 internal class FakeTimeline : TimelineProviding {
     var weeksPages = mutableMapOf<String?, TimelineWeeksPage>()

@@ -84,6 +84,9 @@ import chat.matron.android.features.memories.MemoriesScreen
 import chat.matron.android.features.memories.MemoryEditorScreen
 import chat.matron.android.features.missions.MissionsScreen
 import chat.matron.android.features.projects.ProjectsScreen
+import chat.matron.android.features.projects.ProjectScreen
+import chat.matron.android.features.projects.ProjectSectionScreen
+import chat.matron.android.designsystem.ProjectSection
 import chat.matron.android.features.missions.missionOpenConversationOutcome
 import chat.matron.android.features.chat.ChatScreen
 import chat.matron.android.features.chat.ChatVMCache
@@ -496,6 +499,17 @@ private class NavControllerShellHost(private val nav: NavHostController) : AppSh
         nav.navigate("${AppTab.MISSIONS.routePrefix}${AppShellNavigation.MISSIONS_LIST_ROUTE}")
     }
 
+    override fun pushOnMissions(pathValue: String) {
+        nav.navigate("${AppTab.MISSIONS.routePrefix}$pathValue")
+    }
+
+    override fun replaceMissionsWith(pathValue: String) {
+        nav.navigate("${AppTab.MISSIONS.routePrefix}$pathValue") {
+            popUpTo(AppTab.MISSIONS.rootRoute) { inclusive = false }
+            launchSingleTop = true
+        }
+    }
+
     override fun pushMemory(name: String?) {
         nav.navigate("${AppTab.MISSIONS.routePrefix}${AppShellNavigation.memoryRoute(name)}")
     }
@@ -880,6 +894,8 @@ private fun SignedInApp(
                 onOpenMilestone = { convoID, seq -> open(convoID); jumpToMilestone(convoID, seq) },
                 onOpenItem = { nav.pushItem(prefix, it) },
                 onOpenConversation = open,
+                projectTitle = { deps.projectTitle(session, it) },
+                onOpenProject = { shell.openProject(it) },
             )
         }
 
@@ -1178,6 +1194,7 @@ private fun SignedInApp(
                             layoutStore = deps.preferences,
                             onOpenMissions = { shell.openMissionsList() },
                             onOpenMemories = { shell.openMemories() },
+                            onOpenProject = { shell.openProject(it) },
                             rootGesture = rootSwipe,
                         ) {
                             // A journal without the timeline keeps the missions list here.
@@ -1189,6 +1206,43 @@ private fun SignedInApp(
                                 rootGesture = rootSwipe,
                             )
                         }
+                    }
+                    // A project's page and its sections, pushed from the timeline,
+                    // a list of projects, or a mission page's project chip.
+                    composable(
+                        route = "${AppTab.MISSIONS.routePrefix}project/{projectID}",
+                        arguments = listOf(navArgument("projectID") { type = NavType.StringType }),
+                    ) { entry ->
+                        val projectID = entry.arguments?.getString("projectID") ?: return@composable
+                        val projectVM = remember(projectID) { deps.makeProjectPageViewModel(session, projectID) }
+                        ProjectScreen(
+                            viewModel = projectVM,
+                            media = deps.mediaService(session),
+                            serverURL = session.homeserverURL.toHttpUrl(),
+                            onBack = { nav.popBackStack() },
+                            onOpenItem = { shell.pushMissionItem(it) },
+                            onOpenSection = { shell.openProjectSection(projectVM.projectID, it.wire) },
+                        )
+                    }
+                    composable(
+                        route = "${AppTab.MISSIONS.routePrefix}project/{projectID}/{section}",
+                        arguments = listOf(
+                            navArgument("projectID") { type = NavType.StringType },
+                            navArgument("section") { type = NavType.StringType },
+                        ),
+                    ) { entry ->
+                        val projectID = entry.arguments?.getString("projectID") ?: return@composable
+                        val section = ProjectSection.fromWire(entry.arguments?.getString("section")) ?: return@composable
+                        val projectVM = remember(projectID) { deps.makeProjectPageViewModel(session, projectID) }
+                        ProjectSectionScreen(
+                            viewModel = projectVM,
+                            section = section,
+                            media = deps.mediaService(session),
+                            serverURL = session.homeserverURL.toHttpUrl(),
+                            onBack = { nav.popBackStack() },
+                            onOpenMission = { shell.pushMission(it) },
+                            onOpenMilestone = { onOpenConversationFromMissions(it.milestone.convoID); jumpToMilestone(it.milestone.convoID, it.milestone.seq) },
+                        )
                     }
                     // The missions list, pushed from the Projects toolbar.
                     composable("${AppTab.MISSIONS.routePrefix}${AppShellNavigation.MISSIONS_LIST_ROUTE}") {
@@ -1230,6 +1284,8 @@ private fun SignedInApp(
                             onOpenMilestone = { convoID, seq -> onOpenConversationFromMissions(convoID); jumpToMilestone(convoID, seq) },
                             onOpenItem = { shell.pushMissionItem(it) },
                             onOpenConversation = onOpenConversationFromMissions,
+                            projectTitle = { deps.projectTitle(session, it) },
+                            onOpenProject = { shell.openProject(it) },
                         )
                     }
                     composable(
@@ -1476,6 +1532,8 @@ private fun MissionDetailRoute(
     onOpenMilestone: (convoID: String, seq: Long) -> Unit,
     onOpenItem: (String) -> Unit,
     onOpenConversation: (String) -> Unit,
+    projectTitle: suspend (String) -> String?,
+    onOpenProject: (String) -> Unit,
 ) {
     val viewModel = remember(missionID) { vmCache.missionDetailViewModel(missionID) }
     MissionDetailScreen(
@@ -1484,6 +1542,8 @@ private fun MissionDetailRoute(
         onOpenMilestone = onOpenMilestone,
         onOpenItem = onOpenItem,
         onOpenConversation = onOpenConversation,
+        projectTitle = projectTitle,
+        onOpenProject = onOpenProject,
     )
 }
 

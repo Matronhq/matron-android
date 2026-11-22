@@ -23,6 +23,8 @@ class MissionsNavigationTest {
         override fun pushItem(tab: AppTab, itemID: String) { commands += "pushItem:${tab.name}:$itemID" }
         override fun pushMemories() { commands += "pushMemories" }
         override fun pushMissionsList() { commands += "pushMissionsList" }
+        override fun pushOnMissions(pathValue: String) { commands += "pushOnMissions:$pathValue" }
+        override fun replaceMissionsWith(pathValue: String) { commands += "replaceMissionsWith:$pathValue" }
         override fun pushMemory(name: String?) { commands += "pushMemory:${name ?: "new"}" }
         override fun popToRoot(tab: AppTab) { commands += "popToRoot:${tab.name}" }
         override fun popChats(count: Int) { commands += "popChats:$count" }
@@ -234,6 +236,34 @@ class MissionsNavigationTest {
         nav.noteDestination(AppTab.MISSIONS, "e1", AppShellNavigation.pathValue("missions/missionlist") { null })
         nav.pushMission("ms_1")
         assertEquals(listOf("missionlist", "mission/ms_1"), nav.missionsPath)
+    }
+
+    @Test
+    fun aProjectAndItsSectionsPushOnTheProjectsStack() {
+        val (nav, host) = nav()
+        nav.noteDestination(AppTab.MISSIONS, "e0", null)
+        nav.openProject("pj_docs")
+        nav.openProject("pj_docs")
+        nav.openProjectSection("pj_docs", "history")
+        assertEquals(listOf("project/pj_docs", "project/pj_docs/history"), nav.missionsPath)
+        assertEquals(listOf("pushOnMissions:project/pj_docs", "pushOnMissions:project/pj_docs/history"), host.commands)
+        // The controller reports the routes as the same path values.
+        assertEquals("project/pj_docs/history", AppShellNavigation.pathValue("missions/project/{projectID}/{section}") {
+            mapOf("projectID" to "pj_docs", "section" to "history")[it]
+        })
+    }
+
+    @Test
+    fun aProjectChipOnAChatTabOpensTheProjectOnItsOwnTab() {
+        val (nav, host) = nav()
+        nav.openProject("pj_docs")
+        assertEquals(AppTab.MISSIONS, nav.tab.value)
+        assertEquals(listOf("project/pj_docs"), nav.missionsPath)
+        assertEquals(listOf("switch:MISSIONS", "replaceMissionsWith:project/pj_docs"), host.commands)
+        nav.missionsSupported = false
+        host.commands.clear()
+        nav.openProject("pj_promo")
+        assertTrue(host.commands.isEmpty())
     }
 
     @Test

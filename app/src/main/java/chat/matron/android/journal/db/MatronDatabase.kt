@@ -98,7 +98,7 @@ import java.util.concurrent.atomic.AtomicLong
         ItemEntity::class, ItemCommentEntity::class, ItemOutboxEntity::class,
         MissionEntity::class, MilestoneEntity::class, MissionConversationEntity::class,
     ],
-    version = 18,
+    version = 20,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -388,11 +388,22 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
+        /// v20: the project a mission is filed in (`mission.project_id`,
+        /// `project_num`), for the project chip on a mission's page. Additive.
+        /// Written as 18→20 so it stands on its own while another change
+        /// takes v19; once that lands, this becomes MIGRATION_19_20.
+        val MIGRATION_18_20 = object : Migration(18, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `mission` ADD COLUMN `project_id` TEXT")
+                db.execSQL("ALTER TABLE `mission` ADD COLUMN `project_num` INTEGER")
+            }
+        }
+
         private val MIGRATIONS = listOf(
             MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
             MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
             MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
-            MIGRATION_17_18,
+            MIGRATION_17_18, MIGRATION_18_20,
         )
 
         /// Production, file-backed at the given path. [onOpened] fires from

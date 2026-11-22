@@ -81,6 +81,11 @@ class AppShellNavigation(var host: Host? = null) {
         /// Push the missions list on the Missions stack (the Projects
         /// root's toolbar entry).
         fun pushMissionsList() = Unit
+        /// Push [pathValue] (a route without the tab prefix, such as
+        /// `project/<id>`) on the Missions stack.
+        fun pushOnMissions(pathValue: String) = Unit
+        /// REPLACE the Missions stack with [pathValue] over its root.
+        fun replaceMissionsWith(pathValue: String) = Unit
         /// Push the editor for memory [name] — `null` = a new memory — on
         /// the Missions stack.
         fun pushMemory(name: String?)
@@ -275,6 +280,35 @@ class AppShellNavigation(var host: Host? = null) {
         if (missionsPath.lastOrNull() == MISSIONS_LIST_ROUTE) return
         missionsPath = missionsPath + MISSIONS_LIST_ROUTE
         navigateExpecting(AppTab.MISSIONS, MISSIONS_LIST_ROUTE) { host?.pushMissionsList() }
+    }
+
+    /// Open a project's page: pushed on the Projects stack when that tab is
+    /// showing (a card, a list row), otherwise the tab is selected and its
+    /// stack REPLACED with the page (a mission page's project chip on a chat
+    /// tab), as [openMission] does. Idempotent for the page already on top.
+    /// No-op on a journal with no Projects tab.
+    fun openProject(projectID: String) {
+        if (!missionsSupported) return
+        val value = projectRoute(projectID)
+        if (_tab.value != AppTab.MISSIONS) {
+            selectTabInternal(AppTab.MISSIONS)
+            if (missionsPath != listOf(value)) {
+                missionsPath = listOf(value)
+                navigateExpecting(AppTab.MISSIONS, value) { host?.replaceMissionsWith(value) }
+            }
+            return
+        }
+        pushOnMissions(value)
+    }
+
+    /// Push one section of a project's page (its history, missions or
+    /// files) on the Projects stack. Idempotent for the section on top.
+    fun openProjectSection(projectID: String, section: String) = pushOnMissions(projectSectionRoute(projectID, section))
+
+    private fun pushOnMissions(value: String) {
+        if (missionsPath.lastOrNull() == value) return
+        missionsPath = missionsPath + value
+        navigateExpecting(AppTab.MISSIONS, value) { host?.pushOnMissions(value) }
     }
 
     /// Push the editor for one memory (`null` = new) on the Missions stack.
@@ -548,6 +582,10 @@ class AppShellNavigation(var host: Host? = null) {
 
         /// Apple's `ItemRoute.pathValue`.
         fun itemRoute(itemID: String): String = "item/$itemID"
+
+        /// A project's page, and one section of it, on the Projects stack.
+        fun projectRoute(projectID: String): String = "project/$projectID"
+        fun projectSectionRoute(projectID: String, section: String): String = "project/$projectID/$section"
 
         /// Apple's `MissionRoute.pathValue`.
         fun missionRoute(missionID: String): String = "mission/$missionID"

@@ -824,6 +824,31 @@ class MatronDatabaseMigrationTest {
         }
     }
 
+    /// MIGRATION_18_20: a mission keeps the project it is filed in. A row
+    /// cached before the upgrade reads as unfiled until its next fetch.
+    @Test
+    fun migratesToV20AndMissionsKeepTheirProject() = runBlocking {
+        val file = File.createTempFile("migration-test-v8-v20", ".sqlite").also { it.delete() }
+        buildV8(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL(
+                "INSERT INTO mission VALUES ('ms_old', 60, 'open', 'Old mission', '', NULL, NULL, 0, 'c1', 0, " +
+                    "'agent', 1000, 1000, NULL, NULL, 0, 0, 0, 0, NULL)"
+            )
+        }
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:alice")
+            assertNull(store.mission("ms_old")?.projectID)
+            store.upsertMissions(listOf(Mission(id = "ms_new", num = 61, title = "Docs search", originConvoID = "c1", projectID = "pj_docs", projectNum = 12)))
+            assertEquals("pj_docs", store.mission("ms_new")?.projectID)
+            assertEquals(12, store.mission("ms_new")?.projectNum)
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
     /// `open(onOpened:)` reports how long the migration chain took on the
     /// open that ran it (the launch timeline's nested `migration` interval)
     /// and `null` on a later open of the same, now up-to-date file.
