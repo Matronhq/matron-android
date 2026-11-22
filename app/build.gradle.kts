@@ -74,8 +74,8 @@ android {
         applicationId = "chat.matron.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 16
-        versionName = "0.1.15"
+        versionCode = 17
+        versionName = "0.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
