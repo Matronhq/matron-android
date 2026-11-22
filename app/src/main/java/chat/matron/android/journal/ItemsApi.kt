@@ -73,6 +73,11 @@ data class ItemCommentResult(
     val askId: String? = null,
 )
 
+/// A signed tap's answer: the item as it now stands and the tap's comment.
+/// [comment] is null for an answer on a consent request's item, which the
+/// journal applies to the request itself and records no comment for.
+data class ItemTapResult(val item: TrackerItem, val comment: TrackerComment?)
+
 /// `POST /items` body. [awaiting] is tri-state like the Swift `ItemAwaiting??`:
 /// [awaitingSet] false ⇒ key omitted (server default), true with a null
 /// [awaiting] ⇒ an explicit `null`.
@@ -151,7 +156,8 @@ interface ItemsProviding {
         replyTo: String? = null,
     ): ItemCommentResult
     /// A tap carrying the user's signed approval: a button on a step-up item
-    /// or follow-up question (an `item_tap` statement). Sent at once, never
+    /// or follow-up question (an `item_tap` statement), or Approve on a
+    /// consent request aimed at a protected box (a `consent` statement). Sent at once, never
     /// queued: a nonce lives five minutes and a signature must not wait on
     /// disk. A provider that cannot carry an approval refuses the tap rather
     /// than sending it unsigned.
@@ -161,7 +167,7 @@ interface ItemsProviding {
         replyTo: String?,
         approval: SignedApproval,
         idempotencyKey: String,
-    ): ItemCommentResult = throw JournalApiError.ApprovalRequired
+    ): ItemTapResult = throw JournalApiError.ApprovalRequired
     suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem
     suspend fun reopenItem(id: String, comment: String?): TrackerItem
     suspend fun rankItem(id: String, change: ItemRankChange): TrackerItem

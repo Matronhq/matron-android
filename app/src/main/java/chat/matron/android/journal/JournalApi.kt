@@ -1139,31 +1139,11 @@ class JournalApi(
         idempotencyKey: String?,
         action: String?,
         replyTo: String?,
-    ): ItemCommentResult = postComment(id, body, attachments, idempotencyKey, action, replyTo, approval = null)
-
-    override suspend fun tapItem(
-        id: String,
-        action: String,
-        replyTo: String?,
-        approval: SignedApproval,
-        idempotencyKey: String,
-    ): ItemCommentResult = postComment(id, action, emptyList(), idempotencyKey, action, replyTo, approval)
-
-    private suspend fun postComment(
-        id: String,
-        body: String,
-        attachments: List<TrackerAttachment>,
-        idempotencyKey: String?,
-        action: String?,
-        replyTo: String?,
-        approval: SignedApproval?,
     ): ItemCommentResult {
         val json = buildJsonObject {
             put("body", body)
             action?.let { put("action", it) }
             replyTo?.let { put("reply_to", it) }
-            // Only a tap carries one: a typed reply's would be ignored.
-            if (approval != null && action != null) put("approval", approval.toJson())
             if (attachments.isNotEmpty()) {
                 put("attachments", kotlinx.serialization.json.buildJsonArray { attachments.forEach { add(it.outgoingJson()) } })
             }
@@ -1181,6 +1161,26 @@ class JournalApi(
             link = InviteLinks.shareableOf(obj),
             askId = obj.objectOrNull("ask")?.stringOrNull("id")?.takeIf { it.isNotEmpty() },
         )
+    }
+
+    override suspend fun tapItem(
+        id: String,
+        action: String,
+        replyTo: String?,
+        approval: SignedApproval,
+        idempotencyKey: String,
+    ): ItemTapResult {
+        val json = buildJsonObject {
+            put("body", action)
+            put("action", action)
+            replyTo?.let { put("reply_to", it) }
+            put("approval", approval.toJson())
+        }
+        val obj = request(
+            path = "/items/${pathSegment(id)}/comments", method = "POST", jsonBody = json,
+            accept = setOf(200, 201), headers = idempotencyHeaders(idempotencyKey),
+        )
+        return ItemTapResult(decodeItem(obj), obj.objectOrNull("comment")?.let(TrackerComment::fromJson))
     }
 
     override suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem =
