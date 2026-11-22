@@ -557,7 +557,7 @@ class AppDependencies(
         pinsSync.start()
         coordinatorSync.start()
         notifySettings.start()
-        core.backfillJob = startBackfill(search = search, api = api, store = store)
+        core.backfillJob = startBackfill(search = search, api = api, store = store, syncScope = { engine.syncScope.value })
         return core
     }
 
@@ -611,7 +611,13 @@ class AppDependencies(
      * `resetBookkeepingFirst` late-attach path is dropped because the Android
      * search DB opens with the process (no device-unlock deferral).
      */
-    private fun startBackfill(search: SearchService?, api: JournalApi, store: JournalStore): Job? {
+    private fun startBackfill(
+        search: SearchService?,
+        api: JournalApi,
+        store: JournalStore,
+        /// Read on every pass: the setting can change while the app runs.
+        syncScope: () -> SyncScope,
+    ): Job? {
         if (search == null) return null
         val coordinator = SearchBackfillCoordinator(search = search) { convoID, beforeSeq, limit ->
             api.messages(convoID, beforeSeq, limit)
@@ -627,6 +633,13 @@ class AppDependencies(
                 // delivery, not to history paging — don't spend its radio
                 // time on a sweep the next foreground can run.
                 if (!isAppProcessInForeground(context)) {
+                    delay(60_000)
+                    continue
+                }
+                // For you only: a chat's history is fetched when it is
+                // opened, not swept in the background (search asks the
+                // journal for what this device does not hold).
+                if (syncScope() == SyncScope.FOR_YOU) {
                     delay(60_000)
                     continue
                 }

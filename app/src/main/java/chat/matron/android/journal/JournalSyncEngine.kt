@@ -40,6 +40,8 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonElement
 
 /// How many reconnect-replay journal frames land per store transaction. The
@@ -243,6 +245,11 @@ class JournalSyncEngine(
     private var catchUpStartedAt: Long? = null
     /// How many chat lists are on screen now.
     private var chatListsOnScreen = 0
+    /// Serialises viewing changes (the local owner, the departure mark and
+    /// the socket op) and a fetched chat's late settle write against them.
+    private val viewingMutex = Mutex()
+    /// Serialises sync scope changes.
+    private val scopeMutex = Mutex()
     /// When the chat list last asked for a [SyncScope.FOR_YOU] refresh.
     private var lastListRefreshAt: Long? = null
 
@@ -700,7 +707,7 @@ class JournalSyncEngine(
     /// stored history alone.
     fun viewedConversationIDs(): Set<String> = synchronized(lock) { setOfNotNull(viewingConvoID) }
 
-    suspend fun setViewing(convoID: String?) {
+    suspend fun setViewing(convoID: String?): Unit = viewingMutex.withLock {
         val left = synchronized(lock) {
             val previous = viewingConvoID
             viewingConvoID = convoID
@@ -716,12 +723,12 @@ class JournalSyncEngine(
     /// The timeline showing [convoID] went away. Clears the viewing set only
     /// if it still names [convoID]: a chat opened since must stay viewed
     /// (its timeline can register before the old one's teardown runs).
-    suspend fun clearViewing(convoID: String) {
-        if (synchronized(lock) { viewingConvoID } != convoID) return
+    suspend fun clearViewing(convoID: String): Unit = viewingMutex.withLock {
+        if (synchronized(lock) { viewingConvoID } != convoID) return@withLock
         val stillViewed = synchronized(lock) {
             if (viewingConvoID != convoID) true else { viewingConvoID = null; viewingGeneration += 1; false }
         }
-        if (stillViewed) return
+        if (stillViewed) return@withLock
         noteConversationLeft(convoID)
         val connection = synchronized(lock) { liveConnection }
         runCatching { connection?.send(ClientOp.Viewing(null)) }
@@ -753,15 +760,17 @@ class JournalSyncEngine(
     /// scoped socket never carried, and nothing can tell which events those
     /// were, so the next connect rebuilds it from the snapshot, as after
     /// `snapshot_required`.
-    suspend fun setSyncScope(scope: SyncScope) {
-        if (_syncScope.value == scope) return
+    suspend fun setSyncScope(scope: SyncScope): Unit = scopeMutex.withLock {
+        // Serialised, so each change reads the scope the previous one stored.
+        if (_syncScope.value == scope) return@withLock
         if (scope == SyncScope.FOR_YOU) runCatching { store.markForYouStart() }
         val connection = synchronized(lock) {
             _syncScope.value = scope
             liveConnection?.also { pathChangeReconnect = true }
         }
         // A deliberate reconnect: straight back to Connecting, no offline
-        // banner (the same path as a network change).
+        // banner (the same path as a network change). A connect still in its
+        // handshake sees the change when it installs its socket.
         connection?.close()
     }
 
@@ -909,20 +918,35 @@ class JournalSyncEngine(
                 delay((min(backoffBaseSeconds * 2.0.pow(attempt.toDouble()), 30.0) * 1000).toLong().milliseconds)
                 if (synchronized(lock) { liveConnection } === connection) startConversationCatchUp(convoID, attempt + 1)
             }
-            settle -> scope.launch { settleConversation(source, convoID, connection) }
+            settle -> scope.launch { settleConversation(source, convoID, connection, generation) }
         }
     }
 
     /// The second, one-page read after an opened conversation's fetch (see
     /// [conversationSettleDelay]). Best effort: the socket carries what
     /// comes next either way.
-    private suspend fun settleConversation(source: ConversationPageSource, convoID: String, connection: JournalConnection) {
+    private suspend fun settleConversation(
+        source: ConversationPageSource,
+        convoID: String,
+        connection: JournalConnection,
+        generation: Int,
+    ) {
         delay(conversationSettleDelay)
-        if (synchronized(lock) { liveConnection } !== connection) return
+        fun sameSession() = synchronized(lock) {
+            liveConnection === connection && viewingGeneration == generation && viewingConvoID == convoID
+        }
+        if (!sameSession()) return
         val page = runCatching { source.messages(convoID, null, SETTLE_PAGE_SIZE) }.getOrNull() ?: return
-        if (synchronized(lock) { liveConnection } !== connection) return
-        runCatching { store.insertConversationTail(page, convoID, reachesSyncedSeq = true) }
-            .onSuccess { indexFetched(page, emptyList()) }
+        // Written only while the chat is still on screen in the session that
+        // asked, checked under the lock every viewing change takes: once it
+        // closes, the socket stops carrying it and its mark is set at the
+        // cursor, and a page landed after that could leave a hole marked
+        // complete.
+        viewingMutex.withLock {
+            if (!sameSession()) return@withLock
+            runCatching { store.insertConversationTail(page, convoID, reachesSyncedSeq = true) }
+                .onSuccess { indexFetched(page, emptyList()) }
+        }
     }
 
     private fun indexFetched(fetched: List<JournalEvent>, dropped: List<Long>) {
@@ -961,11 +985,19 @@ class JournalSyncEngine(
 
     suspend fun refreshSummaries() {
         val (epoch, settings) = synchronized(lock) { storeEpoch to settingsEpoch }
+        val adoptUnread = _syncScope.value == SyncScope.FOR_YOU
+        // A chat read while the snapshot is out keeps its own count.
+        val readMarks = if (adoptUnread) runCatching { store.readMarks() }.getOrNull() else null
         val snapshot = runCatching { api.snapshot() }.getOrNull() ?: return
         if (synchronized(lock) { storeEpoch } != epoch) return // store wiped mid-flight; stale
         publishSnapshotSettings(snapshot, settings)
-        val adoptUnread = _syncScope.value == SyncScope.FOR_YOU
-        runCatching { store.refreshSummaries(snapshot.conversations, adoptUnread = adoptUnread) }
+        val viewed = synchronized(lock) { setOfNotNull(viewingConvoID) }
+        runCatching {
+            store.refreshSummaries(
+                snapshot.conversations, adoptUnread = adoptUnread,
+                readMarksAtRequest = readMarks, keepUnread = viewed,
+            )
+        }
         runCatching { store.replaceAgents(snapshot.agents) }
     }
 
@@ -1457,6 +1489,16 @@ class JournalSyncEngine(
                     sync = scopeNow,
                 )
                 val headSeq = hello.headSeq
+                // The scope changed while this hello was out: the socket was
+                // set up for the old one, and setSyncScope had no socket to
+                // close. Drop it and connect again under the new scope.
+                val scopeMoved = synchronized(lock) {
+                    (_syncScope.value != scopeNow).also { moved -> if (moved) pathChangeReconnect = true }
+                }
+                if (scopeMoved) {
+                    connection.close()
+                    throw ScopeChangedDuringHandshake()
+                }
                 synchronized(lock) {
                     liveConnection = connection; attempt = 0
                     // Fetched over the last socket; this one starts behind them.
@@ -1857,6 +1899,9 @@ class JournalSyncEngine(
         runCatching { store.wipe() }
             .onFailure { MatronDebug.breadcrumb("mirror reset: store.wipe failed: $it") }
     }
+
+    /// The scope changed while a hello was out; the loop connects again.
+    private class ScopeChangedDuringHandshake : Exception("The sync scope changed while connecting.")
 
     /// The switch back to [SyncScope.EVERYTHING] could not wipe the mirror.
     private class MirrorResetFailed : Exception("The local copy could not be reset.")

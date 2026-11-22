@@ -684,12 +684,12 @@ class JournalTimelineService(
         }
         val before = store.minSeq(convoID)
         val events = api.messages(convoID, before, requestSize)
-        // An opened chat's For you only fetch dropped the older rows while
-        // this page was out: it is below a gap now, so land nothing and let
-        // the next scroll page from the new oldest row.
-        if (before != null && store.minSeq(convoID) != before) return true
         val newOnes = events.filter { before == null || it.seq < before }
-        store.insertHistory(newOnes)
+        // Checked in the insert's own transaction: an opened chat's For you
+        // only fetch that dropped the older rows while this page was out
+        // leaves it below a gap, so nothing lands and the next scroll pages
+        // from the new oldest row.
+        if (!store.insertHistoryIfOldestIs(convoID, before, newOnes)) return true
         // Below the tail anchor the observation won't see these; hand them to
         // the overlay directly — but only when a subscription has rebased
         // (boundary known). With no subscription yet, prepending would put
