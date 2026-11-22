@@ -70,6 +70,28 @@ class ProjectPageViewModelTest {
     }
 
     @Test
+    fun aProjectThatGoesAwayLeavesNothingOnScreen() = runBlocking {
+        val timeline = Timeline(mutableMapOf("pj_docs" to TimelineProjectPage(docs)))
+        val vm = ProjectPageViewModel("pj_docs", timeline, FakeProjects())
+        vm.refreshPage()
+        timeline.pages.clear()
+        vm.refresh()
+        assertTrue(vm.state.value.isMissing)
+        assertNull(vm.state.value.page)
+    }
+
+    @Test
+    fun aFailedSectionReadIsReadAgainOnRefresh() = runBlocking {
+        val projects = FakeProjects()
+        val vm = ProjectPageViewModel("pj_docs", Timeline(mutableMapOf("pj_docs" to TimelineProjectPage(docs))), projects)
+        vm.loadMissions()
+        assertNull(vm.state.value.openMissions)
+        projects.details["pj_docs"] = ProjectDetail(Project(id = "pj_docs", num = 12, title = "Docs site launch"), emptyList())
+        vm.refresh()
+        assertEquals(emptyList<Mission>(), vm.state.value.openMissions)
+    }
+
+    @Test
     fun aMergedProjectFollowsTheOneItBecame() = runBlocking {
         val timeline = Timeline(mutableMapOf("pj_old" to TimelineProjectPage(docs, mergedFromID = "pj_old")))
         timeline.historyPages["pj_docs" to null] = TimelineHistoryPage(listOf(history("2026-11-16")), null)

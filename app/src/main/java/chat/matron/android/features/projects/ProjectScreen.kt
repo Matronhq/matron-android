@@ -64,8 +64,8 @@ sealed interface ProjectScreenContent {
 
     companion object {
         fun of(state: ProjectPageState): ProjectScreenContent = when {
-            state.page != null -> Page
             state.isMissing -> Missing
+            state.page != null -> Page
             state.error != null -> Failed
             else -> Loading
         }
