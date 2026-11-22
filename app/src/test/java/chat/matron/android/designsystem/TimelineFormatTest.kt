@@ -37,10 +37,17 @@ class TimelineFormatTest {
         assertEquals("16 – 22 November", TimelineFormat.pageTitle(week(final = true), end.plusSeconds(8 * 86_400)))
         assertNull(TimelineFormat.pageDates(week(final = true), end.plusSeconds(8 * 86_400)))
         assertEquals("16 – 22 November", TimelineFormat.pageDates(week(final = false), start))
-        val summaries = listOf("2026-11-16", "2026-11-09", "2026-11-02").map { TimelineWeekSummary(it, start, end) }
-        assertEquals(listOf("This week", "Last week", "2 – 8 Nov"), weekChoices(summaries).map { it.title })
-        assertEquals("Last week", projectsBarTitle(TimelineState(weeks = summaries, selectedWeek = "2026-11-09")))
-        assertEquals("Projects", projectsBarTitle(TimelineState()))
+        fun summary(key: String): TimelineWeekSummary {
+            val monday = Instant.parse("${key}T00:00:00Z")
+            return TimelineWeekSummary(key, monday, monday.plusSeconds(7 * 86_400))
+        }
+        val now = start.plusSeconds(3600)
+        val summaries = listOf("2026-11-16", "2026-11-09", "2026-11-02").map(::summary)
+        assertEquals(listOf("This week", "Last week", "2 – 8 Nov"), weekChoices(summaries, now).map { it.title })
+        assertEquals("Last week", projectsBarTitle(TimelineState(weeks = summaries, selectedWeek = "2026-11-09"), now))
+        assertEquals("Projects", projectsBarTitle(TimelineState(), now))
+        // A dropped leading row never makes an older week "This week".
+        assertEquals(listOf("Last week", "2 – 8 Nov"), weekChoices(summaries.drop(1), now).map { it.title })
     }
 
     @Test

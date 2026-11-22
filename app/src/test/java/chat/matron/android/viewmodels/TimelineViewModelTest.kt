@@ -259,6 +259,7 @@ class TimelineViewModelTest {
         assertEquals(TimelineWeekExtras.Status.MORE, vm.state.value.weekExtras?.status)
         vm.loadMoreWeekProjects()
         assertEquals(listOf("pj_promo"), vm.state.value.weekProjects.map { it.project.id })
+        assertEquals(1, vm.state.value.weekExtras?.pages)
         vm.loadMoreWeekProjects()
         assertEquals(listOf("pj_promo", "pj_app"), vm.state.value.weekProjects.map { it.project.id })
         assertEquals(TimelineWeekExtras.Status.DONE, vm.state.value.weekProjectsStatus)

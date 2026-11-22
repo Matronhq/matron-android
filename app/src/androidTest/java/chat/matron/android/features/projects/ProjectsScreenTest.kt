@@ -57,7 +57,7 @@ class ProjectsScreenTest {
                         val vm = remember { TimelineViewModel(ProjectsFixtures.Timeline(), scope) }
                         Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
                             ProjectsScreen(
-                                viewModel = vm, media = ProjectsFixtures.Media(), serverURL = "https://journal.example.com/".toHttpUrl(),
+                                viewModel = vm, now = { ProjectsFixtures.now }, media = ProjectsFixtures.Media(), serverURL = "https://journal.example.com/".toHttpUrl(),
                                 layoutStore = store, onOpenMissions = {}, onOpenMemories = {}, onOpenProject = {},
                             ) { Text("Missions") }
                         }

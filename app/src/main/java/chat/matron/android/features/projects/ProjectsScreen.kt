@@ -65,12 +65,12 @@ import okhttp3.HttpUrl
 /// One entry of the week menu: "This week", "Last week", then their dates.
 data class WeekChoice(val week: String, val title: String)
 
-fun weekChoices(weeks: List<TimelineWeekSummary>): List<WeekChoice> =
-    weeks.mapIndexed { index, summary -> WeekChoice(summary.week, TimelineFormat.menuTitle(index, summary.week)) }
+fun weekChoices(weeks: List<TimelineWeekSummary>, now: Instant): List<WeekChoice> =
+    weeks.map { summary -> WeekChoice(summary.week, TimelineFormat.menuTitle(summary, now)) }
 
 /// The bar's title: the picked week's menu name, else "Projects".
-fun projectsBarTitle(state: TimelineState): String =
-    weekChoices(state.weeks).firstOrNull { it.week == state.selectedWeek }?.title ?: TimelineFormat.PROJECTS
+fun projectsBarTitle(state: TimelineState, now: Instant): String =
+    weekChoices(state.weeks, now).firstOrNull { it.week == state.selectedWeek }?.title ?: TimelineFormat.PROJECTS
 
 /// The pictures of a timeline page by blob id, loaded once each through the
 /// session's authenticated media service as bytes Coil decodes. Only the
@@ -111,6 +111,8 @@ fun rememberTimelineImages(blobIDs: List<String>, media: MediaService, serverURL
 @Composable
 fun ProjectsScreen(
     viewModel: TimelineViewModel,
+    /// The clock the week names are read against; tests pass a fixed one.
+    now: () -> Instant = Instant::now,
     media: MediaService,
     serverURL: HttpUrl,
     layoutStore: KeyValueStore,
@@ -133,7 +135,7 @@ fun ProjectsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { WeekMenu(state, onPick = { viewModel.selectInBackground(it) }, onEarlier = { scope.launch { viewModel.loadEarlierWeeks() } }) },
+                title = { WeekMenu(state, now(), onPick = { viewModel.selectInBackground(it) }, onEarlier = { scope.launch { viewModel.loadEarlierWeeks() } }) },
                 actions = {
                     IconButton(onClick = onOpenMissions, modifier = Modifier.testTag("projects.missions")) {
                         Icon(Icons.Outlined.SportsScore, contentDescription = "Missions")
@@ -154,7 +156,7 @@ fun ProjectsScreen(
                     is TimelineWeekContent.Week -> TimelineWeekView(
                         week = content.week,
                         extras = state.weekExtras,
-                        now = Instant.now(),
+                        now = now(),
                         images = images,
                         layout = layout,
                         onLayoutChange = { layout = it; layoutStore.setString(TimelineWeekLayout.STORAGE_KEY, it.wire) },
@@ -185,16 +187,16 @@ fun ProjectsScreen(
 /// The title as a menu: the weeks newest first, the picked one checked,
 /// then "Earlier weeks" while the journal has more.
 @Composable
-private fun WeekMenu(state: TimelineState, onPick: (String) -> Unit, onEarlier: () -> Unit) {
+private fun WeekMenu(state: TimelineState, now: Instant, onPick: (String) -> Unit, onEarlier: () -> Unit) {
     var open by remember { mutableStateOf(false) }
-    val choices = weekChoices(state.weeks)
+    val choices = weekChoices(state.weeks, now)
     Box {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.testTag("projects.weekMenu"),
         ) {
             TextButton(onClick = { open = true }, enabled = choices.isNotEmpty()) {
-                Text(projectsBarTitle(state), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurface)
+                Text(projectsBarTitle(state, now), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurface)
                 if (choices.isNotEmpty()) Icon(Icons.Filled.ArrowDropDown, contentDescription = "Pick a week", tint = MaterialTheme.colorScheme.onSurface)
             }
         }
