@@ -1316,4 +1316,80 @@ class ComposerViewModelTest {
         assertTrue(vm.confirmPaletteSelection())
         assertEquals("/model sonnet ", vm.input)
     }
+
+    // MARK: - unsent reply kept on disk
+
+    private fun unsentStore(root: File = Files.createTempDirectory("unsent").toFile()) =
+        UnsentReplyStore(File(root, "boxes"), File(root, "staging"))
+
+    private fun persistentVM(store: UnsentReplyStore, timeline: FakeTimelineService = FakeTimelineService()) =
+        ComposerViewModel("c1", timeline, emptyList(), emptyRecentFolders(), store.stagingDirectory, unsentReplies = store)
+
+    @Test
+    fun unsentTextAndTray_surviveANewViewModelAndStore() = runBlocking {
+        val root = Files.createTempDirectory("unsent").toFile()
+        val first = persistentVM(unsentStore(root))
+        first.input = "still writing"
+        first.attachFiles(listOf(makeTempFile("pic.png", "PNG")))
+
+        val again = persistentVM(unsentStore(root))
+        assertEquals("still writing", again.input)
+        assertEquals(listOf("pic.png"), again.stagedAttachments.value.map { it.filename })
+        assertTrue(again.stagedAttachments.value.single().file.exists())
+    }
+
+    @Test
+    fun unsentReply_isClearedBySuccessfulSend() = runBlocking {
+        val root = Files.createTempDirectory("unsent").toFile()
+        val vm = persistentVM(unsentStore(root))
+        vm.input = "hello"
+        vm.attachFiles(listOf(makeTempFile("pic.png", "PNG")))
+        vm.send()
+
+        val again = persistentVM(unsentStore(root))
+        assertEquals("", again.input)
+        assertTrue(again.stagedAttachments.value.isEmpty())
+    }
+
+    @Test
+    fun unsentReply_isKeptAfterAFailedSend() = runBlocking {
+        val root = Files.createTempDirectory("unsent").toFile()
+        val fake = FakeTimelineService().apply { nextSendError = RuntimeException("boom") }
+        val vm = persistentVM(unsentStore(root), fake)
+        vm.input = "try me"
+        vm.attachFiles(listOf(makeTempFile("notes.txt")))
+        vm.send()
+
+        val again = persistentVM(unsentStore(root))
+        assertEquals("try me", again.input)
+        assertEquals(listOf("notes.txt"), again.stagedAttachments.value.map { it.filename })
+    }
+
+    @Test
+    fun recalledSentLine_doesNotOverwriteTheSavedDraft() = runBlocking {
+        val root = Files.createTempDirectory("unsent").toFile()
+        val vm = persistentVM(unsentStore(root))
+        vm.input = "sent earlier"
+        vm.send()
+        vm.input = "my draft"
+        vm.recallOlder()
+        assertEquals("sent earlier", vm.input)
+
+        assertEquals("my draft", persistentVM(unsentStore(root)).input)
+    }
+
+    @Test
+    fun trayChangeDuringRecall_isSavedWithTheStashedDraft() = runBlocking {
+        val root = Files.createTempDirectory("unsent").toFile()
+        val vm = persistentVM(unsentStore(root))
+        vm.input = "sent earlier"
+        vm.send()
+        vm.input = "my draft"
+        vm.recallOlder()
+        vm.attachFiles(listOf(makeTempFile("pic.png", "PNG")))
+
+        val again = persistentVM(unsentStore(root))
+        assertEquals("my draft", again.input)
+        assertEquals(listOf("pic.png"), again.stagedAttachments.value.map { it.filename })
+    }
 }

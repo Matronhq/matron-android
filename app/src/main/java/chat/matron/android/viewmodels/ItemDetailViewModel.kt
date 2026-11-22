@@ -60,6 +60,10 @@ class ItemDetailViewModel(
     private val scope: CoroutineScope,
     private val stagingDirectory: File,
     private val now: () -> Instant = Instant::now,
+    /// Where the unsent reply (draft and tray) is kept on disk, so it
+    /// survives leaving the item, eviction and a restart. `null` keeps it in
+    /// memory only.
+    private val unsentReplies: UnsentReplyStore? = null,
     /// Answers a reply's queue card (Send now, Cancel, Edit). `null` draws no
     /// buttons on a queued reply: one wired to nothing would look like it acted.
     private val queuedRelease: QueuedReplySending? = null,
@@ -69,6 +73,8 @@ class ItemDetailViewModel(
     /// spin forever.
     private val sendNowConfirmTimeoutMillis: Long = 20_000,
 ) {
+    private val unsentPlace = UnsentReplyStore.Place.Item(itemID)
+    private val unsentEpoch = unsentReplies?.epoch ?: 0
     private val _item = MutableStateFlow<TrackerItem?>(null)
     val item: StateFlow<TrackerItem?> = _item.asStateFlow()
 
@@ -88,11 +94,77 @@ class ItemDetailViewModel(
     val draftFlow: StateFlow<String> = _draft.asStateFlow()
     var draft: String
         get() = _draft.value
-        set(value) { _draft.value = value }
+        set(value) { _draft.value = value; persistUnsent() }
 
     /// The tray: attachments picked but not yet sent, in send order.
     private val _stagedAttachments = MutableStateFlow<List<StagedAttachment>>(emptyList())
     val stagedAttachments: StateFlow<List<StagedAttachment>> = _stagedAttachments.asStateFlow()
+
+    /// Writes to the tray go through here so each change is saved.
+    private var tray: List<StagedAttachment>
+        get() = _stagedAttachments.value
+        set(value) { _stagedAttachments.value = value; persistUnsent() }
+
+    init {
+        unsentReplies?.reply(unsentPlace)?.let { saved ->
+            _draft.value = saved.text
+            _stagedAttachments.value = saved.attachments
+        }
+        if (unsentReplies?.strandedSends(unsentPlace)?.isNotEmpty() == true) {
+            scope.launch { recoverStrandedSends() }
+        }
+    }
+
+    /// Replies an earlier run was sending when the app stopped. One that
+    /// never reached the outbox goes back in the box. One that had reached
+    /// the outbox insert is put back only if it is neither in the outbox nor
+    /// already in the thread, so a queued reply is never offered twice. If
+    /// the outbox can't be read, it stays recorded for the next visit.
+    private suspend fun recoverStrandedSends() {
+        val stores = unsentReplies ?: return
+        for ((id, send) in stores.strandedSends(unsentPlace)) {
+            val putBack = if (!send.queuing) {
+                true
+            } else {
+                val queued = runCatching {
+                    store.itemOutboxRows(itemID).any { it.localID == id || it.localID.startsWith("$id-") }
+                }.getOrNull() ?: continue
+                val delivered = queued || (runCatching { store.comments(itemID) }.getOrNull() ?: continue)
+                    .any { isDelivery(it, send) }
+                !delivered
+            }
+            if (putBack) {
+                val merged = UnsentReplyStore.merge(send.reply, UnsentReply(_draft.value, _stagedAttachments.value))
+                _draft.value = merged.text
+                tray = merged.attachments
+            } else {
+                // Queued: the outbox holds what it needs.
+                send.reply.attachments.forEach { it.deleteStagedCopy() }
+            }
+            stores.dropStranded(unsentPlace, id, unsentEpoch)
+        }
+    }
+
+    /// Whether [comment] is [send] already delivered (it left the outbox): the
+    /// user's own plain reply (not a contributor's or a hand-over copy, not a
+    /// button tap), posted since the send began (a minute's grace for clock
+    /// skew), with the same text and, when the send carried files, files
+    /// drawn from them by name and size — a split reply's first part carries
+    /// some of them, and a file is counted once.
+    private fun isDelivery(comment: TrackerComment, send: StrandedSend): Boolean {
+        if (comment.author != ItemAuthor.USER || comment.kind != TrackerComment.Kind.COMMENT) return false
+        if (comment.action != null || comment.contributor != null || comment.attribution != null) return false
+        if (comment.createdAt.toEpochMilli() < send.startedAt - 60_000) return false
+        if (comment.body.trim() != send.reply.text.trim()) return false
+        if (send.files.isEmpty()) return comment.attachments.isEmpty()
+        if (comment.attachments.isEmpty()) return false
+        val left = send.files.toMutableList()
+        return comment.attachments.all { left.remove(it.name to it.size) }
+    }
+
+    private fun persistUnsent() {
+        unsentReplies?.save(unsentPlace, UnsentReply(_draft.value, _stagedAttachments.value), unsentEpoch)
+    }
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
@@ -337,14 +409,14 @@ class ItemDetailViewModel(
         // The edit's text isn't in the box until its hold has landed: nothing
         // goes yet, and a voice note goes back in the tray rather than being lost.
         if (_editHoldPending.value) {
-            if (leading != null) _stagedAttachments.value = listOf(leading) + _stagedAttachments.value
+            if (leading != null) tray = listOf(leading) + _stagedAttachments.value
             _error.value = "That reply is still being held for editing. Send again in a moment."
             return
         }
         if (_editingQueuedReplyID.value != null) {
             val failure = withdrawEditedOriginal()
             if (failure != null) {
-                if (leading != null) _stagedAttachments.value = listOf(leading) + _stagedAttachments.value
+                if (leading != null) tray = listOf(leading) + _stagedAttachments.value
                 _error.value = failure
                 return
             }
@@ -354,12 +426,18 @@ class ItemDetailViewModel(
         val replaces = _replacingCommentID.value
         _replacingCommentID.value = null
         draft = ""
-        _stagedAttachments.value = emptyList()
+        tray = emptyList()
+        // Recorded under the outbox local id until it is queued or back in
+        // the tray, so a reply still uploading when the app is killed comes
+        // back on the next visit ([recoverStrandedSends]).
+        val sendID = UUID.randomUUID().toString()
+        unsentReplies?.beginSend(unsentPlace, sendID, UnsentReply(pending, attachments), unsentEpoch)
         _isBusy.value = true
         var sent = false
         try {
             val uploaded = upload(attachments) ?: return
-            sync.enqueueComment(itemID, UUID.randomUUID().toString(), pending.trim(), uploaded, replaces = replaces)
+            unsentReplies?.markQueuing(unsentPlace, sendID, unsentEpoch)
+            sync.enqueueComment(itemID, sendID, pending.trim(), uploaded, replaces = replaces)
             sent = true
             attachments.forEach { it.deleteStagedCopy() }
         } catch (cancel: CancellationException) {
@@ -368,11 +446,12 @@ class ItemDetailViewModel(
             _error.value = error.message ?: error.toString()
         } finally {
             if (!sent) {
-                _stagedAttachments.value = attachments + _stagedAttachments.value
+                tray = attachments + _stagedAttachments.value
                 if (draft.isEmpty()) draft = pending
                 // Still an edit only when its own text came back to the box.
                 if (replaces != null && _replacingCommentID.value == null && draft == pending) _replacingCommentID.value = replaces
             }
+            unsentReplies?.endSend(unsentPlace, sendID, unsentEpoch)
             _isBusy.value = false
         }
     }
@@ -389,7 +468,7 @@ class ItemDetailViewModel(
             }
             try {
                 val staged = withContext(Dispatchers.IO) { StagedAttachment.stage(file, stagingDirectory) }
-                _stagedAttachments.value = _stagedAttachments.value + staged
+                tray = _stagedAttachments.value + staged
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (error: Throwable) {
@@ -418,7 +497,7 @@ class ItemDetailViewModel(
     /// Drops one attachment from the tray (its ✕) and deletes its copy.
     fun removeAttachment(id: String) {
         val attachment = _stagedAttachments.value.firstOrNull { it.id == id } ?: return
-        _stagedAttachments.value = _stagedAttachments.value.filterNot { it.id == id }
+        tray = _stagedAttachments.value.filterNot { it.id == id }
         attachment.deleteStagedCopy()
     }
 
