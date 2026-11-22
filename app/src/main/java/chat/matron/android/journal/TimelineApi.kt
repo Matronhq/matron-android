@@ -68,6 +68,8 @@ object TimelineDecoding {
     }
 
     fun week(obj: JsonObject): TimelineWeek {
+        // No stories array is a malformed answer, not an empty week.
+        if (obj.arrayOrNull("stories") == null) throw malformed("week")
         val week = TimelineWeek.fromJson(obj) ?: throw malformed("week")
         val sent = (obj.arrayOrNull("stories")?.size ?: 0) + (obj.arrayOrNull("also")?.size ?: 0)
         val kept = week.stories.size + week.also.size

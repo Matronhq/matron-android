@@ -172,6 +172,30 @@ class TimelineListsTest {
     }
 
     @Test
+    fun aVisitStartedWhileTheCountsAreReadStillLands() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var reads = 0
+        val lists = object : FakeTimelineBase() {
+            override suspend fun timelineProjects(before: String?, limit: Int?): TimelineProjectList {
+                reads += 1
+                val mine = reads
+                if (mine == 1) hold.await()
+                return TimelineProjectList(mine, listOf(TimelineProjectRow(TimelineFixtures.docs)))
+            }
+        }
+        val vm = TimelineViewModel(lists, scope)
+        // The visit's read is slow; the counts read lands first.
+        val visit = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined).launch { vm.loadList(TimelinePlace.Projects) }
+        vm.loadCounts()
+        hold.complete(Unit)
+        visit.join()
+        // The visit's own answer still lands: the list is never left loading.
+        assertEquals(1, vm.state.value.allProjects?.total)
+        assertTrue(vm.state.value.listContent(TimelinePlace.Projects) is TimelineListContent.Projects)
+        assertEquals(2, vm.state.value.listPages[TimelinePlace.Projects])
+    }
+
+    @Test
     fun aReloadedFirstPageClearsTheRetry() = runBlocking {
         val lists = object : FakeTimelineBase() {
             override suspend fun finishedProjects(before: String?, limit: Int?): TimelineFinishedPage {

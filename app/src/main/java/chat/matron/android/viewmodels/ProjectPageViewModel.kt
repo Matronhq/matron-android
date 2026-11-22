@@ -143,11 +143,13 @@ class ProjectPageViewModel(
         try {
             val loaded = timeline.timelineProjectHistory(projectID, before = before)
             if (generation != historyGeneration) return
-            historyNextBefore = loaded.nextBefore
+            // A cursor that does not move on would read the same page forever.
+            val next = loaded.nextBefore?.takeIf { it != before }
+            historyNextBefore = next
             _state.update { s ->
                 s.copy(
                     history = s.history + loaded.weeks.filter { w -> s.history.none { it.week == w.week } },
-                    hasMoreHistory = loaded.nextBefore != null, historyVersion = s.historyVersion + 1,
+                    hasMoreHistory = next != null, historyVersion = s.historyVersion + 1,
                 )
             }
         } catch (cancel: CancellationException) {

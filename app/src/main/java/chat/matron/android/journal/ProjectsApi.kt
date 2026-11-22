@@ -58,7 +58,8 @@ object ProjectsDecoding {
     fun detail(obj: JsonObject): ProjectDetail {
         val project = obj.objectOrNull("project")?.let(Project::fromJson)
             ?: throw JournalApiError.Transport("malformed project response")
-        return ProjectDetail(project, obj.arrayOrNull("missions")?.objects()?.mapNotNull(Mission::fromJson) ?: emptyList())
+        val missions = obj.arrayOrNull("missions") ?: throw JournalApiError.Transport("malformed project response")
+        return ProjectDetail(project, missions.objects().mapNotNull(Mission::fromJson))
     }
 
     /// A response for another kind than asked, or without `rows`, is a
@@ -73,8 +74,9 @@ object ProjectsDecoding {
     /// wrong current mission.
     fun conversationMissions(obj: JsonObject): List<ConversationMissionLink> {
         val rows = obj.arrayOrNull("missions") ?: throw JournalApiError.Transport("malformed conversation missions response")
-        return rows.objects().map { row ->
-            ConversationMissionLink.fromJson(row) ?: throw JournalApiError.Transport("malformed conversation mission row")
+        return rows.map { element ->
+            (element as? JsonObject)?.let(ConversationMissionLink::fromJson)
+                ?: throw JournalApiError.Transport("malformed conversation mission row")
         }
     }
 

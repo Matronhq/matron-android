@@ -156,7 +156,7 @@ private fun ListLede(text: String) {
 
 /// The end of a paged list: composing it asks for the next page; after a
 /// failed read it offers Retry instead, which asks again.
-private fun LazyListScope.pageEnd(rowCount: Int, onLoadMore: (() -> Unit)?, failed: Boolean) {
+private fun LazyListScope.pageEnd(rowCount: Int, onLoadMore: (() -> Unit)?, failed: Boolean, version: Int) {
     if (onLoadMore == null) return
     if (failed) {
         item(key = "retry:$rowCount") {
@@ -167,8 +167,8 @@ private fun LazyListScope.pageEnd(rowCount: Int, onLoadMore: (() -> Unit)?, fail
         }
         return
     }
-    item(key = "end:$rowCount") {
-        LaunchedEffect(rowCount) { onLoadMore() }
+    item(key = "end:$version:$rowCount") {
+        LaunchedEffect(version, rowCount) { onLoadMore() }
         Spacer(Modifier.height(1.dp))
     }
 }
@@ -194,26 +194,26 @@ private fun ProjectListRow(title: String, meta: String?, testTag: String, onClic
 /// when it last moved. Reaching the end loads the next page ([onLoadMore]
 /// null when there is none).
 @Composable
-fun AllProjectsListView(list: TimelineProjectList, now: Instant, onOpenProject: (String) -> Unit, onLoadMore: (() -> Unit)?, modifier: Modifier = Modifier, pagingFailed: Boolean = false) {
+fun AllProjectsListView(list: TimelineProjectList, now: Instant, onOpenProject: (String) -> Unit, onLoadMore: (() -> Unit)?, modifier: Modifier = Modifier, pagingFailed: Boolean = false, version: Int = 0) {
     LazyColumn(modifier.fillMaxSize().testTag("timeline.projects"), contentPadding = PaddingValues(16.dp)) {
         if (list.rows.isEmpty()) item(key = "empty") { ListLede(TimelineListCopy.NO_PROJECTS) }
         items(list.rows, key = { it.project.id }) { row ->
             ProjectListRow(row.project.title, TimelineListFormat.moved(row.lastMovedAt, now), "timeline.projects.${row.project.num}") { onOpenProject(row.project.id) }
         }
-        pageEnd(list.rows.size, onLoadMore, pagingFailed)
+        pageEnd(list.rows.size, onLoadMore, pagingFailed, version)
     }
 }
 
 /// "Finished": projects with nothing left open, newest first, each with when
 /// it finished. Reaching the end loads the next page.
 @Composable
-fun FinishedListView(rows: List<FinishedProject>, now: Instant, onOpenProject: (String) -> Unit, onLoadMore: (() -> Unit)?, modifier: Modifier = Modifier, pagingFailed: Boolean = false) {
+fun FinishedListView(rows: List<FinishedProject>, now: Instant, onOpenProject: (String) -> Unit, onLoadMore: (() -> Unit)?, modifier: Modifier = Modifier, pagingFailed: Boolean = false, version: Int = 0) {
     LazyColumn(modifier.fillMaxSize().testTag("timeline.finished"), contentPadding = PaddingValues(16.dp)) {
         if (rows.isEmpty()) item(key = "empty") { ListLede(TimelineListCopy.NOTHING_FINISHED) }
         items(rows, key = { it.project.id }) { row ->
             ProjectListRow(row.project.title, TimelineListFormat.daysAgo(row.finishedAt, now), "timeline.finished.${row.project.num}") { onOpenProject(row.project.id) }
         }
-        pageEnd(rows.size, onLoadMore, pagingFailed)
+        pageEnd(rows.size, onLoadMore, pagingFailed, version)
     }
 }
 

@@ -249,6 +249,8 @@ data class TimelineWeekExtras(
     val week: String,
     val projects: List<TimelineWeekProject> = emptyList(),
     val status: Status,
+    /// How many pages have landed: the page's end is keyed on it.
+    val pages: Int = 0,
 ) {
     enum class Status {
         /// More to read: reaching the end of the page asks for it.
