@@ -195,6 +195,15 @@ class ItemsSync(
     /// [stop] can cancel and await a drain the same way it does a refresh —
     /// including the background one `enqueueCreate` kicks and never awaits.
     private val drainJobs = mutableSetOf<Job>()
+    /// Items named by markers and not yet refetched, oldest first. Markers
+    /// waiting for the same item share one refetch: a reconnect replays each
+    /// marker the device missed, often several for one item.
+    private val pendingRefetches = LinkedHashSet<String>()
+    /// The workers taking [pendingRefetches], at most [REFETCH_WIDTH] at once,
+    /// so a new item's refetch does not wait behind every other one.
+    private val refetchWorkers = mutableSetOf<Job>()
+    /// List reads started by [launchRefresh], joined by [stop].
+    private val launchedRefreshes = mutableSetOf<Job>()
 
     /// Set by [stop], cleared by [start]. Every write site in refresh /
     /// refetch / drain re-checks this immediately after its await, before
@@ -217,10 +226,16 @@ class ItemsSync(
             stopped = false
             if (markerJob != null) return
             markerJob = scope.launch {
-                markers().collect { (_, marker) -> refreshItem(marker.itemID) }
+                markers().collect { (_, marker) -> queueRefetch(marker.itemID) }
             }
             stateJob = scope.launch {
                 connectionStates().collect { state ->
+                    // Ahead of the replay: the list read needs the network,
+                    // not the socket, and For you is current without waiting
+                    // for the whole backlog. A read already running is joined.
+                    if (state is SyncConnectionState.CatchingUp) {
+                        launchRefresh()
+                    }
                     if (state is SyncConnectionState.Running) {
                         // No `isSupported = true` here: publishing "supported"
                         // before the probe would flash true→false for an old
@@ -236,6 +251,70 @@ class ItemsSync(
         // once caught up, even on a cold start, and that already drains.
     }
 
+    /// The app came to the front: read what changed since the last list read
+    /// at once, without waiting for the socket's reconnect and replay.
+    fun refreshOnForeground() {
+        if (stopped) return
+        launchRefresh()
+    }
+
+    /// A list read nobody awaits (catch-up start, foreground). Tracked like
+    /// the marker workers, so [stop] cancels and joins it too.
+    private fun launchRefresh() {
+        synchronized(lock) {
+            if (stopped) return
+            lateinit var job: Job
+            job = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    refresh(ItemsScope.All)
+                } finally {
+                    synchronized(lock) { launchedRefreshes.remove(job) }
+                }
+            }
+            launchedRefreshes += job
+            job.start()
+        }
+    }
+
+    private fun queueRefetch(id: String) {
+        synchronized(lock) {
+            if (stopped) return
+            // Already being fetched: that run goes once more rather than a
+            // worker waiting on it, so the pool keeps fetching other items.
+            if (id in inFlightRefetches) {
+                refetchAgain.add(id)
+                return
+            }
+            if (!pendingRefetches.add(id)) return
+            if (refetchWorkers.size >= REFETCH_WIDTH) return
+            lateinit var worker: Job
+            worker = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    while (true) {
+                        // Retiring in the same critical section that finds the
+                        // queue empty: an id queued after it starts a worker.
+                        val next = synchronized(lock) {
+                            var taken: String? = null
+                            while (taken == null) {
+                                val id = pendingRefetches.firstOrNull() ?: break
+                                pendingRefetches.remove(id)
+                                // Started since it was queued: ask that run
+                                // to go once more instead of joining it.
+                                if (id in inFlightRefetches) refetchAgain.add(id) else taken = id
+                            }
+                            taken ?: run { refetchWorkers.remove(worker); null }
+                        } ?: break
+                        refreshItem(next)
+                    }
+                } finally {
+                    synchronized(lock) { refetchWorkers.remove(worker) }
+                }
+            }
+            refetchWorkers += worker
+            worker.start()
+        }
+    }
+
     /// Suspends until nothing more will happen: cancels the marker/state/retry
     /// jobs AND every in-flight refresh, per-item refetch and drain pass, and
     /// joins them all, so a caller's sign-out wipe can never race a resuming
@@ -248,7 +327,8 @@ class ItemsSync(
         synchronized(lock) {
             stopped = true
             toJoin = listOfNotNull(markerJob, stateJob, retryJob) +
-                inFlightRefreshes.values + inFlightRefetches.values + drainJobs
+                inFlightRefreshes.values + inFlightRefetches.values + drainJobs + refetchWorkers + launchedRefreshes
+            pendingRefetches.clear()
             markerJob = null; stateJob = null; retryJob = null
             // Sign-out wipes the store, so no local write survives to defend.
             localItemWrites.clear()
@@ -840,3 +920,6 @@ class ItemsSync(
         }
     }
 }
+
+/// How many marker refetches run at once.
+private const val REFETCH_WIDTH = 4

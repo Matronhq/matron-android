@@ -37,6 +37,9 @@ interface ChatService {
     /// snapshot for its states and unread counts. Default: nothing to do.
     fun listDidAppear() {}
 
+    /// The chat list went off screen. Default: nothing to do.
+    fun listDidDisappear() {}
+
     /// Mutes notifications for `roomID`. Idempotent.
     suspend fun mute(roomID: String)
 

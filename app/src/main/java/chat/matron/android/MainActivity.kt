@@ -255,6 +255,7 @@ class MainActivity : FragmentActivity() {
         super.onStart()
         chat.matron.android.sync.MainAppVisibility.noteStarted()
         appLock.noteForegrounded()
+        (application as MatronApplication).dependencies.appCameToForeground()
     }
 
     override fun onDestroy() {

@@ -104,6 +104,8 @@ class JournalChatService(
 
     override fun listDidAppear() = engine.chatListDidAppear()
 
+    override fun listDidDisappear() = engine.chatListDidDisappear()
+
     override suspend fun mute(roomID: String) = store.setMuted(true, roomID)
 
 

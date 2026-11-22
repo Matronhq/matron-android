@@ -180,6 +180,10 @@ class JournalSyncEngine(
     private val conversationSettleDelay: Duration = 1500.milliseconds,
     /// Per-day counts of sync work, shown in Settings. `null` counts nothing.
     val stats: SyncStatsRecorder? = null,
+    /// Whether the app's window is in front. On [SyncScope.FOR_YOU] a
+    /// connect made in the background (a background catch-up) skips the
+    /// chat list's snapshot: nobody is looking at it.
+    private val isAppInFront: () -> Boolean = { true },
     /// Wall clock (ms) for the chat list's refresh pacing; tests move it.
     private val clock: () -> Long = System::currentTimeMillis,
 ) : SyncService {
@@ -245,6 +249,8 @@ class JournalSyncEngine(
     private val historyResetListeners = mutableMapOf<UUID, Pair<String, () -> Unit>>()
     /// When the current catch-up began (ms since boot), for [stats].
     private var catchUpStartedAt: Long? = null
+    /// How many chat lists are on screen now.
+    private var chatListsOnScreen = 0
     /// Serialises viewing changes (the local owner, the departure mark and
     /// the socket op) and a fetched chat's late settle write against them.
     private val viewingMutex = Mutex()
@@ -789,9 +795,18 @@ class JournalSyncEngine(
     /// never reach this device, so the list's snippets, states and unread
     /// counts come from the snapshot: read it again, at most once a minute.
     fun chatListDidAppear() {
+        synchronized(lock) { chatListsOnScreen += 1 }
+        refreshListIfShown()
+    }
+
+    /// The app came to the front: a chat list already on screen reads the
+    /// snapshot again, paced like [chatListDidAppear].
+    fun appCameToFront() = refreshListIfShown()
+
+    private fun refreshListIfShown() {
         val now = clock()
         val due = synchronized(lock) {
-            if (_syncScope.value != SyncScope.FOR_YOU || liveConnection == null) return
+            if (_syncScope.value != SyncScope.FOR_YOU || liveConnection == null || chatListsOnScreen == 0) return
             val last = lastListRefreshAt
             (last == null || now - last >= LIST_REFRESH_INTERVAL_MS).also { if (it) lastListRefreshAt = now }
         }
@@ -799,6 +814,21 @@ class JournalSyncEngine(
         // older one rather than racing it to the store.
         if (due) startRefreshSummaries()
     }
+
+    /// The chat list went off screen (see [chatListDidAppear]).
+    fun chatListDidDisappear() {
+        synchronized(lock) { chatListsOnScreen = maxOf(0, chatListsOnScreen - 1) }
+    }
+
+    /// Whether a connect reads the snapshot (the chat list's titles, states
+    /// and unread counts). Always on [SyncScope.EVERYTHING]. On
+    /// [SyncScope.FOR_YOU] it is the whole conversation list, sub-chats
+    /// included, and costly on every reconnect and background wake, so only
+    /// while a chat list is on screen with the app in front; the list reads
+    /// it again itself when it comes on screen.
+    private fun connectReadsSnapshot(): Boolean = synchronized(lock) {
+        _syncScope.value == SyncScope.EVERYTHING || chatListsOnScreen > 0
+    } && (_syncScope.value == SyncScope.EVERYTHING || isAppInFront())
 
     /// Fetches what [convoID] is missing, unless a fetch is already running
     /// on this socket or it was fetched since this socket came up.
@@ -1534,7 +1564,12 @@ class JournalSyncEngine(
                 // a final flush, so this bounds the server's stored device
                 // cursor to one reconnect's worth of frames.
                 if (store.cursor() > 0) runCatching { connection.send(ClientOp.Ack(store.cursor())) }
-                startRefreshSummaries()
+                if (connectReadsSnapshot()) {
+                    startRefreshSummaries()
+                } else {
+                    // Skipped: the list's next appearance reads it at once.
+                    synchronized(lock) { lastListRefreshAt = null }
+                }
                 // Fresh socket: everything unconfirmed is eligible to resend
                 // once (idem-dedup'd server-side), including messages queued
                 // while offline. Launched as a child job so the frame loop

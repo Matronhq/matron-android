@@ -31,6 +31,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -115,7 +116,10 @@ fun ChatListScreen(
 
     // On "For you only" the list's states and unread counts come from the
     // journal's snapshot: coming on screen re-reads it (paced by the engine).
-    LaunchedEffect(viewModel) { viewModel.listDidAppear() }
+    DisposableEffect(viewModel) {
+        viewModel.listDidAppear()
+        onDispose { viewModel.listDidDisappear() }
+    }
 
     var overflowOpen by remember { mutableStateOf(false) }
 

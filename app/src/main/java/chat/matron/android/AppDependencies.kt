@@ -460,6 +460,7 @@ class AppDependencies(
             // Settings › Sync on this device: per device, not per account.
             syncScope = SyncScope.stored(preferences),
             stats = if (live) syncStats else null,
+            isAppInFront = { chat.matron.android.sync.MainAppVisibility.isStarted },
         )
         val maintenance = JournalMaintenance(
             store = store,
@@ -684,6 +685,19 @@ class AppDependencies(
     }
 
     /**
+     * The app's window came to the front. For you reads the tracker list
+     * at once (what changed since its last read), ahead of the socket's
+     * reconnect and replay. Live stacks only; this never builds one.
+     */
+    fun appCameToForeground() {
+        if (signingOut) return
+        synchronized(this) { cores.values.toList() }.forEach {
+            it.itemsSync.refreshOnForeground()
+            it.engine.appCameToFront()
+        }
+    }
+
+    /**
      * Unlocking the account from this device, when the lock froze it: the
      * confirm sheet and signature, `POST /panic/unlock`, then the new token
      * saved and swapped into the API client and the socket. An answer that
@@ -791,6 +805,16 @@ class AppDependencies(
 
     /** The session's pinned desk chats (journal "Pinned desk chats"). */
     fun pinsSync(session: UserSession): PinsSyncing = core(session).pinsSync
+
+    /**
+     * Whether this device's stored session state for a conversation follows
+     * the journal live (every one on Everything, only the Coordinator's on
+     * For you only). The item thread's working indicator asks it.
+     */
+    fun sessionLiveness(session: UserSession): (String) -> Boolean {
+        val engine = core(session).engine
+        return engine::followsSessionStateLive
+    }
 
     /** Settings › Sync on this device: saved here, applied by the session's engine. */
     fun makeSyncScopeSettingModel(session: UserSession, scope: CoroutineScope): SyncScopeSettingModel {
