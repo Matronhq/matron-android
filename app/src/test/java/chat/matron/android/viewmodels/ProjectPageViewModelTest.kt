@@ -141,6 +141,31 @@ class ProjectPageViewModelTest {
     }
 
     @Test
+    fun everyLandedHistoryPageBumpsTheVersionAndAFailureOffersRetry() = runBlocking {
+        var fail = true
+        val timeline = object : FakeTimelineBase() {
+            override suspend fun timelineProjectHistory(id: String, before: String?, limit: Int?): TimelineHistoryPage {
+                if (before == null) return TimelineHistoryPage(listOf(history("2026-11-16")), "2026-11-16")
+                if (fail) throw JournalApiError.Transport("offline")
+                // A page of weeks already listed still moves the cursor on.
+                return TimelineHistoryPage(listOf(history("2026-11-16")), "2026-11-09")
+            }
+        }
+        val vm = ProjectPageViewModel("pj_docs", timeline, FakeProjects())
+        vm.loadHistory()
+        assertEquals(1, vm.state.value.historyVersion)
+        vm.loadMoreHistory()
+        assertTrue(vm.state.value.historyPagingFailed)
+        fail = false
+        vm.loadMoreHistory()
+        assertFalse(vm.state.value.historyPagingFailed)
+        assertEquals(1, vm.state.value.history.size)
+        assertEquals(2, vm.state.value.historyVersion)
+        vm.loadHistory()
+        assertEquals(3, vm.state.value.historyVersion)
+    }
+
+    @Test
     fun missionsSplitOpenByActivityAndDoneByClose() = runBlocking {
         val t = Instant.parse("2026-11-20T10:00:00Z")
         fun m(id: String, state: MissionState = MissionState.OPEN, last: Instant? = null, closed: Instant? = null) =
