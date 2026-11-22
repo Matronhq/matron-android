@@ -148,7 +148,7 @@ fun TimelineWeekView(
                 }
             }
             if (pages && shownExtras != null) {
-                item(key = "end:${shownExtras.projects.size}:${shownExtras.status}") { PageEnd(shownExtras, onLoadMore) }
+                item(key = "end:${shownExtras.projects.size}:${shownExtras.status}:${shownExtras.pages}") { PageEnd(shownExtras, onLoadMore) }
             } else {
                 val also = TimelineFormat.alsoMovedProjects(week)
                 TimelineFormat.alsoMoved(also.size)?.let { line ->
@@ -224,7 +224,7 @@ private fun WeekTop(week: TimelineWeek, now: Instant, layout: TimelineWeekLayout
 private fun PageEnd(extras: TimelineWeekExtras, onLoadMore: () -> Unit) {
     when (extras.status) {
         TimelineWeekExtras.Status.MORE, TimelineWeekExtras.Status.LOADING -> {
-            LaunchedEffect(extras.week, extras.projects.size, extras.status) {
+            LaunchedEffect(extras.week, extras.projects.size, extras.status, extras.pages) {
                 if (extras.status == TimelineWeekExtras.Status.MORE) onLoadMore()
             }
             Row(

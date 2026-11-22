@@ -160,9 +160,11 @@ fun ProjectSectionScreen(
             ProjectSection.FILES -> viewModel.loadFiles()
         }
     }
-    val pictures = state.history.mapNotNull { it.media }.filter { !it.isVideo }.map { it.blobID } +
-        (state.files?.rows ?: emptyList()).filter { it.isImage }.map { it.blobID }.distinct()
+    // The history's pictures (one per week at most) load with the list; the
+    // Files grid loads its own, on screen, into a bounded cache.
+    val pictures = state.history.mapNotNull { it.media }.filter { !it.isVideo }.map { it.blobID }.distinct()
     val images = rememberTimelineImages(pictures, media, serverURL)
+    val thumbnails = remember(media, serverURL) { ThumbnailCache(media, serverURL) }
     val title = ProjectFormat.sectionTitle(section)
     var gallery by remember { mutableStateOf<ImageGallery?>(null) }
     var sourceMessage by remember { mutableStateOf<String?>(null) }
@@ -185,7 +187,8 @@ fun ProjectSectionScreen(
                     open = state.openMissions!!, closed = state.closedMissions, now = Instant.now(), onOpenMission = onOpenMission,
                 )
                 section == ProjectSection.FILES && state.files != null -> ProjectFilesGridView(
-                    files = state.files!!.rows, images = images, now = Instant.now(), hasMore = state.files!!.hasMore,
+                    files = state.files!!.rows, images = emptyMap(), now = Instant.now(), hasMore = state.files!!.hasMore,
+                    loadImage = { blobID -> thumbnails.load(blobID) },
                     onOpenFile = { file ->
                         when (projectFileOpening(file)) {
                             // The latest tap wins: an earlier one still resolving
@@ -193,9 +196,9 @@ fun ProjectSectionScreen(
                             ProjectFileOpening.PICTURE -> {
                                 sourceJob?.cancel()
                                 val rows = state.files!!.rows
-                                val loaded = images[file.blobID]
+                                val loaded = thumbnails[file.blobID]
                                 if (loaded != null) {
-                                    gallery = projectGallery(rows, file, images, serverURL, media)
+                                    gallery = projectGallery(rows, file, thumbnails.snapshot(), serverURL, media)
                                 } else {
                                     // Its thumbnail hasn't landed: fetch it, then open on it.
                                     sourceJob = scope.launch {
@@ -205,7 +208,7 @@ fun ProjectSectionScreen(
                                         if (bytes == null) {
                                             sourceMessage = PICTURE_UNAVAILABLE
                                         } else {
-                                            gallery = projectGallery(rows, file, images + (file.blobID to bytes), serverURL, media)
+                                            gallery = projectGallery(rows, file, thumbnails.snapshot() + (file.blobID to bytes), serverURL, media)
                                         }
                                     }
                                 }

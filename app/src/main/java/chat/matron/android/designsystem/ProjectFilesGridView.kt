@@ -28,6 +28,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.Row
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -99,7 +101,9 @@ object ProjectFileFormat {
             file.isImage -> "Image"
             else -> "File"
         }
-        return "$kind ${name(file)}, ${meta(file, now)}"
+        // A file with no name of its own is named by its kind: said once.
+        val name = name(file)
+        return if (name == kind) "$kind, ${meta(file, now)}" else "$kind $name, ${meta(file, now)}"
     }
 }
 
@@ -132,6 +136,9 @@ fun ProjectFilesGridView(
     version: Int = 0,
     /// The last next-page read failed: the end offers Retry instead.
     pagingFailed: Boolean = false,
+    /// Loads a picture's bytes while its tile is on screen; null shows only
+    /// what [images] holds.
+    loadImage: (suspend (String) -> Any?)? = null,
 ) {
     BoxWithConstraints(modifier.fillMaxSize()) {
         val columns = if (maxWidth >= 700.dp) 3 else 2
@@ -148,7 +155,12 @@ fun ProjectFilesGridView(
                 }
             }
             items(files, key = { it.id }) { file ->
-                ProjectFileTile(file, images[file.blobID], now, onOpen = { onOpenFile(file) })
+                // A tile loads its picture while it is on screen and lets go of
+                // it when it scrolls away; the host's cache bounds what is kept.
+                val image by produceState(images[file.blobID], file.blobID, loadImage) {
+                    if (value == null && file.isImage && loadImage != null) value = loadImage(file.blobID)
+                }
+                ProjectFileTile(file, image, now, onOpen = { onOpenFile(file) })
             }
             if (hasMore && pagingFailed) {
                 item(key = "retry:${files.size}", span = { GridItemSpan(maxLineSpan) }) {

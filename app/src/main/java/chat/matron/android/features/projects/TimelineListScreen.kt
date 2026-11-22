@@ -68,6 +68,7 @@ fun TimelineListScreen(
                     content.list, now, onOpenProject,
                     onLoadMore = if (content.list.nextBefore != null) ({ viewModel.loadMoreInBackground(place) }) else null,
                     pagingFailed = place in state.pagingFailed,
+                    version = state.listPages[place] ?: 0,
                 )
                 is TimelineListContent.Stalled -> StalledListView(
                     lede = if (place == TimelinePlace.Quiet) TimelineListCopy.QUIET_LEDE else TimelineListCopy.LONG_LEDE,
@@ -78,6 +79,7 @@ fun TimelineListScreen(
                     content.rows, now, onOpenProject,
                     onLoadMore = if (state.hasMoreFinished) ({ viewModel.loadMoreInBackground(place) }) else null,
                     pagingFailed = place in state.pagingFailed,
+                    version = state.listPages[place] ?: 0,
                 )
                 TimelineListContent.Failed -> ProjectPlaceholder(TimelineFormat.FAILED, TimelineFormat.FAILED_DETAIL) {
                     Button(onClick = { scope.launch { viewModel.loadList(place) } }) { Text(TimelineFormat.TRY_AGAIN) }
