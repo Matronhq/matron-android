@@ -173,7 +173,11 @@ class KeystoreApprovalKeyProvider(
         // Only a key held in secure hardware (the TEE or StrongBox) is an
         // approval key: one the Keystore keeps in software could be copied
         // off a compromised device.
-        if (!inSecureHardware(alias) && !allowSoftwareKeys) {
+        val secure = inSecureHardware(alias)
+        if (!secure && allowSoftwareKeys) {
+            chat.matron.android.models.MatronDebug.breadcrumb("approval key held in software; accepted in a debuggable build only")
+        }
+        if (!secure && !allowSoftwareKeys) {
             runCatching { KeyStore.getInstance(KEYSTORE).apply { load(null) }.deleteEntry(alias) }
             throw ApprovalKeyFailure.Other(
                 "This device's secure hardware can't hold the key, so it can't approve with one. Approve on another device.",
