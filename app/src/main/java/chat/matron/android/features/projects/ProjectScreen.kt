@@ -58,6 +58,7 @@ import chat.matron.android.viewmodels.ProjectPageState
 import chat.matron.android.viewmodels.ProjectPageViewModel
 import java.time.Instant
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import okhttp3.HttpUrl
 
@@ -194,7 +195,13 @@ fun ProjectSectionScreen(
                                     // Its thumbnail hasn't landed: fetch it, then open on it.
                                     sourceJob = scope.launch {
                                         val bytes = try { media.image(projectMediaURL(serverURL, file.blobID)) } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (_: Throwable) { null }
-                                        gallery = projectGallery(rows, file, images + listOfNotNull(bytes?.let { file.blobID to it }), serverURL, media)
+                                        // A later tap won while this one was fetching: it says nothing.
+                                        ensureActive()
+                                        if (bytes == null) {
+                                            sourceMessage = PICTURE_UNAVAILABLE
+                                        } else {
+                                            gallery = projectGallery(rows, file, images + (file.blobID to bytes), serverURL, media)
+                                        }
                                     }
                                 }
                             }
@@ -234,6 +241,9 @@ fun sectionLoaded(state: ProjectPageState, section: ProjectSection): Boolean = w
     ProjectSection.MISSIONS -> state.openMissions != null
     ProjectSection.FILES -> state.files != null
 }
+
+/// Said when a tapped picture could not be fetched for the viewer.
+const val PICTURE_UNAVAILABLE = "Couldn't load this picture. Check the connection and try again."
 
 internal fun projectMediaURL(serverURL: HttpUrl, blobID: String): String =
     serverURL.newBuilder().addPathSegment("media").addPathSegment(blobID).build().toString()
