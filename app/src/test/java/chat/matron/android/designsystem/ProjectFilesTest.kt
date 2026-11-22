@@ -35,6 +35,28 @@ class ProjectFilesTest {
     }
 
     @Test
+    fun aFailedReloadOverFilesOnScreenSaysSoAndKeepsPaging() = runBlocking {
+        var failing = false
+        val projects = object : FakeProjects() {
+            override suspend fun projectFiles(id: String, before: String?, limit: Int?): ProjectFilesPage {
+                if (failing) throw chat.matron.android.journal.JournalApiError.Transport("offline")
+                return ProjectFilesPage(1, listOf(file("a", type = "image/png")), null)
+            }
+        }
+        val timeline = object : FakeTimelineBase() {
+            override suspend fun timelineProject(id: String) = TimelineProjectPage(TimelineProjectRef(id, 12, "Docs site launch"))
+        }
+        val vm = ProjectPageViewModel("pj_docs", timeline, projects)
+        vm.loadFiles()
+        val version = vm.state.value.filesVersion
+        failing = true
+        vm.loadFiles()
+        assertEquals("Couldn't reach the server — offline", vm.state.value.error)
+        assertEquals(listOf("a"), vm.state.value.files?.rows?.map { it.blobID })
+        assertEquals(version + 1, vm.state.value.filesVersion)
+    }
+
+    @Test
     fun theViewerOpensNeighboursFromTheGridsBytes() = runBlocking {
         val files = listOf(file("a", type = "image/png"), file("b", type = "image/png"))
         var fetched = 0
