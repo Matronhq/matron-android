@@ -5,6 +5,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.platform.testTag
+import chat.matron.android.models.ConversationRoom
+import kotlinx.coroutines.flow.MutableStateFlow
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -76,6 +80,7 @@ import chat.matron.android.designsystem.JumpToBottomButton
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.PaginatingHeader
 import chat.matron.android.designsystem.ChatTopTrailingControls
+import chat.matron.android.designsystem.RoomsChip
 import chat.matron.android.designsystem.chatTopTrailingShowsJump
 import chat.matron.android.designsystem.SubtaskLinkCard
 import chat.matron.android.designsystem.TimelineLoadingIndicator
@@ -157,6 +162,10 @@ fun ChatScreen(
     /// Pin… / Move pin… / Unpin in the "⋮" menu (journal pinned desk
     /// chats). `null` — a journal without pins, previews — offers none.
     pinMenu: ChatPinMenu? = null,
+    /// The agent-chat rooms this conversation is in: the header's
+    /// "Rooms · n" chip and the sheet it opens. `null` (previews/tests)
+    /// offers no chip.
+    conversationRooms: ConversationRoomsHost? = null,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val chatSearch by chatVM.chatSearch.collectAsStateWithLifecycle()
@@ -168,6 +177,9 @@ fun ChatScreen(
     val sessionStatus by chatVM.sessionStatus.collectAsStateWithLifecycle()
 
     var showSessionStatus by remember { mutableStateOf(false) }
+    var showRoomsSheet by remember { mutableStateOf(false) }
+    val noRooms = remember { MutableStateFlow(emptyList<ConversationRoom>()) }
+    val conversationRoomList by (conversationRooms?.rooms ?: noRooms).collectAsStateWithLifecycle()
     var showMediaBrowser by remember { mutableStateOf(false) }
     var showSwitcher by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
@@ -268,18 +280,36 @@ fun ChatScreen(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.semantics { contentDescription = a11yTitle },
                         )
-                        chatContextLine(boxName, sessionStatus?.workdir)?.let { context ->
-                            Text(
-                                context,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                // The Apple original middle-truncates (the
-                                // tail of a path is the part worth keeping);
-                                // TextOverflow.MiddleEllipsis needs Compose
-                                // 1.8, so tail ellipsis until the BOM moves.
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                        val contextLine = chatContextLine(boxName, sessionStatus?.workdir)
+                        val roomCount = if (conversationRooms != null) conversationRoomList.size else 0
+                        if (contextLine != null || roomCount > 0) {
+                            // "box · ~/workdir", then the "Rooms · n" chip
+                            // for a conversation in an agent-chat room: the
+                            // path truncates first, the chip keeps its size.
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                contextLine?.let { context ->
+                                    Text(
+                                        context,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        // The Apple original middle-truncates (the
+                                        // tail of a path is the part worth keeping);
+                                        // TextOverflow.MiddleEllipsis needs Compose
+                                        // 1.8, so tail ellipsis until the BOM moves.
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false),
+                                    )
+                                }
+                                RoomsChip(
+                                    count = roomCount,
+                                    onClick = { showRoomsSheet = true },
+                                    modifier = Modifier.testTag("chat.roomsChip"),
+                                )
+                            }
                         }
                     }
                 },
@@ -441,6 +471,22 @@ fun ChatScreen(
                 boxName = boxName,
                 subagents = children,
                 onOpenSubagent = onOpenChild,
+            )
+        }
+    }
+    if (showRoomsSheet && conversationRooms != null) {
+        // Full height straight away: a room's timeline wants the room.
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(onDismissRequest = { showRoomsSheet = false }, sheetState = sheetState) {
+            ConversationRoomsSheet(
+                rooms = conversationRoomList,
+                host = conversationRooms,
+                onDone = { showRoomsSheet = false },
+                // Close first, then open: the destination is under the sheet.
+                onOpenConversation = { id ->
+                    showRoomsSheet = false
+                    onOpenConversation(id)
+                },
             )
         }
     }

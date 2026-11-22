@@ -141,6 +141,11 @@ data class ConvoSummaryDTO(
     /// field. Absent never clears a stored set (same discipline as
     /// [agentDeviceID]); present replaces it wholesale.
     val participants: List<Long>? = null,
+    /// The conversations taking part in an agent-chat room (each
+    /// participant agent's own session), or `null` when the server omits the
+    /// key — a server predating the field. Present replaces the stored list
+    /// wholesale; absent leaves it alone, like [participants].
+    val participantConvos: List<String>? = null,
     /// When the conversation was archived (ms), from a journal that syncs
     /// the archive; `null` when it is not archived or the journal says
     /// nothing. Read only when the row is first created (see
@@ -589,6 +594,7 @@ class JournalApi(
                 // Multi-agent room membership (owner + joined). Absent for
                 // solo conversations and on older servers -> null.
                 participants = c.longArrayOrNull("participants"),
+                participantConvos = c.stringArrayOrNull("participant_convos"),
                 archivedAt = c.longOrNull("archived_at"),
             )
         }

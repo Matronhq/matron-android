@@ -133,6 +133,25 @@ class JournalApiTest {
         assertNull(snap.conversations.first { it.id == "solo" }.participants)
     }
 
+    /// A room row carries its `participant_convos`; absent degrades to null
+    /// (an older server: the stored list stays), and a list with a
+    /// non-string element is dropped whole rather than half-read.
+    @Test
+    fun snapshotParsesParticipantConvos() = runBlocking {
+        server.enqueue(
+            json(
+                200,
+                """{"conversations":[{"id":"room","title":"T","session_state":"waiting","last_seq":1,"snippet":"","created_at":0,"participant_convos":["c-alice","c-bob"]},""" +
+                    """{"id":"odd","title":"O","session_state":"waiting","last_seq":1,"snippet":"","created_at":0,"participant_convos":["c-alice",7]},""" +
+                    """{"id":"solo","title":"S","session_state":"running","last_seq":1,"snippet":"","created_at":0}],"seq":1}""",
+            )
+        )
+        val snap = api(token = "t").snapshot()
+        assertEquals(listOf("c-alice", "c-bob"), snap.conversations.first { it.id == "room" }.participantConvos)
+        assertNull(snap.conversations.first { it.id == "odd" }.participantConvos)
+        assertNull(snap.conversations.first { it.id == "solo" }.participantConvos)
+    }
+
     @Test
     fun snapshotToleratesMissingLastTS() = runBlocking {
         server.enqueue(json(200, """{"conversations":[{"id":"c1","title":"T","session_state":"waiting","last_seq":9,"unread_count":2,"snippet":"s","created_at":5}],"seq":9}"""))
