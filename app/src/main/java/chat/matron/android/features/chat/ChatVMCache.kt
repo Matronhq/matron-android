@@ -110,6 +110,9 @@ class ChatVMCache(
      * session [scope] after the user navigates away, and if it then fails,
      * the draft and tray it puts back are still there when the item is
      * reopened. An evicted VM is stopped (its screen already stopped it).
+     * A VM with a send in flight is never evicted: a new one for the same item
+     * would show an empty box, and the send's failure would put the reply
+     * back on the evicted one.
      */
     fun itemDetailViewModel(itemID: String): ItemDetailViewModel {
         itemDetailEntries.remove(itemID)?.let { cached ->
@@ -128,8 +131,8 @@ class ChatVMCache(
         )
         itemDetailEntries[itemID] = vm
         if (itemDetailEntries.size > limit) {
-            val eldest = itemDetailEntries.keys.first()
-            itemDetailEntries.remove(eldest)?.stop()
+            val eldest = itemDetailEntries.entries.firstOrNull { !it.value.isBusy.value }?.key
+            if (eldest != null) itemDetailEntries.remove(eldest)?.stop()
         }
         return vm
     }

@@ -1377,4 +1377,19 @@ class ComposerViewModelTest {
 
         assertEquals("my draft", persistentVM(unsentStore(root)).input)
     }
+
+    @Test
+    fun trayChangeDuringRecall_isSavedWithTheStashedDraft() = runBlocking {
+        val root = Files.createTempDirectory("unsent").toFile()
+        val vm = persistentVM(unsentStore(root))
+        vm.input = "sent earlier"
+        vm.send()
+        vm.input = "my draft"
+        vm.recallOlder()
+        vm.attachFiles(listOf(makeTempFile("pic.png", "PNG")))
+
+        val again = persistentVM(unsentStore(root))
+        assertEquals("my draft", again.input)
+        assertEquals(listOf("pic.png"), again.stagedAttachments.value.map { it.filename })
+    }
 }

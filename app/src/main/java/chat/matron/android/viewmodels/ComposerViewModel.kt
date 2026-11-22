@@ -144,9 +144,10 @@ class ComposerViewModel(
     private fun persistUnsent() {
         val store = unsentReplies ?: return
         if (restoringUnsent) return
-        // A recalled sent line isn't a draft: the stashed draft stays saved.
-        if (lastRecalledValue != null && input == lastRecalledValue) return
-        store.save(unsentPlace, UnsentReply(input, _stagedAttachments.value), unsentEpoch)
+        // A recalled sent line isn't a draft: while a walk shows one, the
+        // stashed draft is what is saved, with the tray as it is now.
+        val text = history.stashed ?: input
+        store.save(unsentPlace, UnsentReply(text, _stagedAttachments.value), unsentEpoch)
     }
 
     /// Whether [send] would do anything — an attachment alone is a valid message.

@@ -290,7 +290,9 @@ class UnsentReplyStore(
 
         /// [reply] ahead of [box]: its attachments first, its text after
         /// whatever [box] already says. An attachment already there isn't
-        /// added twice.
+        /// added twice, and nor is text the box already holds (a failed send
+        /// that put itself back, or a recovery interrupted before its record
+        /// was dropped).
         fun merge(reply: UnsentReply, box: UnsentReply): UnsentReply {
             val known = box.attachments.map { it.id }.toSet()
             val attachments = reply.attachments.filter { it.id !in known } + box.attachments
@@ -299,6 +301,7 @@ class UnsentReplyStore(
             val text = when {
                 back.isEmpty() -> box.text
                 typed.isEmpty() -> reply.text
+                typed.contains(back) -> box.text
                 else -> "$typed\n\n$back"
             }
             return UnsentReply(text, attachments)

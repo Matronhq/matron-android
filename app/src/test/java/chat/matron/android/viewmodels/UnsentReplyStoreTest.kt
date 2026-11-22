@@ -158,4 +158,11 @@ class UnsentReplyStoreTest {
         assertEquals("typed\n\nback", merged.text)
         assertEquals(listOf(a, b), merged.attachments)
     }
+
+    @Test
+    fun mergeDoesNotRepeatTextTheBoxAlreadyHolds() {
+        val merged = UnsentReplyStore.merge(UnsentReply("back"), UnsentReply("typed\n\nback"))
+        assertEquals("typed\n\nback", merged.text)
+        assertEquals("back", UnsentReplyStore.merge(UnsentReply("back"), UnsentReply("back")).text)
+    }
 }
