@@ -1,6 +1,7 @@
 package chat.matron.android
 
 import androidx.test.core.app.ApplicationProvider
+import chat.matron.android.chat.MediaDiskCache
 import chat.matron.android.journal.db.MatronDatabase
 import chat.matron.android.models.UserSession
 import chat.matron.android.search.SearchDatabase
@@ -243,7 +244,7 @@ class AppDependenciesTest {
      * so it wipes any leftovers before the first core opens.
      */
     @Test
-    fun wipeLocalDataForFreshLogin_removesMirrorFilesAndSearchIndex() = runBlocking {
+    fun wipeLocalDataForFreshLogin_removesMirrorFilesSearchIndexAndCachedMedia() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val deps = deps()
 
@@ -251,6 +252,8 @@ class AppDependenciesTest {
         // and a still-populated search index.
         val journalDir = File(StoragePaths.appSupport(context), "journal-store").apply { mkdirs() }
         val stale = File(journalDir, "stale-user.sqlite").apply { writeText("stale") }
+        val staleMedia = File(MediaDiskCache.directory(MediaDiskCache.rootDirectory(context.cacheDir), "old"), "blob")
+            .apply { parentFile!!.mkdirs(); writeText("previous user's image") }
         deps.search!!.index(
             roomID = "!room:s",
             eventID = "42",
@@ -262,6 +265,7 @@ class AppDependenciesTest {
         deps.wipeLocalDataForFreshLogin()
 
         assertFalse("stale mirror file must be deleted on fresh login", stale.exists())
+        assertFalse("cached media must be deleted on fresh login", staleMedia.exists())
         assertTrue(
             "search index must be wiped on fresh login",
             deps.search!!.query("needle", limit = 10).isEmpty(),

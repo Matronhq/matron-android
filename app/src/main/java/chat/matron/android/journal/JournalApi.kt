@@ -374,7 +374,7 @@ class JournalApi(
     private val authResponses: ((Int) -> Unit)? = null,
 ) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
-    TrackerSearching,
+    TrackerSearching, JournalSearching,
     ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding, ContactsProviding,
     InviteAskAnswering {
     constructor(
@@ -1156,7 +1156,7 @@ class JournalApi(
         ) ?: throw JournalApiError.Transport("malformed lookup response")
 
     /// The tracker-wide search (protocol.md "Unified search"). `chats=0`:
-    /// this app searches message text in its own index.
+    /// message text is searched through [searchChats] instead.
     override suspend fun searchAll(query: String, kinds: Set<TrackerSearchKind>, limit: Int): List<TrackerSearchHit> =
         TrackerSearchDecoding.hits(
             request(
@@ -1167,6 +1167,41 @@ class JournalApi(
                     "kinds" to kinds.joinToString(",") { it.wire },
                     "chats" to "0",
                 ),
+            ),
+        )
+
+    /// The message search's app modes (protocol.md "Journal search"):
+    /// one row per conversation, best match first.
+    override suspend fun searchChats(query: String, limit: Int, excludeSubagents: Boolean): List<JournalSearchChat> =
+        JournalSearchDecoding.chats(
+            request(
+                path = "/search",
+                query = listOf(
+                    "q" to query,
+                    "mode" to "chats",
+                    "limit" to limit.toString(),
+                    "exclude_subagents" to if (excludeSubagents) "1" else "0",
+                ),
+            ),
+        )
+
+    /// Matching messages newest first, inside [convoID] when one is given.
+    override suspend fun searchRecent(
+        query: String,
+        convoID: String?,
+        limit: Int,
+        excludeSubagents: Boolean,
+    ): List<JournalSearchHit> =
+        JournalSearchDecoding.hits(
+            request(
+                path = "/search",
+                query = buildList {
+                    add("q" to query)
+                    add("mode" to "recent")
+                    add("limit" to limit.toString())
+                    add("exclude_subagents" to if (excludeSubagents) "1" else "0")
+                    convoID?.let { add("convo_id" to it) }
+                },
             ),
         )
 

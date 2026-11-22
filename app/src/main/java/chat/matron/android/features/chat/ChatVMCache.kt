@@ -52,7 +52,7 @@ class ChatVMCache(
             grants = deps.grantService(session),
             inviteAsks = deps.inviteAskService(session),
             inviteLinks = deps.revealedInviteLinks(session),
-            search = deps.search,
+            search = deps.messageSearch(session),
             sessionStopper = deps.sessionStopper(session),
         )
         val pair = chat to ComposerViewModel(
