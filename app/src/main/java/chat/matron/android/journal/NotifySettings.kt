@@ -183,7 +183,7 @@ sealed interface NotifyChange {
             NotifySettings.preset(mode).orEmpty().map { (event, on) -> NotifyAtom.Event(event, on) }
         is SetEvent -> listOf(
             NotifyAtom.Mode(NotifySettings.Mode.CUSTOM),
-            NotifyAtom.Event(event, event == NotifySettings.Event.PROMPTS || on),
+            NotifyAtom.Event(event, event == NotifySettings.Event.PROMPTS || on, movesToCustom = true),
         )
         is SetDeviceLevel -> listOf(NotifyAtom.DeviceLevel(level))
         is ConvoLevel -> listOf(NotifyAtom.ConvoLevel(convoID, level))
@@ -227,10 +227,16 @@ sealed interface NotifyAtom {
         override fun appliedTo(view: NotifyView) = view.copy(settings = view.settings.copy(mode = mode))
     }
 
-    data class Event(val event: NotifySettings.Event, val on: Boolean) : NotifyAtom {
+    /// [movesToCustom]: a switch flipped by the user, which the journal
+    /// always applies with mode Custom — so it never shows beside a preset,
+    /// even when a later save of the mode means its own mode edit is skipped.
+    data class Event(val event: NotifySettings.Event, val on: Boolean, val movesToCustom: Boolean = false) : NotifyAtom {
         override val key get() = "event:${event.wire}"
-        override fun appliedTo(view: NotifyView) =
-            view.copy(settings = view.settings.copy(events = view.settings.events + (event to on)))
+        override fun appliedTo(view: NotifyView): NotifyView {
+            val s = view.settings
+            val mode = if (movesToCustom) NotifySettings.Mode.CUSTOM else s.mode
+            return view.copy(settings = s.copy(mode = mode, events = s.events + (event to on)))
+        }
     }
 
     data class DeviceLevel(val level: NotifyDeviceLevel) : NotifyAtom {

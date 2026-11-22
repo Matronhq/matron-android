@@ -143,4 +143,19 @@ class NotifySettingsTest {
         assertEquals(NotifySettings.Mode.ALL, (frame as ServerFrame.NotifyFrame).settings.mode)
         assertNull("a malformed frame is skipped", ServerFrame.decode("""{"kind":"notify","settings":{}}"""))
     }
+
+    @Test
+    fun aFlippedSwitchNeverShowsBesideAPreset() {
+        val preset = NotifyView(
+            NotifySettings(NotifySettings.Mode.ALL, NotifySettings.preset(NotifySettings.Mode.ALL)!!, true, emptyList()),
+            NotifyDeviceLevel.ALL,
+        )
+        val switchOnly = NotifyChange.SetEvent(NotifySettings.Event.ROOMS, true).atoms().filterNot { it.key == "mode" }
+        val shown = switchOnly.fold(preset) { v, atom -> atom.appliedTo(v) }
+        assertEquals(NotifySettings.Mode.CUSTOM, shown.settings.mode)
+        assertTrue(shown.settings.isOn(NotifySettings.Event.ROOMS))
+        val presetEvents = NotifyChange.SetMode(NotifySettings.Mode.COORDINATOR).atoms().filterNot { it.key == "mode" }
+        assertEquals("a preset's switches leave the mode alone", NotifySettings.Mode.ALL,
+            presetEvents.fold(preset) { v, atom -> atom.appliedTo(v) }.settings.mode)
+    }
 }
