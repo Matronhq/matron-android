@@ -228,8 +228,10 @@ class JournalSyncEngine(
     /// Conversations on screen fetched since the live socket came up: only
     /// these are known to be complete up to the cursor.
     private val caughtUpViewed = mutableSetOf<String>()
-    /// Fetched on this socket, waiting for their settle read: not fetched again.
-    private val settlingViewed = mutableSetOf<String>()
+    /// Fetched on this socket, waiting for their settle read, with the
+    /// viewing generation they were fetched in: not fetched again while that
+    /// viewing lasts. A chat reopened since is fetched afresh.
+    private val settlingViewed = mutableMapOf<String, Int>()
     /// Conversation → the socket its running fetch belongs to. A fetch from
     /// a socket since replaced must not hold back the new socket's.
     private val catchUpsInFlight = mutableMapOf<String, JournalConnection>()
@@ -802,7 +804,8 @@ class JournalSyncEngine(
         val (connection, generation) = synchronized(lock) {
             val connection = liveConnection ?: return
             if (_syncScope.value != SyncScope.FOR_YOU || !scopedReplayDone || liveHelloSync != SyncScope.FOR_YOU) return
-            if (viewingConvoID != convoID || convoID in caughtUpViewed || convoID in settlingViewed) return
+            if (viewingConvoID != convoID || convoID in caughtUpViewed) return
+            if (settlingViewed[convoID] == viewingGeneration) return
             if (catchUpsInFlight[convoID] === connection) return
             catchUpsInFlight[convoID] = connection
             _fetchingConversations.value = _fetchingConversations.value + convoID
@@ -866,7 +869,7 @@ class JournalSyncEngine(
                     // Complete up to the cursor only once the settle read
                     // has covered the handover (see settleConversation).
                     settle = true
-                    settlingViewed += convoID
+                    settlingViewed[convoID] = generation
                 }
             }
         } catch (e: CancellationException) {
@@ -909,7 +912,7 @@ class JournalSyncEngine(
         try {
             settle(source, convoID, connection, generation)
         } finally {
-            synchronized(lock) { settlingViewed -= convoID }
+            synchronized(lock) { if (settlingViewed[convoID] == generation) settlingViewed.remove(convoID) }
         }
     }
 

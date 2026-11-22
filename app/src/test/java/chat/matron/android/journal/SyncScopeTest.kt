@@ -471,6 +471,28 @@ class SyncScopeTest {
     }
 
     @Test
+    fun reopeningAChatWhileItsSettleIsPendingFetchesItAgain() = runBlocking {
+        val pages = FakePages(listOf(event(5)))
+        val socket = FakeWebSocketConnection().apply { serve(helloOK(6)); serve(cursorFrame(6)) }
+        val store = seededStore()
+        val engine = JournalSyncEngine(
+            api = FakeSnapshotSource(), store = store, connector = FakeConnector(listOf(socket)), token = "t",
+            ownSender = "user:alice", backoffBaseSeconds = 0.01, pages = pages, syncScope = SyncScope.FOR_YOU,
+            conversationSettleDelay = 1000.milliseconds,
+        )
+        engine.beginSync()
+        engine.waitUntilReady()
+        engine.setViewing("c1")
+        waitUntil { store.events("c1").isNotEmpty() }
+        engine.setViewing("c2")
+        pages.events = listOf(event(5), event(8))
+        engine.setViewing("c1") // the first settle is still waiting
+        waitUntil { store.events("c1").map { it.seq } == listOf(5L, 8L) }
+        assertEquals(listOf(5L, 8L), store.events("c1").map { it.seq })
+        engine.endSync()
+    }
+
+    @Test
     fun clearViewingLeavesANewerChatViewed() = runBlocking {
         val socket = FakeWebSocketConnection().apply { serve(helloOK(0)); serve(cursorFrame(0)) }
         val engine = makeEngine(seededStore(), listOf(socket))
