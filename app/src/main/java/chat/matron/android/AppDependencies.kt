@@ -572,9 +572,11 @@ class AppDependencies(
      */
     suspend fun chatMissionLine(session: UserSession, convoID: String): Result<ChatMissionLine?> =
         try {
-            val links = core(session).api.conversationMissions(convoID)
-            val line = ChatMissionLine.from(links)
-            Result.success(line?.projectID?.let { id -> line.copy(projectTitle = projectTitle(session, id)) } ?: line)
+            val api = core(session).api
+            val line = ChatMissionLine.from(api.conversationMissions(convoID))
+            // The project's title is part of the read: when it fails, the
+            // whole read fails and the header keeps what it showed.
+            Result.success(line?.projectID?.let { id -> line.copy(projectTitle = api.timelineProject(id).project.title) } ?: line)
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
         } catch (error: Throwable) {

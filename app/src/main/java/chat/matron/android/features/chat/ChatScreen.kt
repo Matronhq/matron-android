@@ -36,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -485,20 +486,29 @@ fun ChatHeaderTitle(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.semantics { contentDescription = a11yTitle },
         )
-        chatContextLine(boxName, workdir)?.let { context ->
-            Text(
-                context,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                // The Apple original middle-truncates (the
-                // tail of a path is the part worth keeping);
-                // TextOverflow.MiddleEllipsis needs Compose
-                // 1.8, so tail ellipsis until the BOM moves.
-                overflow = TextOverflow.Ellipsis,
-            )
+        // "box · ~/workdir", then the mission and its project, sharing one
+        // line so the header keeps the app bar's two-line height at any
+        // font size; when space is short both truncate.
+        val context = chatContextLine(boxName, workdir)
+        if (context != null || missionLine != null) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                context?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        // The Apple original middle-truncates (the
+                        // tail of a path is the part worth keeping);
+                        // TextOverflow.MiddleEllipsis needs Compose
+                        // 1.8, so tail ellipsis until the BOM moves.
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                }
+                missionLine?.let { line -> ChatMissionLineView(line, onOpenMission, onOpenProject, Modifier.weight(1.5f, fill = false)) }
+            }
         }
-        missionLine?.let { line -> ChatMissionLineView(line, onOpenMission, onOpenProject) }
     }
 }
 
