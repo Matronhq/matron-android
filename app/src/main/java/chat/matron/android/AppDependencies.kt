@@ -82,6 +82,15 @@ import chat.matron.android.journal.CredentialSignal
 import chat.matron.android.journal.LegacyStoreFileMove
 import chat.matron.android.push.JournalPushService
 import chat.matron.android.push.PushService
+import chat.matron.android.push.FirebasePush
+import chat.matron.android.push.PushKeyStore
+import chat.matron.android.push.PushMessageHandler
+import chat.matron.android.push.PushNotificationActions
+import chat.matron.android.push.PushNotifier
+import chat.matron.android.push.PushRegistration
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.runBlocking
 import chat.matron.android.search.SearchBackfillCoordinator
 import chat.matron.android.search.SearchDatabase
 import chat.matron.android.search.SearchService
@@ -138,9 +147,9 @@ import okhttp3.OkHttpClient
  * Android adaptations vs iOS:
  * - No App Group container: the Room databases live under [StoragePaths.appSupport].
  * - `FileSessionStore` → [EncryptedPrefsSessionStore] (EncryptedSharedPreferences).
- * - Push is dormant (FCM not wired). [pushService] returns a [JournalPushService]
- *   whose `requestPermission()` is a stub — kept so a future FCM token can flow to
- *   the same `/push/register` endpoint. APNs delegate plumbing is dropped entirely.
+ * - Push is Firebase Cloud Messaging ([FirebasePush]), on only in builds that
+ *   name a Firebase project. [pushService] registers the FCM token and this
+ *   phone's [PushKeyStore] key with the journal's `/push/fcm/register`.
  */
 class AppDependencies(
     val context: Context,
@@ -165,6 +174,10 @@ class AppDependencies(
         }
     },
     private val searchDatabaseFactory: (Context, File) -> SearchDatabase = { c, f -> SearchDatabase.open(c, f) },
+    /** This phone's key for sealed notification content; AndroidKeyStore-backed, so a seam. */
+    private val pushKeyStoreFactory: (Context) -> PushKeyStore = {
+        PushKeyStore(EncryptedPrefsSessionStore.create(it, PushKeyStore.FILE))
+    },
     /**
      * Background scope for startup sweeps and sign-out teardown. Injectable so
      * tests can pump teardown jobs on a paused dispatcher and pin down the
@@ -365,14 +378,96 @@ class AppDependencies(
         runCatching { File(context.cacheDir, "attachments").deleteRecursively() }
     }
 
-    /** Debuggable builds register sandbox push tokens; release builds are prod. */
-    private val pushEnvironment: JournalApi.PushEnvironment
-        get() =
-            if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
-                JournalApi.PushEnvironment.SANDBOX
-            } else {
-                JournalApi.PushEnvironment.PROD
-            }
+    /** Null when the encrypted store cannot be opened: push then registers without a key. */
+    private val pushKeyStore: PushKeyStore? by lazy {
+        runCatching { pushKeyStoreFactory(context) }
+            .onFailure { MatronDebug.breadcrumb("push: key store unavailable: ${it.javaClass.simpleName}") }
+            .getOrNull()
+    }
+
+    val pushNotifier: PushNotifier by lazy { PushNotifier(context) }
+
+    // After init: `preferences` is set there.
+    private val pushRegistrationState =
+        MutableStateFlow(PushRegistration.fromStored(preferences.getString(PUSH_REGISTRATION_KEY)))
+
+    /**
+     * Where this phone's push registration stands (Settings → Notifications
+     * says so). Null until the first attempt of this sign-in; remembered
+     * across launches.
+     */
+    val pushRegistration: StateFlow<PushRegistration?> get() = pushRegistrationState
+
+    private fun notePushRegistration(result: PushRegistration) {
+        pushRegistrationState.value = result
+        preferences.setString(PUSH_REGISTRATION_KEY, result.stored)
+    }
+
+    /**
+     * Bumped at every sign-out. Push work that began before one (a token
+     * registration, an answer from a notification, a message being shown)
+     * checks it afterwards and leaves no trace for the signed-out account.
+     */
+    @Volatile
+    var pushGeneration: Long = 0L
+        private set
+
+    /** Registers this phone for push with [session]'s journal (after sign-in, and at each launch). */
+    suspend fun registerPush(session: UserSession): PushRegistration {
+        val started = pushGeneration
+        return pushService(session, started).register().also { finishRegistration(started, it) }
+    }
+
+    /// Records [result] unless a sign-out came in between. (No key can be
+    /// left behind: [PushKeyStore.publicKeyForRegistration] makes none once
+    /// the generation has moved, under the lock sign-out's delete takes.)
+    private fun finishRegistration(started: Long, result: PushRegistration) {
+        if (pushGeneration == started) notePushRegistration(result)
+    }
+
+    /**
+     * A new FCM token from Firebase: the signed-in account's journal learns
+     * it. It may arrive with no activity running, so this uses the stored
+     * session and a plain API client, as [answerItem] does.
+     */
+    suspend fun registerPushToken(token: String) {
+        val started = pushGeneration
+        val session = runCatching { auth.restoreSession() }.getOrNull() ?: return
+        val api = JournalApi(session.homeserverURL, sharedClient, session.accessToken)
+        val result = JournalPushService(
+            api,
+            pushKey = { pushKeyStore?.publicKeyForRegistration { pushGeneration == started } },
+            token = { token },
+        ).register(token)
+        finishRegistration(started, result)
+    }
+
+    /** Turns FCM messages into notifications (MatronMessagingService). */
+    fun pushMessageHandler(): PushMessageHandler = PushMessageHandler(
+        notifier = pushNotifier,
+        privateKey = { pushKeyStore?.privateKey() },
+        signedIn = { runCatching { runBlocking { auth.restoreSession() } }.getOrNull() != null },
+        generation = { pushGeneration },
+    )
+
+    /**
+     * A button tapped on an item's notification: the same answer a tap on
+     * the item's own button sends (the label as both the action and the
+     * comment's text). It may run with no activity and no session core, so
+     * it uses the stored session and a plain API client. Returns whether
+     * the journal took the answer.
+     */
+    suspend fun answerItem(answer: PushNotificationActions.Answer): Boolean {
+        val session = runCatching { auth.restoreSession() }.getOrNull() ?: return false
+        val api = JournalApi(session.homeserverURL, sharedClient, session.accessToken)
+        return runCatching {
+            api.commentItem(
+                id = answer.itemID, body = answer.label, attachments = emptyList(),
+                idempotencyKey = java.util.UUID.randomUUID().toString(), action = answer.label,
+                replyTo = answer.replyTo, replaces = null, selected = null,
+            )
+        }.isSuccess
+    }
 
     /**
      * Builds (or returns the cached) journal stack for [session]. A store that
@@ -1081,8 +1176,14 @@ class AppDependencies(
         )
     }
 
-    fun pushService(session: UserSession): PushService =
-        JournalPushService(api = core(session).api, environment = pushEnvironment)
+    fun pushService(session: UserSession, generation: Long = pushGeneration): PushService =
+        JournalPushService(
+            api = core(session).api,
+            // With this phone's key, so the journal can seal what each
+            // notification says for this phone alone; none once signed out.
+            pushKey = { pushKeyStore?.publicKeyForRegistration { pushGeneration == generation } },
+            token = { FirebasePush.currentToken(context) },
+        )
 
     /** Devices/pairing surface (Settings → Manage Devices). */
     fun devicesService(session: UserSession): DevicesProviding =
@@ -1389,6 +1490,14 @@ class AppDependencies(
         }
         // Unsent replies belong to the account: their text and staged files go.
         unsentReplies.wipeAll()
+        // The key belongs to the session: the next one registers a new key,
+        // and the last account's notifications leave the shade.
+        runCatching { pushNotifier.endSession { pushGeneration += 1 } }
+            .onFailure { pushGeneration += 1 }
+        pushKeyStore?.delete()
+        chat.matron.android.push.PushTaps.clear()
+        pushRegistrationState.value = null
+        preferences.remove(PUSH_REGISTRATION_KEY)
         cores.clear()
         mediaServices.clear()
         mediaCaches.clear()
@@ -1480,6 +1589,9 @@ class AppDependencies(
     }
 
     companion object {
+        /** Where the last push registration stood ([PushRegistration.stored]). */
+        const val PUSH_REGISTRATION_KEY = "matron.push.registration"
+
         /**
          * Whether [name] is one of the files of a database in [held]: the
          * database itself or one of its side files (`-wal`, `-shm`,

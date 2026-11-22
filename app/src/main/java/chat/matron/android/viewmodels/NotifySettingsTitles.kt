@@ -3,6 +3,7 @@ package chat.matron.android.viewmodels
 import chat.matron.android.journal.NotifyDeviceLevel
 import chat.matron.android.journal.NotifyMuteDuration
 import chat.matron.android.journal.NotifySettings
+import chat.matron.android.push.PushRegistration
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -64,11 +65,35 @@ object NotifySettingsTitles {
         "Events that don't notify still update the app's lists and unread dots. " +
             "For quiet hours, use Do Not Disturb."
 
-    /// Android does not receive push notifications yet, so "On this device"
-    /// would otherwise read as if it already worked here.
-    const val ANDROID_PUSH_NOTE =
-        "This phone doesn't receive push notifications yet. Your choices above are saved on your " +
-            "server and apply to your other devices now; this device's level applies once it does."
+    /// The footnote under "On this device": whether this phone actually
+    /// gets push, so the level never reads as working when it does not.
+    /// [configured] is whether this build has push set up, [registration]
+    /// where its registration with the journal stands, and
+    /// [notificationsEnabled] whether Android lets the app post.
+    fun devicePushNote(configured: Boolean, registration: PushRegistration?, notificationsEnabled: Boolean): String = when {
+        !configured -> NO_PUSH_BUILD
+        registration == PushRegistration.SERVER_OFF -> SERVER_OFF
+        registration == PushRegistration.REGISTERED && !notificationsEnabled -> NOTIFICATIONS_OFF
+        registration == PushRegistration.REGISTERED -> PUSH_WORKS
+        registration == PushRegistration.NO_TOKEN -> NO_TOKEN
+        else -> NOT_REGISTERED
+    }
+
+    const val PUSH_WORKS = "This phone receives push notifications. Its level above decides which ones reach it."
+    const val NO_PUSH_BUILD =
+        "This build of the app has no push notifications. Your choices above are saved on your server and " +
+            "apply to your other devices."
+    const val SERVER_OFF =
+        "Your server doesn't send Android push notifications yet. Your choices above apply to your other " +
+            "devices now; this phone's level applies once it does."
+    const val NOTIFICATIONS_OFF =
+        "Notifications are turned off for Matron in Android's settings. Turn them on there for this phone's " +
+            "level to apply."
+    const val NO_TOKEN =
+        "This phone couldn't get a push token from Google Play services, so it doesn't receive push " +
+            "notifications. It tries again each time the app opens."
+    const val NOT_REGISTERED =
+        "This phone isn't registered for push notifications yet. It tries again each time the app opens."
 
     /// One line for an overrides row: the level and the running mute,
     /// e.g. "Needs me · muted until 14:00".

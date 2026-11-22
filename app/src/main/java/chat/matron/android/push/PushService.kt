@@ -1,21 +1,32 @@
 package chat.matron.android.push
 
-import okhttp3.HttpUrl
-
-/// Cross-platform surface for managing the push pipeline, ported from
-/// matron-apple's `PushService` protocol. Tests inject a fake so call-site code
-/// stays platform-neutral and suspend-pure.
+/// The app's push registration with its journal. Tests inject a fake.
 interface PushService {
-    /// Requests notification permission. Returns `true` on grant, `false` on
-    /// decline OR error — the OS-level error here isn't actionable from the app.
-    suspend fun requestPermission(): Boolean
+    /// Registers this phone for push: its FCM token and the public key its
+    /// notifications are sealed to. Never throws.
+    suspend fun register(): PushRegistration
 
-    /// Registers a device token with the user's server. Idempotent server-side.
-    /// Throws on network / SDK failure. `pusherBaseURL` is part of the legacy
-    /// signature; the journal server doesn't need it (registration is keyed on
-    /// the authenticated device alone).
-    suspend fun registerToken(deviceToken: ByteArray, pusherBaseURL: HttpUrl? = null)
+    /// Registers [token] (a fresh one from Firebase). Never throws.
+    suspend fun register(token: String): PushRegistration
 
-    /// Removes the push registration from the server (sign-out path).
-    suspend fun unregister(deviceToken: ByteArray, pusherBaseURL: HttpUrl? = null)
+    /// Removes the push registration from the server (sign-out path). Throws
+    /// on a network failure.
+    suspend fun unregister()
+}
+
+/// Where this phone's push registration stands, for Settings → Notifications.
+enum class PushRegistration(val stored: String) {
+    /// This build has no push set up.
+    NOT_CONFIGURED("not_configured"),
+    /// Firebase gave no token (no Play services, offline).
+    NO_TOKEN("no_token"),
+    /// The journal has Android push off.
+    SERVER_OFF("server_off"),
+    /// The journal could not be reached; tried again next launch.
+    FAILED("failed"),
+    REGISTERED("registered");
+
+    companion object {
+        fun fromStored(value: String?): PushRegistration? = entries.firstOrNull { it.stored == value }
+    }
 }

@@ -447,7 +447,6 @@ class JournalApi(
     @Volatile
     var accountLock: AccountLockListening? = null
 
-    enum class PushEnvironment(val wire: String) { SANDBOX("sandbox"), PROD("prod") }
 
     /// The server URL's own path, normalized so endpoint paths can be appended:
     /// "" or "/" → "", "/prefix/" → "/prefix". Appending (not replacing) keeps
@@ -1163,18 +1162,21 @@ class JournalApi(
         }
     }
 
-    /// Registers this device for pushes (client devices only).
-    suspend fun registerPush(tokenHex: String, environment: PushEnvironment) {
-        request(path = "/push/register", method = "POST", jsonBody = buildJsonObject {
-            put("apns_token", tokenHex)
-            put("environment", environment.wire)
+    /// Registers this phone's Firebase Cloud Messaging token, with the
+    /// public key its notifications are sealed to (client devices only).
+    /// A journal with Android push off answers 404 ([JournalApiError.NotFound]).
+    suspend fun registerFcmPush(token: String, pushKey: String?) {
+        request(path = "/push/fcm/register", method = "POST", jsonBody = buildJsonObject {
+            put("token", token)
+            if (pushKey != null) put("push_key", pushKey)
         })
     }
 
-    /// Clears this device's push registration (apns_token: null).
+    /// Clears this device's push registration (`token: null`). Accepted even
+    /// by a journal with Android push off.
     suspend fun unregisterPush() {
-        request(path = "/push/register", method = "POST", jsonBody = buildJsonObject {
-            put("apns_token", kotlinx.serialization.json.JsonNull)
+        request(path = "/push/fcm/register", method = "POST", jsonBody = buildJsonObject {
+            put("token", kotlinx.serialization.json.JsonNull)
         })
     }
 

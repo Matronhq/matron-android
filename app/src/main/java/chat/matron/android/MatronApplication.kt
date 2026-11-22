@@ -20,5 +20,12 @@ import coil.ImageLoaderFactory
 class MatronApplication : Application(), ImageLoaderFactory {
     val dependencies: AppDependencies by lazy { AppDependencies(this) }
 
+    override fun onCreate() {
+        super.onCreate()
+        // Push: Firebase from the build's values, when it names any (a no-op
+        // otherwise, and in unit tests). Cheap: it touches no keystore.
+        chat.matron.android.push.FirebasePush.initialize(this)
+    }
+
     override fun newImageLoader(): ImageLoader = AnimatedImages.imageLoader(this)
 }

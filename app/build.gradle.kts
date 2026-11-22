@@ -66,6 +66,35 @@ val appLinkHost: String? = buildProp("MATRON_APP_LINK_HOST")?.trim()?.also { hos
     }
 }
 
+// Android push (Firebase Cloud Messaging). FirebaseApp is initialised from
+// these four values at launch rather than from a google-services.json, so
+// the build needs no Firebase file: a build that names none (every PR and
+// local build) has push switched off, and a release build gets them from
+// CI secrets. All four, or none.
+val fcmPropertyNames = listOf(
+    "MATRON_FCM_PROJECT_ID",
+    "MATRON_FCM_APP_ID",
+    "MATRON_FCM_API_KEY",
+    "MATRON_FCM_SENDER_ID",
+)
+val fcmConfig: Map<String, String>? = run {
+    val values = fcmPropertyNames.associateWith { buildProp(it)?.trim() }
+    when {
+        values.values.all { it == null } -> null
+        values.values.any { it == null } -> {
+            logger.warn(
+                "Firebase push partially configured — missing ${
+                    values.filterValues { it == null }.keys.joinToString()
+                }; building with push notifications OFF."
+            )
+            null
+        }
+        else -> values.mapValues { it.value!! }
+    }
+}
+fun buildConfigString(value: String?): String =
+    if (value == null) "null" else "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
 android {
     namespace = "chat.matron.android"
     compileSdk = 36
@@ -80,6 +109,10 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         manifestPlaceholders["matronAppLinkHost"] = appLinkHost ?: ""
+
+        for (name in fcmPropertyNames) {
+            buildConfigField("String", name.removePrefix("MATRON_"), buildConfigString(fcmConfig?.get(name)))
+        }
     }
 
     // The App Links intent filter lives in its own manifest, merged into
@@ -127,6 +160,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     testOptions {
@@ -183,6 +217,16 @@ dependencies {
     // capture UI, NO CAMERA permission and no manifest change. Degrades to the
     // manual link-code path when Play services is unavailable.
     implementation(libs.play.services.code.scanner)
+
+    // Android push. No google-services plugin: FirebaseApp is set up by hand
+    // from the BuildConfig values above (FirebasePush), and only when a
+    // build names them.
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging)
+    // X25519 and ChaCha20-Poly1305 for opening sealed notification content
+    // (PushBox) on every supported API level. Already on the classpath
+    // through security-crypto; declared because PushBox uses it directly.
+    implementation(libs.tink.android)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlin.test)

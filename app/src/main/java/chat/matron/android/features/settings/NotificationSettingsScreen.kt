@@ -60,6 +60,9 @@ fun NotificationSettingsScreen(
     /// An overrides row's title, from the local conversation list.
     title: (String) -> String,
     onBack: () -> Unit,
+    /// The footnote under "On this device": whether this phone gets push
+    /// ([NotifySettingsTitles.devicePushNote]).
+    pushNote: String = NotifySettingsTitles.NO_PUSH_BUILD,
 ) {
     val view by store.view.collectAsStateWithLifecycle()
     val supported by store.isSupported.collectAsStateWithLifecycle()
@@ -114,7 +117,7 @@ fun NotificationSettingsScreen(
                 else -> {
                     ModeSection(current.settings) { store.post(NotifyChange.SetMode(it)) }
                     EventsSection(current.settings) { event, on -> store.post(NotifyChange.SetEvent(event, on)) }
-                    DeviceSection(current.deviceLevel) { store.post(NotifyChange.SetDeviceLevel(it)) }
+                    DeviceSection(current.deviceLevel, pushNote) { store.post(NotifyChange.SetDeviceLevel(it)) }
                     val overrides = store.activeOverrides(current, now)
                     if (overrides.isNotEmpty()) {
                         SettingsSection("Conversation overrides") {
@@ -206,7 +209,7 @@ private fun EventsSection(settings: NotifySettings, onToggle: (NotifySettings.Ev
 }
 
 @Composable
-private fun DeviceSection(level: NotifyDeviceLevel, onSelect: (NotifyDeviceLevel) -> Unit) {
+private fun DeviceSection(level: NotifyDeviceLevel, pushNote: String, onSelect: (NotifyDeviceLevel) -> Unit) {
     SettingsSection("On this device") {
         NotifyDeviceLevel.entries.forEach { option ->
             RadioRow(
@@ -217,7 +220,7 @@ private fun DeviceSection(level: NotifyDeviceLevel, onSelect: (NotifyDeviceLevel
                 tag = "notify-device-${option.wire}",
             )
         }
-        Footnote(NotifySettingsTitles.ANDROID_PUSH_NOTE)
+        Footnote(pushNote)
     }
 }
 

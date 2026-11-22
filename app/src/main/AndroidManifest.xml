@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -94,6 +95,27 @@
             android:name=".platform.VoiceRecordingService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- Push (Firebase Cloud Messaging). The journal's messages are data
+             only, so this service builds every notification itself. Firebase
+             is set up by hand from the build's MATRON_FCM_* values
+             (FirebasePush), so its automatic start-up provider, which looks
+             for a google-services.json, is removed. -->
+        <service
+            android:name=".push.MatronMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+        <provider
+            android:name="com.google.firebase.provider.FirebaseInitProvider"
+            android:authorities="${applicationId}.firebaseinitprovider"
+            tools:node="remove" />
+        <!-- A button on an item's notification answers the item. -->
+        <receiver
+            android:name=".push.PushActionReceiver"
+            android:exported="false" />
 
         <!-- Grants external viewers read access to downloaded attachments in
              cacheDir/matron-attachments (see AttachmentOpener.kt). -->

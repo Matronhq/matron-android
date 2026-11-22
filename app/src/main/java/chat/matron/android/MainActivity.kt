@@ -178,9 +178,10 @@ import kotlinx.coroutines.launch
 /**
  * Single-activity Compose host. Ports App/MatronApp.swift: bootstrap the persisted
  * session, switch signed-out → [SignInScreen] vs signed-in → the tabbed shell
- * (`SignedInApp`, apple's `AppShellView`) over the [NavHost]. Push
- * (APNs/FCM) and its notification-tap deep-link are NOT wired — Android push is
- * dormant; those iOS `.task`s are dropped (see the class docs).
+ * (`SignedInApp`, apple's `AppShellView`) over the [NavHost]. A tapped
+ * notification ([chat.matron.android.push.PushTaps]) opens its chat or item
+ * once the shell is up, and the shell asks for the notification permission
+ * and registers for push ([PushRegistrationEffect]), as iOS's push `.task` does.
  *
  * Extends [FragmentActivity] rather than `ComponentActivity` purely so
  * `BiometricPrompt` has a host for its internal fragment; `FragmentActivity` IS a
@@ -206,6 +207,12 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // A tapped notification that started the activity. Not again on a
+        // recreation, which hands the same intent back.
+        // After process death the tap still waiting comes back from the
+        // saved state instead.
+        if (savedInstanceState == null) chat.matron.android.push.PushTaps.record(intent)
+        else chat.matron.android.push.PushTaps.restore(savedInstanceState)
         incomingLinks.value = launchLink(
             restored = savedInstanceState != null,
             saved = savedInstanceState?.getString(PENDING_LINK_KEY),
@@ -243,12 +250,14 @@ class MainActivity : FragmentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         incomingLinks.value?.let { outState.putString(PENDING_LINK_KEY, it) }
+        chat.matron.android.push.PushTaps.save(outState)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         incomingViewLink(intent.action, intent.dataString)?.let { incomingLinks.value = it }
+        chat.matron.android.push.PushTaps.record(intent)
     }
 
     override fun onStart() {
@@ -821,6 +830,15 @@ private fun SignedInApp(
     }
     // An App Link that started or resumed the activity. It waits in the
     // activity while signed out or locked, and is taken once the shell is up.
+    // A tapped notification: its item if it was about one, else its chat.
+    // It waits while signed out or locked, and is taken once the shell is up.
+    val pendingTap by chat.matron.android.push.PushTaps.pending.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingTap) {
+        val tap = pendingTap ?: return@LaunchedEffect
+        chat.matron.android.push.PushTaps.pending.compareAndSet(tap, null)
+        if (tap.itemID != null) shell.openItem(tap.itemID) else shell.openChat(tap.convoID)
+    }
+    PushRegistrationEffect(deps, session)
     val pendingLink by incomingLinks.collectAsStateWithLifecycle()
     LaunchedEffect(pendingLink, openTrackerLink) {
         val url = pendingLink ?: return@LaunchedEffect
@@ -1402,11 +1420,26 @@ private fun SignedInApp(
                     }
 
                     composable("notifications") {
+                        val registration by deps.pushRegistration.collectAsStateWithLifecycle()
+                        // Read again whenever the screen resumes: the user may
+                        // have just changed it in Android's settings and come back.
+                        var enabled by remember {
+                            mutableStateOf(androidx.core.app.NotificationManagerCompat.from(deps.context).areNotificationsEnabled())
+                        }
+                        androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
+                            enabled = androidx.core.app.NotificationManagerCompat.from(deps.context).areNotificationsEnabled()
+                            onPauseOrDispose { }
+                        }
                         NotificationSettingsScreen(
                             store = deps.notifySettings(session),
                             // Archived chats too: an override can outlive the chat's place in the list.
                             title = { id -> summaryFor(id)?.title?.takeIf { it.isNotBlank() } ?: id },
                             onBack = { nav.popBackStack() },
+                            pushNote = chat.matron.android.viewmodels.NotifySettingsTitles.devicePushNote(
+                                configured = chat.matron.android.push.FirebasePush.isConfigured,
+                                registration = registration,
+                                notificationsEnabled = enabled,
+                            ),
                         )
                     }
 
@@ -2125,5 +2158,29 @@ private data class ParentLookup(val parent: String?)
 private fun LoadingScreen() {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         CircularProgressIndicator()
+    }
+}
+
+/**
+ * Push, once per sign-in: asks for the notification permission where iOS
+ * does (as the signed-in app first shows), then registers this phone's FCM
+ * token and key with the journal. Only in builds with push set up; the
+ * registration goes ahead whatever the answer, as on iOS, so turning
+ * notifications on later in Android's settings needs nothing more.
+ */
+@Composable
+private fun PushRegistrationEffect(deps: AppDependencies, session: UserSession) {
+    if (!chat.matron.android.push.FirebasePush.isConfigured) return
+    val context = deps.context
+    val scope = rememberCoroutineScope()
+    val permission = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { scope.launch { deps.registerPush(session) } }
+    LaunchedEffect(session.userID) {
+        deps.pushNotifier.ensureChannels()
+        val needsAsk = android.os.Build.VERSION.SDK_INT >= 33 &&
+            androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (needsAsk) permission.launch(android.Manifest.permission.POST_NOTIFICATIONS) else deps.registerPush(session)
     }
 }
