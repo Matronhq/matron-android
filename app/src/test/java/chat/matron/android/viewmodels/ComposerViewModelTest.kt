@@ -1392,4 +1392,17 @@ class ComposerViewModelTest {
         assertEquals("my draft", again.input)
         assertEquals(listOf("pic.png"), again.stagedAttachments.value.map { it.filename })
     }
+
+    @Test
+    fun sendDuringRecall_leavesNoSavedDraft() = runBlocking {
+        val root = Files.createTempDirectory("unsent").toFile()
+        val vm = persistentVM(unsentStore(root))
+        vm.input = "sent earlier"
+        vm.send()
+        vm.input = "my draft"
+        vm.recallOlder()
+        vm.send()
+
+        assertEquals("", persistentVM(unsentStore(root)).input)
+    }
 }

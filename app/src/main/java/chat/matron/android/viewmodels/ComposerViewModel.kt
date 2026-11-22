@@ -144,9 +144,11 @@ class ComposerViewModel(
     private fun persistUnsent() {
         val store = unsentReplies ?: return
         if (restoringUnsent) return
-        // A recalled sent line isn't a draft: while a walk shows one, the
-        // stashed draft is what is saved, with the tray as it is now.
-        val text = history.stashed ?: input
+        // A recalled sent line isn't a draft: while the field shows one, the
+        // stashed draft is what is saved, with the tray as it is now. Anything
+        // else in the field (cleared by a send, or edited) is the draft.
+        val showingRecalled = lastRecalledValue != null && input == lastRecalledValue
+        val text = history.stashed?.takeIf { showingRecalled } ?: input
         store.save(unsentPlace, UnsentReply(text, _stagedAttachments.value), unsentEpoch)
     }
 

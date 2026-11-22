@@ -1,6 +1,8 @@
 package chat.matron.android.viewmodels
 
+import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.JournalApiError
+import chat.matron.android.journal.MatronJson
 import chat.matron.android.journal.db.ItemOutboxEntity
 import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.ItemAuthor
@@ -346,9 +348,10 @@ class ItemDetailViewModelTest {
         val sync = object : Sync() {
             override suspend fun enqueueComment(
                 itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>, action: String?, replyTo: String?, replaces: String?,
+                selected: List<String>?,
             ): Boolean {
                 kotlinx.coroutines.delay(50)
-                super.enqueueComment(itemID, localID, body, attachments, action, replyTo, replaces)
+                super.enqueueComment(itemID, localID, body, attachments, action, replyTo, replaces, selected)
                 store.storedOutbox = store.storedOutbox + outboxTap(localID, action!!, replyTo!!)
                 return true
             }
@@ -433,6 +436,83 @@ class ItemDetailViewModelTest {
         localID, "it_1", ItemOutboxEntity.OP_COMMENT,
         """{"body":"$label","action":"$label","replyTo":"$replyTo"}""", 1, 0, null,
     )
+
+    private fun outboxSelection(localID: String, labels: List<String>, replyTo: String?) = ItemOutboxEntity(
+        localID, "it_1", ItemOutboxEntity.OP_COMMENT,
+        MatronJson.encodeToString(
+            ItemsSync.CommentPayload.serializer(),
+            ItemsSync.CommentPayload(labels.joinToString(", "), replyTo = replyTo, selected = labels),
+        ),
+        1, 0, null,
+    )
+
+    @Test
+    fun sendSelectionQueuesEveryTickedLabelAsOneAnswer() = runBlocking {
+        val sync = Sync(); val store = FakeItemsStore()
+        val vm = ItemDetailViewModel("it_1", store, Api(), sync, this, staging)
+        val asking = TrackerComment(
+            "ic_q", "it_1", ItemAuthor.AGENT, body = "Which areas?",
+            actions = listOf("Docs", "Billing", "Search"), multiSelect = true,
+        )
+        vm.start()
+        store.item.emit(TrackerItem(id = "it_1", num = 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, title = "T", originConvoID = "c1"))
+        waitUntil { vm.item.value != null }
+        vm.sendSelection(asking, emptyList())
+        assertTrue("nothing ticked is no answer", sync.selections.isEmpty())
+        vm.sendSelection(asking, listOf("Docs", "Nope"))
+        assertTrue("a label the question does not offer is ignored", sync.selections.isEmpty())
+        vm.sendSelection(asking.copy(multiSelect = false), listOf("Docs"))
+        assertTrue("a one-tap question takes no selection", sync.selections.isEmpty())
+        vm.sendSelection(asking, setOf("Search", "Docs"))
+        assertEquals("in the order offered", listOf(Triple("it_1", listOf("Docs", "Search"), "ic_q")), sync.selections)
+        assertEquals("Docs, Search", sync.comments.single().second)
+        assertTrue("never a one-tap action with it", sync.taps.isEmpty())
+        // The same answer already queued is not queued twice; a change is.
+        store.storedOutbox = listOf(outboxSelection("L1", listOf("Docs", "Search"), "ic_q"))
+        vm.sendSelection(asking, listOf("Search", "Docs"))
+        assertEquals(1, sync.selections.size)
+        vm.sendSelection(asking, listOf("Billing"))
+        assertEquals(listOf("Billing"), sync.selections.last().second)
+        vm.stop()
+    }
+
+    @Test
+    fun sendSelectionOnTheItemsOwnQuestionSkipsTheLandedAnswer() = runBlocking {
+        val sync = Sync(); val store = FakeItemsStore()
+        val vm = ItemDetailViewModel("it_1", store, Api(), sync, this, staging)
+        vm.start()
+        val question = TrackerItem(
+            id = "it_1", num = 1, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, title = "T", originConvoID = "c1",
+            actions = listOf("Docs", "Billing"), multiSelect = true, chosenActions = listOf("Billing"), chosenAction = "Billing",
+        )
+        store.item.emit(question)
+        waitUntil { vm.item.value != null }
+        vm.sendSelection(null, listOf("Billing"))
+        assertTrue("already the answer", sync.selections.isEmpty())
+        vm.sendSelection(null, listOf("Billing", "Docs"))
+        assertEquals(listOf(Triple("it_1", listOf("Docs", "Billing"), null)), sync.selections)
+        // Closed: the boxes are a record.
+        store.item.emit(question.copy(state = ItemState.CLOSED, resolution = ItemResolution.ANSWERED))
+        waitUntil { vm.item.value?.state == ItemState.CLOSED }
+        vm.sendSelection(null, listOf("Docs"))
+        assertEquals(1, sync.selections.size)
+        vm.stop()
+    }
+
+    @Test
+    fun pendingSelectionsReadTheQueuedAnswersAndSkipTapsAndRefusals() {
+        val rows = listOf(
+            outboxSelection("L1", listOf("Docs"), "ic_q"),
+            outboxSelection("L2", listOf("Docs", "Billing"), "ic_q"),
+            outboxSelection("L3", listOf("Search"), null),
+            outboxTap("L4", "Merge", "ic_t"),
+            outboxSelection("L5", listOf("Billing"), "ic_r").copy(rejectedReason = "unknown_action"),
+        )
+        assertEquals(mapOf("ic_q" to listOf("Docs", "Billing")), ItemDetailViewModel.pendingSelections(rows))
+        assertEquals(listOf("Search"), ItemDetailViewModel.pendingItemSelection(rows))
+        assertEquals("a selection is not a tap", mapOf("ic_t" to "Merge"), ItemDetailViewModel.pendingTaps(rows))
+        assertNull(ItemDetailViewModel.pendingItemTap(rows))
+    }
 
     @Test
     fun voiceNoteIsAnAudioAttachmentComment() = runBlocking {

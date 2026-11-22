@@ -133,7 +133,8 @@ class ChatVMCache(
         )
         itemDetailEntries[itemID] = vm
         if (itemDetailEntries.size > limit) {
-            val eldest = itemDetailEntries.entries.firstOrNull { !it.value.isBusy.value }?.key
+            // Never the VM just made for this call: the caller holds it.
+            val eldest = itemDetailEntries.entries.firstOrNull { it.key != itemID && !it.value.isBusy.value }?.key
             if (eldest != null) itemDetailEntries.remove(eldest)?.stop()
         }
         return vm

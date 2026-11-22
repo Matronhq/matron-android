@@ -7,6 +7,7 @@ import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerItemTest
 import java.time.Instant
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -90,6 +91,31 @@ class ItemsApiTest {
         api().commentItem("it_1", "hi", emptyList(), idempotencyKey = "k4")
         val typed = parseJsonObjectOrNull(server.takeRequest().body.readUtf8())!!
         assertNull(typed["action"]); assertNull(typed["reply_to"]); assertNull(typed["replaces"])
+    }
+
+    @Test
+    fun commentItemSendsAMultiSelectAnswerAsSelectedAndNeverWithAction() = runBlocking {
+        server.enqueue(json(201, """{"item":$itemJSON,"comment":$commentJSON}"""))
+        api().commentItem(
+            "it_1", "Docs, Search", emptyList(), idempotencyKey = "k7", action = "Docs", replyTo = "ic_q",
+            selected = listOf("Docs", "Search"),
+        )
+        val request = server.takeRequest()
+        assertEquals("k7", request.getHeader("Idempotency-Key"))
+        val answer = parseJsonObjectOrNull(request.body.readUtf8())!!
+        assertEquals(listOf("Docs", "Search"), answer.arrayOrNull("selected")?.map { (it as JsonPrimitive).content })
+        assertNull("selected and action never go together", answer["action"])
+        assertEquals("ic_q", answer.stringOrNull("reply_to"))
+        // An item's own question: no reply_to.
+        server.enqueue(json(201, """{"item":$itemJSON,"comment":$commentJSON}"""))
+        api().commentItem("it_1", "Docs", emptyList(), idempotencyKey = "k8", selected = listOf("Docs"))
+        val own = parseJsonObjectOrNull(server.takeRequest().body.readUtf8())!!
+        assertEquals(1, own.arrayOrNull("selected")?.size); assertNull(own["reply_to"])
+        // A one-tap tap sends no `selected` key, as before; nor does an empty list.
+        server.enqueue(json(201, """{"item":$itemJSON,"comment":$commentJSON}"""))
+        api().commentItem("it_1", "Merge", emptyList(), idempotencyKey = "k9", action = "Merge", selected = emptyList())
+        val tap = parseJsonObjectOrNull(server.takeRequest().body.readUtf8())!!
+        assertNull(tap["selected"]); assertEquals("Merge", tap.stringOrNull("action"))
     }
 
     @Test
