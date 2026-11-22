@@ -213,6 +213,10 @@ object StepUpTap {
             // No longer step-up (the mark was lowered), or the asking comment
             // has gone: an ordinary tap.
             if (request == null) return Outcome.Unsigned
+            // Already the answer, per the journal (this tap, or another device,
+            // got there first): nothing to sign or send.
+            val chosen = if (comment != null) freshComment?.chosenAction else fresh.item.chosenAction
+            if (chosen == label) return Outcome.Cancelled
             val approval = signer(request) ?: return Outcome.Unsigned
             val result = try {
                 api.tapItem(item.id, label, comment?.id, approval, idempotencyKey(item.id, comment?.id, label))

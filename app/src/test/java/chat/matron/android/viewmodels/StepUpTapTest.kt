@@ -132,6 +132,15 @@ class StepUpTapTest {
     }
 
     @Test
+    fun aButtonAlreadyTheAnswerIsNotSignedAgain() = runTest {
+        withKey()
+        val api = Api(cached.copy(stepUp = true, chosenAction = "Deploy"))
+        assertEquals(StepUpTap.Outcome.Cancelled, StepUpTap.send(cached.copy(stepUp = true), null, "Deploy", api, sync, center.signer, true))
+        assertTrue(api.taps.isEmpty())
+        assertNull(center.prompt.value)
+    }
+
+    @Test
     fun cancellingSendsNothing() = runTest {
         withKey()
         val api = Api(cached.copy(stepUp = true))
