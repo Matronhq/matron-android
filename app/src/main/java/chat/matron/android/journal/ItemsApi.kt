@@ -79,7 +79,14 @@ data class ItemCommentResult(
 /// A signed tap's answer: the item as it now stands and the tap's comment.
 /// [comment] is null for an answer on a consent request's item, which the
 /// journal applies to the request itself and records no comment for.
-data class ItemTapResult(val item: TrackerItem, val comment: TrackerComment?)
+/// [link] and [askId]: an Approve on an agent's invite ask answers with the
+/// invite link, this once, as an ordinary tap does ([ItemCommentResult]).
+data class ItemTapResult(
+    val item: TrackerItem,
+    val comment: TrackerComment?,
+    val link: String? = null,
+    val askId: String? = null,
+)
 
 /// `POST /items` body. [awaiting] is tri-state like the Swift `ItemAwaiting??`:
 /// [awaitingSet] false ⇒ key omitted (server default), true with a null
