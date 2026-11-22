@@ -48,6 +48,10 @@ data class ProjectPageState(
     /// Bumped each time a page of the files lands: the grid's end asks for
     /// the next page again even when the list kept its length.
     val filesVersion: Int = 0,
+    /// Bumped by each read of the files' first page (a refresh), not by
+    /// older pages: tiles ask again for pictures that failed on a refresh,
+    /// and paging never cancels a picture still loading.
+    val filesReloads: Int = 0,
     /// The last next-page read of the files failed: the grid's end offers Retry.
     val filesPagingFailed: Boolean = false,
     /// What the "⋯" menu offers: open missions in no project (to add), and
@@ -163,13 +167,9 @@ class ProjectPageViewModel(
             val loaded = timeline.timelineProject(projectID)
             if (generation != pageGeneration) return
             if (loaded.mergedFromID != null && loaded.project.id != projectID) {
-                projectID = loaded.project.id
-                // The Ask and the ⋯ lists were the closed project's: they
-                // start over for the one it became (a refresh reads them).
-                actionsGeneration += 1
-                _state.update {
-                    it.copy(redirectedTo = loaded.project.id, asked = false, actionsLoaded = false, unfiled = emptyList(), mergeTargets = emptyList())
-                }
+                // Everything but the page was the closed project's: it
+                // starts over for the one it became.
+                startOver(loaded.project.id)
             }
             _state.update { it.copy(page = loaded, isMissing = false, pageLoads = it.pageLoads + 1) }
         } catch (cancel: CancellationException) {
@@ -287,14 +287,14 @@ class ProjectPageViewModel(
         isReloadingFiles = true
         try {
             val page = projects.projectFiles(projectID)
-            if (generation == filesGeneration) _state.update { it.copy(files = page, filesVersion = it.filesVersion + 1, filesPagingFailed = false) }
+            if (generation == filesGeneration) _state.update { it.copy(files = page, filesVersion = it.filesVersion + 1, filesReloads = it.filesReloads + 1, filesPagingFailed = false) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
             // Said in an alert over the files on screen (before any, the
             // screen offers Try again); the grid's end asks again from the
             // list shown, so paging never stalls behind the failed reload.
-            if (generation == filesGeneration) _state.update { it.copy(error = error.message, filesVersion = it.filesVersion + 1, filesPagingFailed = false) }
+            if (generation == filesGeneration) _state.update { it.copy(error = error.message, filesVersion = it.filesVersion + 1, filesReloads = it.filesReloads + 1, filesPagingFailed = false) }
         } finally {
             if (generation == filesGeneration) isReloadingFiles = false
         }
@@ -365,30 +365,11 @@ class ProjectPageViewModel(
         val from = projectID
         val ok = write(reload = false) { projects.mergeProject(from, into) }
         if (ok) {
-            // Any read of the lists still in flight was for the old project:
-            // neither its answer nor its failure lands.
-            actionsGeneration += 1
-            projectID = into
             // Nothing of the closed project stays on screen: until the
             // surviving project's page lands, the page shows its progress
-            // (or its retry), never the old project under the new id. The
-            // Ask was about the old project, and the lists are the new one's.
-            // The sections were the closed project's too: they start over,
-            // and any read still on its way for them is dropped.
-            historyGeneration += 1
-            missionsGeneration += 1
-            filesGeneration += 1
-            historyNextBefore = null
-            isReloadingHistory = false
-            isReloadingFiles = false
-            _state.update {
-                it.copy(
-                    redirectedTo = into, page = null, asked = false, actionsLoaded = false, unfiled = emptyList(), mergeTargets = emptyList(),
-                    history = emptyList(), historyLoaded = false, hasMoreHistory = false, historyPagingFailed = false,
-                    openMissions = null, closedMissions = emptyList(), files = null, filesPagingFailed = false,
-                )
-            }
-            _state.update { it.copy(isBusy = true) }
+            // (or its retry), never the old project under the new id.
+            startOver(into)
+            _state.update { it.copy(page = null, isBusy = true) }
             try {
                 refresh()
             } finally {
@@ -465,6 +446,29 @@ class ProjectPageViewModel(
             _state.update { it.copy(isBusy = false) }
         }
         return true
+    }
+
+    /// The page now stands for [into] (a merge, here or found on a read):
+    /// the Ask, the ⋯ lists and the sections were the closed project's, so
+    /// they start over, and any read still on its way for them is dropped.
+    /// The sections opened before read again on the next refresh, or when
+    /// they next come on screen.
+    private fun startOver(into: String) {
+        projectID = into
+        actionsGeneration += 1
+        historyGeneration += 1
+        missionsGeneration += 1
+        filesGeneration += 1
+        historyNextBefore = null
+        isReloadingHistory = false
+        isReloadingFiles = false
+        _state.update {
+            it.copy(
+                redirectedTo = into, asked = false, actionsLoaded = false, unfiled = emptyList(), mergeTargets = emptyList(),
+                history = emptyList(), historyLoaded = false, hasMoreHistory = false, historyPagingFailed = false,
+                openMissions = null, closedMissions = emptyList(), files = null, filesPagingFailed = false,
+            )
+        }
     }
 
     fun dismissError() {

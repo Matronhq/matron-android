@@ -249,6 +249,9 @@ class ProjectActionsTest {
         redirected.refreshPage()
         assertFalse(redirected.state.value.asked)
         assertFalse(redirected.state.value.actionsLoaded)
+        // The sections start over for the project it became.
+        kotlin.test.assertNull(redirected.state.value.openMissions)
+        assertFalse(redirected.state.value.historyLoaded)
         vm.refreshPage()
     }
 
