@@ -75,7 +75,11 @@ object ProjectFileFormat {
     /// A file's name, falling back to its caption, then its kind.
     fun name(file: ProjectFile): String = file.name?.takeIf { it.isNotEmpty() }
         ?: file.caption?.takeIf { it.isNotEmpty() }?.let(ProjectFormat::oneLine)
-        ?: if (file.isImage) "Image" else "File"
+        ?: when {
+            file.isVideo -> "Video"
+            file.isImage -> "Image"
+            else -> "File"
+        }
 
     /// The document tile's label: the name's extension ("PDF"), else the
     /// content type's subtype ("ZIP"), else "FILE". At most 4 characters.

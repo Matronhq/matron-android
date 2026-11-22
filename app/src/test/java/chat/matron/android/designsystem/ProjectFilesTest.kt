@@ -28,6 +28,7 @@ class ProjectFilesTest {
         assertEquals("chat · 12d", ProjectFileFormat.meta(file("b", source = ProjectFileSource.Chat("c1", 9), posted = now.minusSeconds(12 * 86_400)), now))
         assertEquals("Launch plan", ProjectFileFormat.name(file("b", caption = "Launch\nplan")))
         assertEquals("Image", ProjectFileFormat.name(file("b", type = "image/png")))
+        assertEquals("Video", ProjectFileFormat.name(file("b", type = "video/mp4")))
         assertEquals("PDF", ProjectFileFormat.extension(file("b", "brief.pdf", "application/pdf")))
         assertEquals("ZIP", ProjectFileFormat.extension(file("b", "assets", "application/zip")))
         assertEquals("FILE", ProjectFileFormat.extension(file("b", "notes.markdown", null)))
