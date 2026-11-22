@@ -55,7 +55,9 @@ data class ChatMissionLine(
             val mission = headline.mission
             return ChatMissionLine(
                 missionID = mission.id, missionNum = mission.num, missionTitle = mission.displayName,
-                others = links.count { it.mission.id != mission.id }, isCurrent = headline.isCurrent,
+                others = links.count { it.mission.id != mission.id },
+                // A current link to a closed mission reads as earlier: muted.
+                isCurrent = headline.isCurrent && !headline.isEarlier,
                 projectID = mission.projectID, projectTitle = mission.projectID?.let(projectTitle),
             )
         }

@@ -44,6 +44,8 @@ class ChatMissionLineTest {
         assertEquals("#3 Done", earlier.missionText)
         assertNull(earlier.projectLabel)
         assertNull(ChatMissionLine.from(emptyList()))
+        val closedCurrent = ChatMissionLine.from(listOf(ConversationMissionLink(mission("ms_4", 4, "Shipped", state = MissionState.CLOSED), isCurrent = true)))!!
+        assertFalse(closedCurrent.isCurrent)
     }
 
     @Test
