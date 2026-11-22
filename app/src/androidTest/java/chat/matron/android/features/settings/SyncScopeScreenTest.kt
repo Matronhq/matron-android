@@ -25,6 +25,7 @@ import androidx.test.uiautomator.Until
 import chat.matron.android.MainActivity
 import chat.matron.android.designsystem.MatronAppearance
 import chat.matron.android.designsystem.MatronTheme
+import chat.matron.android.journal.SyncDayStats
 import chat.matron.android.journal.SyncScope
 import java.io.File
 import org.junit.Assert.assertTrue
@@ -64,15 +65,21 @@ class SyncScopeScreenTest {
             }
         }
 
+    // Sample counts, as Settings draws them under the choice.
+    private val sampleDays = SyncDayStats("2026-11-22", events = 1204, catchUps = 3, catchUpSeconds = 1.2,
+        conversationFetches = 2, backgroundWakes = 0) to
+        SyncDayStats("2026-11-21", events = 8930, catchUps = 11, catchUpSeconds = 9.9, backgroundWakes = 14)
+
     @Test
     fun pickingForYouOnlyChangesTheExplanation() {
         for (appearance in listOf(MatronAppearance.Light, MatronAppearance.Dark)) {
             show(appearance) {
                 var selected by remember { mutableStateOf(SyncScope.EVERYTHING) }
-                SyncScopeRows(selected = selected, onSelect = { selected = it })
+                SyncScopeRows(selected = selected, onSelect = { selected = it }, days = sampleDays)
             }.use {
                 node(By.text(SYNC_SCOPE_SECTION_TITLE))
                 node(By.textContains("Every conversation is kept on this device"))
+                node(By.textContains("0 background wakes"))
                 screenshot("settings-everything-${appearance.name.lowercase()}")
                 node(By.text(SyncScope.FOR_YOU.title)).click()
                 node(By.textContains("Other conversations are fetched when you open them"))

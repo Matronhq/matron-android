@@ -104,6 +104,7 @@ import chat.matron.android.viewmodels.RecentStartFolders
 import chat.matron.android.viewmodels.SharedPreferencesKeyValueStore
 import chat.matron.android.viewmodels.SyncScopeSettingModel
 import chat.matron.android.journal.SyncScope
+import chat.matron.android.journal.SyncStatsRecorder
 import chat.matron.android.models.SyncConnectionState
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
@@ -191,6 +192,13 @@ class AppDependencies(
      * EncryptedSharedPreferences-backed session store).
      */
     val preferences: KeyValueStore
+
+    /**
+     * This device's per-day sync counts (Settings › Sync on this device).
+     * One recorder for the engine and the background worker, so both count
+     * into the same days.
+     */
+    val syncStats: SyncStatsRecorder
 
     /**
      * Recent start-folder completion, a `UserDefaults` singleton on iOS; here it
@@ -340,6 +348,7 @@ class AppDependencies(
         val prefs = context.getSharedPreferences("matron-kv", Context.MODE_PRIVATE)
         preferences = SharedPreferencesKeyValueStore(prefs)
         LaunchTimeline.shared.attachStore(preferences)
+        syncStats = SyncStatsRecorder(preferences)
         recentStartFolders = RecentStartFolders(preferences)
         boxLetterOverrides = BoxLetterOverrides(preferences)
 
@@ -445,6 +454,7 @@ class AppDependencies(
             pages = api,
             // Settings › Sync on this device: per device, not per account.
             syncScope = SyncScope.stored(preferences),
+            stats = if (live) syncStats else null,
         )
         val maintenance = JournalMaintenance(
             store = store,
@@ -724,6 +734,8 @@ class AppDependencies(
             while (engine.hasPendingOutbox()) delay(500)
         }
         if (startedHere && !isAppVisible()) engine.endSync()
+        // The process may be stopped as soon as the worker returns.
+        syncStats.flush()
     }
 
     /** Whether the session's offline outbox still holds unsent messages (the share screen waits on it). */
@@ -761,7 +773,9 @@ class AppDependencies(
     /** Settings › Sync on this device: saved here, applied by the session's engine. */
     fun makeSyncScopeSettingModel(session: UserSession, scope: CoroutineScope): SyncScopeSettingModel {
         val engine = core(session).engine
-        return SyncScopeSettingModel(preferences = preferences, apply = engine::setSyncScope, scope = scope)
+        return SyncScopeSettingModel(
+            preferences = preferences, apply = engine::setSyncScope, scope = scope, stats = syncStats,
+        )
     }
 
     /** The session's journal-held Coordinator (Coordinator redesign §3a). */

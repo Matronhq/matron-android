@@ -32,6 +32,10 @@ class OutboxCatchUpWorker(
     override suspend fun doWork(): Result {
         val app = applicationContext as? MatronApplication ?: return Result.success()
         val deps = app.dependencies
+        // Counted as the wake arrives, before anything can end it early (no
+        // session to restore, a failed catch-up), and written at once:
+        // Settings shows how often the system really wakes the app.
+        deps.syncStats.noteBackgroundWake()
         val session = runCatching { deps.auth.restoreSession() }.getOrNull() ?: return Result.success()
         runCatching { deps.backgroundCatchUp(session, isAppVisible = ::isAppInForeground) }
             .onFailure { MatronDebug.breadcrumb("OutboxCatchUpWorker: catch-up failed: $it") }
