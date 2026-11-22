@@ -251,7 +251,7 @@ class AppLockControllerTest {
     }
 
     @Test
-    fun anApprovalKeysPromptIsNotARoundTrip() = runBlocking {
+    fun leavingWhileAnApprovalKeysPromptIsUpStillLocks() = runBlocking {
         val lock = makeController()
         lock.setEnabled(true)
         lock.setTimeout(AppLockTimeout.IMMEDIATELY)
@@ -259,10 +259,6 @@ class AppLockControllerTest {
         lock.noteBackgrounded()
         lock.noteForegrounded()
         lock.noteSystemPrompt(showing = false)
-        assertFalse(lock.isLocked.value)
-        // Once it is down, a real trip away locks as before.
-        lock.noteBackgrounded()
-        lock.noteForegrounded()
         assertTrue(lock.isLocked.value)
     }
 
