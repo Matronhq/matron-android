@@ -45,10 +45,12 @@ import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.AppLockTimeout
 import chat.matron.android.viewmodels.DevicesProviding
 import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
+import chat.matron.android.viewmodels.NewChatDefaultsStore
 import chat.matron.android.viewmodels.NoticesSettingViewModel
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
 import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
 import chat.matron.android.viewmodels.AccountEmailViewModel
+import chat.matron.android.viewmodels.ApprovalKeysScreenModel
 import chat.matron.android.viewmodels.ChangePasswordViewModel
 import kotlinx.coroutines.launch
 
@@ -86,6 +88,8 @@ fun DeviceSettingsScreen(
     onPinnedChats: (() -> Unit)? = null,
     /// Settings → People (contacts and invite links). `null` hides it.
     onPeople: (() -> Unit)? = null,
+    /// Settings → Notifications. `null` hides the row (previews).
+    onNotifications: (() -> Unit)? = null,
     /// Settings → For you's journal-held "notices" switch. `null` in hosts
     /// without a session (previews); the section also stays hidden until the
     /// journal answers, and for good on a journal without `/settings`.
@@ -102,6 +106,12 @@ fun DeviceSettingsScreen(
     /// Settings → Security's "Email address" for password resets. `null` in
     /// hosts without a session; hidden too on a journal without it.
     accountEmail: AccountEmailViewModel? = null,
+    /// Settings ▸ Security ▸ Approval keys. `null` hides the row.
+    approvalKeys: ApprovalKeysScreenModel? = null,
+    onApprovalKeys: () -> Unit = {},
+    /// Settings → New chats: the user's default model and effort. `null`
+    /// in hosts without a session (previews); says so on an older journal.
+    newChatDefaults: NewChatDefaultsStore? = null,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -126,8 +136,8 @@ fun DeviceSettingsScreen(
                 LabeledRow("Server", hostOf(session.homeserverURL))
             }
 
-            if (twoFactor != null || changePassword != null || accountEmail != null) {
-                SecuritySection(twoFactor, changePassword, accountEmail)
+            if (twoFactor != null || changePassword != null || accountEmail != null || approvalKeys != null) {
+                SecuritySection(twoFactor, changePassword, accountEmail, approvalKeys, onApprovalKeys)
             }
 
             if (devicesApi != null) {
@@ -173,7 +183,11 @@ fun DeviceSettingsScreen(
 
             if (coordinator != null) CoordinatorSection(coordinator)
 
+            if (newChatDefaults != null) NewChatDefaultsSection(newChatDefaults)
+
             if (onPinnedChats != null) PinnedChatsSection(onPinnedChats)
+
+            if (onNotifications != null) NotificationsSection(onNotifications)
 
             if (notices != null) NoticesSection(notices)
 
@@ -520,6 +534,22 @@ private fun PeopleSection(onOpen: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("People", modifier = Modifier.weight(1f))
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+        }
+    }
+}
+
+@Composable
+private fun NotificationsSection(onOpen: () -> Unit) {
+    SettingsSection("Notifications") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onOpen)
+                .padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Notifications", modifier = Modifier.weight(1f))
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
         }
     }

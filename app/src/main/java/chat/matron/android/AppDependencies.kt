@@ -37,11 +37,20 @@ import chat.matron.android.viewmodels.UnsentReplyStore
 import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
 import chat.matron.android.viewmodels.CoordinatorSetting
 import chat.matron.android.viewmodels.MemoriesListViewModel
+import chat.matron.android.viewmodels.NewChatDefaultsStore
 import chat.matron.android.viewmodels.RoutinesViewModel
 import chat.matron.android.viewmodels.MemoryEditorViewModel
 import chat.matron.android.viewmodels.MissionDetailViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
+import chat.matron.android.viewmodels.ConversationRoomsViewModel
+import chat.matron.android.viewmodels.NotifySettingsStore
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
+import chat.matron.android.viewmodels.ApprovalCenter
+import chat.matron.android.viewmodels.AccountLockMonitor
+import chat.matron.android.viewmodels.AccountUnlockModel
+import chat.matron.android.viewmodels.ApprovalKeysScreenModel
+import chat.matron.android.platform.ApprovalKeyStore
+import chat.matron.android.platform.KeystoreApprovalKeyProvider
 import chat.matron.android.viewmodels.ChangePasswordViewModel
 import chat.matron.android.viewmodels.AccountEmailViewModel
 import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
@@ -251,6 +260,8 @@ class AppDependencies(
         val pinsSync: PinsSync,
         /** The journal-held Coordinator, mirrored into [CoordinatorSetting]. */
         val coordinatorSync: CoordinatorSync,
+        /** Settings → Notifications and each chat's Notifications menu. */
+        val notifySettings: NotifySettingsStore,
         /**
          * Background search-history backfill sweep for this session (see
          * [SearchBackfillCoordinator]). Cancelled on sign-out, and joined by
@@ -269,6 +280,12 @@ class AppDependencies(
         val revocation: CredentialRevocationMonitor = CredentialRevocationMonitor(onRevoked = {}).apply { cancel() },
         /** The account this stack is for (its per-account caches are cleared with it). */
         val userID: String = "",
+        /**
+         * The account's approval keys and this device's own: the confirm
+         * sheet every signed request goes through. Null only for a core
+         * built without one (tests).
+         */
+        var approvals: ApprovalCenter? = null,
     )
 
     /**
@@ -462,10 +479,34 @@ class AppDependencies(
             setting = CoordinatorSetting(session.userID, preferences),
             updates = { engine.coordinatorUpdates() },
         )
+        val notifySettings = NotifySettingsStore(
+            api = api,
+            updates = { engine.notifyUpdates() },
+            connectionStates = { engine.stateStream },
+        )
         val core = JournalCore(
             api, db, dbFile, store, engine, maintenance, itemsSync, missionsSync, memoriesSync,
-            pinsSync = pinsSync, coordinatorSync = coordinatorSync, revocation = revocation,
-            userID = session.userID,
+            pinsSync = pinsSync, coordinatorSync = coordinatorSync, notifySettings = notifySettings,
+            revocation = revocation, userID = session.userID,
+        )
+        // The account lock: every answer and the socket say whether it holds.
+        api.accountLock = accountLock
+        engine.accountLock = accountLock
+        core.approvals = ApprovalCenter(
+            api = api,
+            keys = KeystoreApprovalKeyProvider(
+                context,
+                // Debuggable builds also take a software-held key, for
+                // emulators without secure hardware; release builds refuse it.
+                allowSoftwareKeys = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0,
+            ),
+            // One record per journal account: the journal's host and port
+            // and any base path it is served under.
+            store = ApprovalKeyStore(preferences, ApprovalCenter.journalScope(session.homeserverURL), session.userID),
+            user = session.userID,
+            deviceID = session.deviceID.toLongOrNull(),
+            deviceName = approvalKeyName,
+            journalHost = ApprovalCenter.journalHost(session.homeserverURL),
         )
         if (!live) return core
         core.itemsSync.onInviteLink = { link, askId ->
@@ -499,6 +540,7 @@ class AppDependencies(
         memoriesSync.start()
         pinsSync.start()
         coordinatorSync.start()
+        notifySettings.start()
         core.backfillJob = startBackfill(search = search, api = api, store = store)
         return core
     }
@@ -589,6 +631,73 @@ class AppDependencies(
     fun syncService(session: UserSession): SyncService = core(session).engine
 
     /**
+     * Whether the journal says the account is locked (HTTP 423, the socket's
+     * `panic` frame or a refused hello). One for the app: one account is
+     * signed in at a time.
+     */
+    @Volatile
+    private var signingOut = false
+
+    val accountLock: AccountLockMonitor = AccountLockMonitor().also { monitor ->
+        // Replies held while the account was locked go once it is cleared.
+        monitor.whenCleared {
+            // Not the outbox of a sign-in that is going.
+            if (signingOut) return@whenCleared
+            // Read under the monitor every other use of `cores` takes: this
+            // runs on the socket's or OkHttp's thread.
+            synchronized(this@AppDependencies) { cores.values.toList() }
+                .forEach { core -> appScope.launch { core.itemsSync.drainOutbox() } }
+        }
+    }
+
+    /**
+     * Unlocking the account from this device, when the lock froze it: the
+     * confirm sheet and signature, `POST /panic/unlock`, then the new token
+     * saved and swapped into the API client and the socket. An answer that
+     * comes back after a sign-out (or a new sign-in) is thrown away.
+     */
+    fun makeAccountUnlockModel(session: UserSession): AccountUnlockModel {
+        val core = core(session)
+        val center = approvalCenter(session)
+        return AccountUnlockModel(
+            monitor = accountLock,
+            api = core.api,
+            sign = { since -> center.signUnlock(since, AccountUnlockModel.unlockDetail(since)) },
+            adoptToken = { token ->
+                // Saved first, so the next launch has it; then every client of
+                // this session uses it.
+                val saved = runCatching { auth.persist(session.copy(accessToken = token)) }.isSuccess
+                core.api.setToken(token)
+                core.engine.replaceToken(token)
+                saved
+            },
+            isCurrent = { synchronized(this) { cores.values.any { it === core } } },
+            // No revocation sign-out while the unlock swaps the token: the old
+            // token is refused from the moment the journal unlocks.
+            attempt = AccountUnlockModel.Attempt(
+                begin = { core.revocation.hold() },
+                end = { tookNewToken -> core.revocation.release(discard = tookNewToken) },
+            ),
+        )
+    }
+
+    /** The session's approval centre: keys, and the confirm sheet signing goes through. */
+    fun approvalCenter(session: UserSession): ApprovalCenter = core(session).approvals!!
+
+    /** Settings ▸ Approval keys. */
+    fun makeApprovalKeysScreenModel(session: UserSession): ApprovalKeysScreenModel =
+        ApprovalKeysScreenModel(approvalCenter(session))
+
+    /** What this device's approval key is called on the account: the model's name. */
+    private val approvalKeyName: String
+        get() = listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL)
+            .filter { it.isNotBlank() }
+            .let { parts -> if (parts.size == 2 && parts[1].startsWith(parts[0], ignoreCase = true)) listOf(parts[1]) else parts }
+            .joinToString(" ")
+            .ifBlank { "Android device" }
+            .take(40)
+
+    /**
      * Bounded background catch-up — the Android analog of iOS's BGAppRefresh
      * handler (`chat.matron.refresh`): ensures the sync engine is running,
      * waits (capped) until the journal is caught up, then gives queued outbox
@@ -611,6 +720,9 @@ class AppDependencies(
         }
         if (startedHere && !isAppVisible()) engine.endSync()
     }
+
+    /** Whether the session's offline outbox still holds unsent messages (the share screen waits on it). */
+    suspend fun hasPendingOutbox(session: UserSession): Boolean = core(session).engine.hasPendingOutbox()
 
     fun chatService(session: UserSession): ChatService {
         val core = core(session)
@@ -643,6 +755,9 @@ class AppDependencies(
 
     /** The session's journal-held Coordinator (Coordinator redesign §3a). */
     fun coordinatorSync(session: UserSession): CoordinatorSync = core(session).coordinatorSync
+
+    /** The session's notification settings (`GET`/`PUT /notify`), shared by every surface. */
+    fun notifySettings(session: UserSession): NotifySettingsStore = core(session).notifySettings
 
     /** Agent box id → name, live — the pin successor hint names the box. */
     fun agentNamesFlow(session: UserSession): kotlinx.coroutines.flow.Flow<Map<Long, String>> =
@@ -698,7 +813,18 @@ class AppDependencies(
      */
     fun makeItemsPanelViewModel(session: UserSession, convoID: String?, scope: CoroutineScope): ItemsPanelViewModel {
         val c = core(session)
-        return ItemsPanelViewModel(convoID = convoID, store = c.store, api = c.api, sync = c.itemsSync, scope = scope)
+        return ItemsPanelViewModel(
+            convoID = convoID, store = c.store, api = c.api, sync = c.itemsSync, scope = scope, approvals = c.approvals,
+        )
+    }
+
+    /**
+     * A chat header's "Rooms · n": the agent-chat rooms [convoID] takes part
+     * in, live off the session store's rooms stream. One per chat showing.
+     */
+    fun makeConversationRoomsViewModel(session: UserSession, convoID: String, scope: CoroutineScope): ConversationRoomsViewModel {
+        val store = core(session).store
+        return ConversationRoomsViewModel(convoID = convoID, source = { store.roomsFlow() }, scope = scope)
     }
 
     /**
@@ -715,6 +841,12 @@ class AppDependencies(
      * session's API client, live-updated from the engine's settings frames.
      * One per settings screen showing.
      */
+    /** Settings → New chats: the user's default model and effort (`GET`/`PUT /defaults`). */
+    fun makeNewChatDefaultsStore(session: UserSession, scope: CoroutineScope): NewChatDefaultsStore {
+        val c = core(session)
+        return NewChatDefaultsStore(api = c.api, updates = { c.engine.defaultsUpdates() }, scope = scope)
+    }
+
     fun makeNoticesSettingViewModel(session: UserSession, scope: CoroutineScope): NoticesSettingViewModel {
         val c = core(session)
         return NoticesSettingViewModel(api = c.api, updates = { c.engine.settingsUpdates() }, scope = scope)
@@ -1003,11 +1135,26 @@ class AppDependencies(
     @Synchronized
     fun signOut() {
         val oldCores = cores.values.toList()
+        // A lock (or its warning) belongs to the sign-in that is going. Its
+        // clients stop reporting first: teardown's own requests (push
+        // deregistration) would otherwise answer 423 and put the old
+        // account's lock back for the next sign-in.
+        for (core in oldCores) {
+            core.api.accountLock = null
+            core.engine.accountLock = null
+        }
+        signingOut = true
+        accountLock.cleared()
+        signingOut = false
+        accountLock.dismissWarning()
         val oldUserIDs = cores.values.map { it.userID }.distinct()
         // Disarm first: the teardown below still talks to the server with the
         // old token (push deregistration), and a revoked token's 401s must not
         // ask for a second sign-out.
         for (core in oldCores) core.revocation.cancel()
+        // The next account must not be offered this one's conversations as
+        // direct-share targets in the system share sheet.
+        chat.matron.android.features.share.ShareShortcuts.clear(context)
         // These sign-ins are over: a late core() with one of them gets an
         // inert stack, never a live one on the old token.
         retiredSignIns += cores.keys
@@ -1057,6 +1204,8 @@ class AppDependencies(
                     .onFailure { MatronDebug.breadcrumb("signOut: archive.stop failed: $it") }
                 runCatching { core.coordinatorSync.stop() }
                     .onFailure { MatronDebug.breadcrumb("signOut: coordinatorSync.stop failed: $it") }
+                runCatching { core.notifySettings.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: notifySettings.stop failed: $it") }
                 core.engine.endSync()
                 runCatching { core.store.wipe() }
                     .onFailure { MatronDebug.breadcrumb("signOut: store.wipe failed: $it") }

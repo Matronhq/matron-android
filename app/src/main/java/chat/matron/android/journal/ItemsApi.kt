@@ -8,6 +8,7 @@ import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
 import chat.matron.android.models.TrackerLink
+import chat.matron.android.journal.approvals.SignedApproval
 import java.io.File
 import java.time.Instant
 import kotlinx.coroutines.Dispatchers
@@ -71,6 +72,18 @@ data class ItemDetail(val item: TrackerItem, val comments: List<TrackerComment>)
 data class ItemCommentResult(
     val item: TrackerItem,
     val comment: TrackerComment,
+    val link: String? = null,
+    val askId: String? = null,
+)
+
+/// A signed tap's answer: the item as it now stands and the tap's comment.
+/// [comment] is null for an answer on a consent request's item, which the
+/// journal applies to the request itself and records no comment for.
+/// [link] and [askId]: an Approve on an agent's invite ask answers with the
+/// invite link, this once, as an ordinary tap does ([ItemCommentResult]).
+data class ItemTapResult(
+    val item: TrackerItem,
+    val comment: TrackerComment?,
     val link: String? = null,
     val askId: String? = null,
 )
@@ -157,6 +170,19 @@ interface ItemsProviding {
         replaces: String? = null,
         selected: List<String>? = null,
     ): ItemCommentResult
+    /// A tap carrying the user's signed approval: a button on a step-up item
+    /// or follow-up question (an `item_tap` statement), or Approve on a
+    /// consent request aimed at a protected box (a `consent` statement). Sent at once, never
+    /// queued: a nonce lives five minutes and a signature must not wait on
+    /// disk. A provider that cannot carry an approval refuses the tap rather
+    /// than sending it unsigned.
+    suspend fun tapItem(
+        id: String,
+        action: String,
+        replyTo: String?,
+        approval: SignedApproval,
+        idempotencyKey: String,
+    ): ItemTapResult = throw JournalApiError.ApprovalRequired
     suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem
     suspend fun reopenItem(id: String, comment: String?): TrackerItem
     suspend fun rankItem(id: String, change: ItemRankChange): TrackerItem

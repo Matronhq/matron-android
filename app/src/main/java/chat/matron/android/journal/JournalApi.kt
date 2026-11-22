@@ -15,6 +15,15 @@ import chat.matron.android.models.Milestone
 import chat.matron.android.models.Mission
 import chat.matron.android.models.TrackerItem
 import chat.matron.android.viewmodels.BoxStatus
+import chat.matron.android.journal.approvals.ApprovalKeyDTO
+import chat.matron.android.journal.approvals.ApprovalKeyError
+import chat.matron.android.journal.approvals.ApprovalKeysProviding
+import chat.matron.android.journal.approvals.ApprovalKeysState
+import chat.matron.android.journal.approvals.ApprovalNonce
+import chat.matron.android.journal.approvals.SignedApproval
+import chat.matron.android.journal.approvals.malformed
+import chat.matron.android.journal.approvals.toJson
+import java.time.Instant
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -146,6 +155,11 @@ data class ConvoSummaryDTO(
     /// field. Absent never clears a stored set (same discipline as
     /// [agentDeviceID]); present replaces it wholesale.
     val participants: List<Long>? = null,
+    /// The conversations taking part in an agent-chat room (each
+    /// participant agent's own session), or `null` when the server omits the
+    /// key — a server predating the field. Present replaces the stored list
+    /// wholesale; absent leaves it alone, like [participants].
+    val participantConvos: List<String>? = null,
     /// When the conversation was archived (ms), from a journal that syncs
     /// the archive; `null` when it is not archived or the journal says
     /// nothing. Read only when the row is first created (see
@@ -362,6 +376,19 @@ sealed class JournalApiError(message: String) : Exception(message) {
         val reason: String? = null,
         val max: Int? = null,
     ) : JournalApiError(serverMessage.ifEmpty { "Server error (HTTP $status)." })
+    /// 403 `approval_required`: the account has an approval key and this
+    /// request needed a signature it did not carry.
+    /// 423 `account_locked`: the whole account is locked; nothing is
+    /// accepted until it is cleared.
+    data class AccountLocked(val lock: AccountLock) : JournalApiError("This account is locked.")
+    data object ApprovalRequired : JournalApiError(
+        "This needs a signature from an approval key. Approve it on a device that has one.",
+    )
+    /// 400 `approval_invalid`: the journal refused the signed approval.
+    /// [reason] is its own word: `mismatch`, `nonce`, `revoked_key`,
+    /// `wrong_device`, `unknown_key`, `signature`, `bad_statement`.
+    data class ApprovalInvalid(val reason: String) :
+        JournalApiError(chat.matron.android.journal.approvals.approvalInvalidText(reason))
     data class Transport(val detail: String) :
         JournalApiError(if (detail.isEmpty()) "Couldn't reach the server." else "Couldn't reach the server — $detail")
 }
@@ -377,11 +404,11 @@ class JournalApi(
     /// token has been revoked. Not told about requests sent without a token,
     /// transport failures, or answers to a token since replaced.
     private val authResponses: ((Int) -> Unit)? = null,
-) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding, RoutinesProviding,
-    PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
+) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding, RoutinesProviding, NewChatDefaultsProviding,
+    PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NotifySettingsProviding, NumberLookupProviding,
     TrackerSearching, JournalSearching,
     ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding, ContactsProviding,
-    InviteAskAnswering {
+    InviteAskAnswering, ApprovalKeysProviding, AccountUnlocking {
     constructor(
         baseUrl: String,
         client: OkHttpClient = OkHttpClient(),
@@ -393,8 +420,18 @@ class JournalApi(
     private var token: String? = token
 
     fun setToken(token: String?) {
-        this.token = token
+        synchronized(tokenLock) { this.token = token }
     }
+
+    /// Held while a token is swapped and while an answer's lock report is
+    /// checked against the token in use, so a report for the old token is
+    /// either told before the swap or never.
+    private val tokenLock = Any()
+
+    /// Told what every answered, authenticated request says about the
+    /// account lock (HTTP 423). Null in hosts that do not watch for it.
+    @Volatile
+    var accountLock: AccountLockListening? = null
 
     enum class PushEnvironment(val wire: String) { SANDBOX("sandbox"), PROD("prod") }
 
@@ -546,6 +583,81 @@ class JournalApi(
         return PasswordChange(signedOut = obj.intOrNull("signed_out") ?: 0)
     }
 
+    // MARK: Approval keys (protocol "Approval keys (step-up)")
+
+    override suspend fun approvalKeys(): ApprovalKeysState =
+        ApprovalKeysState.fromJson(request("/approval-keys")) ?: throw malformed("approval keys")
+
+    override suspend fun approvalNonce(): ApprovalNonce {
+        val obj = approvalKeyRequest("/approvals/nonce", buildJsonObject {})
+        val nonce = obj.stringOrNull("nonce")?.takeIf { it.isNotEmpty() } ?: throw malformed("nonce")
+        val expires = obj.longOrNull("expires_at")?.let(Instant::ofEpochMilli) ?: Instant.now().plusSeconds(300)
+        return ApprovalNonce(nonce, expires)
+    }
+
+    override suspend fun enrolApprovalKey(publicKey: String, name: String, password: String, code: String): ApprovalKeyDTO =
+        approvalKeyOf(
+            approvalKeyRequest(
+                "/approval-keys",
+                buildJsonObject {
+                    put("public_key", publicKey); put("name", name); put("password", password); put("code", code)
+                },
+            ),
+        )
+
+    override suspend fun requestApprovalKey(publicKey: String, name: String): String {
+        val obj = approvalKeyRequest(
+            "/approval-keys/requests",
+            buildJsonObject { put("public_key", publicKey); put("name", name) },
+        )
+        return obj.stringOrNull("id") ?: throw malformed("key request")
+    }
+
+    override suspend fun approveApprovalKeyRequest(id: String, approval: SignedApproval): ApprovalKeyDTO =
+        approvalKeyOf(
+            approvalKeyRequest(
+                "/approval-keys/requests/${pathSegment(id)}/approve",
+                buildJsonObject { put("approval", approval.toJson()) },
+            ),
+        )
+
+    override suspend fun revokeApprovalKey(keyID: String, approval: SignedApproval) {
+        approvalKeyRequest("/approval-keys/${pathSegment(keyID)}/revoke", buildJsonObject { put("approval", approval.toJson()) })
+    }
+
+    override suspend fun revokeApprovalKey(keyID: String, password: String, code: String) {
+        approvalKeyRequest(
+            "/approval-keys/${pathSegment(keyID)}/revoke",
+            buildJsonObject { put("password", password); put("code", code) },
+        )
+    }
+
+    override suspend fun attachApprovalKey(approval: SignedApproval): ApprovalKeyDTO =
+        approvalKeyOf(approvalKeyRequest("/approval-keys/attach", buildJsonObject { put("approval", approval.toJson()) }))
+
+    // MARK: Account unlock (protocol "Panic lock")
+
+    override suspend fun unlockAccount(approval: SignedApproval): AccountUnlockResult {
+        val (status, data) = raw("/panic/unlock", "POST", buildJsonObject { put("approval", approval.toJson()) })
+        val obj = parseJsonObjectOrNull(String(data, Charsets.UTF_8))
+        if (status == 409 && obj?.stringOrNull("error") == "not_locked") throw AccountNotLockedError()
+        if (status != 200) throw error(status, data)
+        val token = obj?.stringOrNull("token")?.takeIf { it.isNotEmpty() } ?: throw malformed("unlock")
+        return AccountUnlockResult(token, obj.intOrNull("devices_revoked") ?: 0)
+    }
+
+    private fun approvalKeyOf(obj: JsonObject): ApprovalKeyDTO =
+        ApprovalKeyDTO.fromJson(obj.objectOrNull("key")) ?: throw malformed("approval key")
+
+    /// A key route's POST: its own refusals first ([ApprovalKeyError]), then
+    /// the generic table.
+    private suspend fun approvalKeyRequest(path: String, body: JsonObject): JsonObject {
+        val (status, data) = raw(path, "POST", body)
+        val obj = parseJsonObjectOrNull(String(data, Charsets.UTF_8))
+        if (status != 200 && status != 201) throw ApprovalKeyError.from(status, obj) ?: error(status, data)
+        return obj ?: throw JournalApiError.Transport("non-JSON response for $path")
+    }
+
     // MARK: Password reset by email
     //
     // The sign-in screen's "Forgot password?" is unauthenticated; the link
@@ -603,6 +715,7 @@ class JournalApi(
                 // Multi-agent room membership (owner + joined). Absent for
                 // solo conversations and on older servers -> null.
                 participants = c.longArrayOrNull("participants"),
+                participantConvos = c.stringArrayOrNull("participant_convos"),
                 archivedAt = c.longOrNull("archived_at"),
             )
         }
@@ -1114,6 +1227,30 @@ class JournalApi(
         )
     }
 
+    override suspend fun tapItem(
+        id: String,
+        action: String,
+        replyTo: String?,
+        approval: SignedApproval,
+        idempotencyKey: String,
+    ): ItemTapResult {
+        val json = buildJsonObject {
+            put("body", action)
+            put("action", action)
+            replyTo?.let { put("reply_to", it) }
+            put("approval", approval.toJson())
+        }
+        val obj = request(
+            path = "/items/${pathSegment(id)}/comments", method = "POST", jsonBody = json,
+            accept = setOf(200, 201), headers = idempotencyHeaders(idempotencyKey),
+        )
+        return ItemTapResult(
+            decodeItem(obj), obj.objectOrNull("comment")?.let(TrackerComment::fromJson),
+            link = InviteLinks.shareableOf(obj),
+            askId = obj.objectOrNull("ask")?.stringOrNull("id")?.takeIf { it.isNotEmpty() },
+        )
+    }
+
     override suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem =
         decodeItem(
             request(
@@ -1155,6 +1292,19 @@ class JournalApi(
         UserSettingsDecoding.settings(
             request(path = "/settings", method = "PATCH", jsonBody = buildJsonObject { put("auto_archive_days", days) }),
         ) ?: throw JournalApiError.Transport("malformed settings response")
+
+    // MARK: Notifications
+    //
+    // Journal notification settings: what may push, synced per user, plus
+    // this device's own level. A journal predating the route 404s the GET.
+
+    override suspend fun notifySettings(): NotifyView =
+        NotifyView.decode(request(path = "/notify"))
+            ?: throw JournalApiError.Transport("malformed /notify response")
+
+    override suspend fun updateNotify(change: NotifyChange): NotifyView =
+        NotifyView.decode(request(path = "/notify", method = "PUT", jsonBody = change.body()))
+            ?: throw JournalApiError.Transport("malformed /notify response")
 
     // MARK: Archive
 
@@ -1254,6 +1404,23 @@ class JournalApi(
 
     override suspend fun deleteMemory(name: String): Memory =
         MemoriesDecoding.memory(request(path = "/memories/${pathSegment(name)}", method = "DELETE"))
+
+    // MARK: New chat defaults
+    //
+    // The user's default model and effort for new chats. A journal that
+    // predates them 404s `GET /defaults`.
+
+    override suspend fun newChatDefaults(): NewChatDefaults =
+        NewChatDefaults.decode(request(path = "/defaults"))
+            ?: throw JournalApiError.Transport("malformed /defaults response")
+
+    override suspend fun setNewChatDefault(key: NewChatDefaults.Key, value: String?): NewChatDefaults =
+        NewChatDefaults.decode(
+            request(
+                path = "/defaults", method = "PUT",
+                jsonBody = buildJsonObject { put(key.wire, value?.let { JsonPrimitive(it) } ?: JsonNull) },
+            ),
+        ) ?: throw JournalApiError.Transport("malformed /defaults response")
 
     // MARK: Routines
     //
@@ -1497,8 +1664,20 @@ class JournalApi(
     /// the new one).
     private suspend fun execute(call: Call, sentWith: String?): Pair<Int, ByteArray> {
         val result = send(call)
-        if (sentWith != null && sentWith == token) {
-            authResponses?.invoke(credentialStatus(result.first, result.second))
+        if (sentWith != null) {
+            // Checked against the token in use, and told, under the lock its
+            // swap takes: an answer to a token an unlock has since replaced
+            // says nothing about this sign-in (its 401 is expected, the old
+            // token having died), so it is told before the swap or never.
+            synchronized(tokenLock) {
+                if (sentWith == token) {
+                    val (status, bytes) = result
+                    val lock = AccountLock.fromHttp(status, bytes)
+                    // A locked account's refusal is never a revoke.
+                    if (lock == null) authResponses?.invoke(credentialStatus(status, bytes))
+                    accountLock?.let { listener -> lock?.let(listener::noteLock) ?: listener.noteStatus(status) }
+                }
+            }
         }
         return result
     }
@@ -1607,7 +1786,11 @@ class JournalApi(
                 JournalApiError.TwoFactorConflict(code)
             status == 429 && code == "locked_out" ->
                 JournalApiError.LockedOut(obj?.intOrNull("retry_after") ?: 60)
+            status == 423 || code == "account_locked" ->
+                JournalApiError.AccountLocked(AccountLock.fromHttp(423, data) ?: AccountLock(null, false))
             status == 429 -> JournalApiError.RateLimited
+            status == 403 && code == "approval_required" -> JournalApiError.ApprovalRequired
+            status == 400 && code == "approval_invalid" -> JournalApiError.ApprovalInvalid(obj?.stringOrNull("reason") ?: "")
             status == 401 -> JournalApiError.Unauthenticated
             status == 403 -> JournalApiError.Forbidden
             status == 404 -> JournalApiError.NotFound

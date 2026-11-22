@@ -129,7 +129,7 @@ class JournalSyncEngine(
     private val api: SnapshotSource,
     private val store: JournalStore,
     private val connector: WebSocketConnecting,
-    private val token: String,
+    token: String,
     private val ownSender: String,
     private val search: SearchIndexer? = null,
     private val backoffBaseSeconds: Double = 1.0,
@@ -184,6 +184,8 @@ class JournalSyncEngine(
     /// The user's journal-held settings as `hello_ok` and `settings` frames
     /// carry them — the settings screen's live feed.
     private val settingsListeners = mutableMapOf<UUID, (UserSettings) -> Unit>()
+    private val defaultsListeners = mutableMapOf<UUID, (NewChatDefaults) -> Unit>()
+    private val notifyListeners = mutableMapOf<UUID, (NotifySettings) -> Unit>()
     /// Live `box_status` frames as `(deviceID, report)` — New Chat's feed.
     private val boxStatusListeners = mutableMapOf<UUID, (Pair<Long, BoxStatus>) -> Unit>()
     private val boxDefaultsListeners = mutableMapOf<UUID, (BoxDefaultsUpdate) -> Unit>()
@@ -321,6 +323,7 @@ class JournalSyncEngine(
     fun beginSync() {
         synchronized(lock) {
             if (runJob != null) return
+            stoppedForAuth = false
             attempt = 0
             runJob = scope.launch { runLoop() }
         }
@@ -405,6 +408,36 @@ class JournalSyncEngine(
     /// Android network-availability seam (analogue of the Apple path monitor).
     /// Mid-backoff, retry now on the fresh path; otherwise close the live
     /// socket and route the run loop straight back to `.connecting`.
+    /// The device token the next hello sends. Replaced when unlocking the
+    /// account gives this device a new one ([replaceToken]).
+    @Volatile
+    private var token: String = token
+
+    /// Told what the socket says about the account lock (a `panic` frame, a
+    /// refused or accepted hello). Null in hosts that do not watch for it.
+    @Volatile
+    var accountLock: AccountLockListening? = null
+
+    /// The token the current connect attempt's hello carries.
+    @Volatile
+    private var attemptToken: String = token
+
+    /// Starts using [newToken]: the socket opened with the old one is closed
+    /// and the next hello carries the new one.
+    fun replaceToken(newToken: String) {
+        // A hello sent with the old token just before the swap may have been
+        // refused as a sign-out and stopped the loop: the new token restarts
+        // it. Swapped and checked under the lock the refusal handlers take.
+        val restart = synchronized(lock) {
+            token = newToken
+            stoppedForAuth.also { stoppedForAuth = false }
+        }
+        if (restart) beginSync() else onNetworkAvailable()
+    }
+
+    /// The loop stopped because the server refused this device's token.
+    private var stoppedForAuth = false
+
     fun onNetworkAvailable() {
         val conn = synchronized(lock) {
             if (liveConnection == null) return@synchronized null
@@ -710,6 +743,15 @@ class JournalSyncEngine(
         awaitClose { synchronized(lock) { boxDefaultsListeners.remove(id) } }
     }
 
+    /// The user's default model and effort for new chats, as live `defaults`
+    /// frames bring them (any device's or agent's change, this device's own
+    /// echo included). No replay: a subscriber reads `GET /defaults` first.
+    fun defaultsUpdates(): Flow<NewChatDefaults> = callbackFlow {
+        val id = UUID.randomUUID()
+        synchronized(lock) { defaultsListeners[id] = { d -> trySend(d) } }
+        awaitClose { synchronized(lock) { defaultsListeners.remove(id) } }
+    }
+
     /// The user's journal-held settings as each connect's `hello_ok` and
     /// each live `settings` control frame carry them. No replay: a
     /// subscriber seeds from `GET /settings` and this only carries what
@@ -722,6 +764,16 @@ class JournalSyncEngine(
 
     private fun fanOutSettings(settings: UserSettings) = synchronized(lock) {
         settingsListeners.values.forEach { it(settings) }
+    }
+
+    /// Live `notify` frames (journal notification settings): the synced part
+    /// of the user's notification settings after any device changed them.
+    /// No replay: a subscriber seeds from `GET /notify`. Mirrors
+    /// [settingsUpdates].
+    fun notifyUpdates(): Flow<NotifySettings> = callbackFlow {
+        val id = UUID.randomUUID()
+        synchronized(lock) { notifyListeners[id] = { u -> trySend(u) } }
+        awaitClose { synchronized(lock) { notifyListeners.remove(id) } }
     }
 
     /// Mission markers (`mission` and `milestone` events) as they are
@@ -1047,13 +1099,16 @@ class JournalSyncEngine(
                 setState(SyncConnectionState.Connecting)
                 coldStartIfNeeded()
                 val cursor = store.cursor()
+                val helloToken = synchronized(lock) { token.also { attemptToken = it } }
                 val (connection, hello) = JournalConnection.establishWithHello(
-                    connector = connector, wsUrl = api.wsUrl, token = token, cursor = cursor,
+                    connector = connector, wsUrl = api.wsUrl, token = helloToken, cursor = cursor,
                     archiveSince = archive?.helloArchiveSince(),
                 )
                 val headSeq = hello.headSeq
                 synchronized(lock) { liveConnection = connection; attempt = 0 }
                 credentialSignals?.invoke(CredentialSignal.Accepted)
+                // The journal greets no device of a locked account.
+                accountLock?.noteSocketAccepted()
                 // Before the replay: a message the replay brings back is then
                 // judged against the archive as the journal has it.
                 archive?.applyHello(hello.archive)
@@ -1165,15 +1220,59 @@ class JournalSyncEngine(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: JournalConnectionError.AuthRejected) {
+                // Decided under the lock replaceToken takes, so a token swapped
+                // in meanwhile is either seen here or sees this stop.
+                val stale = synchronized(lock) {
+                    if (attemptToken != token) {
+                        true
+                    } else {
+                        liveConnection = null; runJob = null; stoppedForAuth = true
+                        // Said here, not after: once this lock is let go a
+                        // token swap may restart the loop, and a late
+                        // "signed out" must not overwrite its state.
+                        _state.value = SyncConnectionState.Offline("Signed out by server")
+                        false
+                    }
+                }
+                if (stale) {
+                    // A hello sent with a token since replaced (an unlock
+                    // gave this device a new one): retry with the new one,
+                    // never taken as a sign-out.
+                    closeLive()
+                    continue
+                }
                 MatronDebug.breadcrumb("server rejected auth — stopping sync (signed out by server)")
-                synchronized(lock) { liveConnection = null; runJob = null }
-                setState(SyncConnectionState.Offline("Signed out by server"))
                 failReadyWaiters(JournalSyncError.AuthRevoked)
                 failAllRPC(RPCRequestError.Offline)
                 // Last: the app's sign-out may run from here, and it ends
                 // this engine.
                 credentialSignals?.invoke(CredentialSignal.Rejected)
                 return
+            } catch (e: JournalConnectionError.AccountLocked) {
+                // Checked and told under the lock replaceToken takes: an
+                // unlock that swaps the token in clears the lock after that,
+                // so a stale refusal can never be told after the clear.
+                val stale = synchronized(lock) {
+                    if (attemptToken != token) {
+                        true
+                    } else {
+                        // Refused because the whole account is locked: said
+                        // so, then the usual backoff, so the lock's clearing
+                        // is noticed.
+                        accountLock?.noteLockedBySocket(AccountLock(e.since, e.canUnlock))
+                        false
+                    }.also { stale ->
+                        // Never a revoke: a frozen device keeps its token.
+                        if (!stale) credentialSignals?.invoke(CredentialSignal.AccountLocked)
+                    }
+                }
+                if (stale) {
+                    // Refused for the token an unlock has since replaced: it
+                    // says nothing about the account now. Retry at once.
+                    closeLive()
+                    continue
+                }
+                MatronDebug.breadcrumb("hello refused: account locked")
             } catch (e: Throwable) {
                 // Fall through to backoff — but never silently.
                 val n = synchronized(lock) { attempt + 1 }
@@ -1309,6 +1408,7 @@ class JournalSyncEngine(
                 // fails its outbox row; other post-hello control frames are
                 // advisory.
                 val requestID = frame.requestID
+                if (frame.code == "account_locked") accountLock?.noteLockedBySocket(AccountLock(frame.since, frame.unlock))
                 when {
                     requestID != null -> failRPC(requestID, frame.code, frame.detail)
                     frame.ref == "send" -> handleSendRejected(frame.code, frame.detail)
@@ -1351,7 +1451,14 @@ class JournalSyncEngine(
                 publishPinsLocked(frame.pins)
             }
             is ServerFrame.SettingsFrame -> fanOutSettings(frame.settings)
+            is ServerFrame.DefaultsFrame -> synchronized(lock) {
+                defaultsListeners.values.forEach { it(frame.defaults) }
+            }
+            is ServerFrame.NotifyFrame -> synchronized(lock) {
+                notifyListeners.values.forEach { it(frame.settings) }
+            }
             is ServerFrame.ArchiveFrame -> archive?.apply(frame.delta)
+            is ServerFrame.Panic -> if (frame.on) accountLock?.noteLockedBySocket(AccountLock(frame.since, frame.unlock))
             is ServerFrame.HelloOK, is ServerFrame.UnknownControl -> Unit // post-hello control frames are advisory
         }
         return appliedSinceAck

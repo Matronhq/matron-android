@@ -31,6 +31,7 @@ import java.time.Instant
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import java.util.UUID
 import kotlinx.serialization.json.buildJsonObject
@@ -97,8 +98,26 @@ data class ConversationEntity(
     /// stays; opening it pages the history back from the journal. Cleared by
     /// an unarchive, so a later archive purges again.
     @ColumnInfo(name = "history_purged_at") val historyPurgedAt: Long? = null,
+    /// JSON-encoded `[String]` of the conversations taking part in an
+    /// agent-chat room (each participant agent's own session,
+    /// journal-ordered), else `null`. `[]` for a room whose participants are
+    /// not known yet. Replaced wholesale when the wire sends the key,
+    /// untouched when it doesn't, like [participants]. Read through
+    /// [participantConvoIDs].
+    @ColumnInfo(name = "participant_convos") val participantConvos: String? = null,
 ) {
     val isArchived: Boolean get() = archivedAt != null
+
+    /// Decoded [participantConvos]. Empty for anything that is not a room
+    /// with known participants (null column, `[]`, or a value that fails to
+    /// decode).
+    val participantConvoIDs: List<String>
+        get() {
+            val raw = participantConvos ?: return emptyList()
+            return runCatching {
+                MatronJson.decodeFromString(ListSerializer(String.serializer()), raw)
+            }.getOrElse { emptyList() }
+        }
 
     /// Decoded [participants]. Empty for anything that is not a known
     /// multi-agent room (null column, or a value that fails to decode).
@@ -114,6 +133,11 @@ data class ConversationEntity(
         fun encodeParticipants(ids: List<Long>): String? =
             runCatching {
                 MatronJson.encodeToString(ListSerializer(Long.serializer()), ids)
+            }.getOrNull()
+
+        fun encodeParticipantConvos(ids: List<String>): String? =
+            runCatching {
+                MatronJson.encodeToString(ListSerializer(String.serializer()), ids)
             }.getOrNull()
     }
 }
@@ -306,6 +330,11 @@ data class ItemEntity(
     @ColumnInfo(name = "handover_json") val handoverJson: String? = null,
     /// The contributor who filed the item (v17); null on everything else.
     @ColumnInfo(name = "contributor_json") val contributorJson: String? = null,
+    /// Approval keys (v20): the step-up mark and its subject as JSON. Rows
+    /// cached before v20 read "not step-up" until their next refetch; a tap
+    /// that needs a signature reads the item afresh before signing anyway.
+    @ColumnInfo(name = "step_up") val stepUp: Boolean? = null,
+    @ColumnInfo(name = "subject_json") val subjectJson: String? = null,
     /// Whether the item's own buttons are a multi-select question (v19);
     /// rows cached before v19 read `false` until their next refetch.
     @ColumnInfo(name = "multi_select", defaultValue = "0") val multiSelect: Boolean = false,
@@ -335,6 +364,8 @@ data class ItemEntity(
         working = workingJson?.let(::storedItemWorking),
         handover = ItemHandover.fromJson(handoverJson?.let(::parseJsonObjectOrNull)),
         contributor = Contributor.fromJson(contributorJson?.let(::parseJsonObjectOrNull)),
+        stepUp = stepUp ?: false,
+        subject = subjectJson?.let { TrackerItem.stringMapOrNull(parseJsonObjectOrNull(it)) },
     )
 
     companion object {
@@ -360,6 +391,8 @@ data class ItemEntity(
             lastUserInputAt = i.lastUserInputAt?.toEpochMilli(),
             handoverJson = i.handover?.toJson()?.toString(),
             contributorJson = i.contributor?.toJson()?.toString(),
+            stepUp = if (i.stepUp) true else null,
+            subjectJson = i.subject?.let { MatronJson.encodeToString(MapSerializer(String.serializer(), String.serializer()), it) },
         )
     }
 }
@@ -407,6 +440,8 @@ data class ItemCommentEntity(
         @SerialName("contributor_via") val contributorVia: String? = null,
         val attribution: String? = null,
         val replaces: String? = null,
+        @SerialName("step_up") val stepUp: Boolean? = null,
+        val subject: Map<String, String>? = null,
     )
 
     fun toComment(): TrackerComment {
@@ -433,6 +468,8 @@ data class ItemCommentEntity(
             },
             attribution = meta?.attribution,
             replaces = meta?.replaces,
+            stepUp = meta?.stepUp ?: false,
+            subject = meta?.subject,
         )
     }
 
@@ -444,7 +481,9 @@ data class ItemCommentEntity(
                 c.multiSelect || c.chosenActions.isNotEmpty() || c.selected.isNotEmpty()
             val hasAuthor = c.deviceName != null || c.convoID != null || c.convoTitle != null ||
                 c.contributor != null || c.attribution != null
-            val meta = if (c.statusFrom != null || c.statusTo != null || hasButtons || hasAuthor || c.replaces != null) {
+            val meta = if (c.statusFrom != null || c.statusTo != null || hasButtons || hasAuthor || c.replaces != null ||
+                c.stepUp || c.subject != null
+            ) {
                 MatronJson.encodeToString(
                     Meta.serializer(),
                     Meta(
@@ -458,6 +497,8 @@ data class ItemCommentEntity(
                         contributorName = c.contributor?.name, contributorVia = c.contributor?.via?.wire,
                         attribution = c.attribution,
                         replaces = c.replaces,
+                        stepUp = if (c.stepUp) true else null,
+                        subject = c.subject,
                     ),
                 )
             } else {

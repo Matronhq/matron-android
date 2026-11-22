@@ -42,6 +42,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -68,6 +69,9 @@ class ItemDetailViewModel(
     private val scope: CoroutineScope,
     private val stagingDirectory: File,
     private val now: () -> Instant = Instant::now,
+    /// Approval keys: signs a tap on a step-up item or question. `null` in
+    /// hosts without one; such a tap is then refused with the reason.
+    private val approvals: ApprovalCenter? = null,
     /// Answers a spawn consent item's card (`POST /agent-spawn/answer`, as the
     /// chat card does). `null` draws the card read-only: buttons wired to
     /// nothing would look like they acted.
@@ -539,6 +543,7 @@ class ItemDetailViewModel(
                 val stored = runCatching { store.comments(itemID) }.getOrNull()?.firstOrNull { it.id == comment.id } ?: comment
                 if (stored.chosenAction == label) return
             }
+            if (!sendSigned(_item.value ?: return, comment, label)) return
             sync.enqueueComment(itemID, UUID.randomUUID().toString(), label, emptyList(), action = label, replyTo = comment.id)
         }
     }
@@ -557,8 +562,33 @@ class ItemDetailViewModel(
             val queued = runCatching { store.itemOutboxRows(itemID) }.getOrElse { _pendingComments.value }
             val pending = pendingItemTap(queued)
             if (pending == label) return
-            if (pending == null && current.chosenAction == label) return
+            // The store's copy, not this model's flow: a signed tap writes no
+            // outbox row, and the flow only catches up after the write, so
+            // a second press waiting here must see the first one's answer.
+            val stored = runCatching { store.itemFlow(itemID).first() }.getOrNull() ?: current
+            if (pending == null && (current.chosenAction == label || stored.chosenAction == label)) return
+            if (!sendSigned(stored, null, label)) return
             sync.enqueueComment(itemID, UUID.randomUUID().toString(), label, emptyList(), action = label, replyTo = null)
+        }
+    }
+
+    /// A tap that needs a signature is confirmed, signed and posted here, at
+    /// once ([StepUpTap]). True when no signature applies and the outbox
+    /// should take the tap; false when it was sent, cancelled or refused
+    /// ([error] then says why).
+    private suspend fun sendSigned(item: TrackerItem, comment: TrackerComment?, label: String): Boolean {
+        if (item.kind == ItemKind.NOTICE) return true // a notice is never step-up
+        val outcome = StepUpTap.send(
+            item, comment, label, api, sync,
+            signer = approvals?.signer, accountHasKey = approvals?.accountHasKey ?: false,
+        )
+        return when (outcome) {
+            StepUpTap.Outcome.Unsigned -> true
+            StepUpTap.Outcome.Sent, StepUpTap.Outcome.Cancelled -> false
+            is StepUpTap.Outcome.Failed -> {
+                _error.value = outcome.message
+                false
+            }
         }
     }
 
@@ -581,6 +611,12 @@ class ItemDetailViewModel(
             val offered = asking?.actions ?: current.actions
             val multiSelect = asking?.multiSelect ?: current.multiSelect
             if (!multiSelect || labels.isEmpty() || !offered.containsAll(labels)) return
+            // A signature confirms one label, so a step-up question never
+            // takes a multi-select answer: refuse rather than send it unsigned.
+            if (current.stepUp || asking?.stepUp == true) {
+                _error.value = "This question needs a signed answer, which can't cover several choices."
+                return
+            }
             val ordered = offered.filter { it in labels }
             val queued = runCatching { store.itemOutboxRows(itemID) }.getOrElse { _pendingComments.value }
             val pending = if (asking != null) pendingSelections(queued)[asking.id] else pendingItemSelection(queued)

@@ -17,6 +17,9 @@ sealed class JournalConnectionError(message: String? = null) : Exception(message
     data object BadHandshake : JournalConnectionError()
     data object SocketClosed : JournalConnectionError()
     data object HandshakeTimeout : JournalConnectionError()
+    /// The hello was refused because the whole account is locked
+    /// (`account_locked`): since when, and whether this device can unlock it.
+    data class AccountLocked(val since: Long?, val canUnlock: Boolean) : JournalConnectionError("This account is locked.")
 }
 
 /// Opens sockets. The OkHttp implementation is production; tests supply a fake.

@@ -59,6 +59,8 @@ class CredentialRevocationMonitor(
     private var firstRejectionAt: Long? = null
     private var armed = true
     private var fired = false
+    private var holds = 0
+    private var heldRejection = false
 
     /// Whether [onRevoked] has run.
     val hasFired: Boolean get() = synchronized(lock) { fired }
@@ -102,6 +104,28 @@ class CredentialRevocationMonitor(
         synchronized(lock) { armed = false }
     }
 
+    /// Holds back a revoke while this device unlocks a locked account. The
+    /// journal can unlock before its answer arrives, and the old token is
+    /// refused from that moment: a refusal then says nothing about the new
+    /// token the answer carries. Ported from matron-apple.
+    fun hold() {
+        synchronized(lock) { holds += 1 }
+    }
+
+    /// Ends a [hold]. [discard]: the unlock went through and this device took
+    /// its new token, so a refusal held meanwhile, and the 401s counted
+    /// toward one, were the old token's. Otherwise a held refusal fires now.
+    fun release(discard: Boolean) {
+        val fire = synchronized(lock) {
+            holds = (holds - 1).coerceAtLeast(0)
+            val fire = holds == 0 && heldRejection && !discard
+            if (holds == 0) heldRejection = false
+            if (discard) resetLocked()
+            fire
+        }
+        if (fire) fireOnce()
+    }
+
     private fun resetLocked() {
         consecutiveRejections = 0
         firstRejectionAt = null
@@ -109,6 +133,10 @@ class CredentialRevocationMonitor(
 
     private fun fireOnce() {
         synchronized(lock) {
+            if (holds > 0) {
+                heldRejection = true
+                return
+            }
             if (!armed || fired) return
             fired = true
         }

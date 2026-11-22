@@ -431,6 +431,7 @@ fun ItemDetailView(
     /// send is the one send and [onSubmit] must carry the note.
     voice: ItemCommentVoice = ItemCommentVoice.IDLE,
     onCancelRecording: () -> Unit = {},
+    microphoneMenu: (@Composable () -> Unit)? = null,
     /// A tap on one of a comment's one-tap answer buttons.
     onTapAction: (TrackerComment, String) -> Unit = { _, _ -> },
     /// A tap on one of the item's own buttons (a notice's Seen).
@@ -587,7 +588,7 @@ fun ItemDetailView(
                 draft = draft, onDraftChange = onDraftChange, isBusy = model.isBusy,
                 onSubmit = onSubmit, onAttach = onAttach, onVoiceNote = onVoiceNote,
                 attachments = attachments, onRemoveAttachment = onRemoveAttachment,
-                voice = voice, onCancelRecording = onCancelRecording,
+                voice = voice, onCancelRecording = onCancelRecording, microphoneMenu = microphoneMenu,
                 onPasteAttachments = onPasteAttachments,
             )
         }
