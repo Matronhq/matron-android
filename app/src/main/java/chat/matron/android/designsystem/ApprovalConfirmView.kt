@@ -2,6 +2,13 @@ package chat.matron.android.designsystem
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.Arrangement
@@ -217,17 +224,37 @@ private fun Note(text: String, icon: ImageVector, tint: Color = MaterialTheme.co
     }
 }
 
-/// Shows the confirm sheet whenever [center] has a request waiting, covering
-/// the whole app. Composed last at the app's root, so it lies over every
+/// Shows the confirm sheet whenever [center] has a request waiting, over
+/// [content] (the app). Composed at the app's root, so it lies over every
 /// screen. Not a dialog window: those can be sized to run under the
-/// navigation bar, hiding the Cancel row. Only the sheet's own Cancel, or
-/// back, ends it: a stray tap must not be read as an answer either way.
+/// navigation bar, hiding the Cancel row. While a request waits, [content]
+/// is taken out of reach: hidden from TalkBack, unable to take keyboard
+/// focus (its focus is cleared, so its keyboard goes), and under a surface
+/// that swallows taps. Only the sheet's own Cancel, or back, ends it.
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
-fun ApprovalConfirmHost(center: ApprovalCenter) {
+fun ApprovalConfirmHost(center: ApprovalCenter, content: @Composable () -> Unit = {}) {
     val prompt by center.prompt.collectAsStateWithLifecycle()
     val isSigning by center.isSigning.collectAsStateWithLifecycle()
     val error by center.promptError.collectAsStateWithLifecycle()
-    val current = prompt ?: return
+    val current = prompt
+    val focus = LocalFocusManager.current
+    LaunchedEffect(current?.id) { if (current != null) focus.clearFocus(force = true) }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .then(
+                if (current != null) {
+                    Modifier
+                        .clearAndSetSemantics {}
+                        .focusProperties { canFocus = false; enter = { FocusRequester.Cancel } }
+                        .focusGroup()
+                } else {
+                    Modifier
+                },
+            ),
+    ) { content() }
+    if (current == null) return
     BackHandler { if (!isSigning) center.cancel() }
     Surface(
         modifier = Modifier

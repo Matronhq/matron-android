@@ -164,9 +164,24 @@ class AppLockController(
         store.setInt(TIMEOUT_KEY, value.seconds.toInt())
     }
 
+    /// Another system prompt this app raised (an approval key's biometric
+    /// check) is up: its stop and start of the activity is not the app
+    /// leaving, as with the lock's own prompt. Main thread only.
+    private var systemPrompts = 0
+
+    /// Call when such a prompt goes up ([showing] true) and comes down.
+    fun noteSystemPrompt(showing: Boolean) {
+        if (showing) {
+            systemPrompts += 1
+        } else {
+            systemPrompts = (systemPrompts - 1).coerceAtLeast(0)
+            lastAuthEndedAt = now()
+        }
+    }
+
     /// Call when the app leaves the foreground (`ON_STOP`).
     fun noteBackgrounded() {
-        if (!_isEnabled.value || _isLocked.value || _isAuthenticating.value) return
+        if (!_isEnabled.value || _isLocked.value || _isAuthenticating.value || systemPrompts > 0) return
         if (backgroundedAt == null) backgroundedAt = now()
     }
 
