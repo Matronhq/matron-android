@@ -1,6 +1,7 @@
 package chat.matron.android.viewmodels
 
 import chat.matron.android.models.MatronDebug
+import chat.matron.android.models.Microphone
 import java.io.File
 import java.time.Instant
 import java.util.UUID
@@ -72,6 +73,12 @@ class VoiceRecorder(
     /// default leave it empty.
     private val describeInputRoute: () -> String = { "" },
     private val now: () -> Instant = Instant::now,
+    /// The inputs a note can record from right now (the real one reads
+    /// `AudioManager`; see `MicrophoneCatalog`).
+    private val listMicrophones: () -> List<Microphone> = { emptyList() },
+    /// Where the user's pick is kept: on this device only, since the
+    /// headsets differ from one device to the next.
+    private val preferences: MicrophonePreference = MicrophonePreference.InMemory(),
     /// How [start] waits between checks that the microphone is live.
     /// Injectable so tests drive the warm-up without real time passing.
     private val pause: suspend () -> Unit = { delay(LIVE_CHECK_INTERVAL) },
@@ -146,6 +153,38 @@ class VoiceRecorder(
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
 
+    private val _microphone = MutableStateFlow<Microphone?>(null)
+
+    /// The input the note in progress records from; `null` when idle or when
+    /// the platform can't say.
+    val microphone: StateFlow<Microphone?> = _microphone.asStateFlow()
+
+    private val _preferredMicrophoneID = MutableStateFlow(preferences.load())
+
+    /// The user's pick, remembered across notes and launches. `null` means the
+    /// system's choice. A pick that isn't connected falls back to the system's
+    /// choice for that note.
+    val preferredMicrophoneID: StateFlow<String?> = _preferredMicrophoneID.asStateFlow()
+
+    /// The inputs a note can record from right now.
+    fun availableMicrophones(): List<Microphone> = runCatching { listMicrophones() }.getOrElse { emptyList() }
+
+    /// Remembers [id] (`null`: the system's choice) for every note from now
+    /// on and, while a note records, moves it to that microphone at once: the
+    /// recorder reroutes the running capture, in the same file.
+    fun selectMicrophone(id: String?) {
+        _preferredMicrophoneID.value = id
+        runCatching { preferences.save(id) }
+        val active = recorder ?: return
+        runCatching { active.useMicrophone(id) }
+        refreshMicrophone()
+        log("microphone: picked=$id now=${_microphone.value?.name}")
+    }
+
+    private fun refreshMicrophone() {
+        _microphone.value = recorder?.let { runCatching { it.microphone }.getOrNull() }
+    }
+
     private var recorder: AudioRecording? = null
     private var fileURL: File? = null
     private var startedAt: Instant? = null
@@ -213,9 +252,14 @@ class VoiceRecorder(
             var unsubscribe: (() -> Unit)? = null
             try {
                 val newRecorder = makeRecorder(file)
+                runCatching { newRecorder.useMicrophone(_preferredMicrophoneID.value) }
                 if (!newRecorder.record()) throw RecorderError.RecordFailed
                 liveRecorder = newRecorder
                 recorder = newRecorder
+                // The route settles after the start (and again if a headset
+                // comes or goes): keep the bar's name current.
+                runCatching { newRecorder.setOnMicrophoneChanged { if (recorder === newRecorder) refreshMicrophone() } }
+                refreshMicrophone()
                 fileURL = file
                 _state.value = State.Starting
                 screenClaimed = true
@@ -230,7 +274,7 @@ class VoiceRecorder(
                 // mic is live pauses the recorder just the same.
                 unsubscribe = observeInterruptions { event -> handleInterruption(event) }
                 stopObservingInterruptions = unsubscribe
-                log("start: ${routeDescription()}")
+                log("start: microphone=${_microphone.value?.name} picked=${_preferredMicrophoneID.value} ${routeDescription()}")
             } catch (error: Throwable) {
                 runCatching { unsubscribe?.invoke() }
                 stopObservingInterruptions = null
@@ -240,6 +284,7 @@ class VoiceRecorder(
                 if (screenClaimed) runCatching { setKeepScreenAwake(false) }
                 runCatching { liveRecorder?.stop() }
                 recorder = null
+                _microphone.value = null
                 fileURL = null
                 startedAt = null
                 isInterrupted = false
@@ -340,6 +385,7 @@ class VoiceRecorder(
                 "peak=$peak ${routeDescription()}",
         )
         recorder = null
+        _microphone.value = null
         fileURL = null
         startedAt = null
         _state.value = State.Finished
@@ -367,6 +413,7 @@ class VoiceRecorder(
         recorder?.stop()
         fileURL?.delete()
         recorder = null
+        _microphone.value = null
         fileURL = null
         startedAt = null
         _state.value = State.Idle
@@ -523,4 +570,29 @@ interface AudioRecording {
     /// real microphone's noise floor reads above zero, while an input still
     /// coming up delivers exact zeros. Reads (and so resets) the peak.
     fun isCapturingAudio(): Boolean = peakAmplitude() > 0
+    /// The input this recording takes sound from, `null` when unknown.
+    val microphone: Microphone? get() = null
+
+    /// Records from [id] (`null`: the system's choice). Called before
+    /// [record], and again mid-note when the user picks another microphone;
+    /// the running capture moves there.
+    fun useMicrophone(id: String?) {}
+
+    /// Called when the input the recording is routed from changes (the route
+    /// settling after a start or a pick, a headset coming or going); `null`
+    /// stops the calls.
+    fun setOnMicrophoneChanged(listener: (() -> Unit)?) {}
+}
+
+/// Where [VoiceRecorder] keeps the user's microphone pick.
+interface MicrophonePreference {
+    fun load(): String?
+    fun save(id: String?)
+
+    class InMemory(private var id: String? = null) : MicrophonePreference {
+        override fun load(): String? = id
+        override fun save(id: String?) {
+            this.id = id
+        }
+    }
 }

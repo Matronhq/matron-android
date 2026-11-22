@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Switches on the call-audio link a Bluetooth headset's microphone needs. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- A voice note keeps recording while the app is backgrounded (switching
          apps mid-note): VoiceRecordingService holds a microphone foreground
          session for exactly the span of a recording (port of apple #180's

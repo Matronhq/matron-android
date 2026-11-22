@@ -2,6 +2,7 @@ package chat.matron.android.designsystem
 
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -176,6 +177,9 @@ fun ItemCommentComposer(
     /// A copied file or image pasted into the field goes to the tray
     /// ([AttachmentPasteTarget]). `null` keeps text-only paste.
     onPasteAttachments: ((List<Uri>) -> Unit)? = null,
+    /// Names the recording microphone and picks another (`MicrophoneMenu`),
+    /// shown under the strip while a note records.
+    microphoneMenu: (@Composable () -> Unit)? = null,
 ) {
     val hasAttachments = attachments.isNotEmpty()
     val sendable = itemCommentCanSubmit(draft, hasAttachments, voice)
@@ -189,6 +193,7 @@ fun ItemCommentComposer(
     ) {
         if (voice == ItemCommentVoice.RECORDING || voice == ItemCommentVoice.STARTING) {
             ItemCommentRecordingStrip(live = voice == ItemCommentVoice.RECORDING, onCancel = onCancelRecording)
+            microphoneMenu?.let { menu -> Box(Modifier.padding(start = 52.dp)) { menu() } }
         }
         AttachmentTray(attachments = attachments, onRemove = onRemoveAttachment)
         Row(

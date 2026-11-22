@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.view.WindowManager
@@ -60,6 +61,7 @@ import chat.matron.android.designsystem.AttachmentPaste
 import chat.matron.android.designsystem.AttachmentPasteTarget
 import chat.matron.android.designsystem.AttachmentTray
 import chat.matron.android.designsystem.LocalAppLockActive
+import chat.matron.android.designsystem.MicrophoneMenu
 import chat.matron.android.designsystem.UploadProgressBar
 import chat.matron.android.designsystem.VoiceNoteBarMode
 import chat.matron.android.designsystem.VoiceNoteRecordingBar
@@ -67,6 +69,8 @@ import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.BotCommand
 import chat.matron.android.platform.AudioFocusInterruptions
 import chat.matron.android.platform.AudioInputDiagnostics
+import chat.matron.android.platform.MicrophoneCatalog
+import chat.matron.android.platform.SharedPreferencesMicrophonePreference
 import chat.matron.android.platform.VoiceRecordingService
 import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.ComposerDraftMemory
@@ -176,6 +180,8 @@ fun ComposerView(viewModel: ComposerViewModel) {
         }
     }
     val recorderState by recorder.state.collectAsStateWithLifecycle()
+    val microphone by recorder.microphone.collectAsStateWithLifecycle()
+    val preferredMicrophoneID by recorder.preferredMicrophoneID.collectAsStateWithLifecycle()
     // Peak-level breadcrumbs every few seconds while capture is live, so a
     // note that comes back silent can be told from one that was never heard
     // (port of apple #181). Keyed on the state so a pause stops the ticker.
@@ -255,6 +261,15 @@ fun ComposerView(viewModel: ComposerViewModel) {
                         syncFromVm()
                     }
                 },
+            )
+            // Which microphone is recording, and a way to pick another; the
+            // pick moves this note at once and is kept for the next ones.
+            MicrophoneMenu(
+                current = microphone,
+                preferredID = preferredMicrophoneID,
+                available = recorder::availableMicrophones,
+                onSelect = recorder::selectMicrophone,
+                modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
             )
         } ?: run {
             AttachmentTray(attachments = staged, onRemove = { id -> viewModel.removeAttachment(id) })
@@ -369,9 +384,10 @@ private val LEVEL_SAMPLE_INTERVAL = 5.seconds
 /// [VoiceRecorderBindings] and are rebound by whichever composer holds it.
 private fun makeVoiceRecorderHost(context: Context): VoiceRecorderHost {
     val bindings = VoiceRecorderBindings()
+    val microphones = MicrophoneCatalog(context)
     val recorder = VoiceRecorder(
         requestPermission = { bindings.requestPermission() },
-        makeRecorder = { file -> MediaRecorderAudioRecording(file) },
+        makeRecorder = { file -> MediaRecorderAudioRecording(file, microphones, context.getSystemService(AudioManager::class.java)) },
         measureDuration = MediaRecorderAudioRecording::measuredDuration,
         tempDirectory = File(context.cacheDir, "voice").apply { mkdirs() },
         setKeepScreenAwake = { bindings.setKeepScreenAwake(it) },
@@ -386,6 +402,8 @@ private fun makeVoiceRecorderHost(context: Context): VoiceRecorderHost {
         // changes pause and resume the recorder (port of apple #180).
         observeInterruptions = AudioFocusInterruptions(context)::observe,
         describeInputRoute = AudioInputDiagnostics(context)::describe,
+        listMicrophones = microphones::list,
+        preferences = SharedPreferencesMicrophonePreference(context),
     )
     return VoiceRecorderHost(bindings, recorder)
 }
