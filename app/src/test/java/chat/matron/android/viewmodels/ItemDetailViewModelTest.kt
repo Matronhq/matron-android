@@ -2,6 +2,7 @@ package chat.matron.android.viewmodels
 
 import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.db.ItemOutboxEntity
+import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.ItemAuthor
 import chat.matron.android.models.ItemAwaiting
 import chat.matron.android.models.ItemKind
@@ -64,6 +65,12 @@ class ItemDetailViewModelTest {
         /// completed-exceptionally gate fails the upload.
         var gate: CompletableDeferred<Unit>? = null
         val started = CompletableDeferred<Unit>()
+        /// The file name of every upload sent from a file.
+        val fileUploads = mutableListOf<String>()
+        override suspend fun uploadMedia(file: File, contentType: String, progress: ((Double) -> Unit)?): String {
+            fileUploads += file.name
+            return super.uploadMedia(file, contentType, progress)
+        }
         override suspend fun uploadMedia(data: ByteArray, contentType: String, progress: ((Double) -> Unit)?): String {
             onUploadStart(uploadStarts++)
             started.complete(Unit)
@@ -212,6 +219,41 @@ class ItemDetailViewModelTest {
         assertFalse(first.file.exists())
     }
 
+    /// The tray takes a file of exactly 100 MB and refuses one byte more,
+    /// with the shared wording, before anything is copied. Sparse files keep
+    /// the test cheap on disk.
+    @Test
+    fun aPickOver100MBIsRefusedAndExactly100MBIsStaged() = runBlocking {
+        val vm = ItemDetailViewModel("it_1", FakeItemsStore(), Api(), Sync(), this, staging)
+        val over = sparse("big.mov", AttachmentLimits.MAX_BYTES + 1)
+        vm.attachFiles(listOf(over))
+        assertTrue(vm.stagedAttachments.value.isEmpty())
+        assertEquals("big.mov is larger than 100 MB and wasn't attached.", vm.error.value)
+
+        vm.dismissError()
+        vm.attachFiles(listOf(sparse("edge.mov", AttachmentLimits.MAX_BYTES)))
+        assertEquals(listOf(AttachmentLimits.MAX_BYTES), vm.stagedAttachments.value.map { it.sizeBytes })
+        assertNull(vm.error.value)
+        vm.stagedAttachments.value.forEach { vm.removeAttachment(it.id) }
+    }
+
+    private fun sparse(name: String, length: Long): File =
+        File(Files.createTempDirectory("picked-").toFile(), name).also {
+            java.io.RandomAccessFile(it, "rw").use { raf -> raf.setLength(length) }
+        }
+
+    /// A send uploads each attachment from its staged file, not from bytes
+    /// read into memory first.
+    @Test
+    fun sendUploadsStraightFromTheStagedFile() = runBlocking {
+        val api = Api(); val sync = Sync()
+        val vm = ItemDetailViewModel("it_1", FakeItemsStore(), api, sync, this, staging)
+        vm.attachFiles(listOf(picked("a.png", byteArrayOf(1, 2, 3))))
+        vm.submitComment()
+        assertEquals(listOf("a.png"), api.fileUploads)
+        assertEquals(3L, sync.comments.single().third.single().size)
+    }
+
     @Test
     fun anUnreadablePickIsReportedAndStagesNothing() = runBlocking {
         val vm = ItemDetailViewModel("it_1", FakeItemsStore(), Api(), Sync(), this, staging)
@@ -303,10 +345,10 @@ class ItemDetailViewModelTest {
         // The enqueue is slow, and only once it returns is the row in the outbox.
         val sync = object : Sync() {
             override suspend fun enqueueComment(
-                itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>, action: String?, replyTo: String?,
+                itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>, action: String?, replyTo: String?, replaces: String?,
             ): Boolean {
                 kotlinx.coroutines.delay(50)
-                super.enqueueComment(itemID, localID, body, attachments, action, replyTo)
+                super.enqueueComment(itemID, localID, body, attachments, action, replyTo, replaces)
                 store.storedOutbox = store.storedOutbox + outboxTap(localID, action!!, replyTo!!)
                 return true
             }
@@ -819,5 +861,146 @@ class ItemDetailViewModelTest {
         vm.submitComment()
         waitUntil { !vm.isBusy.value }
         assertEquals("keep me", vm.draftFlow.value)
+    }
+
+    // MARK: - unsent reply kept on disk
+
+    private fun unsentStore(root: File) = UnsentReplyStore(File(root, "boxes"), File(root, "staging"))
+
+    @Test
+    fun theUnsentReplySurvivesANewViewModelAndStore() = runBlocking {
+        val root = Files.createTempDirectory("unsent-").toFile()
+        val store = unsentStore(root)
+        val vm = ItemDetailViewModel("it_1", FakeItemsStore(), Api(), Sync(), this, store.stagingDirectory, unsentReplies = store)
+        vm.draft = "half a reply"
+        vm.attachFiles(listOf(picked("a.png")))
+
+        val again = unsentStore(root)
+        val reopened = ItemDetailViewModel("it_1", FakeItemsStore(), Api(), Sync(), this, again.stagingDirectory, unsentReplies = again)
+        assertEquals("half a reply", reopened.draftFlow.value)
+        assertEquals(listOf("a.png"), reopened.stagedAttachments.value.map { it.filename })
+        val other = ItemDetailViewModel("it_2", FakeItemsStore(), Api(), Sync(), this, again.stagingDirectory, unsentReplies = again)
+        assertEquals("", other.draft)
+    }
+
+    @Test
+    fun aSentReplyIsNotKeptAndAFailedOneIs() = runBlocking {
+        val root = Files.createTempDirectory("unsent-").toFile()
+        val store = unsentStore(root)
+        val api = Api()
+        val vm = ItemDetailViewModel("it_1", FakeItemsStore(), api, Sync(), this, store.stagingDirectory, unsentReplies = store)
+        vm.draft = "goes out"
+        vm.submitComment()
+        assertEquals("", unsentStore(root).reply(UnsentReplyStore.Place.Item("it_1")).text)
+
+        api.failUpload = true
+        vm.draft = "stays"
+        vm.attachFiles(listOf(picked("a.png")))
+        vm.submitComment()
+        val kept = unsentStore(root).reply(UnsentReplyStore.Place.Item("it_1"))
+        assertEquals("stays", kept.text)
+        assertEquals(listOf("a.png"), kept.attachments.map { it.filename })
+    }
+
+    /// A reply still uploading when the app is killed is back in the box the
+    /// next time the item opens.
+    @Test
+    fun aReplyStillUploadingWhenTheAppStopsComesBack() = runBlocking {
+        val root = Files.createTempDirectory("unsent-").toFile()
+        val store = unsentStore(root)
+        val api = Api().apply { gate = CompletableDeferred() }
+        val scope = CoroutineScope(Job())
+        val vm = ItemDetailViewModel("it_1", FakeItemsStore(), api, Sync(), scope, store.stagingDirectory, unsentReplies = store)
+        vm.draft = "in flight"
+        vm.attachFiles(listOf(picked("a.png")))
+        scope.launch { vm.submitComment() }
+        withTimeout(5_000) { api.started.await() }
+        // The process dies here: a fresh store reads what was on disk.
+        val again = unsentStore(root)
+        val reopened = ItemDetailViewModel("it_1", FakeItemsStore(), Api(), Sync(), this, again.stagingDirectory, unsentReplies = again)
+        waitUntil { reopened.draftFlow.value == "in flight" }
+        assertEquals(listOf("a.png"), reopened.stagedAttachments.value.map { it.filename })
+        assertTrue(unsentStore(root).strandedSends(UnsentReplyStore.Place.Item("it_1")).isEmpty())
+        scope.cancel()
+    }
+
+    /// A send that had reached the outbox insert when the app stopped, and
+    /// is in the outbox, is not put back: that would offer it twice.
+    @Test
+    fun aStrandedSendFoundInTheOutboxIsNotPutBack() = runBlocking {
+        val root = Files.createTempDirectory("unsent-").toFile()
+        val first = unsentStore(root)
+        val place = UnsentReplyStore.Place.Item("it_1")
+        first.beginSend(place, "local-1", UnsentReply("queued already"), first.epoch)
+        first.markQueuing(place, "local-1", first.epoch)
+        first.beginSend(place, "local-2", UnsentReply("never queued"), first.epoch)
+        first.markQueuing(place, "local-2", first.epoch)
+
+        val items = FakeItemsStore().apply {
+            storedOutbox = listOf(
+                ItemOutboxEntity(localID = "local-1", itemID = "it_1", op = ItemOutboxEntity.OP_COMMENT,
+                    payloadJson = "{}", createdAt = 0, attempts = 0, lastError = null),
+            )
+        }
+        val again = unsentStore(root)
+        val vm = ItemDetailViewModel("it_1", items, Api(), Sync(), this, again.stagingDirectory, unsentReplies = again)
+        waitUntil { unsentStore(root).strandedSends(place).isEmpty() }
+        assertEquals("never queued", vm.draft)
+    }
+
+    /// A queued stranded send that left the outbox counts as delivered only
+    /// for a matching reply posted since it began: an older reply with the
+    /// same words doesn't.
+    @Test
+    fun aStrandedSendIsDeliveredOnlyByAMatchingNewerComment() = runBlocking {
+        val root = Files.createTempDirectory("unsent-").toFile()
+        val first = unsentStore(root)
+        val place = UnsentReplyStore.Place.Item("it_1")
+        first.beginSend(place, "local-1", UnsentReply("ok"), first.epoch)
+        first.markQueuing(place, "local-1", first.epoch)
+
+        val old = TrackerComment(id = "cm_old", itemID = "it_1", author = ItemAuthor.USER, body = "ok",
+            createdAt = java.time.Instant.now().minusSeconds(3_600))
+        val again = unsentStore(root)
+        val vm = ItemDetailViewModel("it_1", FakeItemsStore().apply { storedComments = listOf(old) }, Api(), Sync(),
+            this, again.stagingDirectory, unsentReplies = again)
+        waitUntil { unsentStore(root).strandedSends(place).isEmpty() }
+        assertEquals("an older reply with the same words isn't this one", "ok", vm.draft)
+
+        val third = unsentStore(root)
+        third.save(place, UnsentReply(), third.epoch)
+        third.beginSend(place, "local-2", UnsentReply("ok"), third.epoch)
+        third.markQueuing(place, "local-2", third.epoch)
+        val fresh = old.copy(id = "cm_new", createdAt = java.time.Instant.now())
+        val fourth = unsentStore(root)
+        val vm2 = ItemDetailViewModel("it_1", FakeItemsStore().apply { storedComments = listOf(fresh) }, Api(), Sync(),
+            this, fourth.stagingDirectory, unsentReplies = fourth)
+        waitUntil { unsentStore(root).strandedSends(place).isEmpty() }
+        assertEquals("", vm2.draft)
+    }
+
+    /// A hand-over copy or a contributor's reply with the same words isn't
+    /// this send; nor is one whose files differ in size.
+    @Test
+    fun aStrandedSendIgnoresOtherPeoplesAndMismatchedReplies() = runBlocking {
+        val root = Files.createTempDirectory("unsent-").toFile()
+        val first = unsentStore(root)
+        val place = UnsentReplyStore.Place.Item("it_1")
+        val note = chat.matron.android.models.StagedAttachment.stage(picked("voice-note.m4a", ByteArray(10)), first.stagingDirectory)
+        first.beginSend(place, "local-1", UnsentReply("see note", listOf(note)), first.epoch)
+        first.markQueuing(place, "local-1", first.epoch)
+
+        val now = java.time.Instant.now()
+        fun reply(id: String, size: Long, attribution: String? = null) = TrackerComment(
+            id = id, itemID = "it_1", author = ItemAuthor.USER, body = "see note", createdAt = now,
+            attribution = attribution,
+            attachments = listOf(TrackerAttachment(blobRef = "b-$id", mime = "audio/mp4", name = "voice-note.m4a", size = size)),
+        )
+        val again = unsentStore(root)
+        val items = FakeItemsStore().apply { storedComments = listOf(reply("c1", 10, attribution = "bob"), reply("c2", 99)) }
+        val vm = ItemDetailViewModel("it_1", items, Api(), Sync(), this, again.stagingDirectory, unsentReplies = again)
+        waitUntil { unsentStore(root).strandedSends(place).isEmpty() }
+        assertEquals("see note", vm.draft)
+        assertEquals(listOf("voice-note.m4a"), vm.stagedAttachments.value.map { it.filename })
     }
 }
