@@ -1123,7 +1123,10 @@ private fun SignedInApp(
                         val boxesState by boxesVM.state.collectAsStateWithLifecycle()
                         // Restored here straight after a process death: the
                         // Boxes screen that normally loads is not underneath.
-                        LaunchedEffect(Unit) { if (!boxesVM.state.value.hasLoaded) boxesVM.load() }
+                        // Reloaded on every appear, as the Boxes screen is:
+                        // after a process death nothing else has loaded, and
+                        // back from a chat the sessions may have changed.
+                        LaunchedEffect(Unit) { boxesVM.load() }
                         // The Boxes screen's watch stops when it leaves the
                         // stack's top, so this list keeps itself current.
                         LaunchedEffect(Unit) { boxesVM.watch() }

@@ -243,6 +243,25 @@ class BoxesViewModelTest {
     }
 
     @Test
+    fun aNewerLoadThatFailsDoesNotBlockAnOlderOneThatSucceeds() = runBlocking {
+        val fake = Fake()
+        val online = agent(1, "box-a", connected = true)
+        val gate = CompletableDeferred<Unit>()
+        fake.devicesGate = gate
+        val vm = makeVM(fake)
+        val first = launch { vm.load() }
+        waitUntil { fake.devicesCalls == 1 }
+        fake.devicesGate = null
+        fake.devicesResult = Result.failure(RuntimeException("offline"))
+        vm.load()
+        fake.devicesResult = Result.success(listOf(online))
+        gate.complete(Unit)
+        first.join()
+        assertNull(vm.state.value.errorMessage)
+        assertEquals(BoxConnectionState.Online, vm.rows(nowMs = now).single().state)
+    }
+
+    @Test
     fun wake_staysWakingUntilTheReloadAfterItLands() = runBlocking {
         val fake = Fake()
         val asleep = agent(1, "box-a", connected = false)

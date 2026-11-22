@@ -110,7 +110,7 @@ class BoxesViewModel(
 
     /// Load generations: [load] can run from the poll, a reconnect, Wake,
     /// pull-to-refresh and first appear at once. Only the newest started load
-    /// that has finished is applied, so an older answer landing last can't
+    /// that has succeeded is applied, so an older answer landing last can't
     /// rewind a box that just came online.
     private val loadsStarted = java.util.concurrent.atomic.AtomicLong(0)
     private var loadApplied = 0L
@@ -142,13 +142,18 @@ class BoxesViewModel(
             throw cancel
         } catch (error: Throwable) {
             runCatching { Log.e(TAG, "boxes load failed", error) }
-            if (!claimApply(generation)) return
+            // A failure shows its error unless a newer load has landed, but
+            // claims nothing: an older load that succeeds still applies.
+            if (generation < currentApplied()) return
             _state.update { it.copy(hasLoaded = true, errorMessage = "Couldn't load your boxes. Try again.") }
         }
     }
 
     /// Whether a load of [generation] may write its result: not once a newer
     /// one has.
+    @Synchronized
+    private fun currentApplied(): Long = loadApplied
+
     @Synchronized
     private fun claimApply(generation: Long): Boolean {
         if (generation < loadApplied) return false
