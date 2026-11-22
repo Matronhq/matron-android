@@ -52,6 +52,14 @@ object JournalTimelineMapper {
     /// namespaced so a bridge prompt id can never collide with an event seq.
     fun queuedReleaseAnswerKey(releasePromptID: String): String = "qr:$releasePromptID"
 
+    /// The queue-card choices that hold a queued message for editing and
+    /// release that hold. On a busy-queue card neither answers it: the
+    /// message is still queued and the card keeps its buttons
+    /// (`ChatViewModel.isQueuedEditTap`). On any other prompt they are
+    /// ordinary answers.
+    const val QUEUED_EDIT_HOLD_CHOICE = "edit"
+    const val QUEUED_EDIT_CANCEL_CHOICE = "edit_cancel"
+
     fun displayName(sender: String): String {
         val colon = sender.indexOf(':')
         if (colon >= 0 && sender.substring(0, colon) in setOf("user", "agent")) {

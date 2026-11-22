@@ -98,9 +98,9 @@ class LRUCacheTest {
 
     @Test
     fun timelineCacheKeyEqualityAndHashing() {
-        val a = TimelineCacheKey(userID = "@u:s", roomID = "!r1:s")
-        val b = TimelineCacheKey(userID = "@u:s", roomID = "!r1:s")
-        val c = TimelineCacheKey(userID = "@u:s", roomID = "!r2:s")
+        val a = TimelineCacheKey(signIn = "@u:s|1|https://s.example", roomID = "!r1:s")
+        val b = TimelineCacheKey(signIn = "@u:s|1|https://s.example", roomID = "!r1:s")
+        val c = TimelineCacheKey(signIn = "@u:s|1|https://s.example", roomID = "!r2:s")
         assertEquals(a, b)
         assertFalse(a == c)
         assertEquals(a.hashCode(), b.hashCode())

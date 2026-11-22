@@ -19,8 +19,8 @@ import kotlinx.coroutines.launch
 /// the chat (title/bot) hits derived from a chat-list snapshot. Ported from
 /// matron-apple's `SearchViewModel`.
 class SearchViewModel(
-    /// The local message index; `null` where it could not be opened, which
-    /// leaves the Messages section empty.
+    /// The message search (the journal first, this device's index as the
+    /// fallback); `null` leaves the Messages section empty.
     private val search: SearchService?,
     allChats: List<ChatSummary>,
     /// The journal's tracker search (items, missions, memories), for the
@@ -194,16 +194,32 @@ class SearchViewModel(
                 // costs a round trip, which must not hold the FTS hits back.
                 if (num != null) launch { lookUpNumber(num, trimmed) }
                 if (trackerSearch != null) launch { searchTracker(trimmed) }
-                val result = runCatching { search?.queryGrouped(trimmed, limit = 50) ?: emptyList() }
-                result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
-                result.onFailure { MatronDebug.breadcrumb("SearchViewModel: search failed for query \"$trimmed\": $it") }
-                _searchFailed.value = result.isFailure
-                _messageHits.value = result.getOrDefault(emptyList())
+                searchMessages(trimmed)
             }
         } finally {
             activeSearches -= 1
             if (activeSearches == 0) _isSearching.value = false
         }
+    }
+
+    /// Waits out a typing pause, then asks the message search (the journal
+    /// first, so every keystroke is a round trip worth skipping). Applied only
+    /// while the query is still the one it was asked for: answers can land
+    /// out of order, and a slow one for `pos` must not replace `postgres`.
+    private suspend fun searchMessages(askedFor: String) {
+        val service = search ?: run {
+            _messageHits.value = emptyList()
+            _searchFailed.value = false
+            return
+        }
+        delay(TRACKER_SEARCH_DEBOUNCE_MS)
+        if (query.trim() != askedFor) return
+        val result = runCatching { service.queryGrouped(askedFor, limit = 50) }
+        result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+        result.onFailure { MatronDebug.breadcrumb("SearchViewModel: search failed for query \"$askedFor\": $it") }
+        if (query.trim() != askedFor) return
+        _searchFailed.value = result.isFailure
+        _messageHits.value = result.getOrDefault(emptyList())
     }
 
     /// Waits out a typing pause, then asks the journal. Applied only while
@@ -225,7 +241,8 @@ class SearchViewModel(
     }
 
     companion object {
-        /// Keystrokes settle for this long before the journal is asked.
+        /// Keystrokes settle for this long before the journal is asked
+        /// (tracker and message search alike).
         const val TRACKER_SEARCH_DEBOUNCE_MS = 250L
     }
 

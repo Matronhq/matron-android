@@ -221,6 +221,23 @@ class JournalApiTest {
     }
 
     @Test
+    fun uploadMediaFromAFileStreamsItsBytesAndReportsProgress() = runBlocking {
+        server.enqueue(json(200, """{"media_id":"m-file"}"""))
+        val bytes = ByteArray(300_000) { (it % 251).toByte() }
+        val file = java.io.File.createTempFile("upload-", ".bin").apply { writeBytes(bytes); deleteOnExit() }
+        val fractions = java.util.Collections.synchronizedList(mutableListOf<Double>())
+        val mediaID = api(token = "t").uploadMedia(file, "video/mp4") { fractions += it }
+        assertEquals("m-file", mediaID)
+        val req = server.takeRequest()
+        assertEquals("/media", req.path)
+        assertEquals("video/mp4", req.getHeader("Content-Type"))
+        assertEquals("300000", req.getHeader("Content-Length"))
+        assertTrue(bytes.contentEquals(req.body.readByteArray()))
+        assertTrue(fractions.isNotEmpty())
+        assertEquals(1.0, fractions.last(), 0.0)
+    }
+
+    @Test
     fun uploadMediaMapsErrorStatus() = runBlocking {
         server.enqueue(json(401, """{"error":"unauthenticated"}"""))
         try {

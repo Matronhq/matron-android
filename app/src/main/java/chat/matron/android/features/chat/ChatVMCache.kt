@@ -52,7 +52,7 @@ class ChatVMCache(
             grants = deps.grantService(session),
             inviteAsks = deps.inviteAskService(session),
             inviteLinks = deps.revealedInviteLinks(session),
-            search = deps.search,
+            search = deps.messageSearch(session),
             sessionStopper = deps.sessionStopper(session),
         )
         val pair = chat to ComposerViewModel(
@@ -122,6 +122,7 @@ class ChatVMCache(
             sync = deps.itemsSync(session),
             scope = scope,
             stagingDirectory = deps.stagingDirectory,
+            queuedRelease = deps.queuedReplySender(session),
         )
         itemDetailEntries[itemID] = vm
         if (itemDetailEntries.size > limit) {

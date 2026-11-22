@@ -810,6 +810,9 @@ class JournalStore(
     override fun itemOwnerSessionStateFlow(convoID: String): Flow<String?> =
         conversationDao.sessionStateFlow(convoID).distinctUntilChanged()
 
+    override fun queuedReleaseEventsFlow(convoID: String): Flow<List<JournalEvent>> =
+        eventDao.queuedReleaseFlow(convoID).distinctUntilChanged().map { list -> list.map { it.toJournalEvent() } }
+
     override fun itemFlow(id: String): Flow<TrackerItem?> =
         itemDao.byIdFlow(id).map { it?.toItem() }.distinctUntilChanged()
 

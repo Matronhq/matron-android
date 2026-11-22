@@ -3,6 +3,7 @@ package chat.matron.android.viewmodels
 import chat.matron.android.chat.FakeTimelineService
 import chat.matron.android.chat.SendGate
 import chat.matron.android.models.ArgSuggestion
+import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.BotCommand
 import chat.matron.android.models.BotCommandCatalog
 import chat.matron.android.models.SessionStatus
@@ -461,6 +462,32 @@ class ComposerViewModelTest {
         assertEquals(2L, vm.stagedAttachments.value.first().sizeBytes)
         assertTrue(fake.sentFiles.isEmpty())
         assertNull(vm.sendError.value)
+    }
+
+    @Test
+    fun attachFiles_refusesAFileOver100MB_withTheSharedWording() = runBlocking {
+        val dir = Files.createTempDirectory("attach-test").toFile()
+        val big = File(dir, "big.mov").also {
+            java.io.RandomAccessFile(it, "rw").use { raf -> raf.setLength(AttachmentLimits.MAX_BYTES + 1) }
+        }
+        val vm = makeVM()
+
+        vm.attachFiles(listOf(big, makeTempFile("small.txt")))
+
+        assertEquals(listOf("small.txt"), vm.stagedAttachments.value.map { it.filename })
+        assertEquals("big.mov is larger than 100 MB and wasn't attached.", vm.sendError.value)
+    }
+
+    @Test
+    fun send_handsTheStagedFileToTheTimeline() = runBlocking {
+        val fake = FakeTimelineService()
+        val vm = makeVM(timeline = fake)
+        vm.attachFiles(listOf(makeTempFile("pic.png", "PNG")))
+
+        vm.send()
+
+        assertEquals(listOf("pic.png"), fake.attachmentFiles)
+        assertEquals(1, fake.sentImages.size)
     }
 
     @Test

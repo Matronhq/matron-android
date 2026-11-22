@@ -216,6 +216,16 @@ interface EventDao {
     @Query("SELECT * FROM event WHERE convo_id = :convoID AND seq >= :sinceSeq ORDER BY seq")
     fun forConversationSinceFlow(convoID: String, sinceSeq: Long): Flow<List<EventEntity>>
 
+    /// One conversation's busy-queue cards and their releases (`prompt` and
+    /// `prompt_reply` rows whose payload is a `queued_release`), oldest first:
+    /// what an item's thread reads to tell which of its replies still wait
+    /// on the agent. The LIKE narrows the read; callers check the parsed kind.
+    @Query(
+        "SELECT * FROM event WHERE convo_id = :convoID AND type IN ('prompt', 'prompt_reply') " +
+            "AND payload LIKE '%queued_release%' ORDER BY seq",
+    )
+    fun queuedReleaseFlow(convoID: String): Flow<List<EventEntity>>
+
     /// The seq of the [offset]-th newest row (0-based), or null when the
     /// conversation holds fewer rows — the anchor a tail window starts at.
     @Query("SELECT seq FROM event WHERE convo_id = :convoID ORDER BY seq DESC LIMIT 1 OFFSET :offset")

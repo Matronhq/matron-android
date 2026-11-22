@@ -64,6 +64,9 @@ internal class FakeItemsStore : ItemsStoreReading {
     /// The owner conversation's session state, as the item detail follows it.
     val ownerSession = MutableSharedFlow<String?>(replay = 1)
     override fun itemOwnerSessionStateFlow(convoID: String): Flow<String?> = ownerSession
+    /// The owner conversation's queue cards and releases.
+    val queuedRows = kotlinx.coroutines.flow.MutableStateFlow<List<chat.matron.android.journal.JournalEvent>>(emptyList())
+    override fun queuedReleaseEventsFlow(convoID: String): Flow<List<chat.matron.android.journal.JournalEvent>> = queuedRows
     override fun commentsFlow(itemID: String): Flow<List<TrackerComment>> {
         commentsSubscriptions += 1
         return comments
@@ -102,12 +105,15 @@ internal open class FakeItemsSync : ItemsSyncing {
     val taps = mutableListOf<Triple<String, String, String?>>()
     /// The local id of every queued comment, in order.
     val localIDs = mutableListOf<String>()
+    /// The `replaces` of every queued comment, in order.
+    val replacing = mutableListOf<String?>()
     override suspend fun enqueueComment(
-        itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>, action: String?, replyTo: String?,
+        itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>, action: String?, replyTo: String?, replaces: String?,
     ): Boolean {
         comments += Triple(itemID, body, attachments)
         if (action != null) taps += Triple(itemID, action, replyTo)
         localIDs += localID
+        replacing += replaces
         return commentSucceeds
     }
     override suspend fun enqueueCreate(localID: String, new: NewItem): Boolean { created += new; return createSucceeds }
@@ -131,7 +137,7 @@ internal open class FakeItemsApi : ItemsProviding {
     override suspend fun createItem(new: NewItem, idempotencyKey: String?): TrackerItem = error("unused")
     override suspend fun updateItem(id: String, patch: ItemPatch): TrackerItem = error("unused")
     override suspend fun commentItem(
-        id: String, body: String, attachments: List<TrackerAttachment>, idempotencyKey: String?, action: String?, replyTo: String?,
+        id: String, body: String, attachments: List<TrackerAttachment>, idempotencyKey: String?, action: String?, replyTo: String?, replaces: String?,
     ): ItemCommentResult = error("unused")
     override suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem = error("unused")
     override suspend fun reopenItem(id: String, comment: String?): TrackerItem = error("unused")
