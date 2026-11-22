@@ -7,6 +7,8 @@ import chat.matron.android.models.TimelineHistoryWeek
 import chat.matron.android.models.TimelineItemRef
 import chat.matron.android.models.TimelineProjectPage
 import chat.matron.android.models.TimelineProjectRef
+import chat.matron.android.features.projects.ProjectScreenContent
+import chat.matron.android.viewmodels.ProjectPageState
 import java.time.Instant
 import java.time.ZoneOffset
 import org.junit.Assert.assertEquals
@@ -60,6 +62,14 @@ class ProjectPageFormatTest {
         assertEquals("No status yet", ProjectFormat.missionLine(base, now))
         assertEquals("Closed", ProjectFormat.closedMissionLine(base.copy(closeSummary = "  ")))
         assertEquals("Shipped it.", ProjectFormat.closedMissionLine(base.copy(closeSummary = "Shipped it.")))
+    }
+
+    @Test
+    fun aMissingProjectWinsOverAStalePage() {
+        val page = TimelineProjectPage(docs)
+        assertEquals(ProjectScreenContent.Missing, ProjectScreenContent.of(ProjectPageState(page = page, isMissing = true)))
+        assertEquals(ProjectScreenContent.Page, ProjectScreenContent.of(ProjectPageState(page = page, error = "offline")))
+        assertEquals(ProjectScreenContent.Failed, ProjectScreenContent.of(ProjectPageState(error = "offline")))
     }
 
     @Test

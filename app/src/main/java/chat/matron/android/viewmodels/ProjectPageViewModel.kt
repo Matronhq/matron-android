@@ -57,6 +57,10 @@ class ProjectPageViewModel(
     private var historyNextBefore: String? = null
     private var isLoadingMoreHistory = false
     private var isReloadingHistory = false
+    /// The sections the reader opened: a refresh (or Try again) reads them
+    /// again even when their first read failed.
+    private var historyAsked = false
+    private var missionsAsked = false
 
     /// Reads the page: on arrival, on coming back, and for "Try again".
     suspend fun refreshPage() {
@@ -75,7 +79,8 @@ class ProjectPageViewModel(
             throw cancel
         } catch (error: Throwable) {
             if (generation != pageGeneration) return
-            if (error is JournalApiError.NotFound) _state.update { it.copy(isMissing = true) }
+            // Gone: nothing of the old page stays on screen.
+            if (error is JournalApiError.NotFound) _state.update { it.copy(isMissing = true, page = null) }
             else _state.update { it.copy(error = error.message) }
         }
     }
@@ -85,8 +90,8 @@ class ProjectPageViewModel(
     suspend fun refresh() {
         refreshPage()
         if (_state.value.isMissing) return
-        if (_state.value.historyLoaded) loadHistory()
-        if (_state.value.openMissions != null) loadMissions()
+        if (historyAsked) loadHistory()
+        if (missionsAsked) loadMissions()
     }
 
     /// Reads the history's first page unless it has loaded (or is being read).
@@ -97,6 +102,7 @@ class ProjectPageViewModel(
 
     /// Reads the history's first page, replacing what was loaded.
     suspend fun loadHistory() {
+        historyAsked = true
         historyGeneration += 1
         val generation = historyGeneration
         isReloadingHistory = true
@@ -137,6 +143,7 @@ class ProjectPageViewModel(
 
     /// Reads the project's missions (`GET /projects/:id`).
     suspend fun loadMissions() {
+        missionsAsked = true
         try {
             val detail = projects.project(projectID)
             val (open, closed) = missionSections(detail.missions)
