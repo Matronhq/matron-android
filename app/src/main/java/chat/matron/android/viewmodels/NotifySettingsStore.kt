@@ -88,10 +88,11 @@ class NotifySettingsStore(
     /// Writes in flight, oldest first, each with the ticket it was sent with.
     private val pending = mutableListOf<Pending>()
     private var nextWriteID = 0
-    /// The newest ticket of a `PUT` answer taken. The journal applies writes
-    /// in the order they arrive, so that answer already holds every older
-    /// write: those are no longer replayed on top of it.
-    private var writeTicket = 0L
+    /// For each thing a write sets ([NotifyChange.fields]), the ticket of
+    /// the newest save of it that has succeeded. An older write of the same
+    /// thing still in flight is not replayed: the user's later choice for it
+    /// has already landed. Writes of other things still are.
+    private val savedTicket = mutableMapOf<String, Long>()
     /// Successful saves so far; a `GET` sent while a save was in flight
     /// compares it to tell whether that save answered before it did.
     private var savesDone = 0L
@@ -205,8 +206,7 @@ class NotifySettingsStore(
             val answer = api.updateNotify(change)
             val superseded = synchronized(lock) {
                 val taken = acceptLocked(answer, ticket)
-                // Only an answer that is now shown stands in for older writes.
-                if (taken) writeTicket = maxOf(writeTicket, ticket)
+                change.fields().forEach { savedTicket[it] = maxOf(savedTicket[it] ?: 0L, ticket) }
                 savesDone++
                 _isSupported.value = true
                 _error.value = null
@@ -259,7 +259,7 @@ class NotifySettingsStore(
     private fun recomputeLocked() {
         val t = now()
         _clock.value = t
-        val shown = confirmedSettings?.let { NotifyView(it, confirmedLevel) }?.let { base -> pending.filter { it.ticket > writeTicket }.fold(base) { acc, p -> p.change.appliedTo(acc) } }
+        val shown = confirmedSettings?.let { NotifyView(it, confirmedLevel) }?.let { base -> pending.filter { p -> p.change.fields().all { p.ticket > (savedTicket[it] ?: 0L) } }.fold(base) { acc, p -> p.change.appliedTo(acc) } }
         _view.value = shown
         scheduleExpiryLocked(shown, t)
     }

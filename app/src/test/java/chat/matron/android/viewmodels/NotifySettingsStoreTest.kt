@@ -359,3 +359,49 @@ class NotifySettingsStoreSupersededSaveTest {
         store.stop()
     }
 }
+
+class NotifySettingsStoreLaterChoiceTest {
+    @Test
+    fun anOlderWriteDoesNotUndoALaterSavedChoice() = runBlocking {
+        val base = NotifyView(
+            NotifySettings(NotifySettings.Mode.COORDINATOR, NotifySettings.preset(NotifySettings.Mode.COORDINATOR)!!, true, emptyList()),
+            NotifyDeviceLevel.ALL,
+        )
+        val gets = mutableListOf<CompletableDeferred<NotifyView>>()
+        val puts = mutableListOf<CompletableDeferred<NotifyView>>()
+        val frames = MutableSharedFlow<NotifySettings>()
+        val api = object : NotifySettingsProviding {
+            override suspend fun notifySettings() = CompletableDeferred<NotifyView>().also { gets += it }.await()
+            override suspend fun updateNotify(change: NotifyChange) = CompletableDeferred<NotifyView>().also { puts += it }.await()
+        }
+        val store = NotifySettingsStore(api, { frames }, { emptyFlow<SyncConnectionState>() }, now = { 1_000L }, dispatcher = Dispatchers.Unconfined)
+        store.start()
+        val first = launch { store.refresh() }
+        waitUntil { gets.size == 1 }
+        gets[0].complete(base); first.join()
+
+        val older = launch { store.setMode(NotifySettings.Mode.ALL) }
+        waitUntil { puts.size == 1 }
+        val newer = launch { store.setMode(NotifySettings.Mode.CUSTOM) }
+        waitUntil { puts.size == 2 }
+        val custom = NotifyChange.SetMode(NotifySettings.Mode.CUSTOM).appliedTo(NotifyChange.SetMode(NotifySettings.Mode.ALL).appliedTo(base))
+        // The later save's own frame lands before its answer, so the answer is not taken.
+        frames.emit(custom.settings)
+        puts[1].complete(custom)
+        waitUntil { gets.size == 2 }
+        assertEquals("the later choice stands", NotifySettings.Mode.CUSTOM, store.view.value!!.settings.mode)
+        // A level write is unrelated and still shows while in flight.
+        val level = launch { store.setDeviceLevel(NotifyDeviceLevel.OFF) }
+        waitUntil { puts.size == 3 }
+        assertEquals(NotifyDeviceLevel.OFF, store.view.value!!.deviceLevel)
+        puts[0].complete(custom)
+        puts[2].complete(custom.copy(deviceLevel = NotifyDeviceLevel.OFF))
+        val settled = custom.copy(deviceLevel = NotifyDeviceLevel.OFF)
+        waitUntil {
+            gets.forEach { if (!it.isCompleted) it.complete(settled) }
+            older.isCompleted && newer.isCompleted && level.isCompleted
+        }
+        assertEquals(settled, store.view.value)
+        store.stop()
+    }
+}

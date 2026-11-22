@@ -173,6 +173,17 @@ sealed interface NotifyChange {
         is ClearConvo -> convo(convoID, "level" to JsonNull, "mute_until" to JsonNull)
     }
 
+    /// What the change sets, as keys: a later save of any of them makes this
+    /// one's on-screen copy moot. Mode and the event switches are one thing,
+    /// since a switch moves the mode to custom.
+    fun fields(): Set<String> = when (this) {
+        is SetMode, is SetEvent -> setOf("prefs")
+        is SetDeviceLevel -> setOf("device_level")
+        is ConvoLevel -> setOf("convo:$convoID:level")
+        is ConvoMute -> setOf("convo:$convoID:mute")
+        is ClearConvo -> setOf("convo:$convoID:level", "convo:$convoID:mute")
+    }
+
     /// The change as the journal will apply it, for the copy shown while
     /// the `PUT` is in flight.
     fun appliedTo(view: NotifyView): NotifyView {
