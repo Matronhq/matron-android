@@ -279,7 +279,7 @@ class ProjectPageViewModel(
             // Said in an alert over the files on screen (before any, the
             // screen offers Try again); the grid's end asks again from the
             // list shown, so paging never stalls behind the failed reload.
-            if (generation == filesGeneration) _state.update { it.copy(error = error.message, filesVersion = it.filesVersion + 1) }
+            if (generation == filesGeneration) _state.update { it.copy(error = error.message, filesVersion = it.filesVersion + 1, filesPagingFailed = false) }
         } finally {
             if (generation == filesGeneration) isReloadingFiles = false
         }

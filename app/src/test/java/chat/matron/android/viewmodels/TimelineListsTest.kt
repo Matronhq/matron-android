@@ -196,6 +196,27 @@ class TimelineListsTest {
     }
 
     @Test
+    fun aLateCountsReadNeverReplacesAPagedList() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var firstPages = 0
+        val lists = object : FakeTimelineBase() {
+            override suspend fun timelineProjects(before: String?, limit: Int?): TimelineProjectList {
+                if (before != null) return TimelineProjectList(2, listOf(TimelineProjectRow(TimelineFixtures.promo)), null)
+                firstPages += 1
+                if (firstPages == 1) hold.await()
+                return TimelineProjectList(2, listOf(TimelineProjectRow(TimelineFixtures.docs)), "p1")
+            }
+        }
+        val vm = TimelineViewModel(lists, scope)
+        val counts = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined).launch { vm.loadCounts() }
+        vm.loadList(TimelinePlace.Projects)
+        vm.loadMoreProjects()
+        hold.complete(Unit)
+        counts.join()
+        assertEquals(listOf("pj_docs", "pj_promo"), vm.state.value.allProjects?.rows?.map { it.project.id })
+    }
+
+    @Test
     fun aNextPageOvertakenByARefreshIsDropped() = runBlocking {
         val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
         val lists = object : FakeTimelineBase() {
