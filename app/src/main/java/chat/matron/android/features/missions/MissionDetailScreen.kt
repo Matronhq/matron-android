@@ -16,6 +16,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -73,10 +74,20 @@ fun MissionDetailScreen(
     val resolvedTitle by produceState<String?>(initialValue = null, projectID) {
         value = projectID?.let { id -> movedTitle?.takeIf { it.first == id }?.second ?: projectTitle(id) }
     }
-    // Read once per page (the lambda is rebuilt on every recomposition, so it is not the key).
+    // Read on arrival and again on each pull to refresh (the lambda is
+    // rebuilt on every recomposition, so it is not the key). A failed read
+    // keeps the list it had.
     val offersMove = projectTargets != null
-    val targets by produceState<List<Project>?>(initialValue = null, offersMove) {
-        value = projectTargets?.let { load -> try { load() } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (_: Throwable) { null } }
+    var targetsReads by remember { mutableStateOf(0) }
+    var targets by remember { mutableStateOf<List<Project>?>(null) }
+    LaunchedEffect(offersMove, targetsReads) {
+        val load = projectTargets ?: return@LaunchedEffect
+        try {
+            targets = load()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+        }
     }
     var moveError by remember { mutableStateOf<String?>(null) }
 
@@ -110,6 +121,7 @@ fun MissionDetailScreen(
                 onEditCloseSummary = { viewModel.setCloseSummaryDraft(it) },
                 onClose = { coroutineScope.launch { viewModel.close() } },
                 onRefresh = {
+                    targetsReads += 1
                     coroutineScope.launch {
                         isRefreshing = true
                         try { viewModel.refresh() } finally { isRefreshing = false }
