@@ -42,6 +42,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -561,8 +562,12 @@ class ItemDetailViewModel(
             val queued = runCatching { store.itemOutboxRows(itemID) }.getOrElse { _pendingComments.value }
             val pending = pendingItemTap(queued)
             if (pending == label) return
-            if (pending == null && current.chosenAction == label) return
-            if (!sendSigned(current, null, label)) return
+            // The store's copy, not this model's flow: a signed tap writes no
+            // outbox row, and the flow only catches up after the write, so
+            // a second press waiting here must see the first one's answer.
+            val stored = runCatching { store.itemFlow(itemID).first() }.getOrNull() ?: current
+            if (pending == null && (current.chosenAction == label || stored.chosenAction == label)) return
+            if (!sendSigned(stored, null, label)) return
             sync.enqueueComment(itemID, UUID.randomUUID().toString(), label, emptyList(), action = label, replyTo = null)
         }
     }

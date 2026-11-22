@@ -120,25 +120,28 @@ interface ApprovalKeyProviding {
 /// [FragmentActivity]; the app has one, which registers itself here while it
 /// exists.
 object BiometricPromptHost {
-    @Volatile
-    private var current: WeakReference<FragmentActivity>? = null
+    /// The activity and what it wants told about the prompt, as one
+    /// registration: both go when that activity is destroyed.
+    private class Registration(val activity: WeakReference<FragmentActivity>, val onPrompt: ((Boolean) -> Unit)?)
 
-    fun attach(activity: FragmentActivity) {
-        current = WeakReference(activity)
+    @Volatile
+    private var current: Registration? = null
+
+    /// [onPrompt] is told when the system's biometric prompt goes up (true)
+    /// and comes down (false), on the main thread.
+    fun attach(activity: FragmentActivity, onPrompt: ((showing: Boolean) -> Unit)? = null) {
+        current = Registration(WeakReference(activity), onPrompt)
     }
 
     fun detach(activity: FragmentActivity) {
-        if (current?.get() === activity) current = null
+        if (current?.activity?.get() === activity) current = null
     }
 
-    val activity: FragmentActivity? get() = current?.get()
+    val activity: FragmentActivity? get() = current?.activity?.get()
 
-    /// Told when the system's biometric prompt goes up (true) and comes down
-    /// (false), on the main thread. The app lock listens: the prompt's own
-    /// stop and start of the activity is not the app leaving the foreground,
-    /// and locking then would tear down the signature the user just gave.
-    @Volatile
-    var onPrompt: ((showing: Boolean) -> Unit)? = null
+    internal fun notePrompt(showing: Boolean) {
+        current?.onPrompt?.invoke(showing)
+    }
 }
 
 /// The real thing: ECDSA P-256 in the Android Keystore (StrongBox when the
@@ -295,7 +298,7 @@ class KeystoreApprovalKey internal constructor(
             onInvalidated()
             throw ApprovalKeyFailure.Invalidated
         }
-        BiometricPromptHost.onPrompt?.invoke(true)
+        BiometricPromptHost.notePrompt(true)
         val authorised = try {
             suspendCancellableCoroutine { continuation ->
             val settled = AtomicBoolean(false)
@@ -327,7 +330,7 @@ class KeystoreApprovalKey internal constructor(
             prompt.authenticate(info, BiometricPrompt.CryptoObject(signature))
             }
         } finally {
-            BiometricPromptHost.onPrompt?.invoke(false)
+            BiometricPromptHost.notePrompt(false)
         }
         try {
             authorised.update(data)
