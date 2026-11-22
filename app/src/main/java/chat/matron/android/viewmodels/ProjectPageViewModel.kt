@@ -161,7 +161,12 @@ class ProjectPageViewModel(
             if (generation != pageGeneration) return
             if (loaded.mergedFromID != null && loaded.project.id != projectID) {
                 projectID = loaded.project.id
-                _state.update { it.copy(redirectedTo = loaded.project.id) }
+                // The Ask and the ⋯ lists were the closed project's: they
+                // start over for the one it became (a refresh reads them).
+                actionsGeneration += 1
+                _state.update {
+                    it.copy(redirectedTo = loaded.project.id, asked = false, actionsLoaded = false, unfiled = emptyList(), mergeTargets = emptyList())
+                }
             }
             _state.update { it.copy(page = loaded, isMissing = false) }
         } catch (cancel: CancellationException) {
@@ -373,13 +378,22 @@ class ProjectPageViewModel(
                     openMissions = null, closedMissions = emptyList(), files = null, filesPagingFailed = false,
                 )
             }
-            refresh()
+            _state.update { it.copy(isBusy = true) }
+            try {
+                refresh()
+            } finally {
+                _state.update { it.copy(isBusy = false) }
+            }
         }
         return ok
     }
 
     /// `POST /projects/:id/close` with the app's summary.
-    suspend fun close(): Boolean = write { projects.closeProject(projectID, ProjectActionsFormat.CLOSE_SUMMARY) }
+    suspend fun close(): Boolean = write {
+        projects.closeProject(projectID, ProjectActionsFormat.CLOSE_SUMMARY)
+        // Closed now, whatever the re-read says later: no write offers itself.
+        _state.update { s -> s.copy(page = s.page?.copy(state = "closed")) }
+    }
 
     /// Files [missionID] in this project.
     suspend fun addMission(missionID: String): Boolean {
@@ -433,9 +447,13 @@ class ProjectPageViewModel(
             _state.update { it.copy(isBusy = false, error = message) }
             return false
         }
-        _state.update { it.copy(isBusy = false) }
         projectChanged()
-        if (reload) refresh()
+        // The writes stay dimmed until the page shows what the write did.
+        try {
+            if (reload) refresh()
+        } finally {
+            _state.update { it.copy(isBusy = false) }
+        }
         return true
     }
 

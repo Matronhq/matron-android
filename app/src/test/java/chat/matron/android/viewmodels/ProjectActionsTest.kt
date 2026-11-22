@@ -217,6 +217,42 @@ class ProjectActionsTest {
     }
 
     @Test
+    fun aCloseDimsTheWritesAtOnce() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val (_, projects, _) = setup()
+        val pages = object : FakeTimelineBase() {
+            var reads = 0
+            override suspend fun timelineProject(id: String): TimelineProjectPage {
+                reads += 1
+                if (reads > 1) hold.await()
+                return TimelineProjectPage(docs)
+            }
+        }
+        val vm = ProjectPageViewModel("pj_docs", pages, projects)
+        vm.refreshPage(); vm.loadActionTargets()
+        val closing = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined).launch { vm.close() }
+        // The close went through; its re-read is still on its way.
+        assertFalse(vm.state.value.actions.rename)
+        assertFalse(vm.rename("Docs"))
+        hold.complete(Unit)
+        closing.join()
+    }
+
+    @Test
+    fun aRedirectFoundOnReloadStartsTheAskAndListsOver() = runBlocking {
+        val (vm, _, _) = setup()
+        val pages = Pages().apply { pages["pj_docs"] = TimelineProjectPage(docs) }
+        val redirected = ProjectPageViewModel("pj_docs", pages, FakeProjects(), askCoordinator = {})
+        redirected.refreshPage(); redirected.ask()
+        assertTrue(redirected.state.value.asked)
+        pages.pages["pj_docs"] = TimelineProjectPage(promo, mergedFromID = "pj_docs")
+        redirected.refreshPage()
+        assertFalse(redirected.state.value.asked)
+        assertFalse(redirected.state.value.actionsLoaded)
+        vm.refreshPage()
+    }
+
+    @Test
     fun refusalsAreSaidInWords() = runBlocking {
         val (vm, projects, _) = setup()
         vm.refreshPage(); vm.loadActionTargets()
