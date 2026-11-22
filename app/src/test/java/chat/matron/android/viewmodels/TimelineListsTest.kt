@@ -128,6 +128,26 @@ class TimelineListsTest {
     }
 
     @Test
+    fun aFailedNextPageOffersRetryUntilItLands() = runBlocking {
+        var fail = true
+        val lists = object : FakeTimelineBase() {
+            override suspend fun finishedProjects(before: String?, limit: Int?): TimelineFinishedPage {
+                if (before == null) return TimelineFinishedPage(listOf(FinishedProject(TimelineFixtures.docs, now)), "c1")
+                if (fail) throw JournalApiError.Transport("offline")
+                return TimelineFinishedPage(listOf(FinishedProject(TimelineFixtures.pricing, now)), null)
+            }
+        }
+        val vm = TimelineViewModel(lists, scope)
+        vm.loadList(TimelinePlace.Finished)
+        vm.loadMoreFinished()
+        assertEquals(setOf(TimelinePlace.Finished), vm.state.value.pagingFailed)
+        fail = false
+        vm.loadMoreFinished()
+        assertTrue(vm.state.value.pagingFailed.isEmpty())
+        assertEquals(2, vm.state.value.finished.size)
+    }
+
+    @Test
     fun askingTheCoordinatorNamesTheProjectAndMarksTheRow() = runBlocking {
         val sent = mutableListOf<String>()
         val vm = TimelineViewModel(Lists(), scope, askCoordinator = { sent += it }, now = { now })

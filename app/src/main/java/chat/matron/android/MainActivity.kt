@@ -1259,9 +1259,17 @@ private fun SignedInApp(
                             onOpenMilestone = { onOpenConversationFromMissions(it.milestone.convoID); jumpToMilestone(it.milestone.convoID, it.milestone.seq) },
                             onOpenFileSource = { source ->
                                 when (source) {
-                                    is ProjectFileSource.Chat -> { onOpenConversationFromMissions(source.convoID); jumpToMilestone(source.convoID, source.seq) }
-                                    is ProjectFileSource.Item -> sessionScope.launch {
-                                        (deps.trackerItemLinkOutcome(source.num, session) as? TrackerItemLinkOutcome.Open)?.let { shell.pushMissionItem(it.itemID) }
+                                    is ProjectFileSource.Chat -> {
+                                        onOpenConversationFromMissions(source.convoID)
+                                        jumpToMilestone(source.convoID, source.seq)
+                                        null
+                                    }
+                                    // The item by its number; when it can't be opened, the
+                                    // resolver's words say why.
+                                    is ProjectFileSource.Item -> when (val outcome = deps.trackerItemLinkOutcome(source.num, session)) {
+                                        is TrackerItemLinkOutcome.Open -> { shell.pushMissionItem(outcome.itemID); null }
+                                        is TrackerItemLinkOutcome.Explain -> outcome.message
+                                        else -> null
                                     }
                                 }
                             },

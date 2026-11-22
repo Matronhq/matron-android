@@ -142,7 +142,9 @@ fun ProjectSectionScreen(
     onOpenMission: (String) -> Unit,
     onOpenMilestone: (ProjectMilestone) -> Unit,
     /// Opens a file where it was posted: its item, or its chat at that point.
-    onOpenFileSource: (ProjectFileSource) -> Unit = {},
+    /// Returns what to tell the user when the file can't be opened there
+    /// (an item that is gone, say); null when it opened.
+    onOpenFileSource: suspend (ProjectFileSource) -> String? = { null },
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -160,6 +162,7 @@ fun ProjectSectionScreen(
     val images = rememberTimelineImages(pictures, media, serverURL)
     val title = ProjectFormat.sectionTitle(section)
     var gallery by remember { mutableStateOf<ImageGallery?>(null) }
+    var sourceMessage by remember { mutableStateOf<String?>(null) }
 
     ProjectScaffold(title = title, onBack = onBack) {
         PullToRefreshBox(
@@ -181,7 +184,7 @@ fun ProjectSectionScreen(
                     onOpenFile = { file ->
                         when (projectFileOpening(file)) {
                             ProjectFileOpening.PICTURE -> gallery = projectGallery(state.files!!.rows, file, images, serverURL, media)
-                            ProjectFileOpening.SOURCE -> onOpenFileSource(file.source)
+                            ProjectFileOpening.SOURCE -> scope.launch { sourceMessage = onOpenFileSource(file.source) }
                         }
                     },
                     onLoadMore = { scope.launch { viewModel.loadMoreFiles() } },
@@ -194,6 +197,14 @@ fun ProjectSectionScreen(
         }
     }
     gallery?.let { AttachmentFullscreenViewer(gallery = it, onDismiss = { gallery = null }) }
+    sourceMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { sourceMessage = null },
+            confirmButton = { TextButton(onClick = { sourceMessage = null }) { Text("OK") } },
+            title = { Text(ProjectFormat.sectionTitle(ProjectSection.FILES)) },
+            text = { Text(message) },
+        )
+    }
     ProjectErrorAlert(state, viewModel, shown = sectionLoaded(state, section))
 }
 
