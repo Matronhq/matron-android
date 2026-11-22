@@ -176,6 +176,25 @@ class NewChatDefaultsStoreTest {
     }
 
     @Test
+    fun aReadOverlappingASaveStillBringsTheOtherKey() = runBlocking {
+        val api = FakeDefaultsApi()
+        val scope = child()
+        val store = NewChatDefaultsStore(api, { MutableSharedFlow() }, scope)
+        store.refresh()
+        val gate = CompletableDeferred<Unit>()
+        api.gate = gate
+        store.set(NewChatDefaults.Key.MODEL, "sonnet")
+        waitUntil { api.puts.size == 1 }
+        // The effort changed elsewhere while Settings was shut (no frame).
+        api.stored = api.stored.copy(effort = "low")
+        store.refresh()
+        gate.complete(Unit)
+        waitUntil { api.stored.model == "sonnet" && store.defaults.value?.model == "sonnet" }
+        assertEquals(NewChatDefaults("sonnet", "low"), store.defaults.value)
+        scope.cancel()
+    }
+
+    @Test
     fun choicesKeepAValueOutsideTheList() {
         val choices = NewChatDefaultsStore.choices(NewChatDefaults.Key.MODEL, "claude-custom-1")
         assertEquals("claude-custom-1", choices.last().label)

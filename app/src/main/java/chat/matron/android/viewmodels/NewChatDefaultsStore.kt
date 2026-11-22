@@ -69,9 +69,13 @@ class NewChatDefaultsStore(
     private val saving = mutableSetOf<NewChatDefaults.Key>()
     private val saveErrors = mutableMapOf<NewChatDefaults.Key, String>()
     private var loadError: String? = null
-    /// Bumped by every `GET` sent, pick, frame and `PUT` answer: a `GET`
-    /// answer from before the latest of them is older news and is dropped.
+    /// Bumped by every `GET` sent, frame and [stop]: a `GET` answer from
+    /// before the latest of them is older news and is dropped whole.
     private var seq = 0
+    /// Bumped per key by a pick or a `PUT` answer for that key: a `GET`
+    /// answer from before it skips that key only, and still brings the
+    /// other one (which no frame may have carried while Settings was shut).
+    private val keySeq = mutableMapOf<NewChatDefaults.Key, Int>()
     /// The latest frame value per key that landed while that key's `PUT`
     /// ran (see the class note). A present key with a `null` value is a
     /// held "Box default".
@@ -103,10 +107,17 @@ class NewChatDefaultsStore(
     suspend fun refresh() {
         seq += 1
         val sentSeq = seq
+        val sentKeySeq = keySeq.toMap()
         try {
             val answer = api.newChatDefaults()
             if (seq != sentSeq) return
-            server = answer
+            var next = server ?: answer
+            for (key in NewChatDefaults.Key.entries) {
+                if (keySeq[key] != sentKeySeq[key]) continue
+                // A key being saved holds the read back like a frame.
+                if (key in saving) heldFrame[key] = answer[key] else next = next.with(key, answer[key])
+            }
+            server = next
             _isSupported.value = true
             loadError = null
             show()
@@ -130,8 +141,8 @@ class NewChatDefaultsStore(
     /// value. The `PUT` runs on the store's scope, not the caller's.
     fun set(key: NewChatDefaults.Key, value: String?) {
         if (server == null || _defaults.value?.get(key) == value) return
-        // A read already in flight predates this pick: drop its answer.
-        seq += 1
+        // A read already in flight predates this pick: skip its answer's key.
+        bumpKey(key)
         pending[key] = value
         saveErrors.remove(key)
         show()
@@ -148,7 +159,7 @@ class NewChatDefaultsStore(
                 val desired = pending[key]
                 try {
                     val stored = api.setNewChatDefault(key, desired)
-                    seq += 1
+                    bumpKey(key)
                     // The answer to the request we sent wins over any frame
                     // held back meanwhile.
                     heldFrame.remove(key)
@@ -192,6 +203,10 @@ class NewChatDefaultsStore(
         _isSupported.value = true
         loadError = null
         show()
+    }
+
+    private fun bumpKey(key: NewChatDefaults.Key) {
+        keySeq[key] = (keySeq[key] ?: 0) + 1
     }
 
     /// The journal's latest value with the waiting picks on top.
