@@ -24,6 +24,12 @@ interface TimelineService {
     /// prompt. [inReplyTo] is the prompt's journal seq.
     suspend fun sendButtonResponse(selectedValues: List<String>, inReplyTo: String)
 
+    /// Answers a busy-queue card with an edit choice (`edit`, `edit_save`,
+    /// `edit_cancel`; see `AskUserEvent.QueuedEdit`), carrying the edited
+    /// text with `edit_save`. [inReplyTo] is the card's journal seq.
+    suspend fun sendQueuedEdit(choice: String, text: String?, inReplyTo: String): Unit =
+        throw UnsupportedOperationException("queued edits are not supported here")
+
     /// Sends an image attachment. [caption] rides on the event itself.
     suspend fun sendImage(data: ByteArray, filename: String, mimeType: String, caption: String?)
 

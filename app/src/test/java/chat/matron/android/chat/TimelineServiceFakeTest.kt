@@ -104,6 +104,14 @@ class FakeTimelineService : TimelineService {
         sentButtonResponses.add(selectedValues to inReplyTo)
     }
 
+    /// (choice, text, card id) of every queued-message edit answer, in order.
+    val sentQueuedEdits = mutableListOf<Triple<String, String?, String>>()
+
+    override suspend fun sendQueuedEdit(choice: String, text: String?, inReplyTo: String) {
+        nextSendError?.let { nextSendError = null; throw it }
+        sentQueuedEdits.add(Triple(choice, text, inReplyTo))
+    }
+
     override suspend fun sendImage(data: ByteArray, filename: String, mimeType: String, caption: String?) {
         sendGate?.let { it.markStarted(); it.await() }
         nextSendError?.let { nextSendError = null; throw it }

@@ -26,6 +26,7 @@ import chat.matron.android.journal.boolOrNull
 import chat.matron.android.journal.intOrNull
 import chat.matron.android.journal.isItemFallbackText
 import chat.matron.android.journal.longOrNull
+import chat.matron.android.journal.objectOrNull
 import chat.matron.android.journal.stringOrNull
 import chat.matron.android.models.TimelineSendState
 import java.time.Instant
@@ -422,7 +423,22 @@ object JournalTimelineMapper {
             replyChannel = if (options.isEmpty()) AskUserEvent.ReplyChannel.TEXT_REPLY
             else AskUserEvent.ReplyChannel.CHOICE_REPLY,
             queuedReleasePromptID = queuedReleasePromptID,
+            queuedEdit = if (queuedReleasePromptID == null) null else queuedEdit(payload),
         )
+    }
+
+    /// The edit a busy-queue card offers in the conversation: only an
+    /// in-place edit (`edit.mode == "replace"`), of a card that names one
+    /// message. A tracker reply's card (`item`) is edited from the item's
+    /// thread instead, where the reply box is.
+    fun queuedEdit(payload: JsonObject): AskUserEvent.QueuedEdit? {
+        val edit = payload.objectOrNull("edit") ?: return null
+        if (edit.stringOrNull("mode") != "replace" || payload["item"] != null) return null
+        val items = payload.arrayOrNull("items") ?: return null
+        if (items.size != 1) return null
+        val text = (items[0] as? JsonObject)?.stringOrNull("text")?.takeIf { it.isNotEmpty() } ?: return null
+        val hold = edit.longOrNull("hold_seconds")?.toInt() ?: 600
+        return AskUserEvent.QueuedEdit(text, hold.coerceAtLeast(0))
     }
 
     fun streamingItem(messageRef: String, text: String, convoTS: Instant): TimelineItem = TimelineItem(
