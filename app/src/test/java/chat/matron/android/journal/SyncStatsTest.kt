@@ -81,4 +81,18 @@ class SyncStatsTest {
         assertEquals(7L, loaded.events)
         assertEquals(0, loaded.backgroundWakes)
     }
+
+    /// Notes from several threads at once: the last write holds every count.
+    @Test
+    fun concurrentNotesAreNeverLostFromTheStore() {
+        val store = InMemoryKeyValueStore()
+        val stats = SyncStatsRecorder(store, zone = { ZoneOffset.UTC }, nowMs = { now }, flushIntervalMs = 0)
+        val threads = (1..8).map { Thread { repeat(200) { stats.noteBackgroundWake(); stats.noteEvents(1) } } }
+        threads.forEach(Thread::start)
+        threads.forEach(Thread::join)
+        stats.flush()
+        val reread = recorder(store).snapshot().first
+        assertEquals(1600, reread.backgroundWakes)
+        assertEquals(1600L, reread.events)
+    }
 }

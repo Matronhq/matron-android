@@ -52,6 +52,7 @@ class SyncStatsRecorder(
     private val flushIntervalMs: Long = 5_000,
 ) {
     private val lock = Any()
+    private val writeLock = Any()
     private var days: List<SyncDayStats> = load()
     private var dirty = false
     private var lastFlushAt = 0L
@@ -79,13 +80,17 @@ class SyncStatsRecorder(
     }
 
     fun flush() {
-        val toWrite = synchronized(lock) {
-            if (!dirty) return
-            dirty = false
-            lastFlushAt = nowMs()
-            days
+        // One writer at a time, each writing the list it read: a flush that
+        // read an older list can never land after one that read a newer one.
+        synchronized(writeLock) {
+            val toWrite = synchronized(lock) {
+                if (!dirty) return
+                dirty = false
+                lastFlushAt = nowMs()
+                days
+            }
+            store.setString(KEY, MatronJson.encodeToString(ListSerializer(SyncDayStats.serializer()), toWrite))
         }
-        store.setString(KEY, MatronJson.encodeToString(ListSerializer(SyncDayStats.serializer()), toWrite))
     }
 
     private fun update(immediate: Boolean, change: (SyncDayStats) -> SyncDayStats) {
