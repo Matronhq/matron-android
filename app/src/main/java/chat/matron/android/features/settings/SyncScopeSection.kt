@@ -13,7 +13,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import chat.matron.android.journal.SyncDayStats
 import chat.matron.android.journal.SyncScope
 import chat.matron.android.viewmodels.SyncScopeSettingModel
@@ -26,7 +29,12 @@ import chat.matron.android.viewmodels.SyncScopeSettingModel
 internal fun SyncScopeSection(model: SyncScopeSettingModel) {
     val selected by model.selected.collectAsStateWithLifecycle()
     val days by model.days.collectAsStateWithLifecycle()
-    LaunchedEffect(model) { model.refreshStats() }
+    // Read again each time the screen resumes: a background wake while the
+    // app was away must show when the user comes back to this screen.
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(model, lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) { model.refreshStats() }
+    }
     SyncScopeRows(selected = selected, onSelect = model::select, days = days)
 }
 
