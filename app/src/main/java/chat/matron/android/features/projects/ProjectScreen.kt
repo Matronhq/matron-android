@@ -169,7 +169,15 @@ fun ProjectSectionScreen(
             }
         }
     }
-    ProjectErrorAlert(state, viewModel)
+    ProjectErrorAlert(state, viewModel, shown = sectionLoaded(state, section))
+}
+
+/// Whether [section]'s content is on screen: only then does a failed read
+/// say so in an alert over it; before, the screen shows the retry.
+fun sectionLoaded(state: ProjectPageState, section: ProjectSection): Boolean = when (section) {
+    ProjectSection.HISTORY -> state.historyLoaded
+    ProjectSection.MISSIONS -> state.openMissions != null
+    ProjectSection.FILES -> false
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -192,9 +200,9 @@ internal fun ProjectScaffold(title: String, onBack: () -> Unit, content: @Compos
 
 /// A failed read over a page already on screen says so once.
 @Composable
-private fun ProjectErrorAlert(state: ProjectPageState, viewModel: ProjectPageViewModel) {
+private fun ProjectErrorAlert(state: ProjectPageState, viewModel: ProjectPageViewModel, shown: Boolean = state.page != null) {
     val error = state.error ?: return
-    if (state.page == null) return
+    if (!shown) return
     AlertDialog(
         onDismissRequest = { viewModel.dismissError() },
         confirmButton = { TextButton(onClick = { viewModel.dismissError() }) { Text("OK") } },

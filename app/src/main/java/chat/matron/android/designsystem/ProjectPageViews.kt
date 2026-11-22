@@ -243,6 +243,7 @@ fun ProjectSummaryView(
                     ProjectPageRow(
                         Modifier.alpha(if (empty) 0.45f else 1f).testTag("projects.summary.${section.wire}"),
                         detail = ProjectFormat.sectionCount(section, page),
+                        opens = !empty,
                         onClick = if (empty) null else ({ onOpenSection(section) }),
                     ) { Text(ProjectFormat.sectionTitle(section), style = MaterialTheme.typography.bodyLarge) }
                 }
