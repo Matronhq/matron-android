@@ -156,6 +156,7 @@ class BoxesScreenTest {
             onOpenSessions = {},
             onBack = {},
             fixedNowMs = now,
+            onOpenUsageHistory = {},
         )
     }
 
@@ -167,6 +168,7 @@ class BoxesScreenTest {
             node(By.text("Most spare per day"))
             node(By.text("Near limit"))
             node(By.text("2 live ›"))
+            node(By.text("Usage history"))
             screenshot("boxes-light")
         }
     }
