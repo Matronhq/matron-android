@@ -50,6 +50,16 @@ interface ConversationDao {
     )
     fun visibleTopLevelFlow(): Flow<List<ConversationEntity>>
 
+    /// Every visible top-level room whose participant conversations are
+    /// known (`participant_convos` set and not `[]`) — what a chat's
+    /// "Rooms" control picks its own rooms from. Port of matron-apple's
+    /// `missionRoomRows`.
+    @Query(
+        "SELECT * FROM conversation WHERE archived_at IS NULL AND parent_convo_id IS NULL " +
+            "AND participant_convos IS NOT NULL AND participant_convos != '[]'"
+    )
+    fun roomsFlow(): Flow<List<ConversationEntity>>
+
     /// EVERY conversation id — archived rows and subagent children included
     /// (their history is searchable, so the backfill sweep must cover them) —
     /// except one whose stored history the archive purge dropped: indexing it

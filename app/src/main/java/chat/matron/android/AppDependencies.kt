@@ -42,6 +42,7 @@ import chat.matron.android.viewmodels.RoutinesViewModel
 import chat.matron.android.viewmodels.MemoryEditorViewModel
 import chat.matron.android.viewmodels.MissionDetailViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
+import chat.matron.android.viewmodels.ConversationRoomsViewModel
 import chat.matron.android.viewmodels.NotifySettingsStore
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
 import chat.matron.android.viewmodels.ChangePasswordViewModel
@@ -712,6 +713,15 @@ class AppDependencies(
     fun makeItemsPanelViewModel(session: UserSession, convoID: String?, scope: CoroutineScope): ItemsPanelViewModel {
         val c = core(session)
         return ItemsPanelViewModel(convoID = convoID, store = c.store, api = c.api, sync = c.itemsSync, scope = scope)
+    }
+
+    /**
+     * A chat header's "Rooms · n": the agent-chat rooms [convoID] takes part
+     * in, live off the session store's rooms stream. One per chat showing.
+     */
+    fun makeConversationRoomsViewModel(session: UserSession, convoID: String, scope: CoroutineScope): ConversationRoomsViewModel {
+        val store = core(session).store
+        return ConversationRoomsViewModel(convoID = convoID, source = { store.roomsFlow() }, scope = scope)
     }
 
     /**

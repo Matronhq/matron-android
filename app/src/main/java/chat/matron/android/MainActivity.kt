@@ -109,6 +109,7 @@ import chat.matron.android.features.settings.AgentChatScreen
 import chat.matron.android.features.settings.DevicesScreen
 import chat.matron.android.features.settings.NotificationSettingsScreen
 import chat.matron.android.features.settings.PinnedChatsScreen
+import chat.matron.android.features.chat.ConversationRoomsHost
 import chat.matron.android.features.chatlist.ArchivedChatsScreen
 import chat.matron.android.chat.ChatSummary
 import chat.matron.android.features.pins.ChatPinMenu
@@ -1796,6 +1797,22 @@ private fun ChatRoute(
             val missionID by produceState<String?>(initialValue = null, convoID) {
                 deps.missionIDFlow(session, convoID).collect { value = it }
             }
+            // The header's "Rooms · n": the agent-chat rooms this
+            // conversation is in, live off the store while the chat shows.
+            val roomsScope = rememberCoroutineScope()
+            val roomsVM = remember(convoID) { deps.makeConversationRoomsViewModel(session, convoID, roomsScope) }
+            DisposableEffect(roomsVM) {
+                roomsVM.start()
+                val generation = roomsVM.observationGeneration
+                onDispose { roomsVM.stop(generation) }
+            }
+            val conversationRooms = remember(roomsVM) {
+                ConversationRoomsHost(
+                    rooms = roomsVM.rooms,
+                    room = { roomID -> vmCache.viewModels(roomID).first to vmCache.stripViewModel(roomID) },
+                    subagent = { childID, roomID -> vmCache.subChatViewModels(childID, roomID) },
+                )
+            }
             ChatScreen(
                 chatVM = chatVM,
                 composerVM = composerVM,
@@ -1819,6 +1836,7 @@ private fun ChatRoute(
                 missionID = missionID,
                 onOpenMission = onOpenMission,
                 pinMenu = pinMenu,
+                conversationRooms = conversationRooms,
                 notify = remember(session.userID) { deps.notifySettings(session) },
                 // Deferred: built when the browser sheet opens, on the sheet's own
                 // scope, over the same store the sync engine writes (apple #142).
