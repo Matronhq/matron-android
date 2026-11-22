@@ -61,6 +61,7 @@ class ProjectPageViewModel(
     /// again even when their first read failed.
     private var historyAsked = false
     private var missionsAsked = false
+    private var missionsGeneration = 0
 
     /// Reads the page: on arrival, on coming back, and for "Try again".
     suspend fun refreshPage() {
@@ -144,14 +145,17 @@ class ProjectPageViewModel(
     /// Reads the project's missions (`GET /projects/:id`).
     suspend fun loadMissions() {
         missionsAsked = true
+        // Only the newest read's answer (or failure) lands.
+        val generation = ++missionsGeneration
         try {
             val detail = projects.project(projectID)
+            if (generation != missionsGeneration) return
             val (open, closed) = missionSections(detail.missions)
             _state.update { it.copy(openMissions = open, closedMissions = closed) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            _state.update { it.copy(error = error.message) }
+            if (generation == missionsGeneration) _state.update { it.copy(error = error.message) }
         }
     }
 

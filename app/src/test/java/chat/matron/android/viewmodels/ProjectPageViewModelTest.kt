@@ -13,6 +13,7 @@ import chat.matron.android.models.TimelineHistoryWeek
 import chat.matron.android.models.TimelineProjectPage
 import chat.matron.android.models.TimelineProjectRef
 import java.time.Instant
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -89,6 +90,26 @@ class ProjectPageViewModelTest {
         projects.details["pj_docs"] = ProjectDetail(Project(id = "pj_docs", num = 12, title = "Docs site launch"), emptyList())
         vm.refresh()
         assertEquals(emptyList<Mission>(), vm.state.value.openMissions)
+    }
+
+    @Test
+    fun anOlderMissionsReadNeverLandsOverANewerOne() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var reads = 0
+        val projects = object : FakeProjects() {
+            override suspend fun project(id: String): ProjectDetail {
+                reads += 1
+                val mine = reads
+                if (mine == 1) hold.await()
+                return ProjectDetail(Project(id = id, num = 12, title = "Docs site launch"), listOf(Mission(id = "ms_$mine", num = mine, title = "m$mine", originConvoID = "c1")))
+            }
+        }
+        val vm = ProjectPageViewModel("pj_docs", Timeline(mutableMapOf("pj_docs" to TimelineProjectPage(docs))), projects)
+        val first = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined).launch { vm.loadMissions() }
+        vm.loadMissions()
+        hold.complete(Unit)
+        first.join()
+        assertEquals(listOf("ms_2"), vm.state.value.openMissions?.map { it.id })
     }
 
     @Test
