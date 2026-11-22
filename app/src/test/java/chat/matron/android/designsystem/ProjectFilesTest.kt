@@ -111,6 +111,9 @@ class ProjectFilesTest {
         vm.loadFiles()
         vm.loadMoreFiles()
         assertEquals(listOf("a", "b", "c"), vm.state.value.files?.rows?.map { it.blobID })
+        // Coming back to Files keeps what was paged.
+        vm.loadFilesIfNeeded()
+        assertEquals(listOf("a", "b", "c"), vm.state.value.files?.rows?.map { it.blobID })
         assertFalse(vm.state.value.files!!.hasMore)
     }
 
