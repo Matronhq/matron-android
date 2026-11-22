@@ -179,6 +179,7 @@ class JournalSyncEngine(
     /// The user's journal-held settings as `hello_ok` and `settings` frames
     /// carry them — the settings screen's live feed.
     private val settingsListeners = mutableMapOf<UUID, (UserSettings) -> Unit>()
+    private val notifyListeners = mutableMapOf<UUID, (NotifySettings) -> Unit>()
     /// Live `box_status` frames as `(deviceID, report)` — New Chat's feed.
     private val boxStatusListeners = mutableMapOf<UUID, (Pair<Long, BoxStatus>) -> Unit>()
     private val boxDefaultsListeners = mutableMapOf<UUID, (BoxDefaultsUpdate) -> Unit>()
@@ -707,6 +708,16 @@ class JournalSyncEngine(
 
     private fun fanOutSettings(settings: UserSettings) = synchronized(lock) {
         settingsListeners.values.forEach { it(settings) }
+    }
+
+    /// Live `notify` frames (journal notification settings): the synced part
+    /// of the user's notification settings after any device changed them.
+    /// No replay: a subscriber seeds from `GET /notify`. Mirrors
+    /// [settingsUpdates].
+    fun notifyUpdates(): Flow<NotifySettings> = callbackFlow {
+        val id = UUID.randomUUID()
+        synchronized(lock) { notifyListeners[id] = { u -> trySend(u) } }
+        awaitClose { synchronized(lock) { notifyListeners.remove(id) } }
     }
 
     /// Mission markers (`mission` and `milestone` events) as they are
@@ -1325,6 +1336,9 @@ class JournalSyncEngine(
                 publishPinsLocked(frame.pins)
             }
             is ServerFrame.SettingsFrame -> fanOutSettings(frame.settings)
+            is ServerFrame.NotifyFrame -> synchronized(lock) {
+                notifyListeners.values.forEach { it(frame.settings) }
+            }
             is ServerFrame.ArchiveFrame -> archive?.apply(frame.delta)
             is ServerFrame.HelloOK, is ServerFrame.UnknownControl -> Unit // post-hello control frames are advisory
         }

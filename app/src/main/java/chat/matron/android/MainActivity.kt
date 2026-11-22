@@ -100,6 +100,7 @@ import chat.matron.android.features.settings.CoordinatorSettingRowModel
 import chat.matron.android.features.settings.DeviceSettingsScreen
 import chat.matron.android.features.settings.AgentChatScreen
 import chat.matron.android.features.settings.DevicesScreen
+import chat.matron.android.features.settings.NotificationSettingsScreen
 import chat.matron.android.features.settings.PinnedChatsScreen
 import chat.matron.android.features.chatlist.ArchivedChatsScreen
 import chat.matron.android.chat.ChatSummary
@@ -1106,6 +1107,7 @@ private fun SignedInApp(
                             ),
                             onPinnedChats = if (pins != null) ({ nav.navigate("pinned-chats") }) else null,
                             onPeople = { nav.navigate("people") },
+                            onNotifications = { nav.navigate("notifications") },
                             notices = noticesSetting,
                             autoArchive = autoArchiveSetting,
                             twoFactor = twoFactorSetting,
@@ -1117,6 +1119,14 @@ private fun SignedInApp(
 
                     composable("people") {
                         PeopleScreen(viewModel = peopleVM, onBack = { nav.popBackStack() })
+                    }
+
+                    composable("notifications") {
+                        NotificationSettingsScreen(
+                            store = deps.notifySettings(session),
+                            title = { id -> allChats.firstOrNull { it.id == id }?.title ?: "Conversation" },
+                            onBack = { nav.popBackStack() },
+                        )
                     }
 
                     composable("pinned-chats") {
@@ -1639,6 +1649,7 @@ private fun ChatRoute(
                 missionID = missionID,
                 onOpenMission = onOpenMission,
                 pinMenu = pinMenu,
+                notify = remember(session.userID) { deps.notifySettings(session) },
                 // Deferred: built when the browser sheet opens, on the sheet's own
                 // scope, over the same store the sync engine writes (apple #142).
                 mediaBrowser = { scope ->
