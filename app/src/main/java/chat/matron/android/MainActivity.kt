@@ -98,6 +98,7 @@ import chat.matron.android.features.chatlist.ChatListScreen
 import chat.matron.android.features.chatlist.NewChatSheet
 import chat.matron.android.features.chatlist.currentSummary
 import chat.matron.android.features.items.ItemDetailScreen
+import chat.matron.android.features.share.ShareShortcuts
 import chat.matron.android.features.items.ItemsScreen
 import chat.matron.android.viewmodels.ItemReadMemory
 import chat.matron.android.features.onboarding.SignInScreen
@@ -232,11 +233,13 @@ class MainActivity : FragmentActivity() {
 
     override fun onStart() {
         super.onStart()
+        chat.matron.android.sync.MainAppVisibility.noteStarted()
         appLock.noteForegrounded()
     }
 
     override fun onStop() {
         super.onStop()
+        chat.matron.android.sync.MainAppVisibility.noteStopped()
         appLock.noteBackgrounded()
     }
 }
@@ -739,6 +742,14 @@ private fun SignedInApp(
 
     val groups by chatListVM.groups.collectAsStateWithLifecycle()
     val allChats = remember(groups) { groups.flatMap { it.summaries } }
+    // The most recent conversations as direct-share targets in the system
+    // share sheet. Republished only when which ones (or their names) change,
+    // and after a pause, so a busy list doesn't churn the system's ranking.
+    val shareTargets = remember(allChats, coordinatorConvoID) { ShareShortcuts.targets(allChats, coordinatorConvoID) }
+    LaunchedEffect(shareTargets.map { it.id to it.title }) {
+        kotlinx.coroutines.delay(2_000)
+        ShareShortcuts.publish(deps.context, shareTargets)
+    }
     // Archived conversations are not in the list's groups; a chat opened
     // from Archived (or search) takes its header from here instead.
     val archivedFlow = remember(session.userID) { deps.chatService(session).archivedChatSummaries() }
