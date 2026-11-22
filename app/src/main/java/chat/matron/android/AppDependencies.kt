@@ -736,20 +736,24 @@ class AppDependencies(
      * an engine the UI started is left untouched.
      */
     suspend fun backgroundCatchUp(session: UserSession, isAppVisible: () -> Boolean = { false }) {
-        val engine = core(session).engine
-        val startedHere = !engine.isRunning()
-        if (startedHere) engine.beginSync()
-        // stateStream is a StateFlow: an already-Running engine passes through
-        // immediately. The cap bounds the whole wait, not each yield.
-        withTimeoutOrNull(15_000) {
-            engine.stateStream.first { it is SyncConnectionState.Running }
+        try {
+            val engine = core(session).engine
+            val startedHere = !engine.isRunning()
+            if (startedHere) engine.beginSync()
+            // stateStream is a StateFlow: an already-Running engine passes through
+            // immediately. The cap bounds the whole wait, not each yield.
+            withTimeoutOrNull(15_000) {
+                engine.stateStream.first { it is SyncConnectionState.Running }
+            }
+            withTimeoutOrNull(10_000) {
+                while (engine.hasPendingOutbox()) delay(500)
+            }
+            if (startedHere && !isAppVisible()) engine.endSync()
+        } finally {
+            // The process may be stopped as soon as the worker returns, a
+            // failed or cancelled catch-up included.
+            syncStats.flush()
         }
-        withTimeoutOrNull(10_000) {
-            while (engine.hasPendingOutbox()) delay(500)
-        }
-        if (startedHere && !isAppVisible()) engine.endSync()
-        // The process may be stopped as soon as the worker returns.
-        syncStats.flush()
     }
 
     /** Whether the session's offline outbox still holds unsent messages (the share screen waits on it). */

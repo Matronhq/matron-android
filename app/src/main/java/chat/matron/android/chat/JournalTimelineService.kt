@@ -167,10 +167,16 @@ class JournalTimelineService(
         /// reach the anchor become the "older" prefix so the transcript doesn't
         /// blink to the window, and any tail from a previous subscription is
         /// fenced by epoch.
-        fun rebaseForNewTailSubscription(anchor: Long): Int = synchronized(lock) {
+        ///
+        /// [trimBelowAnchor]: drop the held rows below the new anchor too, so
+        /// a window moved up (after a For you only gap drop) really shrinks;
+        /// rows a stale observation delivered in the meantime go with them.
+        fun rebaseForNewTailSubscription(anchor: Long, trimBelowAnchor: Boolean = false): Int = synchronized(lock) {
             tailEpoch += 1
             pendingAnchor = anchor
-            olderEvents = if ((eventsList.lastOrNull()?.seq ?: -1L) >= anchor) eventsList else emptyList()
+            val held = if (trimBelowAnchor) eventsList.filter { it.seq >= anchor } else eventsList
+            olderEvents = if ((held.lastOrNull()?.seq ?: -1L) >= anchor) held else emptyList()
+            if (trimBelowAnchor) eventsList = olderEvents
             tailEvents = emptyList()
             tailEpoch
         }
@@ -475,7 +481,7 @@ class JournalTimelineService(
         // Fire viewing concurrently — the local mirror is the source of truth for
         // what to draw, so the first paint isn't held hostage to a round trip.
         val viewingJob = launch { engine.setViewing(convoID) }
-        fun tailSubscription() = launch {
+        fun tailSubscription(trimBelowAnchor: Boolean = false) = launch {
             // Baseline BEFORE the first flow emission: persisted rows are
             // history and must never retire echoes (see seedBaseline).
             overlay.seedBaseline(runCatching { store.maxSeq(convoID) }.getOrNull() ?: 0L)
@@ -484,7 +490,7 @@ class JournalTimelineService(
             // second) otherwise re-read and re-decoded the entire history.
             // Older rows are revealed locally on scroll-up (apple #171).
             val anchor = runCatching { store.tailWindowStart(convoID, fetchWindow) }.getOrDefault(0L)
-            val epoch = overlay.rebaseForNewTailSubscription(anchor)
+            val epoch = overlay.rebaseForNewTailSubscription(anchor, trimBelowAnchor)
             store.eventsFlow(convoID, anchor).collect { tail ->
                 overlay.setTail(tail, epoch)
                 signal()
@@ -500,7 +506,7 @@ class JournalTimelineService(
                 storeJob.cancel()
                 overlay.forgetOlder()
                 signal()
-                storeJob = tailSubscription()
+                storeJob = tailSubscription(trimBelowAnchor = true)
             }
         }
         val ephemeralJob = launch {
