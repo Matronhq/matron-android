@@ -1,6 +1,11 @@
 package chat.matron.android.features.onboarding
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -214,6 +219,29 @@ fun SignInScreen(
                     }
                 }) { Text("Cancel") }
             } else {
+                viewModel.notice?.let { notice ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier
+                            .padding(top = 16.dp)
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+                            .padding(16.dp)
+                            .testTag(SIGN_IN_NOTICE_TAG),
+                    ) {
+                        Icon(
+                            Icons.Outlined.ErrorOutline,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            notice,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
                 Text(
                     "Server",
                     style = MaterialTheme.typography.labelLarge,
@@ -462,5 +490,6 @@ private fun ForgotPasswordForm(
 }
 
 private const val FORGOT_CHECK_DELAY_MS = 500L
+internal const val SIGN_IN_NOTICE_TAG = "sign-in-notice"
 internal const val FORGOT_PASSWORD_LINK_TAG = "forgot-password-link"
 internal const val FORGOT_PASSWORD_SUBMIT_TAG = "forgot-password-submit"
