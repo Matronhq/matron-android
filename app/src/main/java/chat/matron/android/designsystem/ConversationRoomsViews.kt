@@ -2,6 +2,8 @@ package chat.matron.android.designsystem
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -90,7 +92,8 @@ fun RoomsChip(count: Int, onClick: () -> Unit, modifier: Modifier = Modifier) {
 /// there is more than one. A tap opens the room.
 @Composable
 fun ConversationRoomsList(rooms: List<ConversationRoom>, onOpen: (String) -> Unit, modifier: Modifier = Modifier) {
-    Column(modifier.fillMaxWidth()) {
+    // Scrolls: a conversation can be in more rooms than fit under the header.
+    Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
         rooms.forEachIndexed { index, room ->
             if (index > 0) HorizontalDivider()
             val a11y = ConversationRoomsFormat.rowAccessibilityLabel(room)
