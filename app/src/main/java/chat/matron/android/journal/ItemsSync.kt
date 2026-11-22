@@ -73,7 +73,7 @@ interface ItemsSyncing {
     /// through the outbox (a signed step-up tap): the item, the tap's
     /// comment, and the asking comment's choice, in one write, as a drained
     /// outbox row lands. The refetch that follows can fail.
-    suspend fun applyTapResult(item: TrackerItem, comment: chat.matron.android.models.TrackerComment) = applyItem(item)
+    suspend fun applyTapResult(item: TrackerItem, comment: chat.matron.android.models.TrackerComment?) = applyItem(item)
     /// [action] + [replyTo] make the comment a tap on one of the buttons the
     /// comment [replyTo] offers (see [ItemsProviding.commentItem]). Returns
     /// whether the outbox insert itself succeeded, like [enqueueCreate].
@@ -391,7 +391,7 @@ class ItemsSync(
         run.join()
     }
 
-    override suspend fun applyTapResult(item: TrackerItem, comment: chat.matron.android.models.TrackerComment) {
+    override suspend fun applyTapResult(item: TrackerItem, comment: chat.matron.android.models.TrackerComment?) {
         if (stopped) return
         synchronized(lock) { localItemWrites[item.id] = (localItemWrites[item.id] ?: 0) + 1 }
         try {

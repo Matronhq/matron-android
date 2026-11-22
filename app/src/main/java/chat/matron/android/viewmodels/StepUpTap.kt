@@ -8,6 +8,7 @@ import chat.matron.android.journal.approvals.ApprovalKeyFailure
 import chat.matron.android.journal.approvals.ApprovalRequest
 import chat.matron.android.journal.approvals.ApprovalSigner
 import chat.matron.android.journal.approvals.ApprovalStatement
+import chat.matron.android.journal.approvals.ApprovalSubjects
 import chat.matron.android.journal.approvals.PromptDigest
 import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
@@ -58,9 +59,96 @@ object StepUpTap {
         data class Failed(val message: String) : Outcome
     }
 
-    const val CONSENT_ELSEWHERE =
-        "This request is aimed at a protected box, so approving it needs your approval key on its card. " +
-            "Approve it from a device that can sign consent requests."
+    const val RELOAD_REQUEST = "This request's details don't match what would be approved. Reload it and read it again."
+
+    /// What Approve on a consent request's item signs: a `consent` statement
+    /// over the subject the journal published, for a request aimed at a
+    /// protected box. Only its yes is signed; null otherwise. Ported from
+    /// matron-apple's `StepUpTap.consentRequest`.
+    ///
+    /// The subject names the work by a hash, which nobody can read. So the
+    /// app signs only when it holds the very text that hash is of, and shows
+    /// it: a spawn's task, or a chat ask's message, found verbatim in a
+    /// fenced block of the item's own body and checked against the subject's
+    /// `task_sha256` / `message_sha256`. The subject must also be about this
+    /// item's request (its consent link) and an approval. A file transfer's
+    /// subject is the file's own hash and size, shown as they are with the
+    /// item's words. Throws [ApprovalError.SubjectMismatch] when a check fails.
+    fun consentRequest(item: TrackerItem, label: String): ApprovalRequest? {
+        val kind = item.consentKind ?: return null
+        if (!item.stepUp || !TrackerItem.isAffirmativeAnswer(label)) return null
+        val subject = item.subject ?: emptyMap()
+        if (subject["op"] != kind || subject["decision"] != "approve") throw ApprovalError.SubjectMismatch(RELOAD_REQUEST)
+        val detail = when (kind) {
+            "spawn", "chat" -> {
+                val ask = askOf(item, kind) ?: throw ApprovalError.SubjectMismatch(RELOAD_REQUEST)
+                if (!matches(subject, "ask", ask)) throw ApprovalError.SubjectMismatch(RELOAD_REQUEST)
+                val hashKey = if (kind == "spawn") "task_sha256" else "message_sha256"
+                val hash = subject[hashKey] ?: throw ApprovalError.SubjectMismatch(RELOAD_REQUEST)
+                verifiedText(item.body, hash) ?: throw ApprovalError.SubjectMismatch(
+                    if (kind == "spawn") {
+                        "The task on this request is not the task that would be approved. Reload the request and read it again."
+                    } else {
+                        "The message on this request is not the one that would be approved. Reload the request and read it again."
+                    },
+                )
+            }
+            "transfer" -> item.body
+            else -> throw ApprovalError.SubjectMismatch("This app can't approve this kind of request yet.")
+        }
+        return ApprovalRequest(
+            kind = ApprovalStatement.Kind.Consent, subject = subject, headline = item.title,
+            reference = "#${item.num}", button = label, detail = detail,
+        )
+    }
+
+    /// The request a consent item stands for, from its consent link: a
+    /// spawn's id, or a chat ask's `room/device`.
+    internal fun askOf(item: TrackerItem, kind: String): String? {
+        val prefix = "matron://consent/$kind/"
+        return item.links.firstOrNull { it.url.startsWith(prefix) }?.url?.removePrefix(prefix)?.takeIf { it.isNotEmpty() }
+    }
+
+    /// Whether the subject's [name] (or its hashed form, for a long value)
+    /// is [value].
+    private fun matches(subject: Map<String, String>, name: String, value: String): Boolean =
+        subject[name]?.let { it == value } ?: (subject["${name}_sha256"] == ApprovalSubjects.sha256(value))
+
+    /// The text of the first fenced block in [body] whose SHA-256 is [hash],
+    /// or null. The journal fences peer text with a run of backticks longer
+    /// than any inside it, so a block ends at the first line that is exactly
+    /// its opening fence.
+    internal fun verifiedText(body: String, hash: String): String? {
+        val lines = body.split("\n")
+        var i = 0
+        while (i < lines.size) {
+            val fence = lines[i]
+            if (fence.length >= 3 && fence.all { it == '`' }) {
+                val end = (i + 1 until lines.size).firstOrNull { lines[it] == fence }
+                if (end != null) {
+                    val text = lines.subList(i + 1, end).joinToString("\n")
+                    if (ApprovalSubjects.sha256(text) == hash) return text
+                    i = end + 1
+                    continue
+                }
+            }
+            i += 1
+        }
+        return null
+    }
+
+    /// One idempotency key per tap the user is making, kept until the journal
+    /// has answered it: a retry after a lost answer is the same tap, which the
+    /// journal then answers once instead of applying twice.
+    private val tapKeys = mutableMapOf<String, String>()
+    private fun tapKey(itemID: String, replyTo: String?, label: String) = "$itemID|${replyTo.orEmpty()}|$label"
+    internal fun idempotencyKey(itemID: String, replyTo: String?, label: String): String =
+        synchronized(tapKeys) { tapKeys.getOrPut(tapKey(itemID, replyTo, label)) { UUID.randomUUID().toString() } }
+    private fun answered(itemID: String, replyTo: String?, label: String) {
+        synchronized(tapKeys) { tapKeys.remove(tapKey(itemID, replyTo, label)) }
+    }
+
+    const val MAY_HAVE_BEEN_SENT = "The connection dropped after your answer went out, so it may have been sent. Refreshing the item."
 
     /// Signs and posts the tap when it needs a signature.
     ///
@@ -102,17 +190,13 @@ object StepUpTap {
                 return Outcome.Unsigned
             }
             val freshComment = comment?.let { c -> fresh.comments.firstOrNull { it.id == c.id } }
-            if (fresh.item.consentKind != null) {
+            val request = if (fresh.item.consentKind != null) {
                 // A consent ask is answered with a `consent` statement over
-                // the request it stands for, which this path does not sign.
-                // Only an approval of one aimed at a protected box needs it.
-                return if (comment == null && fresh.item.stepUp && TrackerItem.isAffirmativeAnswer(label)) {
-                    Outcome.Failed(CONSENT_ELSEWHERE)
-                } else {
-                    Outcome.Unsigned
-                }
-            }
-            val request = if (comment != null) {
+                // the request it stands for; only Approve on one aimed at a
+                // protected box needs it. A follow-up's buttons on one are
+                // never signed here.
+                if (comment != null) null else consentRequest(fresh.item, label)
+            } else if (comment != null) {
                 freshComment?.let { request(fresh.item, it, label) }
             } else {
                 request(fresh.item, null, label)
@@ -121,7 +205,14 @@ object StepUpTap {
             // has gone: an ordinary tap.
             if (request == null) return Outcome.Unsigned
             val approval = signer(request) ?: return Outcome.Unsigned
-            val result = api.tapItem(item.id, label, comment?.id, approval, UUID.randomUUID().toString())
+            val result = try {
+                api.tapItem(item.id, label, comment?.id, approval, idempotencyKey(item.id, comment?.id, label))
+            } catch (e: JournalApiError.Transport) {
+                // The answer was lost: the tap may have landed. The next try
+                // carries the same idempotency key, so it is never applied twice.
+                return Outcome.Failed(MAY_HAVE_BEEN_SENT)
+            }
+            answered(item.id, comment?.id, label)
             // The tap and the asking comment's choice land now; the refetch
             // below can fail.
             sync.applyTapResult(result.item, result.comment)

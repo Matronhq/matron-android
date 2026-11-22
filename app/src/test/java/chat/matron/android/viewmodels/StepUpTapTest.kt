@@ -1,6 +1,8 @@
 package chat.matron.android.viewmodels
 
-import chat.matron.android.journal.ItemCommentResult
+import chat.matron.android.journal.ItemTapResult
+import chat.matron.android.journal.approvals.ApprovalSubjects
+import chat.matron.android.models.TrackerLink
 import chat.matron.android.journal.ItemDetail
 import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.approvals.PromptDigest
@@ -22,6 +24,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonNull
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -54,10 +57,12 @@ class StepUpTapTest {
             readError?.let { throw it }
             return ItemDetail(fresh, comments)
         }
-        override suspend fun tapItem(id: String, action: String, replyTo: String?, approval: SignedApproval, idempotencyKey: String): ItemCommentResult {
+        val keys = mutableListOf<String>()
+        override suspend fun tapItem(id: String, action: String, replyTo: String?, approval: SignedApproval, idempotencyKey: String): ItemTapResult {
+            keys += idempotencyKey
             tapError?.let { throw it }
             taps += Triple(action, replyTo, approval)
-            return ItemCommentResult(fresh.copy(chosenAction = action), question.copy(id = "cm_tap"))
+            return ItemTapResult(fresh.copy(chosenAction = action), question.copy(id = "cm_tap"))
         }
     }
 
@@ -188,14 +193,75 @@ class StepUpTapTest {
         assertTrue((outcome as StepUpTap.Outcome.Failed).message.startsWith("This needs an approval key"))
     }
 
+    private val task = "Run the test suite and report.\nThen ```wait``` for me."
+    private fun spawnAsk(taskInBody: String = task) = cached.copy(
+        consentKind = "spawn", stepUp = true, actions = listOf("Approve", "Decline"), labels = listOf(TrackerItem.CONSENT_LABEL),
+        title = "Approve spawn on box-a — tests",
+        body = "**box-b** asks to start a new agent session on **box-a**.\n\n**Task the new session will be given, verbatim:**\n\n" +
+            "````\n$taskInBody\n````\n\n**To answer:** tap **Approve** or **Decline** here.",
+        links = listOf(TrackerLink("matron://consent/spawn/sp_1", "Spawn request sp_1")),
+        subject = mapOf(
+            "op" to "spawn", "ask" to "sp_1", "box" to "box-a", "workdir" to "/srv/app",
+            "task_sha256" to ApprovalSubjects.sha256(task), "decision" to "approve",
+        ),
+    )
+
     @Test
-    fun aProtectedConsentApprovalIsNotSignedAsATap() = runTest {
+    fun approvingAProtectedSpawnSignsAConsentStatementOverTheTaskShown() = runTest {
         withKey()
-        val consent = cached.copy(consentKind = "spawn", stepUp = true, actions = listOf("Approve", "Decline"))
-        val api = Api(consent)
-        assertEquals(StepUpTap.Outcome.Failed(StepUpTap.CONSENT_ELSEWHERE), StepUpTap.send(consent, null, "Approve", api, sync, center.signer, true))
-        assertEquals(StepUpTap.Outcome.Unsigned, StepUpTap.send(consent, null, "Decline", api, sync, center.signer, true))
+        val ask = spawnAsk()
+        val api = Api(ask)
+        val sending = async { StepUpTap.send(ask, null, "Approve", api, sync, center.signer, true) }
+        runCurrent()
+        val prompt = center.prompt.value!!
+        // The task is shown in full, and it is the very text the subject hashes.
+        assertEquals(task, prompt.request.detail)
+        center.confirm()
+        assertEquals(StepUpTap.Outcome.Sent, sending.await())
+        val st = parseJsonObjectOrNull(api.taps.single().third.statement)!!
+        assertEquals("consent", st.stringOrNull("type"))
+        assertEquals(null, st["item"])
+        assertEquals(ask.subject, st.objectOrNull("subject")!!.mapValues { (it.value as kotlinx.serialization.json.JsonPrimitive).content })
+    }
+
+    @Test
+    fun aConsentAskWhoseTextDoesNotMatchIsNeverSigned() = runTest {
+        withKey()
+        // The body's task is not the one the subject hashes.
+        val swapped = spawnAsk(taskInBody = "Delete everything.")
+        assertTrue((StepUpTap.send(swapped, null, "Approve", Api(swapped), sync, center.signer, true) as StepUpTap.Outcome.Failed)
+            .message.startsWith("The task on this request is not"))
+        // A subject about another request.
+        val other = spawnAsk().let { it.copy(subject = it.subject!! + ("ask" to "sp_2")) }
+        assertEquals(StepUpTap.Outcome.Failed(StepUpTap.RELOAD_REQUEST), StepUpTap.send(other, null, "Approve", Api(other), sync, center.signer, true))
+        // Decline is never signed.
+        val api = Api(spawnAsk())
+        assertEquals(StepUpTap.Outcome.Unsigned, StepUpTap.send(spawnAsk(), null, "Decline", api, sync, center.signer, true))
         assertTrue(api.taps.isEmpty())
+        assertNull(center.prompt.value)
+    }
+
+    @Test
+    fun aLostAnswerSaysItMayHaveBeenSentAndTheRetryReusesTheKey() = runTest {
+        withKey()
+        val api = Api(cached.copy(stepUp = true)).apply { tapError = JournalApiError.Transport("reset") }
+        assertEquals(StepUpTap.Outcome.Failed(StepUpTap.MAY_HAVE_BEEN_SENT), sendConfirming(api, null, "Deploy"))
+        assertTrue("it_1" in sync.refetched)
+        api.tapError = null
+        assertEquals(StepUpTap.Outcome.Sent, sendConfirming(api, null, "Deploy"))
+        assertEquals(2, api.keys.size)
+        assertEquals(api.keys[0], api.keys[1])
+        // A later, new tap gets a new key.
+        assertEquals(StepUpTap.Outcome.Sent, sendConfirming(api, null, "Deploy"))
+        assertTrue(api.keys[2] != api.keys[0])
+    }
+
+    @Test
+    fun verifiedTextFindsOnlyAnExactFencedBlock() {
+        val body = "intro\n```\nnot it\n```\n\n`````\nline one\n````\nstill inside\n`````\nend"
+        assertEquals("line one\n````\nstill inside", StepUpTap.verifiedText(body, ApprovalSubjects.sha256("line one\n````\nstill inside")))
+        assertNull(StepUpTap.verifiedText(body, ApprovalSubjects.sha256("line one")))
+        assertEquals("", StepUpTap.verifiedText("```\n\n```", ApprovalSubjects.sha256("")))
     }
 
     @Test
