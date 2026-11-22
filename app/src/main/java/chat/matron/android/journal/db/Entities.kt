@@ -97,8 +97,26 @@ data class ConversationEntity(
     /// stays; opening it pages the history back from the journal. Cleared by
     /// an unarchive, so a later archive purges again.
     @ColumnInfo(name = "history_purged_at") val historyPurgedAt: Long? = null,
+    /// JSON-encoded `[String]` of the conversations taking part in an
+    /// agent-chat room (each participant agent's own session,
+    /// journal-ordered), else `null`. `[]` for a room whose participants are
+    /// not known yet. Replaced wholesale when the wire sends the key,
+    /// untouched when it doesn't, like [participants]. Read through
+    /// [participantConvoIDs].
+    @ColumnInfo(name = "participant_convos") val participantConvos: String? = null,
 ) {
     val isArchived: Boolean get() = archivedAt != null
+
+    /// Decoded [participantConvos]. Empty for anything that is not a room
+    /// with known participants (null column, `[]`, or a value that fails to
+    /// decode).
+    val participantConvoIDs: List<String>
+        get() {
+            val raw = participantConvos ?: return emptyList()
+            return runCatching {
+                MatronJson.decodeFromString(ListSerializer(String.serializer()), raw)
+            }.getOrElse { emptyList() }
+        }
 
     /// Decoded [participants]. Empty for anything that is not a known
     /// multi-agent room (null column, or a value that fails to decode).
@@ -114,6 +132,11 @@ data class ConversationEntity(
         fun encodeParticipants(ids: List<Long>): String? =
             runCatching {
                 MatronJson.encodeToString(ListSerializer(Long.serializer()), ids)
+            }.getOrNull()
+
+        fun encodeParticipantConvos(ids: List<String>): String? =
+            runCatching {
+                MatronJson.encodeToString(ListSerializer(String.serializer()), ids)
             }.getOrNull()
     }
 }

@@ -1,5 +1,7 @@
 package chat.matron.android.journal
 
+import chat.matron.android.models.UsageHistory
+import java.io.File
 import java.io.IOException
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -7,6 +9,8 @@ import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.Memory
+import chat.matron.android.models.Routine
+import chat.matron.android.models.RoutineDraft
 import chat.matron.android.models.Milestone
 import chat.matron.android.models.Mission
 import chat.matron.android.models.TrackerItem
@@ -24,6 +28,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okio.buffer
@@ -141,6 +146,11 @@ data class ConvoSummaryDTO(
     /// field. Absent never clears a stored set (same discipline as
     /// [agentDeviceID]); present replaces it wholesale.
     val participants: List<Long>? = null,
+    /// The conversations taking part in an agent-chat room (each
+    /// participant agent's own session), or `null` when the server omits the
+    /// key — a server predating the field. Present replaces the stored list
+    /// wholesale; absent leaves it alone, like [participants].
+    val participantConvos: List<String>? = null,
     /// When the conversation was archived (ms), from a journal that syncs
     /// the archive; `null` when it is not archived or the journal says
     /// nothing. Read only when the row is first created (see
@@ -367,13 +377,22 @@ class JournalApi(
     private val baseUrl: HttpUrl,
     private val client: OkHttpClient = OkHttpClient(),
     token: String? = null,
-) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
-    PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
+    /// Told the HTTP status of every answer to a request that carried this
+    /// client's token (see [credentialStatus]), so the app can tell when the
+    /// token has been revoked. Not told about requests sent without a token,
+    /// transport failures, or answers to a token since replaced.
+    private val authResponses: ((Int) -> Unit)? = null,
+) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding, RoutinesProviding, NewChatDefaultsProviding,
+    PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NotifySettingsProviding, NumberLookupProviding,
     TrackerSearching, JournalSearching,
     ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding, ContactsProviding,
     InviteAskAnswering {
-    constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
-        : this(baseUrl.toHttpUrl(), client, token)
+    constructor(
+        baseUrl: String,
+        client: OkHttpClient = OkHttpClient(),
+        token: String? = null,
+        authResponses: ((Int) -> Unit)? = null,
+    ) : this(baseUrl.toHttpUrl(), client, token, authResponses)
 
     @Volatile
     private var token: String? = token
@@ -589,6 +608,7 @@ class JournalApi(
                 // Multi-agent room membership (owner + joined). Absent for
                 // solo conversations and on older servers -> null.
                 participants = c.longArrayOrNull("participants"),
+                participantConvos = c.stringArrayOrNull("participant_convos"),
                 archivedAt = c.longOrNull("archived_at"),
             )
         }
@@ -631,17 +651,28 @@ class JournalApi(
     /// uplink, where a multi-MB screenshot otherwise looks frozen. The write/
     /// read timeouts are raised well past the client default for the same
     /// reason: a legitimate slow upload must not die mid-body.
-    override suspend fun uploadMedia(data: ByteArray, contentType: String, progress: ((Double) -> Unit)?): String {
-        val body = data.toRequestBody((contentType.ifEmpty { "application/octet-stream" }).toMediaTypeOrNull())
-        val counted = if (progress != null) ProgressRequestBody(body, data.size.toLong(), progress) else body
+    override suspend fun uploadMedia(data: ByteArray, contentType: String, progress: ((Double) -> Unit)?): String =
+        postMedia(data.toRequestBody(mediaType(contentType)), data.size.toLong(), progress)
+
+    /// The streamed upload: OkHttp reads [file] in segments as it writes the
+    /// request, so memory stays flat however large the attachment is. The
+    /// length is taken once, up front, as the declared Content-Length.
+    override suspend fun uploadMedia(file: File, contentType: String, progress: ((Double) -> Unit)?): String =
+        postMedia(file.asRequestBody(mediaType(contentType)), file.length(), progress)
+
+    private fun mediaType(contentType: String) = contentType.ifEmpty { "application/octet-stream" }.toMediaTypeOrNull()
+
+    private suspend fun postMedia(body: okhttp3.RequestBody, length: Long, progress: ((Double) -> Unit)?): String {
+        val counted = if (progress != null) ProgressRequestBody(body, length, progress) else body
         val builder = Request.Builder().url(buildUrl("/media", emptyList()))
-        token?.let { builder.header("Authorization", "Bearer $it") }
+        val sentToken = token
+        sentToken?.let { builder.header("Authorization", "Bearer $it") }
         builder.method("POST", counted)
         val uploadClient = client.newBuilder()
             .writeTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
             .build()
-        val (status, respData) = execute(uploadClient.newCall(builder.build()))
+        val (status, respData) = execute(uploadClient.newCall(builder.build()), sentToken)
         if (status != 200) throw error(status, respData)
         val obj = parseJsonObjectOrNull(String(respData, Charsets.UTF_8))
         val mediaID = obj?.stringOrNull("media_id")
@@ -696,6 +727,20 @@ class JournalApi(
             )
         }
     }
+
+    /// `GET /roster` reduced to what the Boxes screen reads: each box's open
+    /// sessions and which sleeping boxes can be woken.
+    suspend fun roster(): RosterSnapshot =
+        RosterSnapshot.decode(request(path = "/roster"))
+            ?: throw JournalApiError.Transport("malformed roster response")
+
+    /// `GET /usage/history?weeks=N`: each account's weekly meters over the
+    /// last [weeks] weeks. A journal that predates the route answers 404
+    /// ([JournalApiError.NotFound]).
+    suspend fun usageHistory(weeks: Int): UsageHistory =
+        UsageHistory.parse(
+            request(path = "/usage/history", query = listOf("weeks" to weeks.toString())),
+        ) ?: throw JournalApiError.Transport("malformed usage history response")
 
     /// `PUT /devices/:id/defaults` — sets (or, with a null value, clears)
     /// any subset of an agent box's defaults for new sessions, returning the
@@ -1056,11 +1101,13 @@ class JournalApi(
         idempotencyKey: String?,
         action: String?,
         replyTo: String?,
+        replaces: String?,
     ): ItemCommentResult {
         val json = buildJsonObject {
             put("body", body)
             action?.let { put("action", it) }
             replyTo?.let { put("reply_to", it) }
+            replaces?.let { put("replaces", it) }
             if (attachments.isNotEmpty()) {
                 put("attachments", kotlinx.serialization.json.buildJsonArray { attachments.forEach { add(it.outgoingJson()) } })
             }
@@ -1121,6 +1168,19 @@ class JournalApi(
         UserSettingsDecoding.settings(
             request(path = "/settings", method = "PATCH", jsonBody = buildJsonObject { put("auto_archive_days", days) }),
         ) ?: throw JournalApiError.Transport("malformed settings response")
+
+    // MARK: Notifications
+    //
+    // Journal notification settings: what may push, synced per user, plus
+    // this device's own level. A journal predating the route 404s the GET.
+
+    override suspend fun notifySettings(): NotifyView =
+        NotifyView.decode(request(path = "/notify"))
+            ?: throw JournalApiError.Transport("malformed /notify response")
+
+    override suspend fun updateNotify(change: NotifyChange): NotifyView =
+        NotifyView.decode(request(path = "/notify", method = "PUT", jsonBody = change.body()))
+            ?: throw JournalApiError.Transport("malformed /notify response")
 
     // MARK: Archive
 
@@ -1220,6 +1280,83 @@ class JournalApi(
 
     override suspend fun deleteMemory(name: String): Memory =
         MemoriesDecoding.memory(request(path = "/memories/${pathSegment(name)}", method = "DELETE"))
+
+    // MARK: New chat defaults
+    //
+    // The user's default model and effort for new chats. A journal that
+    // predates them 404s `GET /defaults`.
+
+    override suspend fun newChatDefaults(): NewChatDefaults =
+        NewChatDefaults.decode(request(path = "/defaults"))
+            ?: throw JournalApiError.Transport("malformed /defaults response")
+
+    override suspend fun setNewChatDefault(key: NewChatDefaults.Key, value: String?): NewChatDefaults =
+        NewChatDefaults.decode(
+            request(
+                path = "/defaults", method = "PUT",
+                jsonBody = buildJsonObject { put(key.wire, value?.let { JsonPrimitive(it) } ?: JsonNull) },
+            ),
+        ) ?: throw JournalApiError.Transport("malformed /defaults response")
+
+    // MARK: Routines
+    //
+    // protocol "Coordinator routines". User-global routes; a journal
+    // predating them 404s `GET /routines`, which the Routines screen shows
+    // as "not available". The app writes with its client token (the user),
+    // so no `convo_id` and no causes.
+
+    private suspend fun routinesRequest(
+        path: String,
+        method: String,
+        body: JsonObject? = null,
+        accept: Set<Int> = setOf(200),
+        collection: Boolean,
+    ): JsonObject {
+        val (status, data) = try {
+            raw(path, method, jsonBody = body)
+        } catch (e: JournalApiError) {
+            throw RoutinesError.Other(e.message ?: "Couldn't reach the server.")
+        }
+        if (status !in accept) {
+            throw RoutinesDecoding.error(status, data, collection) { error(status, data).message ?: "HTTP $status" }
+        }
+        return parseJsonObjectOrNull(String(data, Charsets.UTF_8))
+            ?: throw RoutinesError.Other("The journal sent a malformed answer.")
+    }
+
+    private fun routinePath(id: String) = "/routines/${pathSegment(id)}"
+
+    override suspend fun listRoutines(): List<Routine> =
+        RoutinesDecoding.routines(routinesRequest("/routines", "GET", collection = true))
+
+    override suspend fun createRoutine(name: String, draft: RoutineDraft): Routine {
+        val body = JsonObject(
+            draft.requestBody().toMutableMap().apply {
+                put("name", JsonPrimitive(name))
+                // A triggered routine still names a zone on create (the
+                // journal defaults it); sending it keeps the user's choice.
+                if (!containsKey("tz")) put("tz", JsonPrimitive(draft.tz))
+            },
+        )
+        return RoutinesDecoding.routine(routinesRequest("/routines", "POST", body, accept = setOf(201), collection = true))
+    }
+
+    override suspend fun updateRoutine(id: String, draft: RoutineDraft): Routine =
+        RoutinesDecoding.routine(routinesRequest(routinePath(id), "PATCH", draft.requestBody(), collection = false))
+
+    override suspend fun setRoutineEnabled(id: String, enabled: Boolean): Routine =
+        RoutinesDecoding.routine(
+            routinesRequest(routinePath(id), "PATCH", buildJsonObject { put("enabled", enabled) }, collection = false),
+        )
+
+    override suspend fun deleteRoutine(id: String) {
+        routinesRequest(routinePath(id), "DELETE", buildJsonObject {}, collection = false)
+    }
+
+    override suspend fun runRoutine(id: String): RoutineRunResult =
+        RoutinesDecoding.runResult(
+            routinesRequest(routinePath(id) + "/run", "POST", buildJsonObject {}, accept = setOf(202), collection = false),
+        )
 
     // MARK: Missions & milestones
     //
@@ -1374,7 +1511,8 @@ class JournalApi(
         headers: Map<String, String> = emptyMap(),
     ): Pair<Int, ByteArray> {
         val builder = Request.Builder().url(buildUrl(path, query))
-        if (authenticated) token?.let { builder.header("Authorization", "Bearer $it") }
+        val sentToken = if (authenticated) token else null
+        sentToken?.let { builder.header("Authorization", "Bearer $it") }
         // Opt in to the item kinds this build understands on EVERY request,
         // not just `/items`: missions, snapshots and anything else that may
         // embed items then agree with the tracker's own answers.
@@ -1393,10 +1531,22 @@ class JournalApi(
             else -> null
         }
         builder.method(method, body)
-        return execute(client.newCall(builder.build()))
+        return execute(client.newCall(builder.build()), sentToken)
     }
 
-    private suspend fun execute(call: Call): Pair<Int, ByteArray> =
+    /// Runs [call]. [sentWith]: the token the request carried, if any; its
+    /// answer is then reported to [authResponses], unless the token has been
+    /// replaced meanwhile (an answer about the old token says nothing about
+    /// the new one).
+    private suspend fun execute(call: Call, sentWith: String?): Pair<Int, ByteArray> {
+        val result = send(call)
+        if (sentWith != null && sentWith == token) {
+            authResponses?.invoke(credentialStatus(result.first, result.second))
+        }
+        return result
+    }
+
+    private suspend fun send(call: Call): Pair<Int, ByteArray> =
         suspendCancellableCoroutine { cont ->
             cont.invokeOnCancellation { runCatching { call.cancel() } }
             call.enqueue(object : Callback {
@@ -1414,6 +1564,16 @@ class JournalApi(
         }
 
     companion object {
+        /// The status [authResponses] is told for an answer. A 401
+        /// `bad_password` is a wrong current password typed into a form (the
+        /// token itself was accepted), so it is told as a 403: one request
+        /// refused for a device that is still signed in.
+        internal fun credentialStatus(status: Int, data: ByteArray): Int {
+            if (status != 401) return status
+            val code = parseJsonObjectOrNull(String(data, Charsets.UTF_8))?.stringOrNull("error")
+            return if (code == "bad_password") 403 else status
+        }
+
         /// The journal hands `kind: "notice"` only to clients that list it
         /// here; everyone else sees those items as tasks, which keeps an
         /// older app (whose decoder drops unknown kinds) showing them.

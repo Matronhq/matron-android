@@ -7,13 +7,13 @@ import android.net.Uri
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.test.core.app.ApplicationProvider
+import chat.matron.android.features.chat.PickedCopy
 import chat.matron.android.features.chat.copyUriToTemp
 import java.io.File
 import java.time.LocalDateTime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -104,8 +104,8 @@ class AttachmentPasteTest {
     fun aCopyKeepsItsNameWithNoRandomPrefix() {
         val context: Context = ApplicationProvider.getApplicationContext()
         val source = File(context.cacheDir, "src-${System.nanoTime()}").apply { writeText("x") }
-        val first = copyUriToTemp(context, Uri.fromFile(source)) { "pasted-file-2026-01-02-030405" }!!
-        val second = copyUriToTemp(context, Uri.fromFile(source)) { "pasted-file-2026-01-02-030405" }!!
+        val first = copyUriToTemp(context, Uri.fromFile(source)) { "pasted-file-2026-01-02-030405" }.copied()
+        val second = copyUriToTemp(context, Uri.fromFile(source)) { "pasted-file-2026-01-02-030405" }.copied()
         assertEquals("pasted-file-2026-01-02-030405", first.name)
         assertEquals(first.name, second.name)
         assertNotEquals("two copies of one name do not collide", first.parentFile, second.parentFile)
@@ -117,7 +117,7 @@ class AttachmentPasteTest {
         val context: Context = ApplicationProvider.getApplicationContext()
         val picked = File(context.cacheDir, "picked")
         val before = picked.list()?.toSet().orEmpty()
-        assertNull(copyUriToTemp(context, Uri.fromFile(File(context.cacheDir, "missing-${System.nanoTime()}"))))
+        assertEquals(PickedCopy.Unreadable, copyUriToTemp(context, Uri.fromFile(File(context.cacheDir, "missing-${System.nanoTime()}"))))
         assertEquals(before, picked.list()?.toSet().orEmpty())
     }
 
@@ -125,8 +125,10 @@ class AttachmentPasteTest {
     fun aProvidedNameCannotLeaveTheCopyDirectory() {
         val context: Context = ApplicationProvider.getApplicationContext()
         val source = File(context.cacheDir, "src-${System.nanoTime()}").apply { writeText("x") }
-        val copy = copyUriToTemp(context, Uri.fromFile(source)) { "../../escape.txt" }!!
+        val copy = copyUriToTemp(context, Uri.fromFile(source)) { "../../escape.txt" }.copied()
         assertEquals("escape.txt", copy.name)
         assertTrue(copy.parentFile!!.parentFile!!.name == "picked")
     }
 }
+
+private fun PickedCopy.copied(): File = (this as PickedCopy.Copied).file

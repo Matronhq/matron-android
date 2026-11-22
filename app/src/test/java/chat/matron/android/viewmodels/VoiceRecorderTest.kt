@@ -5,6 +5,7 @@ import java.io.File
 import java.nio.file.Files
 import java.time.Instant
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
@@ -28,7 +29,13 @@ class VoiceRecorderTest {
         var pauseReturn: Boolean = true,
         var resumeReturn: Boolean = true,
         var amplitude: Int = 1234,
+        /// How many liveness checks report silence before the mic is live;
+        /// `Int.MAX_VALUE` for one that never delivers.
+        var silentChecks: Int = 0,
+        var timesOut: Boolean = false,
     ) : AudioRecording {
+        var liveChecks = 0
+            private set
         var recordCalls = 0
             private set
         var stopCalls = 0
@@ -59,6 +66,10 @@ class VoiceRecorderTest {
         }
 
         override fun peakAmplitude(): Int = amplitude
+
+        override fun isCapturingAudio(): Boolean = liveChecks++ >= silentChecks
+
+        override val finishTimedOut: Boolean get() = timesOut && stopCalls > 0
     }
 
     /// Fake interruption source (apple #180's `FakeInterruptions`): captures
@@ -88,6 +99,9 @@ class VoiceRecorderTest {
         now: () -> Instant = Instant::now,
         holdRecordingSession: (Boolean) -> Unit = { sessionCalls.add(it) },
         observeInterruptions: ((AudioInterruption) -> Unit) -> (() -> Unit) = interruptions::source,
+        pause: suspend () -> Unit = {},
+        fileSize: (File) -> Long = { -1L },
+        measureDuration: (File) -> Duration? = { null },
     ) = VoiceRecorder(
         requestPermission = { permission },
         makeRecorder = { fake },
@@ -97,6 +111,9 @@ class VoiceRecorderTest {
         observeInterruptions = observeInterruptions,
         describeInputRoute = { "inputs=[fake-mic]" },
         now = now,
+        pause = pause,
+        fileSize = fileSize,
+        measureDuration = measureDuration,
     )
 
     private val defaultSink = MatronDebug.sink
@@ -179,7 +196,7 @@ class VoiceRecorderTest {
     }
 
     @Test
-    fun stop_whenRecorderStopFails_returnsNullAndDeletesTheFile() = runBlocking {
+    fun stop_whenRecorderStopFails_throwsNothingRecordedAndDeletesTheFile() = runBlocking {
         val dir = tempDir()
         val fake = FakeAudioRecorder(stopReturn = false)
         val rec = VoiceRecorder(
@@ -188,8 +205,8 @@ class VoiceRecorderTest {
             tempDirectory = dir,
         )
         rec.start()
-        val result = rec.stop()
-        assertNull(result)
+        val error = runCatching { rec.stop() }.exceptionOrNull()
+        assertEquals(VoiceRecorder.RecorderError.NothingRecorded, error)
         assertEquals(VoiceRecorder.State.Finished, rec.state.value)
         assertTrue(dir.listFiles()?.isEmpty() ?: true)
     }
@@ -667,6 +684,201 @@ class VoiceRecorderTest {
         interruptions.deliver(AudioInterruption.Began)
         rec.sampleLevel()
         assertEquals("paused: no sample", 1, log.count { it.contains("level:") })
+    }
+
+    // MARK: Warm-up: "recording" only once the microphone delivers sound
+
+    @Test
+    fun start_staysStartingUntilTheMicrophoneDeliversSound() = runBlocking {
+        val t0 = Instant.ofEpochSecond(1_000)
+        var now = t0
+        val fake = FakeAudioRecorder(silentChecks = 3)
+        val seen = mutableListOf<VoiceRecorder.State>()
+        lateinit var rec: VoiceRecorder
+        rec = makeRecorder(fake = fake, now = { now }, pause = {
+            seen.add(rec.state.value)
+            now = now.plusMillis(500)
+        })
+        rec.start()
+        assertEquals(List(3) { VoiceRecorder.State.Starting }, seen)
+        // The clock starts once the mic is live, not when the button was hit.
+        assertEquals(t0.plusMillis(1_500), recordingState(rec).start)
+    }
+
+    @Test
+    fun stop_whileStarting_isANoOp() = runBlocking {
+        val gate = CompletableDeferred<Unit>()
+        val fake = FakeAudioRecorder(silentChecks = 1)
+        val rec = makeRecorder(fake = fake, pause = { gate.await() })
+        val job = launch { rec.start() }
+        while (rec.state.value != VoiceRecorder.State.Starting) kotlinx.coroutines.yield()
+        assertNull(rec.stop())
+        assertEquals(0, fake.stopCalls)
+        gate.complete(Unit)
+        job.join()
+        assertTrue(rec.state.value is VoiceRecorder.State.Recording)
+    }
+
+    @Test
+    fun cancel_duringWarmUp_abortsTheStartQuietly() = runBlocking {
+        val gate = CompletableDeferred<Unit>()
+        val keepAwake = mutableListOf<Boolean>()
+        val fake = FakeAudioRecorder(silentChecks = Int.MAX_VALUE)
+        val rec = makeRecorder(fake = fake, keepAwakeCalls = keepAwake, pause = { gate.await() })
+        val job = launch { rec.start() }
+        while (rec.state.value != VoiceRecorder.State.Starting) kotlinx.coroutines.yield()
+        rec.cancel()
+        gate.complete(Unit)
+        job.join()
+        assertEquals(VoiceRecorder.State.Idle, rec.state.value)
+        assertEquals(1, fake.stopCalls)
+        assertEquals(listOf(true, false), keepAwake)
+    }
+
+    @Test
+    fun start_silentMicWhoseFileGrows_goesLiveAtTheCap() = runBlocking {
+        var bytes = 100L
+        val fake = FakeAudioRecorder(silentChecks = Int.MAX_VALUE)
+        var pauses = 0
+        val rec = makeRecorder(fake = fake, fileSize = { bytes }, pause = { pauses++; bytes += 10 })
+        rec.start()
+        assertEquals(VoiceRecorder.MAX_LIVE_CHECKS, pauses)
+        assertTrue(rec.state.value is VoiceRecorder.State.Recording)
+    }
+
+    @Test
+    fun start_whenNothingReachesTheFile_failsWithNoAudioAndCleansUp() = runBlocking {
+        val dir = tempDir()
+        val keepAwake = mutableListOf<Boolean>()
+        val session = mutableListOf<Boolean>()
+        val fake = FakeAudioRecorder(silentChecks = Int.MAX_VALUE)
+        val rec = VoiceRecorder(
+            requestPermission = { true },
+            makeRecorder = { file -> file.writeBytes(ByteArray(40)); fake },
+            tempDirectory = dir,
+            setKeepScreenAwake = { keepAwake.add(it) },
+            holdRecordingSession = { session.add(it) },
+            pause = {},
+        )
+        val error = runCatching { rec.start() }.exceptionOrNull()
+        assertEquals(VoiceRecorder.RecorderError.NoAudio, error)
+        assertEquals(VoiceRecorder.State.Idle, rec.state.value)
+        assertEquals(listOf(true, false), keepAwake)
+        assertEquals(listOf(true, false), session)
+        assertTrue("the empty file is gone", dir.listFiles()?.isEmpty() ?: true)
+    }
+
+    @Test
+    fun interruption_duringWarmUp_holdsTheCapAndResumes() = runBlocking {
+        val interruptions = FakeInterruptions()
+        val fake = FakeAudioRecorder(silentChecks = Int.MAX_VALUE)
+        var pauses = 0
+        var bytes = 0L
+        val rec = makeRecorder(fake = fake, interruptions = interruptions, fileSize = { bytes }, pause = {
+            pauses++
+            when (pauses) {
+                1 -> interruptions.deliver(AudioInterruption.Began)
+                // Far past the cap while interrupted: none of it counts.
+                VoiceRecorder.MAX_LIVE_CHECKS + 50 -> interruptions.deliver(AudioInterruption.Ended(shouldResume = true))
+            }
+            bytes += 1
+        })
+        rec.start()
+        assertEquals(1, fake.pauseCalls)
+        assertEquals(1, fake.resumeCalls)
+        assertTrue(pauses > VoiceRecorder.MAX_LIVE_CHECKS + 50)
+        assertFalse(recordingState(rec).isPaused)
+    }
+
+    @Test
+    fun interruption_duringWarmUp_endingWithoutResume_failsTheStart() = runBlocking {
+        val interruptions = FakeInterruptions()
+        val fake = FakeAudioRecorder(silentChecks = Int.MAX_VALUE)
+        var pauses = 0
+        val rec = makeRecorder(fake = fake, interruptions = interruptions, pause = {
+            pauses++
+            if (pauses == 1) interruptions.deliver(AudioInterruption.Began)
+            if (pauses == 2) interruptions.deliver(AudioInterruption.Ended(shouldResume = false))
+        })
+        val error = runCatching { rec.start() }.exceptionOrNull()
+        assertEquals(VoiceRecorder.RecorderError.RecordFailed, error)
+        assertEquals(VoiceRecorder.State.Idle, rec.state.value)
+    }
+
+    @Test
+    fun start_whileStarting_throwsAlreadyRecording() = runBlocking {
+        val gate = CompletableDeferred<Unit>()
+        val rec = makeRecorder(fake = FakeAudioRecorder(silentChecks = 1), pause = { gate.await() })
+        val job = launch { rec.start() }
+        while (rec.state.value != VoiceRecorder.State.Starting) kotlinx.coroutines.yield()
+        assertEquals(VoiceRecorder.RecorderError.AlreadyRecording, runCatching { rec.start() }.exceptionOrNull())
+        gate.complete(Unit)
+        job.join()
+    }
+
+    // MARK: Never send an empty or unfinished file
+
+    @Test
+    fun stop_whenTheFileHoldsUnderASecond_throwsNothingRecorded() = runBlocking {
+        val dir = tempDir()
+        val rec = VoiceRecorder(
+            requestPermission = { true },
+            makeRecorder = { FakeAudioRecorder() },
+            tempDirectory = dir,
+            measureDuration = { 400.milliseconds },
+        )
+        rec.start()
+        assertEquals(VoiceRecorder.RecorderError.NothingRecorded, runCatching { rec.stop() }.exceptionOrNull())
+        assertTrue(dir.listFiles()?.isEmpty() ?: true)
+    }
+
+    @Test
+    fun stop_whenTheFileHoldsASecondOrMore_returnsTheNote() = runBlocking {
+        val rec = makeRecorder(measureDuration = { 1.seconds })
+        rec.start()
+        assertNotNull(rec.stop())
+    }
+
+    @Test
+    fun stop_whenTheFinishTimesOut_throwsSaveFailed() = runBlocking {
+        val dir = tempDir()
+        val rec = VoiceRecorder(
+            requestPermission = { true },
+            makeRecorder = { FakeAudioRecorder(stopReturn = false, timesOut = true) },
+            tempDirectory = dir,
+        )
+        rec.start()
+        assertEquals(VoiceRecorder.RecorderError.SaveFailed, runCatching { rec.stop() }.exceptionOrNull())
+        assertEquals(VoiceRecorder.State.Finished, rec.state.value)
+        assertTrue(dir.listFiles()?.isEmpty() ?: true)
+    }
+
+    @Test
+    fun resume_reportsThePausedSpanForTheClock() = runBlocking {
+        val t0 = Instant.ofEpochSecond(1_000)
+        var now = t0
+        val interruptions = FakeInterruptions()
+        val rec = makeRecorder(interruptions = interruptions, now = { now })
+        rec.start()
+        now = t0.plusSeconds(10)
+        interruptions.deliver(AudioInterruption.Began)
+        now = t0.plusSeconds(25)
+        interruptions.deliver(AudioInterruption.Ended(shouldResume = true))
+        assertEquals(java.time.Duration.ofSeconds(15), recordingState(rec).pausedTotal)
+    }
+
+    @Test
+    fun interruption_duringWarmUp_whosePauseFails_doesNotFailTheStart() = runBlocking {
+        val interruptions = FakeInterruptions()
+        val fake = FakeAudioRecorder(silentChecks = 3, pauseReturn = false, resumeReturn = false)
+        var pauses = 0
+        val rec = makeRecorder(fake = fake, interruptions = interruptions, pause = {
+            pauses++
+            if (pauses == 1) interruptions.deliver(AudioInterruption.Began)
+            if (pauses == 2) interruptions.deliver(AudioInterruption.Ended(shouldResume = true))
+        })
+        rec.start()
+        assertTrue(rec.state.value is VoiceRecorder.State.Recording)
     }
 
     // MARK: Microphone choice

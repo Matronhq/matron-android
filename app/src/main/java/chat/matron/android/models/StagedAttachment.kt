@@ -89,6 +89,27 @@ data class StagedAttachment private constructor(
             )
         }
 
+        /// Rebuilds an attachment saved by an unsent reply box. `null` unless
+        /// [file] still exists and sits directly in a staging directory named
+        /// [id] under [stagingDirectory] — the layout [stage] makes — so
+        /// [deleteStagedCopy] stays scoped to a directory this type created
+        /// even for data read back from disk.
+        fun restore(
+            id: String,
+            file: File,
+            filename: String,
+            mimeType: String,
+            sizeBytes: Long,
+            batchTag: AttachmentBatchTag?,
+            stagingDirectory: File,
+        ): StagedAttachment? {
+            val parent = file.parentFile ?: return null
+            if (parent.name != id || id.isEmpty() || id == "." || id == "..") return null
+            if (parent.parentFile?.canonicalFile != stagingDirectory.canonicalFile) return null
+            if (!file.isFile) return null
+            return StagedAttachment(id, file, filename, mimeType, sizeBytes, batchTag)
+        }
+
         /// The MIME type comes from the path extension; an unmappable extension
         /// falls back to a generic binary rather than guessing.
         ///

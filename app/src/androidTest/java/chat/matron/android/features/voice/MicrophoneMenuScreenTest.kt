@@ -29,7 +29,8 @@ import chat.matron.android.designsystem.ItemCommentVoice
 import chat.matron.android.designsystem.MatronAppearance
 import chat.matron.android.designsystem.MatronTheme
 import chat.matron.android.designsystem.MicrophoneMenu
-import chat.matron.android.features.chat.RecordingBar
+import chat.matron.android.designsystem.VoiceNoteBarMode
+import chat.matron.android.designsystem.VoiceNoteRecordingBar
 import chat.matron.android.models.Microphone
 import chat.matron.android.platform.MicrophoneCatalog
 import chat.matron.android.viewmodels.MediaRecorderAudioRecording
@@ -95,7 +96,12 @@ class MicrophoneMenuScreenTest {
     private fun chatBar(appearance: MatronAppearance, name: String, current: Microphone, open: Boolean) {
         show(appearance) {
             caption("Chat composer")
-            RecordingBar(isPaused = false, onCancel = {}, onSend = {})
+            val start = java.time.Instant.ofEpochSecond(1_000)
+            VoiceNoteRecordingBar(
+                mode = VoiceNoteBarMode.Recording(start),
+                onCancel = {}, onSend = {},
+                now = { start.plusSeconds(7) },
+            )
             MicrophoneMenu(
                 current = current, preferredID = null, available = { mics }, onSelect = {},
                 initiallyExpanded = open,

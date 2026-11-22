@@ -29,8 +29,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -65,6 +63,9 @@ import chat.matron.android.designsystem.AttachmentTray
 import chat.matron.android.designsystem.LocalAppLockActive
 import chat.matron.android.designsystem.MicrophoneMenu
 import chat.matron.android.designsystem.UploadProgressBar
+import chat.matron.android.designsystem.VoiceNoteBarMode
+import chat.matron.android.designsystem.VoiceNoteRecordingBar
+import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.BotCommand
 import chat.matron.android.platform.AudioFocusInterruptions
 import chat.matron.android.platform.AudioInputDiagnostics
@@ -81,13 +82,15 @@ import chat.matron.android.viewmodels.VoiceRecorderBindings
 import chat.matron.android.viewmodels.VoiceRecorderHandoff
 import chat.matron.android.viewmodels.VoiceRecorderHost
 import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.UUID
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
@@ -234,12 +237,18 @@ fun ComposerView(viewModel: ComposerViewModel) {
             UploadProgressBar(label = upload.label, fraction = upload.fraction)
         }
 
-        (recorderState as? VoiceRecorder.State.Recording)?.let { recording ->
-            RecordingBar(
-                isPaused = recording.isPaused,
+        voiceNoteBarMode(recorderState)?.let { mode ->
+            VoiceNoteRecordingBar(
+                mode = mode,
                 onCancel = { recorder.cancel() },
                 onSend = {
-                    recorder.stop()?.let { note ->
+                    val note = try {
+                        recorder.stop()
+                    } catch (error: VoiceRecorder.RecorderError) {
+                        viewModel.reportAttachmentError(error.userMessage)
+                        null
+                    }
+                    note?.let { note ->
                         // The note takes the typed text and the tray with it.
                         // Undispatched, the view model clears the draft before
                         // the upload's first suspension, so the field can show
@@ -328,7 +337,7 @@ fun ComposerView(viewModel: ComposerViewModel) {
                                 try {
                                     recorder.start()
                                 } catch (error: VoiceRecorder.RecorderError) {
-                                    viewModel.reportAttachmentError(voiceRecorderErrorMessage(error))
+                                    viewModel.reportAttachmentError(error.userMessage)
                                 }
                             }
                         },
@@ -379,6 +388,7 @@ private fun makeVoiceRecorderHost(context: Context): VoiceRecorderHost {
     val recorder = VoiceRecorder(
         requestPermission = { bindings.requestPermission() },
         makeRecorder = { file -> MediaRecorderAudioRecording(file, microphones, context.getSystemService(AudioManager::class.java)) },
+        measureDuration = MediaRecorderAudioRecording::measuredDuration,
         tempDirectory = File(context.cacheDir, "voice").apply { mkdirs() },
         setKeepScreenAwake = { bindings.setKeepScreenAwake(it) },
         // Switching apps mid-note used to kill the capture: a microphone
@@ -396,33 +406,6 @@ private fun makeVoiceRecorderHost(context: Context): VoiceRecorderHost {
         preferences = SharedPreferencesMicrophonePreference(context),
     )
     return VoiceRecorderHost(bindings, recorder)
-}
-
-/// The live-recording strip. While an interruption holds the capture
-/// ([isPaused]) it says so: the spinner and "Recording…" would claim to be
-/// capturing a call that the recorder is not hearing. Send still delivers
-/// what was captured up to the pause.
-@Composable
-internal fun RecordingBar(isPaused: Boolean, onCancel: () -> Unit, onSend: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        if (isPaused) {
-            Icon(Icons.Default.Pause, contentDescription = "Recording paused", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(recordingBarLabel(isPaused = true), modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
-        } else {
-            CircularProgressIndicator(modifier = Modifier.padding(2.dp), strokeWidth = 2.dp)
-            Text(recordingBarLabel(isPaused = false), modifier = Modifier.weight(1f))
-        }
-        TextButton(onClick = onCancel) { Text("Cancel") }
-        IconButton(onClick = onSend) {
-            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send voice note", tint = MaterialTheme.colorScheme.primary)
-        }
-    }
 }
 
 /**
@@ -446,16 +429,11 @@ private fun ComposerErrorBanner(message: String, onDismiss: () -> Unit) {
     }
 }
 
-/// Copy for the recording strip: truthful about a capture an interruption
-/// has paused (a call, another app on the mic) versus one that is live.
-internal fun recordingBarLabel(isPaused: Boolean): String =
-    if (isPaused) "Recording paused" else "Recording…"
-
-/** User-facing copy for a [VoiceRecorder.RecorderError] thrown by [VoiceRecorder.start]. */
-private fun voiceRecorderErrorMessage(error: VoiceRecorder.RecorderError): String = when (error) {
-    VoiceRecorder.RecorderError.PermissionDenied -> "Microphone access is needed to record a voice note."
-    VoiceRecorder.RecorderError.RecordFailed -> "Couldn't start recording."
-    VoiceRecorder.RecorderError.AlreadyRecording -> "Already recording."
+/// The voice-note bar for a recorder state; `null` when no note is under way.
+internal fun voiceNoteBarMode(state: VoiceRecorder.State): VoiceNoteBarMode? = when (state) {
+    VoiceRecorder.State.Starting -> VoiceNoteBarMode.Starting
+    is VoiceRecorder.State.Recording -> VoiceNoteBarMode.Recording(state.start, state.isPaused, state.pausedTotal)
+    VoiceRecorder.State.Idle, VoiceRecorder.State.Finished -> null
 }
 
 /**
@@ -552,49 +530,90 @@ fun SlashCommandPalette(
 
 /** Copies a picked content [Uri] to a temp file and stages it on the composer. */
 private suspend fun attachUri(context: Context, viewModel: ComposerViewModel, uri: Uri, pasted: Boolean = false) {
-    val file = withContext(Dispatchers.IO) {
+    val picked = withContext(Dispatchers.IO) {
         if (pasted) copyUriToTemp(context, uri, AttachmentPaste::fallbackName) else copyUriToTemp(context, uri)
-    } ?: run {
-        viewModel.reportAttachmentError("Couldn't read that file.")
-        return
     }
-    try {
-        viewModel.attachFiles(listOf(file))
-    } finally {
-        // The tray holds its own staged copy.
-        withContext(Dispatchers.IO) { file.parentFile?.deleteRecursively() }
+    when (picked) {
+        PickedCopy.Unreadable -> viewModel.reportAttachmentError("Couldn't read that file.")
+        is PickedCopy.TooLarge -> viewModel.reportAttachmentError(AttachmentLimits.oversizeMessage(picked.filename))
+        is PickedCopy.Copied -> try {
+            viewModel.attachFiles(listOf(picked.file))
+        } finally {
+            // The tray holds its own staged copy.
+            withContext(Dispatchers.IO) { picked.file.parentFile?.deleteRecursively() }
+        }
     }
 }
 
+/// What came of copying a picked item: the copy, a refusal because it is
+/// over [AttachmentLimits.MAX_BYTES], or nothing readable.
+internal sealed interface PickedCopy {
+    data class Copied(val file: File) : PickedCopy
+    data class TooLarge(val filename: String) : PickedCopy
+    data object Unreadable : PickedCopy
+}
+
 /// Copies a picked or pasted content [Uri] into the cache under the name
-/// [pickedFilename] gives it, ready to stage. `null` when unreadable. Shared
-/// with the item comment composer's pickers.
+/// [pickedFilename] gives it, ready to stage. Shared with the item comment
+/// composer's pickers.
 ///
 /// The copy keeps the file's own name: uniqueness comes from a fresh
 /// directory per copy, not a prefix on the name, because the staged name is
 /// the name the attachment is sent with. [fallbackName] names an item whose
 /// provider gives none (a pasted screenshot); the name is reduced to its last
 /// path segment, so a provider cannot aim the write outside the directory.
+///
+/// An item over [AttachmentLimits.MAX_BYTES] is refused before it is copied
+/// when the provider reports its size, and part-way through the copy when it
+/// doesn't, so an oversized pick never fills the cache. A refused or
+/// unreadable item leaves nothing behind, not even its directory.
 internal fun copyUriToTemp(
     context: Context,
     uri: Uri,
     fallbackName: (mimeType: String?) -> String = { "picked-${UUID.randomUUID()}" },
-): File? = runCatching {
+): PickedCopy = runCatching {
     val resolver = context.contentResolver
     val mime = resolver.getType(uri)
     val declaredExt = mime?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
     val name = ChatViewModel.sanitisedAttachmentFilename(
         pickedFilename(displayName(context, uri), declaredExt) { fallbackName(mime) },
     )
+    val declaredSize = declaredSize(context, uri)
+    if (declaredSize != null && AttachmentLimits.isOversize(declaredSize)) return PickedCopy.TooLarge(name)
     val dir = File(File(context.cacheDir, "picked"), UUID.randomUUID().toString()).apply { mkdirs() }
     val out = File(dir, name)
-    val copied = runCatching {
-        resolver.openInputStream(uri)?.use { input -> out.outputStream().use { input.copyTo(it) } }
+    val fits = runCatching {
+        resolver.openInputStream(uri)?.use { input ->
+            out.outputStream().use { copyWithinLimit(input, it, AttachmentLimits.MAX_BYTES) }
+        }
     }.getOrNull()
-    // An unreadable item leaves nothing behind, not even its directory.
-    if (copied == null) dir.deleteRecursively()
-    copied?.let { out }
-}.getOrNull()
+    when (fits) {
+        true -> PickedCopy.Copied(out)
+        false -> {
+            dir.deleteRecursively()
+            PickedCopy.TooLarge(name)
+        }
+        null -> {
+            dir.deleteRecursively()
+            PickedCopy.Unreadable
+        }
+    }
+}.getOrElse { PickedCopy.Unreadable }
+
+/// Copies [input] to [output], stopping as soon as more than [maxBytes] have
+/// come through. `true` when the whole input fit; `false` when it was cut
+/// off (the caller deletes the partial copy).
+internal fun copyWithinLimit(input: InputStream, output: OutputStream, maxBytes: Long): Boolean {
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var total = 0L
+    while (true) {
+        val read = input.read(buffer)
+        if (read < 0) return true
+        total += read
+        if (total > maxBytes) return false
+        output.write(buffer, 0, read)
+    }
+}
 
 /// The staged filename for a picked item: the provider's display name when it
 /// carries an extension; otherwise the name (or a generated one) with the
@@ -616,6 +635,18 @@ internal fun pickedFilename(
 /// ContextThemeWrapper), so a composable can reach the window flags.
 private fun Context.findActivity(): Activity? =
     generateSequence(this) { (it as? ContextWrapper)?.baseContext }.filterIsInstance<Activity>().firstOrNull()
+
+/// The provider's reported size, or null when it doesn't say.
+private fun declaredSize(context: Context, uri: Uri): Long? = runCatching {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) {
+            val index = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (index >= 0 && !cursor.isNull(index)) cursor.getLong(index) else null
+        } else {
+            null
+        }
+    }
+}.getOrNull()
 
 private fun displayName(context: Context, uri: Uri): String? = runCatching {
     context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->

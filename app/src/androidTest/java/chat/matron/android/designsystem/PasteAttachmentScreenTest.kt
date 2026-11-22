@@ -28,6 +28,7 @@ import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.Until
 import chat.matron.android.MainActivity
+import chat.matron.android.features.chat.PickedCopy
 import chat.matron.android.features.chat.copyUriToTemp
 import chat.matron.android.models.StagedAttachment
 import java.io.File
@@ -111,7 +112,7 @@ class PasteAttachmentScreenTest {
                                 onPasteAttachments = { uris ->
                                     scope.launch {
                                         val staged = withContext(Dispatchers.IO) {
-                                            uris.mapNotNull { copyUriToTemp(activity, it, AttachmentPaste::fallbackName) }
+                                            uris.mapNotNull { (copyUriToTemp(activity, it, AttachmentPaste::fallbackName) as? PickedCopy.Copied)?.file }
                                                 .map { StagedAttachment.stage(it, staging) }
                                         }
                                         tray = tray + staged

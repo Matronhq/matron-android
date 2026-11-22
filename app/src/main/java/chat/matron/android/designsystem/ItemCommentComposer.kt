@@ -1,16 +1,13 @@
 package chat.matron.android.designsystem
 
 import android.net.Uri
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -26,7 +23,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
@@ -195,8 +191,8 @@ fun ItemCommentComposer(
             .fillMaxWidth()
             .widthIn(max = ItemTypography.measure),
     ) {
-        if (voice == ItemCommentVoice.RECORDING) {
-            ItemCommentRecordingStrip(onCancel = onCancelRecording)
+        if (voice == ItemCommentVoice.RECORDING || voice == ItemCommentVoice.STARTING) {
+            ItemCommentRecordingStrip(live = voice == ItemCommentVoice.RECORDING, onCancel = onCancelRecording)
             microphoneMenu?.let { menu -> Box(Modifier.padding(start = 52.dp)) { menu() } }
         }
         AttachmentTray(attachments = attachments, onRemove = onRemoveAttachment)
@@ -273,10 +269,12 @@ fun ItemCommentComposer(
     }
 }
 
-/// The live-recording strip above the reply row: what is happening and a
-/// way out. It has no send of its own — the row's send carries the note.
+/// The recording strip above the reply row: what is happening and a way
+/// out. It has no send of its own — the row's send carries the note. Until
+/// the microphone delivers sound ([live] false) it says "Starting
+/// microphone…" with a grey dot, and the row's send waits.
 @Composable
-private fun ItemCommentRecordingStrip(onCancel: () -> Unit) {
+private fun ItemCommentRecordingStrip(live: Boolean, onCancel: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -287,7 +285,12 @@ private fun ItemCommentRecordingStrip(onCancel: () -> Unit) {
         IconButton(onClick = onCancel) {
             Icon(Icons.Filled.Delete, contentDescription = "Cancel recording", tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Box(Modifier.size(10.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
-        Text("Recording…", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        VoiceNoteDot(live = live)
+        Text(
+            if (live) "Recording…" else "Starting microphone…",
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (live) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
     }
 }

@@ -5,6 +5,7 @@ import app.cash.turbine.test
 import chat.matron.android.journal.db.MatronDatabase
 import java.io.File
 import java.time.Instant
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -870,6 +871,75 @@ class JournalStoreTest {
             )
         )
         assertEquals(listOf(7L), store.conversation("room")?.participantIDs)
+    }
+
+    // MARK: Room participant conversations (a chat's "Rooms · n")
+
+    @Test
+    fun participantConvosRoundTripAndAbsentNeverClears() = runBlocking {
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(
+                ConvoSummaryDTO("room", "🔗 [ab] box-a ↔ box-b", "waiting", 1, "", 1, participantConvos = listOf("c-a", "c-b")),
+                ConvoSummaryDTO("c-a", "alice's session", "running", 1, "", 1),
+            ),
+            headSeq = 1,
+        )
+        assertEquals(listOf("c-a", "c-b"), store.conversation("room")?.participantConvoIDs)
+        assertEquals(emptyList<String>(), store.conversation("c-a")?.participantConvoIDs)
+
+        store.refreshSummaries(listOf(ConvoSummaryDTO("room", "🔗 [ab] box-a ↔ box-b", "done", 1, "", 1)))
+        assertEquals(listOf("c-a", "c-b"), store.conversation("room")?.participantConvoIDs)
+
+        store.refreshSummaries(
+            listOf(ConvoSummaryDTO("room", "🔗 [ab] box-a ↔ box-b", "waiting", 1, "", 1, participantConvos = listOf("c-a"))),
+        )
+        assertEquals(listOf("c-a"), store.conversation("room")?.participantConvoIDs)
+    }
+
+    @Test
+    fun participantConvosLearnedLiveFromConvoMeta() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(
+            ev(1, convo = "room", type = "convo_meta", payload = buildJsonObject { put("title", "🔗 room") })
+        )
+        assertEquals(emptyList<String>(), store.conversation("room")?.participantConvoIDs)
+        store.applyJournal(
+            ev(
+                2, convo = "room", type = "convo_meta",
+                payload = buildJsonObject {
+                    put("participant_convos", buildJsonArray { add("c-a"); add("c-b") })
+                },
+            )
+        )
+        assertEquals(listOf("c-a", "c-b"), store.conversation("room")?.participantConvoIDs)
+        store.applyJournal(
+            ev(3, convo = "room", type = "convo_meta", payload = buildJsonObject { put("title", "renamed") })
+        )
+        assertEquals(listOf("c-a", "c-b"), store.conversation("room")?.participantConvoIDs)
+    }
+
+    /// The rooms stream: visible top-level rooms with known participants,
+    /// titles clean; a room with `[]`, an archived room and a plain chat
+    /// are left out.
+    @Test
+    fun roomsFlowListsVisibleRoomsWithKnownParticipants() = runBlocking {
+        val store = makeStore()
+        store.applyColdSnapshot(
+            listOf(
+                ConvoSummaryDTO("room", "🔗 [ab] Plan the launch", "running", 1, "", 5, lastTS = 900, participantConvos = listOf("c-a", "c-b")),
+                ConvoSummaryDTO("pending", "🔗 Pending room", "waiting", 1, "", 5, participantConvos = emptyList()),
+                ConvoSummaryDTO("gone", "🔗 Old room", "done", 1, "", 5, participantConvos = listOf("c-a"), archivedAt = 10),
+                ConvoSummaryDTO("c-a", "alice's session", "running", 1, "", 5),
+            ),
+            headSeq = 1,
+        )
+        val rooms = store.roomsFlow().first()
+        assertEquals(listOf("room"), rooms.map { it.id })
+        assertEquals("Plan the launch", rooms.single().title)
+        assertEquals("running", rooms.single().sessionState)
+        assertEquals(listOf("c-a", "c-b"), rooms.single().participantConvoIDs)
+        assertEquals(900L, rooms.single().lastActivity?.toEpochMilli())
     }
 
     /// Ports matron-apple's `testAgentRosterMirrorsSnapshotAndLiveRenames`.
