@@ -223,13 +223,13 @@ class MainActivity : FragmentActivity() {
 
     override fun onStart() {
         super.onStart()
-        chat.matron.android.sync.MainAppVisibility.isStarted = true
+        chat.matron.android.sync.MainAppVisibility.noteStarted()
         appLock.noteForegrounded()
     }
 
     override fun onStop() {
         super.onStop()
-        chat.matron.android.sync.MainAppVisibility.isStarted = false
+        chat.matron.android.sync.MainAppVisibility.noteStopped()
         appLock.noteBackgrounded()
     }
 }

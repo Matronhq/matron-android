@@ -27,6 +27,17 @@ fun isAppProcessInForeground(context: Context): Boolean {
  * visible app offline.
  */
 object MainAppVisibility {
-    @Volatile
-    var isStarted: Boolean = false
+    /// A count, not a flag: when the activity is recreated, the old
+    /// instance's `onStop` can land after the new one's `onStart`.
+    private val started = java.util.concurrent.atomic.AtomicInteger(0)
+
+    val isStarted: Boolean get() = started.get() > 0
+
+    fun noteStarted() {
+        started.incrementAndGet()
+    }
+
+    fun noteStopped() {
+        started.updateAndGet { (it - 1).coerceAtLeast(0) }
+    }
 }
