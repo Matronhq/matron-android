@@ -45,6 +45,10 @@ import chat.matron.android.viewmodels.NoticesSettingViewModel
 import chat.matron.android.viewmodels.ConversationRoomsViewModel
 import chat.matron.android.viewmodels.NotifySettingsStore
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
+import chat.matron.android.viewmodels.ApprovalCenter
+import chat.matron.android.viewmodels.ApprovalKeysScreenModel
+import chat.matron.android.platform.ApprovalKeyStore
+import chat.matron.android.platform.KeystoreApprovalKeyProvider
 import chat.matron.android.viewmodels.ChangePasswordViewModel
 import chat.matron.android.viewmodels.AccountEmailViewModel
 import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
@@ -274,6 +278,12 @@ class AppDependencies(
         val revocation: CredentialRevocationMonitor = CredentialRevocationMonitor(onRevoked = {}).apply { cancel() },
         /** The account this stack is for (its per-account caches are cleared with it). */
         val userID: String = "",
+        /**
+         * The account's approval keys and this device's own: the confirm
+         * sheet every signed request goes through. Null only for a core
+         * built without one (tests).
+         */
+        var approvals: ApprovalCenter? = null,
     )
 
     /**
@@ -477,6 +487,22 @@ class AppDependencies(
             pinsSync = pinsSync, coordinatorSync = coordinatorSync, notifySettings = notifySettings,
             revocation = revocation, userID = session.userID,
         )
+        core.approvals = ApprovalCenter(
+            api = api,
+            keys = KeystoreApprovalKeyProvider(
+                context,
+                // Debuggable builds also take a software-held key, for
+                // emulators without secure hardware; release builds refuse it.
+                allowSoftwareKeys = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0,
+            ),
+            // One record per journal account: the journal's host and port
+            // and any base path it is served under.
+            store = ApprovalKeyStore(preferences, ApprovalCenter.journalScope(session.homeserverURL), session.userID),
+            user = session.userID,
+            deviceID = session.deviceID.toLongOrNull(),
+            deviceName = approvalKeyName,
+            journalHost = ApprovalCenter.journalHost(session.homeserverURL),
+        )
         if (!live) return core
         core.itemsSync.onInviteLink = { link, askId ->
             core.inviteLinks.show(link, chat.matron.android.journal.RevealedInviteLinks.Source.ASK, askId)
@@ -598,6 +624,22 @@ class AppDependencies(
     }
 
     fun syncService(session: UserSession): SyncService = core(session).engine
+
+    /** The session's approval centre: keys, and the confirm sheet signing goes through. */
+    fun approvalCenter(session: UserSession): ApprovalCenter = core(session).approvals!!
+
+    /** Settings ▸ Approval keys. */
+    fun makeApprovalKeysScreenModel(session: UserSession): ApprovalKeysScreenModel =
+        ApprovalKeysScreenModel(approvalCenter(session))
+
+    /** What this device's approval key is called on the account: the model's name. */
+    private val approvalKeyName: String
+        get() = listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL)
+            .filter { it.isNotBlank() }
+            .let { parts -> if (parts.size == 2 && parts[1].startsWith(parts[0], ignoreCase = true)) listOf(parts[1]) else parts }
+            .joinToString(" ")
+            .ifBlank { "Android device" }
+            .take(40)
 
     /**
      * Bounded background catch-up — the Android analog of iOS's BGAppRefresh

@@ -108,6 +108,8 @@ import chat.matron.android.features.settings.CoordinatorSettingRowModel
 import chat.matron.android.features.settings.DeviceSettingsScreen
 import chat.matron.android.features.settings.AgentChatScreen
 import chat.matron.android.features.settings.DevicesScreen
+import chat.matron.android.features.settings.ApprovalKeysScreen
+import chat.matron.android.designsystem.ApprovalConfirmHost
 import chat.matron.android.features.settings.NotificationSettingsScreen
 import chat.matron.android.features.settings.PinnedChatsScreen
 import chat.matron.android.features.chat.ConversationRoomsHost
@@ -204,6 +206,9 @@ class MainActivity : FragmentActivity() {
             auth = AndroidBiometricAuthenticator(this),
             store = deps.preferences,
         )
+        // Approval keys sign behind a biometric prompt, which needs this
+        // activity; the app lock is told when it ends.
+        chat.matron.android.platform.BiometricPromptHost.attach(this) { showing -> appLock.noteSystemPrompt(showing) }
         setContent {
             // Read lazily by dispose handlers that must tell the lock shield's
             // teardown from the user's (see LocalAppLockActive).
@@ -235,6 +240,11 @@ class MainActivity : FragmentActivity() {
         super.onStart()
         chat.matron.android.sync.MainAppVisibility.noteStarted()
         appLock.noteForegrounded()
+    }
+
+    override fun onDestroy() {
+        chat.matron.android.platform.BiometricPromptHost.detach(this)
+        super.onDestroy()
     }
 
     override fun onStop() {
@@ -372,34 +382,37 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                 // Inside the theme and below the lock check, so a lock
                 // removes an open prompt along with everything else.
                 else -> BlockedLinkHost {
-                    SignedInApp(
-                        deps = deps,
-                        session = session!!,
-                        incomingLinks = incomingLinks,
-                        appearance = appearance,
-                        appLock = appLock,
-                        onAppearanceChange = { next ->
-                            appearance = next
-                            prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
-                        },
-                        // Refused while locked: signing out clears the lock, so it
-                        // must not be reachable from behind the shield. Unreachable
-                        // in practice (the menu isn't composed while locked) — the
-                        // guard belongs with the lock state regardless.
-                        onSignOut = {
-                            appLock.signOutIfUnlocked {
-                                OutboxCatchUpWorker.cancel(context)
-                                deps.signOut()
-                                // Per-account state, cleared like the rest: the next
-                                // account starts opted out.
-                                appLock.resetForSignOut()
-                                // The user's own sign-out: no "signed out from
-                                // another device" notice.
-                                revokedSession = null
-                                session = null
-                            }
-                        },
-                    )
+                    // The approval confirm sheet, over every screen of the app.
+                    ApprovalConfirmHost(remember(session!!.userID) { deps.approvalCenter(session!!) }) {
+                        SignedInApp(
+                            deps = deps,
+                            session = session!!,
+                            incomingLinks = incomingLinks,
+                            appearance = appearance,
+                            appLock = appLock,
+                            onAppearanceChange = { next ->
+                                appearance = next
+                                prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
+                            },
+                            // Refused while locked: signing out clears the lock, so it
+                            // must not be reachable from behind the shield. Unreachable
+                            // in practice (the menu isn't composed while locked) — the
+                            // guard belongs with the lock state regardless.
+                            onSignOut = {
+                                appLock.signOutIfUnlocked {
+                                    OutboxCatchUpWorker.cancel(context)
+                                    deps.signOut()
+                                    // Per-account state, cleared like the rest: the next
+                                    // account starts opted out.
+                                    appLock.resetForSignOut()
+                                    // The user's own sign-out: no "signed out from
+                                    // another device" notice.
+                                    revokedSession = null
+                                    session = null
+                                }
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -1242,6 +1255,7 @@ private fun SignedInApp(
                         val twoFactorSetting = remember(session.userID) { deps.makeTwoFactorSettingViewModel(session) }
                         val changePassword = remember(session.userID) { deps.makeChangePasswordViewModel(session) }
                         val accountEmail = remember(session.userID) { deps.makeAccountEmailViewModel(session) }
+                        val approvalKeys = remember(session.userID) { deps.makeApprovalKeysScreenModel(session) }
                         val coordinatorConsent = remember(session.userID) {
                             deps.makeCoordinatorConsentSettingViewModel(session, sessionScope)
                         }
@@ -1270,9 +1284,16 @@ private fun SignedInApp(
                             twoFactor = twoFactorSetting,
                             changePassword = changePassword,
                             accountEmail = accountEmail,
+                            approvalKeys = approvalKeys,
+                            onApprovalKeys = { nav.navigate("approval-keys") },
                             newChatDefaults = newChatDefaults,
                             onBack = { nav.popBackStack() },
                         )
+                    }
+
+                    composable("approval-keys") {
+                        val approvalKeys = remember(session.userID) { deps.makeApprovalKeysScreenModel(session) }
+                        ApprovalKeysScreen(model = approvalKeys, onBack = { nav.popBackStack() })
                     }
 
                     composable("people") {
@@ -1570,6 +1591,12 @@ private fun SignedInApp(
             )
         }
     }
+
+    // Approval keys: after every sign-in and launch, is this device's key
+    // still attached to this sign-in? Then the confirm sheet, over whatever
+    // is on screen, for every request that needs a signature.
+    val approvals = remember(session.userID) { deps.approvalCenter(session) }
+    LaunchedEffect(approvals) { approvals.refresh() }
 }
 
 /// Who asked for the New Chat sheet: the list (an ordinary chat) or the

@@ -50,6 +50,7 @@ import chat.matron.android.viewmodels.NoticesSettingViewModel
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
 import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
 import chat.matron.android.viewmodels.AccountEmailViewModel
+import chat.matron.android.viewmodels.ApprovalKeysScreenModel
 import chat.matron.android.viewmodels.ChangePasswordViewModel
 import kotlinx.coroutines.launch
 
@@ -105,6 +106,9 @@ fun DeviceSettingsScreen(
     /// Settings → Security's "Email address" for password resets. `null` in
     /// hosts without a session; hidden too on a journal without it.
     accountEmail: AccountEmailViewModel? = null,
+    /// Settings ▸ Security ▸ Approval keys. `null` hides the row.
+    approvalKeys: ApprovalKeysScreenModel? = null,
+    onApprovalKeys: () -> Unit = {},
     /// Settings → New chats: the user's default model and effort. `null`
     /// in hosts without a session (previews); says so on an older journal.
     newChatDefaults: NewChatDefaultsStore? = null,
@@ -132,8 +136,8 @@ fun DeviceSettingsScreen(
                 LabeledRow("Server", hostOf(session.homeserverURL))
             }
 
-            if (twoFactor != null || changePassword != null || accountEmail != null) {
-                SecuritySection(twoFactor, changePassword, accountEmail)
+            if (twoFactor != null || changePassword != null || accountEmail != null || approvalKeys != null) {
+                SecuritySection(twoFactor, changePassword, accountEmail, approvalKeys, onApprovalKeys)
             }
 
             if (devicesApi != null) {
