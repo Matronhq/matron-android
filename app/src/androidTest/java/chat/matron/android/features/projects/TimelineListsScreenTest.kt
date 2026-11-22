@@ -68,7 +68,7 @@ class TimelineListsScreenTest {
         val store = ProjectsFixtures.Store().apply { setString(TimelineWeekLayout.STORAGE_KEY, "list") }
         show { vm ->
             ProjectsScreen(
-                viewModel = vm, media = ProjectsFixtures.Media(), serverURL = "https://journal.example.com/".toHttpUrl(),
+                viewModel = vm, now = { ProjectsFixtures.now }, media = ProjectsFixtures.Media(), serverURL = "https://journal.example.com/".toHttpUrl(),
                 layoutStore = store, onOpenMissions = {}, onOpenMemories = {}, onOpenProject = {}, onOpenList = {},
             ) { Text("Missions") }
         }.use {

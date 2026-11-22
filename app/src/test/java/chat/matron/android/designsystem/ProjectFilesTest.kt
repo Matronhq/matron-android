@@ -33,6 +33,8 @@ class ProjectFilesTest {
         assertEquals("ZIP", ProjectFileFormat.extension(file("b", "assets", "application/zip")))
         assertEquals("FILE", ProjectFileFormat.extension(file("b", "notes.markdown", null)))
         assertEquals("Video tour.mp4, #41", ProjectFileFormat.label(file("b", "tour.mp4", "video/mp4"), now))
+        assertEquals("Image, #41", ProjectFileFormat.label(file("b", type = "image/png"), now))
+        assertEquals("Video, #41", ProjectFileFormat.label(file("b", type = "video/mp4"), now))
     }
 
     @Test
