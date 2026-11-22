@@ -115,6 +115,44 @@ class TrackerItemTest {
     }
 
     @Test
+    fun aMultiSelectItemCarriesEveryLabelOfItsLatestAnswer() {
+        val plain = TrackerItem.fromJson(obj(ITEM_JSON))!!
+        assertFalse("absent reads as one-tap", plain.multiSelect)
+        assertTrue(plain.chosenActions.isEmpty()); assertTrue(plain.answeredLabels.isEmpty())
+        val asked = TrackerItem.fromJson(obj(ITEM_JSON.replace("\"has_image\":1",
+            "\"has_image\":1,\"actions\":[\"Docs\",\"Billing\",\"Search\"],\"multi_select\":true," +
+                "\"chosen_actions\":[\"Docs\",\"Search\"],\"chosen_action\":\"Docs\"")))!!
+        assertTrue(asked.multiSelect)
+        assertEquals(listOf("Docs", "Search"), asked.chosenActions)
+        assertEquals(listOf("Docs", "Search"), asked.answeredLabels)
+        assertEquals("Docs", asked.chosenAction)
+        val unanswered = TrackerItem.fromJson(obj(ITEM_JSON.replace("\"has_image\":1",
+            "\"has_image\":1,\"actions\":[\"Docs\"],\"multi_select\":true,\"chosen_actions\":[],\"chosen_action\":null")))!!
+        assertTrue(unanswered.multiSelect); assertTrue(unanswered.answeredLabels.isEmpty())
+        // A one-tap item from a journal without the list still reads its one answer.
+        val tapped = TrackerItem.fromJson(obj(ITEM_JSON.replace("\"has_image\":1", "\"has_image\":1,\"actions\":[\"Go\"],\"chosen_action\":\"Go\"")))!!
+        assertFalse(tapped.multiSelect); assertEquals(listOf("Go"), tapped.answeredLabels)
+    }
+
+    @Test
+    fun aMultiSelectAnswerCommentCarriesEveryLabelTicked() {
+        val asking = TrackerComment.fromJson(obj("""{"id":"ic_q","item_id":"it_1","author":"agent","kind":"comment",
+            "body":"Which areas?","actions":["Docs","Billing","Search"],"multi_select":true,
+            "chosen_actions":["Billing","Search"],"chosen_action":"Billing","created_at":1}"""))!!
+        assertTrue(asking.multiSelect)
+        assertEquals(listOf("Billing", "Search"), asking.chosenActions)
+        val answer = TrackerComment.fromJson(obj("""{"id":"ic_a","item_id":"it_1","author":"user","kind":"comment",
+            "body":"Billing, Search","action":"Billing","reply_to":"ic_q","selected":["Billing","Search"],"created_at":2}"""))!!
+        assertEquals(listOf("Billing", "Search"), answer.selected)
+        assertEquals(listOf("Billing", "Search"), answer.answerLabels)
+        assertEquals("ic_q", answer.replyTo)
+        // A one-tap tap: no `selected`, its one label is the answer.
+        val tap = TrackerComment.fromJson(obj("""{"id":"ic_t","item_id":"it_1","author":"user","kind":"comment",
+            "body":"Merge","action":"Merge","reply_to":"ic_q","created_at":3}"""))!!
+        assertFalse(tap.multiSelect); assertTrue(tap.selected.isEmpty()); assertEquals(listOf("Merge"), tap.answerLabels)
+    }
+
+    @Test
     fun hasImageAcceptsBooleanAndInteger() {
         assertTrue(TrackerItem.fromJson(obj(ITEM_JSON.replace("\"has_image\":1", "\"has_image\":true")))!!.hasImage)
         assertFalse(TrackerItem.fromJson(obj(ITEM_JSON.replace("\"has_image\":1", "\"has_image\":0")))!!.hasImage)

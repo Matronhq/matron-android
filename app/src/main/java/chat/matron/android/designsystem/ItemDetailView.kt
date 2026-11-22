@@ -28,7 +28,9 @@ import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -40,6 +42,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -182,6 +187,12 @@ data class ItemDetailModel(
     /// drawn as chosen before the journal confirms
     /// (`ItemDetailViewModel.pendingItemTap`).
     val pendingItemTap: String? = null,
+    /// Multi-select answers still in the outbox, as asking-comment id →
+    /// every label ticked (`ItemDetailViewModel.pendingSelections`).
+    val pendingSelections: Map<String, List<String>> = emptyMap(),
+    /// A multi-select answer to the item's own question still in the outbox
+    /// (`ItemDetailViewModel.pendingItemSelection`).
+    val pendingItemSelection: List<String>? = null,
     /// The indicator at the foot of the thread while the agent that owns the
     /// item is busy (`ItemDetailViewModel.workingIndicator`); `null` draws
     /// none.
@@ -425,6 +436,11 @@ fun ItemDetailView(
     onTapAction: (TrackerComment, String) -> Unit = { _, _ -> },
     /// A tap on one of the item's own buttons (a notice's Seen).
     onTapItemAction: (String) -> Unit = {},
+    /// Send on a follow-up comment's multi-select question, with every
+    /// label ticked.
+    onSendSelection: (TrackerComment, List<String>) -> Unit = { _, _ -> },
+    /// Send on the item's own multi-select question.
+    onSendItemSelection: (List<String>) -> Unit = {},
     /// Opens a mission page by id: the context block's mission row.
     onOpenMission: (String) -> Unit = {},
     /// Retry / Discard under a reply the journal refused, by its local id.
@@ -507,7 +523,7 @@ fun ItemDetailView(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(ItemTypography.threadSpacing),
             ) {
-                item(key = "header") { Header(model, onOpenConversation, onOpenMission, onTapItemAction) }
+                item(key = "header") { Header(model, onOpenConversation, onOpenMission, onTapItemAction, onSendItemSelection) }
                 if (hasMeta) item(key = "meta") { Meta(item, onOpenLink) }
                 model.spawnConsent?.let { consent ->
                     // Between the meta row and the body, so the answer sits
@@ -536,8 +552,10 @@ fun ItemDetailView(
                     CommentView(
                         c, now, image, onOpenAttachment, onOpenLink,
                         chosen = commentChosenAction(c, model.pendingTaps),
+                        chosenAll = commentChosenActions(c, model.pendingSelections),
                         actionsEnabled = model.item.state == ItemState.OPEN,
                         onTapAction = { label -> onTapAction(c, label) },
+                        onSendSelection = { labels -> onSendSelection(c, labels) },
                         openableConvoIDs = model.openableConvoIDs,
                         onOpenConversation = onOpenConversation,
                         delivery = model.queuedReplies[c.id]?.takeIf { c.author == ItemAuthor.USER && c.kind == TrackerComment.Kind.COMMENT }
@@ -583,6 +601,7 @@ private fun Header(
     onOpenConversation: (String) -> Unit,
     onOpenMission: (String) -> Unit,
     onTapItemAction: (String) -> Unit,
+    onSendItemSelection: (List<String>) -> Unit,
 ) {
     val item = model.item
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -614,10 +633,17 @@ private fun Header(
         // A drawn spawn card answers on its own buttons; the item's Approve
         // and Decline (the same answer on the journal) would only repeat them.
         if (!model.drawsSpawnCard) {
-            ActionButtons(
-                item.actions, itemChosenAction(item, model.pendingItemTap),
-                enabled = item.state == ItemState.OPEN, onTap = onTapItemAction,
-            )
+            if (item.multiSelect) {
+                MultiSelectAnswers(
+                    item.actions, itemChosenActions(item, model.pendingItemSelection),
+                    enabled = item.state == ItemState.OPEN, onSend = onSendItemSelection,
+                )
+            } else {
+                ActionButtons(
+                    item.actions, itemChosenAction(item, model.pendingItemTap),
+                    enabled = item.state == ItemState.OPEN, onTap = onTapItemAction,
+                )
+            }
         }
     }
 }
@@ -745,6 +771,75 @@ fun commentChosenAction(comment: TrackerComment, pendingTaps: Map<String, String
 fun itemChosenAction(item: TrackerItem, pendingItemTap: String?): String? =
     (pendingItemTap ?: item.chosenAction)?.takeIf { it in item.actions }
 
+/// Which of a multi-select comment's labels to draw as ticked: an answer
+/// still in the outbox first, else the journal's `chosen_actions`. Labels
+/// the comment no longer offers are dropped.
+fun commentChosenActions(comment: TrackerComment, pendingSelections: Map<String, List<String>>): List<String> =
+    (pendingSelections[comment.id] ?: comment.answeredLabels)
+        .filter { it in comment.actions }
+
+/// [commentChosenActions] for the item's own multi-select question.
+fun itemChosenActions(item: TrackerItem, pendingItemSelection: List<String>?): List<String> =
+    (pendingItemSelection ?: item.answeredLabels)
+        .filter { it in item.actions }
+
+/// Whether Send on a multi-select question does anything: something is
+/// ticked, and it is not exactly the answer already given.
+fun multiSelectCanSend(ticked: Set<String>, chosen: List<String>): Boolean =
+    ticked.isNotEmpty() && ticked != chosen.toSet()
+
+/// The line an answer to a multi-select question shows in the thread:
+/// every label ticked. `null` on any other comment, a one-tap tap included
+/// (its body is its label, as before).
+fun itemSelectionLine(comment: TrackerComment): String? =
+    comment.selected.takeIf { it.isNotEmpty() }?.let { "Picked: ${it.joinToString(", ")}" }
+
+/// A multi-select question's answers: a tick box per label, and Send for
+/// the ticked ones as one answer. Starts from the answer already given
+/// ([chosen]), so the boxes show it; the user can change them and send
+/// again (the journal keeps the latest). On a closed item the rows are a
+/// record: nothing can be ticked and there is no Send.
+@Composable
+private fun MultiSelectAnswers(actions: List<String>, chosen: List<String>, enabled: Boolean, onSend: (List<String>) -> Unit) {
+    if (actions.isEmpty()) return
+    // Saveable, so ticks not yet sent survive the question scrolling out of
+    // the thread (which disposes its row) and a configuration change.
+    var ticked by rememberSaveable(actions, chosen, saver = TickedSaver) { mutableStateOf(chosen.toSet()) }
+    // A closed item's rows are the record of the answer sent, never of
+    // ticks left unsent when it closed.
+    val shown = if (enabled) ticked else chosen.toSet()
+    Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
+        for (label in actions) {
+            val isTicked = label in shown
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .toggleable(value = isTicked, enabled = enabled, role = Role.Checkbox) { on ->
+                        ticked = if (on) ticked + label else ticked - label
+                    }
+                    .padding(end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(checked = isTicked, onCheckedChange = null, enabled = enabled, modifier = Modifier.padding(12.dp))
+                Text(label, style = MaterialTheme.typography.bodyLarge)
+            }
+        }
+        if (enabled) {
+            Button(
+                onClick = { onSend(actions.filter { it in ticked }) },
+                enabled = multiSelectCanSend(ticked, chosen),
+                modifier = Modifier.padding(top = 4.dp),
+            ) { Text("Send") }
+        }
+    }
+}
+
+private val TickedSaver = listSaver<MutableState<Set<String>>, String>(
+    save = { it.value.toList() },
+    restore = { mutableStateOf(it.toSet()) },
+)
+
 /// The one-tap answers under the comment that asks, or under the item's
 /// title for the item's own buttons. The chosen one is filled;
 /// while the item is open another can still be tapped (the journal keeps the
@@ -778,8 +873,10 @@ private fun CommentView(
     onOpen: (TrackerAttachment) -> Unit,
     onOpenLink: (String) -> Unit,
     chosen: String? = null,
+    chosenAll: List<String> = emptyList(),
     actionsEnabled: Boolean = false,
     onTapAction: (String) -> Unit = {},
+    onSendSelection: (List<String>) -> Unit = {},
     openableConvoIDs: Set<String> = emptySet(),
     onOpenConversation: (String) -> Unit = {},
     delivery: (@Composable () -> Unit)? = null,
@@ -804,10 +901,20 @@ private fun CommentView(
             }
         }
     } else {
-        ItemCard(mine = c.author == ItemAuthor.USER, copyText = itemCardCopyText(c.body, c.attachments)) {
+        val picked = itemSelectionLine(c)
+        // An answer whose body is just its labels (what the journal stores
+        // when none is typed) shows the Picked line alone.
+        val body = if (picked != null && c.body.trim() == c.selected.joinToString(", ")) "" else c.body
+        val copy = listOfNotNull(picked, itemCardCopyText(body, c.attachments)).joinToString("\n\n").ifEmpty { null }
+        ItemCard(mine = c.author == ItemAuthor.USER, copyText = copy) {
             AuthorCaption(c.attributionText ?: c.authorName, c.createdAt, now, c.authorConversation, openableConvoIDs, onOpenConversation)
-            ItemContent(c.body, c.attachments, image, onOpen, onOpenLink)
-            ActionButtons(c.actions, chosen, actionsEnabled, onTapAction)
+            picked?.let { Text(it, style = ItemTypography.bodyStyle()) }
+            ItemContent(body, c.attachments, image, onOpen, onOpenLink)
+            if (c.multiSelect) {
+                MultiSelectAnswers(c.actions, chosenAll, actionsEnabled, onSendSelection)
+            } else {
+                ActionButtons(c.actions, chosen, actionsEnabled, onTapAction)
+            }
             delivery?.invoke()
         }
     }

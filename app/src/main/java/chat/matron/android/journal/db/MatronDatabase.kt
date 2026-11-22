@@ -100,6 +100,10 @@ import java.util.concurrent.atomic.AtomicLong
 /// v20 adds `item.step_up` and `item.subject_json`: approval keys' step-up
 /// mark and what a tap on the item signs. Additive; cached rows read "not
 /// step-up" until their next fetch.
+///
+/// v21 adds multi-select questions: `item.multi_select` and
+/// `item.chosen_actions_json` (every label of the latest answer). Additive;
+/// cached rows read as one-tap until their next fetch.
 @Database(
     entities = [
         ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
@@ -107,7 +111,7 @@ import java.util.concurrent.atomic.AtomicLong
         ItemEntity::class, ItemCommentEntity::class, ItemOutboxEntity::class,
         MissionEntity::class, MilestoneEntity::class, MissionConversationEntity::class,
     ],
-    version = 20,
+    version = 21,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -412,11 +416,19 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
+        /// v21: multi-select questions (see the class comment).
+        val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `item` ADD COLUMN `multi_select` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `item` ADD COLUMN `chosen_actions_json` TEXT")
+            }
+        }
+
         private val MIGRATIONS = listOf(
             MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
             MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
             MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
-            MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20,
+            MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21,
         )
 
         /// Production, file-backed at the given path. [onOpened] fires from

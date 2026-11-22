@@ -98,6 +98,9 @@ interface ItemsSyncing {
         /// The user's own cancelled reply this one is the edited version of:
         /// the journal records it, and every app shows the edit in its place.
         replaces: String? = null,
+        /// An answer to a multi-select question: every label ticked, sent
+        /// as `selected` (never with [action]), with [replyTo] as for a tap.
+        selected: List<String>? = null,
     ): Boolean
 
     /// Returns whether the outbox insert itself succeeded — `false` when the
@@ -466,6 +469,9 @@ class ItemsSync(
         /// The cancelled reply this one is the edited version of (`replaces`
         /// on the comment POST). On the first part of a reply only.
         val replaces: String? = null,
+        /// A queued multi-select answer: every label ticked (with [replyTo]
+        /// when it answers a comment). Null on everything else.
+        val selected: List<String>? = null,
     )
 
     /// Only the fields the apps-side create flow currently needs.
@@ -490,13 +496,14 @@ class ItemsSync(
         action: String?,
         replyTo: String?,
         replaces: String?,
+        selected: List<String>?,
     ): Boolean {
         // An enqueue racing sign-out must not insert after the outbox wipe has
         // already run — `stop()` is called before the wipe, so this flag being
         // set means the outbox is either already cleared or about to be.
         if (stopped) return false
         val createdAt = System.currentTimeMillis()
-        val rows = commentParts(body, attachments, action, replyTo, replaces).mapIndexed { index, part ->
+        val rows = commentParts(body, attachments, action, replyTo, replaces, selected).mapIndexed { index, part ->
             ItemOutboxEntity(
                 localID = partLocalID(localID, index), itemID = itemID, op = ItemOutboxEntity.OP_COMMENT,
                 payloadJson = MatronJson.encodeToString(CommentPayload.serializer(), part),
@@ -516,7 +523,7 @@ class ItemsSync(
         if (row.op == ItemOutboxEntity.OP_COMMENT && payload != null && payload.attachments.size > ATTACHMENTS_MAX) {
             // Queued before replies were split (or refused for its size): it
             // can only ever be refused again as it stands.
-            val parts = commentParts(payload.body, payload.attachments, payload.action, payload.replyTo, payload.replaces).mapIndexed { index, part ->
+            val parts = commentParts(payload.body, payload.attachments, payload.action, payload.replyTo, payload.replaces, payload.selected).mapIndexed { index, part ->
                 row.copy(
                     localID = partLocalID(localID, index),
                     payloadJson = MatronJson.encodeToString(CommentPayload.serializer(), part),
@@ -714,6 +721,7 @@ class ItemsSync(
                         val result = api.commentItem(
                             itemID, payload.body, payload.attachments, idempotencyKey = row.localID,
                             action = payload.action, replyTo = payload.replyTo, replaces = payload.replaces,
+                            selected = payload.selected,
                         )
                         if (stopped) return DrainOutcome.Clean
                         // Keep the posted comment locally BEFORE the coalesced
@@ -790,7 +798,8 @@ class ItemsSync(
 
         /// One reply as the comments the journal will take: [attachments] in
         /// order, at most [ATTACHMENTS_MAX] to a comment, with [body] (and a
-        /// tap's [action] / [replyTo]) on the first only. A reply within the
+        /// tap's [action] / [replyTo], or a multi-select answer's [selected])
+        /// on the first only. A reply within the
         /// limit is one comment, unchanged.
         fun commentParts(
             body: String,
@@ -798,9 +807,10 @@ class ItemsSync(
             action: String? = null,
             replyTo: String? = null,
             replaces: String? = null,
+            selected: List<String>? = null,
         ): List<CommentPayload> =
             attachments.chunked(ATTACHMENTS_MAX).ifEmpty { listOf(emptyList()) }.mapIndexed { index, chunk ->
-                if (index == 0) CommentPayload(body, chunk, action, replyTo, replaces) else CommentPayload("", chunk)
+                if (index == 0) CommentPayload(body, chunk, action, replyTo, replaces, selected) else CommentPayload("", chunk)
             }
 
         /// The outbox id (and Idempotency-Key) of part [index] of the reply

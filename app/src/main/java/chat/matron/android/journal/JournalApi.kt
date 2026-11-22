@@ -1209,16 +1209,9 @@ class JournalApi(
         action: String?,
         replyTo: String?,
         replaces: String?,
+        selected: List<String>?,
     ): ItemCommentResult {
-        val json = buildJsonObject {
-            put("body", body)
-            action?.let { put("action", it) }
-            replyTo?.let { put("reply_to", it) }
-            replaces?.let { put("replaces", it) }
-            if (attachments.isNotEmpty()) {
-                put("attachments", kotlinx.serialization.json.buildJsonArray { attachments.forEach { add(it.outgoingJson()) } })
-            }
-        }
+        val json = commentRequestJson(body, attachments, action, replyTo, replaces, selected)
         val obj = request(
             path = "/items/${pathSegment(id)}/comments", method = "POST", jsonBody = json,
             accept = setOf(200, 201), headers = idempotencyHeaders(idempotencyKey),
@@ -1707,6 +1700,31 @@ class JournalApi(
         }
 
     companion object {
+        /// The body of `POST /items/:id/comments`. A multi-select answer
+        /// carries `selected` and never `action` (the journal refuses both
+        /// together); an empty [selected] is no answer and is left out.
+        internal fun commentRequestJson(
+            body: String,
+            attachments: List<TrackerAttachment>,
+            action: String?,
+            replyTo: String?,
+            replaces: String?,
+            selected: List<String>?,
+        ): JsonObject = buildJsonObject {
+            put("body", body)
+            val labels = selected?.takeIf { it.isNotEmpty() }
+            if (labels != null) {
+                put("selected", kotlinx.serialization.json.buildJsonArray { labels.forEach { add(JsonPrimitive(it)) } })
+            } else {
+                action?.let { put("action", it) }
+            }
+            replyTo?.let { put("reply_to", it) }
+            replaces?.let { put("replaces", it) }
+            if (attachments.isNotEmpty()) {
+                put("attachments", kotlinx.serialization.json.buildJsonArray { attachments.forEach { add(it.outgoingJson()) } })
+            }
+        }
+
         /// The status [authResponses] is told for an answer. A 401
         /// `bad_password` is a wrong current password typed into a form (the
         /// token itself was accepted), so it is told as a 403: one request

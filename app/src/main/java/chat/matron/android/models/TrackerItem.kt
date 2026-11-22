@@ -289,6 +289,12 @@ data class ItemHandover(
     }
 }
 
+/// The non-empty strings of a JSON array, in order; empty when absent.
+private fun stringsOf(array: JsonArray?): List<String> =
+    array?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.takeIf(String::isNotEmpty) }
+        ?: emptyList()
+
+
 /// One tracker item — a task, a question or a decision (spec: Data model).
 data class TrackerItem(
     val id: String,
@@ -330,7 +336,16 @@ data class TrackerItem(
     /// and on a journal that predates the contract.
     val actions: List<String> = emptyList(),
     /// The label of the user's latest tap on [actions]; `null` until one.
+    /// On a [multiSelect] question, the first label of the latest answer.
     val chosenAction: String? = null,
+    /// The item's [actions] are a multi-select question: the user ticks any
+    /// number of them and sends them as one answer, instead of tapping one.
+    /// `false` on a one-tap question and on a journal that predates it.
+    val multiSelect: Boolean = false,
+    /// Every label of the user's latest answer on [actions], in the order
+    /// offered; empty until one, and from a journal that predates the key
+    /// ([answeredLabels] falls back to [chosenAction] there).
+    val chosenActions: List<String> = emptyList(),
     /// When the user last acted on the item, as the journal derives it: their
     /// latest comment, action tap, close or reopen, else the filing time of
     /// an item they filed. `null` when only agents have touched it, and on a
@@ -358,6 +373,10 @@ data class TrackerItem(
     /// from a fresh fetch; not kept in the local cache.
     val consentKind: String? = null,
 ) {
+    /// Every label of the latest answer: [chosenActions], or the one
+    /// [chosenAction] where the journal sent no list.
+    val answeredLabels: List<String> get() = chosenActions.ifEmpty { listOfNotNull(chosenAction) }
+
     /// "by bob" / "by bob's agent" for a contributor's item, else null.
     val attributionText: String? get() = attributionLine(contributor, null)
 
@@ -473,6 +492,8 @@ data class TrackerItem(
                     ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.takeIf(String::isNotEmpty) }
                     ?: emptyList(),
                 chosenAction = json.stringOrNull("chosen_action"),
+                multiSelect = json.boolOrNull("multi_select") == true,
+                chosenActions = stringsOf(json.arrayOrNull("chosen_actions")),
                 lastUserInputAt = msInstant(json.longOrNull("last_user_input_at")),
                 working = ItemWorking.fromJson(json.objectOrNull("working")),
                 handover = ItemHandover.fromJson(json.objectOrNull("handover")),
@@ -516,11 +537,20 @@ data class TrackerComment(
     /// every other comment, and on a journal that predates the contract.
     val actions: List<String> = emptyList(),
     /// The label of the user's latest tap on [actions]; `null` until one.
+    /// On a [multiSelect] question, the first label of the latest answer.
     val chosenAction: String? = null,
+    /// This comment's [actions] are a multi-select question ([TrackerItem.multiSelect]).
+    val multiSelect: Boolean = false,
+    /// Every label of the user's latest answer on [actions]; empty until one.
+    val chosenActions: List<String> = emptyList(),
     /// Set on the user's tap comment: the tapped label, and the id of the
     /// comment it answers (`null` when it answered the item's own buttons).
+    /// On a multi-select answer [action] is the first of [selected].
     val action: String? = null,
     val replyTo: String? = null,
+    /// Set on the user's answer to a multi-select question: every label
+    /// ticked, in the order offered. Empty on every other comment.
+    val selected: List<String> = emptyList(),
     /// The journal's attribution for an agent comment. Absent on older rows
     /// and on the user's own comments.
     val deviceName: String? = null,
@@ -546,6 +576,14 @@ data class TrackerComment(
     /// "by bob" / "by bob's agent" when someone other than this user's own
     /// side wrote it; null otherwise.
     val attributionText: String? get() = attributionLine(contributor, attribution)
+
+    /// The labels this comment answers with: every one of a multi-select
+    /// answer, the one of a tap, else none.
+    val answerLabels: List<String> get() = selected.ifEmpty { listOfNotNull(action) }
+
+    /// Every label of the latest answer to this comment's [actions]:
+    /// [chosenActions], or the one [chosenAction] where there is no list.
+    val answeredLabels: List<String> get() = chosenActions.ifEmpty { listOfNotNull(chosenAction) }
 
     val authorName: String
         get() = if (author == ItemAuthor.USER) "You" else deviceName?.trim()?.takeIf { it.isNotEmpty() } ?: "Agent"
@@ -589,8 +627,11 @@ data class TrackerComment(
                     ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.takeIf(String::isNotEmpty) }
                     ?: emptyList(),
                 chosenAction = json.stringOrNull("chosen_action"),
+                multiSelect = json.boolOrNull("multi_select") == true,
+                chosenActions = stringsOf(json.arrayOrNull("chosen_actions")),
                 action = json.stringOrNull("action"),
                 replyTo = json.stringOrNull("reply_to"),
+                selected = stringsOf(json.arrayOrNull("selected")),
                 deviceName = json.stringOrNull("device_name"),
                 convoID = json.stringOrNull("convo_id"),
                 convoTitle = json.stringOrNull("convo_title"),
