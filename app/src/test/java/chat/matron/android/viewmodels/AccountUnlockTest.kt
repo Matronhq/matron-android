@@ -103,10 +103,12 @@ class AccountUnlockModelTest {
     private val adopted = mutableListOf<String>()
     private var saves = true
 
+    private val attempts = mutableListOf<String>()
     private fun model(api: Unlocking) = AccountUnlockModel(
         monitor, api,
         sign = { since -> center.signUnlock(since, AccountUnlockModel.unlockDetail(since)) },
         adoptToken = { adopted += it; saves },
+        attempt = AccountUnlockModel.Attempt(begin = { attempts += "begin" }, end = { attempts += "end $it" }),
     )
 
     private suspend fun frozen() {
@@ -133,6 +135,8 @@ class AccountUnlockModelTest {
         assertEquals(mapOf("op" to "clear_panic", "since" to "1789000000000"),
             st.objectOrNull("subject")!!.mapValues { it.value.toString().trim('"') })
         assertEquals(listOf("new-token"), adopted)
+        // The revocation hold spans the request and the swap.
+        assertEquals(listOf("begin", "end true"), attempts)
         assertFalse(monitor.state.value.isLocked)
         assertNull(monitor.warning.value)
     }
@@ -159,6 +163,7 @@ class AccountUnlockModelTest {
         var unlocking = async { model.unlock() }
         runCurrent(); center.confirm(); unlocking.await()
         assertTrue((model.phase.value as AccountUnlockModel.Phase.Failed).message.contains("can't unlock this lock"))
+        assertEquals(listOf("begin", "end false"), attempts)
         api.answer = { throw AccountNotLockedError() }
         unlocking = async { model.unlock() }
         runCurrent(); center.confirm(); unlocking.await()

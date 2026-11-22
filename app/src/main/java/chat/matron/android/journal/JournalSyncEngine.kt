@@ -138,6 +138,10 @@ class JournalSyncEngine(
     /// (`hello_ok.archive`, `archive` frames, `POST /archive`). `null` in
     /// hosts that do not sync the archive: the hello then never asks.
     val archive: ArchiveSync? = null,
+    /// Told what each handshake says about this device's token: accepted
+    /// (`hello_ok`) or refused (`auth`). Feeds the app's
+    /// [CredentialRevocationMonitor].
+    private val credentialSignals: ((CredentialSignal) -> Unit)? = null,
 ) : SyncService {
     private val scope = CoroutineScope(dispatcher + SupervisorJob())
     private val lock = Any()
@@ -1064,6 +1068,7 @@ class JournalSyncEngine(
                 )
                 val headSeq = hello.headSeq
                 synchronized(lock) { liveConnection = connection; attempt = 0 }
+                credentialSignals?.invoke(CredentialSignal.Accepted)
                 // The journal greets no device of a locked account.
                 accountLock?.noteSocketAccepted()
                 // Before the replay: a message the replay brings back is then
@@ -1201,6 +1206,9 @@ class JournalSyncEngine(
                 MatronDebug.breadcrumb("server rejected auth — stopping sync (signed out by server)")
                 failReadyWaiters(JournalSyncError.AuthRevoked)
                 failAllRPC(RPCRequestError.Offline)
+                // Last: the app's sign-out may run from here, and it ends
+                // this engine.
+                credentialSignals?.invoke(CredentialSignal.Rejected)
                 return
             } catch (e: JournalConnectionError.AccountLocked) {
                 // Checked and told under the lock replaceToken takes: an
@@ -1215,6 +1223,9 @@ class JournalSyncEngine(
                         // is noticed.
                         accountLock?.noteLockedBySocket(AccountLock(e.since, e.canUnlock))
                         false
+                    }.also { stale ->
+                        // Never a revoke: a frozen device keeps its token.
+                        if (!stale) credentialSignals?.invoke(CredentialSignal.AccountLocked)
                     }
                 }
                 if (stale) {

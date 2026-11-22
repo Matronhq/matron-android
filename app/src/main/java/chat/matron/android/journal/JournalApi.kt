@@ -389,13 +389,22 @@ class JournalApi(
     private val baseUrl: HttpUrl,
     private val client: OkHttpClient = OkHttpClient(),
     token: String? = null,
+    /// Told the HTTP status of every answer to a request that carried this
+    /// client's token (see [credentialStatus]), so the app can tell when the
+    /// token has been revoked. Not told about requests sent without a token,
+    /// transport failures, or answers to a token since replaced.
+    private val authResponses: ((Int) -> Unit)? = null,
 ) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
-    TrackerSearching,
+    TrackerSearching, JournalSearching,
     ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding, ContactsProviding,
     InviteAskAnswering, ApprovalKeysProviding, AccountUnlocking {
-    constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
-        : this(baseUrl.toHttpUrl(), client, token)
+    constructor(
+        baseUrl: String,
+        client: OkHttpClient = OkHttpClient(),
+        token: String? = null,
+        authResponses: ((Int) -> Unit)? = null,
+    ) : this(baseUrl.toHttpUrl(), client, token, authResponses)
 
     @Volatile
     private var token: String? = token
@@ -742,13 +751,14 @@ class JournalApi(
         val body = data.toRequestBody((contentType.ifEmpty { "application/octet-stream" }).toMediaTypeOrNull())
         val counted = if (progress != null) ProgressRequestBody(body, data.size.toLong(), progress) else body
         val builder = Request.Builder().url(buildUrl("/media", emptyList()))
-        token?.let { builder.header("Authorization", "Bearer $it") }
+        val sentToken = token
+        sentToken?.let { builder.header("Authorization", "Bearer $it") }
         builder.method("POST", counted)
         val uploadClient = client.newBuilder()
             .writeTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
             .build()
-        val (status, respData) = execute(uploadClient.newCall(builder.build()))
+        val (status, respData) = execute(uploadClient.newCall(builder.build()), sentToken)
         if (status != 200) throw error(status, respData)
         val obj = parseJsonObjectOrNull(String(respData, Charsets.UTF_8))
         val mediaID = obj?.stringOrNull("media_id")
@@ -1273,7 +1283,7 @@ class JournalApi(
         ) ?: throw JournalApiError.Transport("malformed lookup response")
 
     /// The tracker-wide search (protocol.md "Unified search"). `chats=0`:
-    /// this app searches message text in its own index.
+    /// message text is searched through [searchChats] instead.
     override suspend fun searchAll(query: String, kinds: Set<TrackerSearchKind>, limit: Int): List<TrackerSearchHit> =
         TrackerSearchDecoding.hits(
             request(
@@ -1284,6 +1294,41 @@ class JournalApi(
                     "kinds" to kinds.joinToString(",") { it.wire },
                     "chats" to "0",
                 ),
+            ),
+        )
+
+    /// The message search's app modes (protocol.md "Journal search"):
+    /// one row per conversation, best match first.
+    override suspend fun searchChats(query: String, limit: Int, excludeSubagents: Boolean): List<JournalSearchChat> =
+        JournalSearchDecoding.chats(
+            request(
+                path = "/search",
+                query = listOf(
+                    "q" to query,
+                    "mode" to "chats",
+                    "limit" to limit.toString(),
+                    "exclude_subagents" to if (excludeSubagents) "1" else "0",
+                ),
+            ),
+        )
+
+    /// Matching messages newest first, inside [convoID] when one is given.
+    override suspend fun searchRecent(
+        query: String,
+        convoID: String?,
+        limit: Int,
+        excludeSubagents: Boolean,
+    ): List<JournalSearchHit> =
+        JournalSearchDecoding.hits(
+            request(
+                path = "/search",
+                query = buildList {
+                    add("q" to query)
+                    add("mode" to "recent")
+                    add("limit" to limit.toString())
+                    add("exclude_subagents" to if (excludeSubagents) "1" else "0")
+                    convoID?.let { add("convo_id" to it) }
+                },
             ),
         )
 
@@ -1466,7 +1511,8 @@ class JournalApi(
         headers: Map<String, String> = emptyMap(),
     ): Pair<Int, ByteArray> {
         val builder = Request.Builder().url(buildUrl(path, query))
-        if (authenticated) token?.let { builder.header("Authorization", "Bearer $it") }
+        val sentToken = if (authenticated) token else null
+        sentToken?.let { builder.header("Authorization", "Bearer $it") }
         // Opt in to the item kinds this build understands on EVERY request,
         // not just `/items`: missions, snapshots and anything else that may
         // embed items then agree with the tracker's own answers.
@@ -1485,24 +1531,34 @@ class JournalApi(
             else -> null
         }
         builder.method(method, body)
-        val sentToken = if (authenticated) token else null
-        val answer = execute(client.newCall(builder.build()))
-        // Only an answer to the token in use now says anything about this
-        // sign-in: one sent with a token since replaced is ignored.
-        if (sentToken != null) {
-            val (status, bytes) = answer
+        return execute(client.newCall(builder.build()), sentToken)
+    }
+
+    /// Runs [call]. [sentWith]: the token the request carried, if any; its
+    /// answer is then reported to [authResponses], unless the token has been
+    /// replaced meanwhile (an answer about the old token says nothing about
+    /// the new one).
+    private suspend fun execute(call: Call, sentWith: String?): Pair<Int, ByteArray> {
+        val result = send(call)
+        if (sentWith != null) {
+            // Checked against the token in use, and told, under the lock its
+            // swap takes: an answer to a token an unlock has since replaced
+            // says nothing about this sign-in (its 401 is expected, the old
+            // token having died), so it is told before the swap or never.
             synchronized(tokenLock) {
-                if (sentToken == token) {
-                    accountLock?.let { listener ->
-                        AccountLock.fromHttp(status, bytes)?.let(listener::noteLock) ?: listener.noteStatus(status)
-                    }
+                if (sentWith == token) {
+                    val (status, bytes) = result
+                    val lock = AccountLock.fromHttp(status, bytes)
+                    // A locked account's refusal is never a revoke.
+                    if (lock == null) authResponses?.invoke(credentialStatus(status, bytes))
+                    accountLock?.let { listener -> lock?.let(listener::noteLock) ?: listener.noteStatus(status) }
                 }
             }
         }
-        return answer
+        return result
     }
 
-    private suspend fun execute(call: Call): Pair<Int, ByteArray> =
+    private suspend fun send(call: Call): Pair<Int, ByteArray> =
         suspendCancellableCoroutine { cont ->
             cont.invokeOnCancellation { runCatching { call.cancel() } }
             call.enqueue(object : Callback {
@@ -1520,6 +1576,16 @@ class JournalApi(
         }
 
     companion object {
+        /// The status [authResponses] is told for an answer. A 401
+        /// `bad_password` is a wrong current password typed into a form (the
+        /// token itself was accepted), so it is told as a 403: one request
+        /// refused for a device that is still signed in.
+        internal fun credentialStatus(status: Int, data: ByteArray): Int {
+            if (status != 401) return status
+            val code = parseJsonObjectOrNull(String(data, Charsets.UTF_8))?.stringOrNull("error")
+            return if (code == "bad_password") 403 else status
+        }
+
         /// The journal hands `kind: "notice"` only to clients that list it
         /// here; everyone else sees those items as tasks, which keeps an
         /// older app (whose decoder drops unknown kinds) showing them.

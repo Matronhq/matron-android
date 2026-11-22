@@ -33,7 +33,18 @@ class AccountUnlockModel(
     private val adoptToken: suspend (String) -> Boolean,
     /// Whether the sign-in the unlock started from is still the current one.
     private val isCurrent: () -> Boolean = { true },
+    /// Told when the unlock request goes out ([Attempt.begin]) and how it
+    /// ended ([Attempt.end], true when this device took its new token), so a
+    /// refusal of the old token meanwhile is held back
+    /// ([chat.matron.android.journal.CredentialRevocationMonitor.hold]).
+    private val attempt: Attempt = Attempt.NONE,
 ) {
+    class Attempt(val begin: () -> Unit, val end: (tookNewToken: Boolean) -> Unit) {
+        companion object {
+            val NONE = Attempt({}, {})
+        }
+    }
+
     sealed interface Phase {
         data object Idle : Phase
         data object Unlocking : Phase
@@ -64,6 +75,21 @@ class AccountUnlockModel(
         }
         // An answer for a sign-in that has since gone changes nothing.
         if (!isCurrent()) { _phase.value = Phase.Idle; return }
+        // From here the journal may unlock, and kill the old token, before
+        // this device hears it: no sign-out for that token's refusals until
+        // the attempt is settled.
+        attempt.begin()
+        var tookNewToken = false
+        try {
+            tookNewToken = send(approval)
+        } finally {
+            attempt.end(tookNewToken)
+        }
+    }
+
+    /// Sends the signed unlock and takes the new token. True once the new
+    /// token is in use.
+    private suspend fun send(approval: SignedApproval): Boolean {
         val result = try {
             api.unlockAccount(approval)
         } catch (e: CancellationException) {
@@ -72,18 +98,19 @@ class AccountUnlockModel(
         } catch (_: AccountNotLockedError) {
             if (isCurrent()) monitor.cleared()
             _phase.value = Phase.Idle
-            return
+            return false
         } catch (e: Throwable) {
             _phase.value = if (isCurrent()) Phase.Failed(text(e)) else Phase.Idle
-            return
+            return false
         }
         // The answer belongs to the sign-in the unlock started from: after a
         // sign-out or a new sign-in it is thrown away.
-        if (!isCurrent()) { _phase.value = Phase.Idle; return }
+        if (!isCurrent()) { _phase.value = Phase.Idle; return false }
         val saved = adoptToken(result.token)
         _phase.value = Phase.Idle
         monitor.cleared()
         if (!saved) monitor.warn(AccountLockMonitor.UNSAVED_TOKEN_WARNING)
+        return true
     }
 
     companion object {
