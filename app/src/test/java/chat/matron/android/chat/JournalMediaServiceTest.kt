@@ -9,7 +9,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 /// Ported from matron-apple's `JournalMediaServiceTests`. The Apple suite stubs
 /// `URLProtocol` (host-agnostic); here `MockWebServer` backs the [JournalApi],
@@ -72,5 +74,35 @@ class JournalMediaServiceTest {
     @Test fun fetchOutcomeForForeignURLIsFailureWithoutRequest() = runBlocking {
         assertEquals(MediaFetchOutcome.Failure, service.fetchOutcome("mxc://matrix.example.com/abc123"))
         assertEquals(0, server.requestCount)
+    }
+
+    // MARK: disk cache
+
+    @get:Rule val temp = TemporaryFolder()
+
+    /// A second fetch, through a NEW service (a relaunch), is served from
+    /// disk with no request.
+    @Test fun aCachedBlobIsServedFromDiskWithoutARequest() = runBlocking {
+        val dir = temp.newFolder("media")
+        server.enqueue(MockResponse().setResponseCode(200).setBody("PNGDATA"))
+        val url = server.url("/media/b1").toString()
+        assertEquals("PNGDATA", JournalMediaService(JournalApi(server.url("/")), MediaDiskCache(dir)).image(url)?.let { String(it) })
+        assertEquals(1, server.requestCount)
+        val relaunched = JournalMediaService(JournalApi(server.url("/")), MediaDiskCache(dir))
+        val outcome = relaunched.fetchOutcome(url)
+        assertEquals("PNGDATA", String((outcome as MediaFetchOutcome.Data).bytes))
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun aMissingBlobIsNotCached() = runBlocking {
+        val cache = MediaDiskCache(temp.newFolder("media"))
+        val cached = JournalMediaService(JournalApi(server.url("/")), cache)
+        server.enqueue(MockResponse().setResponseCode(404).setBody("""{"error":"not_found"}"""))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("LATER"))
+        val url = server.url("/media/b1").toString()
+        assertEquals(MediaFetchOutcome.NotFound, cached.fetchOutcome(url))
+        assertNull(cache.data("b1"))
+        assertEquals("LATER", cached.image(url)?.let { String(it) })
+        assertEquals(2, server.requestCount)
     }
 }

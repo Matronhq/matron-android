@@ -10,14 +10,19 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 /// endpoint. Any failure (unknown/expired blob, network error) maps to `null` —
 /// the UI renders placeholders for `null` results. Ported from matron-apple's
 /// `JournalMediaService`.
-class JournalMediaService(private val api: JournalApi) : MediaService {
+///
+/// With a [cache], a blob already on disk is served from there without a
+/// request, and every successful fetch is stored. A 404 or a network failure
+/// is never cached.
+class JournalMediaService(
+    private val api: JournalApi,
+    private val cache: MediaDiskCache? = null,
+) : MediaService {
 
     /// Resolves a `serverURL/media/<ref>` URL to its bytes. A URL not under that
     /// prefix (e.g. a legacy `mxc://` URL) returns `null` without a request.
-    override suspend fun image(url: String): ByteArray? {
-        val blobRef = blobRef(url, api.serverURL) ?: return null
-        return runCatching { api.mediaData(blobRef) }.getOrNull()
-    }
+    override suspend fun image(url: String): ByteArray? =
+        (fetchOutcome(url) as? MediaFetchOutcome.Data)?.bytes
 
     /// Surfaces the server's 404 as [MediaFetchOutcome.NotFound] so the
     /// attachment paths can mark a reaped blob permanently unavailable instead
@@ -26,8 +31,11 @@ class JournalMediaService(private val api: JournalApi) : MediaService {
     /// we know nothing definitive about it.
     override suspend fun fetchOutcome(url: String): MediaFetchOutcome {
         val blobRef = blobRef(url, api.serverURL) ?: return MediaFetchOutcome.Failure
+        cache?.data(blobRef)?.let { return MediaFetchOutcome.Data(it) }
         return try {
-            MediaFetchOutcome.Data(api.mediaData(blobRef))
+            val bytes = api.mediaData(blobRef)
+            cache?.store(bytes, blobRef)
+            MediaFetchOutcome.Data(bytes)
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {

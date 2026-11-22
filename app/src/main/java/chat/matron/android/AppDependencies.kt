@@ -11,6 +11,7 @@ import chat.matron.android.chat.BoxLetterOverrides
 import chat.matron.android.chat.ChatService
 import chat.matron.android.chat.JournalChatService
 import chat.matron.android.chat.JournalMediaService
+import chat.matron.android.chat.MediaDiskCache
 import chat.matron.android.chat.JournalTimelineService
 import chat.matron.android.chat.MediaService
 import chat.matron.android.chat.TimelineService
@@ -245,6 +246,11 @@ class AppDependencies(
 
     /** Per-session [MediaService] cache — one instance (one image cache) per user. */
     private val mediaServices: MutableMap<String, MediaService> = mutableMapOf()
+
+    /// Each account's on-disk media cache (chat images and files, kept for a
+    /// week after last use), closed and deleted at sign-out.
+    private val mediaCaches: MutableMap<String, MediaDiskCache> = mutableMapOf()
+    private val mediaCacheRoot: File = MediaDiskCache.rootDirectory(context.cacheDir)
 
     /**
      * Per-room [TimelineService] cache, bounded LRU so a long session that visits
@@ -496,7 +502,11 @@ class AppDependencies(
     }
 
     fun mediaService(session: UserSession): MediaService =
-        mediaServices.getOrPut(session.userID) { JournalMediaService(core(session).api) }
+        mediaServices.getOrPut(session.userID) {
+            val cache = MediaDiskCache(MediaDiskCache.directory(mediaCacheRoot, session.userID))
+            mediaCaches[session.userID] = cache
+            JournalMediaService(core(session).api, cache)
+        }
 
     /**
      * The session's journal store, for read-only feature queries (media
@@ -797,6 +807,7 @@ class AppDependencies(
     fun signOut() {
         val oldCores = cores.values.toList()
         val oldUserIDs = cores.keys.toList()
+        val oldMediaCaches = mediaCaches.values.toList()
         // Chain onto any previous teardown: overwriting the job would leave
         // awaitPendingTeardown() watching only the newest one while an older
         // wipe/close still runs (bugbot "Sign-out drops prior teardown job").
@@ -863,6 +874,12 @@ class AppDependencies(
             }
             runCatching { search?.wipe() }
                 .onFailure { MatronDebug.breadcrumb("signOut: search.wipe failed: $it") }
+            // Close each live media cache first (a fetch still in flight must
+            // not write back), then delete the whole root to catch folders an
+            // earlier launch left.
+            for (cache in oldMediaCaches) runCatching { cache.removeAll() }
+            runCatching { withContext(Dispatchers.IO) { MediaDiskCache.removeAllOnDisk(mediaCacheRoot) } }
+                .onFailure { MatronDebug.breadcrumb("signOut: media cache wipe failed: $it") }
             // The chooser's last-known capacity cache is per account (agent
             // device ids are only unique within a journal) and would otherwise
             // outlive the sign-out (apple #164).
@@ -875,6 +892,7 @@ class AppDependencies(
         }
         cores.clear()
         mediaServices.clear()
+        mediaCaches.clear()
         timelineCache = LRUCache(timelineCacheLimit)
         runCatching { auth.clearSession() }
     }
