@@ -142,7 +142,7 @@ private class FakeItems : ItemsProviding {
     val commentTaps: List<Pair<String?, String?>> get() = synchronized(lock) { _commentTaps.toList() }
 
     override suspend fun commentItem(
-        id: String, body: String, attachments: List<TrackerAttachment>, idempotencyKey: String?, action: String?, replyTo: String?,
+        id: String, body: String, attachments: List<TrackerAttachment>, idempotencyKey: String?, action: String?, replyTo: String?, replaces: String?,
     ): ItemCommentResult {
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
         synchronized(lock) { _commentTaps.add(action to replyTo) }

@@ -30,6 +30,7 @@ import chat.matron.android.journal.CoordinatorSync
 import chat.matron.android.journal.ArchiveSync
 import chat.matron.android.journal.PinsSync
 import chat.matron.android.journal.PinsSyncing
+import chat.matron.android.viewmodels.UnsentReplyStore
 import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
 import chat.matron.android.viewmodels.CoordinatorSetting
 import chat.matron.android.viewmodels.MemoriesListViewModel
@@ -198,8 +199,13 @@ class AppDependencies(
      */
     val boxLetterOverrides: BoxLetterOverrides
 
-    /** Where the composer stages picked/pasted attachment copies. */
+    /** Where the composer stages picked/pasted attachment copies. App-private
+     *  and outside the cache (the OS may clear the cache), because an unsent
+     *  reply keeps its files here across restarts; excluded from backups. */
     val stagingDirectory: File
+
+    /** Every reply box's unsent text and files, kept on disk until sent. */
+    val unsentReplies: UnsentReplyStore
 
     /** Foreground haptics singleton. No-op on devices without a vibrator. */
     val haptics: Haptics = SystemHaptics(context)
@@ -326,7 +332,12 @@ class AppDependencies(
         recentStartFolders = RecentStartFolders(preferences)
         boxLetterOverrides = BoxLetterOverrides(preferences)
 
-        stagingDirectory = File(context.cacheDir, "attachments").apply { mkdirs() }
+        stagingDirectory = File(context.noBackupFilesDir, "staged-attachments").apply { mkdirs() }
+        unsentReplies = UnsentReplyStore(File(context.noBackupFilesDir, "unsent-replies"), stagingDirectory)
+        // Copies left by a crash between staging and saving, before any
+        // reply box exists. The old cache location held nothing worth keeping.
+        unsentReplies.sweepOrphans()
+        runCatching { File(context.cacheDir, "attachments").deleteRecursively() }
     }
 
     /** Debuggable builds register sandbox push tokens; release builds are prod. */
@@ -902,6 +913,18 @@ class AppDependencies(
      */
     fun agentSpawnService(session: UserSession): AgentSpawnAnswering = core(session).api
 
+    /**
+     * Answers a reply's busy-queue card from an item thread (Send now,
+     * Cancel, Edit): the same `prompt_reply` a tap on the card in the
+     * conversation sends.
+     */
+    fun queuedReplySender(session: UserSession): chat.matron.android.viewmodels.QueuedReplySending {
+        val engine = core(session).engine
+        return chat.matron.android.viewmodels.QueuedReplySending { convoID, targetSeq, choice ->
+            engine.sendOp(chat.matron.android.journal.ClientOp.PromptReply(convoID, targetSeq, choice = choice, text = null))
+        }
+    }
+
     /** Answers person-to-person grant cards (mission shares, hand-overs). */
     fun grantService(session: UserSession): chat.matron.android.journal.GrantAnswering = core(session).api
 
@@ -1162,6 +1185,8 @@ class AppDependencies(
                 CoordinatorSetting.clear(userID, preferences)
             }
         }
+        // Unsent replies belong to the account: their text and staged files go.
+        unsentReplies.wipeAll()
         cores.clear()
         mediaServices.clear()
         mediaCaches.clear()
