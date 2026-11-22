@@ -374,13 +374,17 @@ class ItemsSyncTest {
         rig.markers.emit(marker("it_1"))
         waitUntil { api.isItemGated }
         repeat(5) { rig.markers.emit(marker("it_1")) }
-        rig.markers.emit(marker("it_2"))
-        // it_2 is fetched while it_1's first refetch is still held.
-        waitUntil { rig.store.item("it_2") != null }
+        for (n in 2..5) {
+            api.detail("it_$n", item("it_$n", n, 5_000), emptyList())
+            rig.markers.emit(marker("it_$n"))
+        }
+        // The others are fetched while it_1's first refetch is still held:
+        // its repeated markers do not fill the pool waiting on it.
+        waitUntil { (2..5).all { rig.store.item("it_$it") != null } }
         api.releaseItemGate()
         waitUntil { rig.store.item("it_1") != null }
         delay(150)
-        assertTrue("six it_1 markers, at most two it_1 reads, plus one for it_2: ${api.itemCalls}", api.itemCalls <= 3)
+        assertTrue("six it_1 markers, at most two it_1 reads, plus one each for the others: ${api.itemCalls}", api.itemCalls <= 6)
         rig.sync.stop()
     }
 

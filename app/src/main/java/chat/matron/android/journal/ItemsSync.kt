@@ -259,7 +259,14 @@ class ItemsSync(
 
     private fun queueRefetch(id: String) {
         synchronized(lock) {
-            if (stopped || !pendingRefetches.add(id)) return
+            if (stopped) return
+            // Already being fetched: that run goes once more rather than a
+            // worker waiting on it, so the pool keeps fetching other items.
+            if (id in inFlightRefetches) {
+                refetchAgain.add(id)
+                return
+            }
+            if (!pendingRefetches.add(id)) return
             if (refetchWorkers.size >= REFETCH_WIDTH) return
             lateinit var worker: Job
             worker = scope.launch(start = CoroutineStart.LAZY) {
@@ -268,8 +275,15 @@ class ItemsSync(
                         // Retiring in the same critical section that finds the
                         // queue empty: an id queued after it starts a worker.
                         val next = synchronized(lock) {
-                            pendingRefetches.firstOrNull()?.also { pendingRefetches.remove(it) }
-                                ?: run { refetchWorkers.remove(worker); null }
+                            var taken: String? = null
+                            while (taken == null) {
+                                val id = pendingRefetches.firstOrNull() ?: break
+                                pendingRefetches.remove(id)
+                                // Started since it was queued: ask that run
+                                // to go once more instead of joining it.
+                                if (id in inFlightRefetches) refetchAgain.add(id) else taken = id
+                            }
+                            taken ?: run { refetchWorkers.remove(worker); null }
                         } ?: break
                         refreshItem(next)
                     }

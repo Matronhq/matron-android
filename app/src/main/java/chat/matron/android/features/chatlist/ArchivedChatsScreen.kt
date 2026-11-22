@@ -19,6 +19,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,6 +51,12 @@ fun ArchivedChatsScreen(
     onBack: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    // A chat list too: on "For you only" its rows come from the snapshot,
+    // which a connect reads only while a list is on screen.
+    DisposableEffect(chat) {
+        chat.listDidAppear()
+        onDispose { chat.listDidDisappear() }
+    }
     val archivedFlow = remember(chat) { chat.archivedChatSummaries() }
     val archived by archivedFlow.collectAsStateWithLifecycle(initialValue = null)
     var query by rememberSaveable { mutableStateOf("") }
