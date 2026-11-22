@@ -89,6 +89,15 @@ class ProjectsApiTest {
     }
 
     @Test
+    fun aDetailWithoutItsMissionsIsMalformed() {
+        try {
+            ProjectsDecoding.detail(obj("""{"project":$PROJECT_JSON}""")); fail("expected Transport")
+        } catch (_: JournalApiError.Transport) {
+        }
+        assertTrue(ProjectsDecoding.detail(obj("""{"project":$PROJECT_JSON,"missions":[]}""")).missions.isEmpty())
+    }
+
+    @Test
     fun conversationMissionsAreAllOrNothing() {
         val links = ProjectsDecoding.conversationMissions(obj("""{"missions":[
             ${MissionModelTest.MISSION_JSON.replace("{\n", "{\"current\":true,\"active\":true,\"joined_at\":1700000000000,\n")}]}"""))
@@ -97,6 +106,10 @@ class ProjectsApiTest {
         assertFalse(links[0].isEarlier)
         try {
             ProjectsDecoding.conversationMissions(obj("""{"missions":[${MissionModelTest.MISSION_JSON},{"id":"broken"}]}""")); fail("expected Transport")
+        } catch (_: JournalApiError.Transport) {
+        }
+        try {
+            ProjectsDecoding.conversationMissions(obj("""{"missions":[${MissionModelTest.MISSION_JSON},null]}""")); fail("expected Transport")
         } catch (_: JournalApiError.Transport) {
         }
     }

@@ -70,6 +70,9 @@ data class TimelineState(
     val weekProjectsKey: String? = null,
     val weekProjects: List<TimelineWeekProject> = emptyList(),
     val weekProjectsStatus: TimelineWeekExtras.Status = TimelineWeekExtras.Status.DONE,
+    /// Bumped by each page of the week's projects that lands, so the page's
+    /// end asks for the next even when one added no new project.
+    val weekProjectsPages: Int = 0,
     /// null before the first weeks read; false once the journal answered
     /// 404 (it has no timeline: the tab keeps the missions list).
     val isSupported: Boolean? = null,
@@ -98,6 +101,9 @@ data class TimelineState(
     val canAsk: Boolean = false,
     /// The paged lists whose last next-page read failed: their end offers Retry.
     val pagingFailed: Set<TimelinePlace> = emptySet(),
+    /// Bumped by each page of a paged list that lands (first or next): the
+    /// list's end is keyed on it, so it asks again even when the length held.
+    val listPages: Map<TimelinePlace, Int> = emptyMap(),
     /// What went wrong on one of the lists below the weeks (a read, or an
     /// Ask), kept apart from [error] so the week page never says it.
     val listError: String? = null,
@@ -117,7 +123,7 @@ data class TimelineState(
             if (weekProjectsKey != shown.week) {
                 return TimelineWeekExtras(shown.week, status = TimelineWeekExtras.Status.DONE)
             }
-            return TimelineWeekExtras(shown.week, weekProjects, weekProjectsStatus)
+            return TimelineWeekExtras(shown.week, weekProjects, weekProjectsStatus, pages = weekProjectsPages)
         }
 
     /// What the week page draws.
@@ -316,6 +322,7 @@ class TimelineViewModel(
                 // a list that shifted between pages repeats none.
                 val seen = ((current.week?.stories ?: emptyList()).map { it.project.id } + current.weekProjects.map { it.project.id }).toMutableSet()
                 current.copy(
+                    weekProjectsPages = current.weekProjectsPages + 1,
                     weekProjects = current.weekProjects + page.projects.filter { seen.add(it.project.id) },
                     // An offset that does not move on would read the same page forever.
                     weekProjectsStatus = if (next != null) TimelineWeekExtras.Status.MORE else TimelineWeekExtras.Status.DONE,
@@ -442,12 +449,14 @@ class TimelineViewModel(
             if (epoch == refreshEpoch && TimelinePlace.Long !in fresh) { _state.update { it.copy(long = list) }; fresh += TimelinePlace.Long }
         }
         if (TimelinePlace.Projects !in fresh && _state.value.projectsSupported != false) {
-            val generation = ++projectsGeneration
+            // Not a new generation: a visit that starts meanwhile wins, and
+            // this read never makes the visit's own read look stale.
+            val generation = projectsGeneration
             try {
                 val list = timeline.timelineProjects()
                 _state.update { it.copy(projectsSupported = true) }
                 if (epoch == refreshEpoch && generation == projectsGeneration) {
-                    _state.update { it.copy(allProjects = list, pagingFailed = it.pagingFailed - TimelinePlace.Projects) }
+                    _state.update { it.copy(allProjects = list, pagingFailed = it.pagingFailed - TimelinePlace.Projects, listPages = it.listPages + (TimelinePlace.Projects to ((it.listPages[TimelinePlace.Projects] ?: 0) + 1))) }
                     fresh += TimelinePlace.Projects
                 }
             } catch (cancel: CancellationException) {
@@ -480,6 +489,7 @@ class TimelineViewModel(
                     _state.update {
                         it.copy(
                             finished = page.rows, hasLoadedFinished = true, hasMoreFinished = page.nextBefore != null,
+                            listPages = it.listPages + (TimelinePlace.Finished to ((it.listPages[TimelinePlace.Finished] ?: 0) + 1)),
                             pagingFailed = it.pagingFailed - TimelinePlace.Finished,
                         )
                     }
@@ -493,7 +503,7 @@ class TimelineViewModel(
                         throw error
                     }
                     if (generation != projectsGeneration || epoch != refreshEpoch) return
-                    _state.update { it.copy(allProjects = page, projectsSupported = true, pagingFailed = it.pagingFailed - TimelinePlace.Projects) }
+                    _state.update { it.copy(allProjects = page, projectsSupported = true, pagingFailed = it.pagingFailed - TimelinePlace.Projects, listPages = it.listPages + (TimelinePlace.Projects to ((it.listPages[TimelinePlace.Projects] ?: 0) + 1))) }
                 }
                 is TimelinePlace.Week -> return
             }
@@ -523,7 +533,10 @@ class TimelineViewModel(
             finishedNextBefore = page.nextBefore
             _state.update { s ->
                 val have = s.finished.map { it.project.id }.toSet()
-                s.copy(finished = s.finished + page.rows.filter { it.project.id !in have }, hasMoreFinished = page.nextBefore != null)
+                s.copy(
+                    finished = s.finished + page.rows.filter { it.project.id !in have }, hasMoreFinished = page.nextBefore != null,
+                    listPages = s.listPages + (TimelinePlace.Finished to ((s.listPages[TimelinePlace.Finished] ?: 0) + 1)),
+                )
             }
         } catch (cancel: CancellationException) {
             throw cancel
@@ -545,7 +558,7 @@ class TimelineViewModel(
             val page = timeline.timelineProjects(before = before)
             if (generation != projectsGeneration) return
             val have = shown.rows.map { it.project.id }.toSet()
-            _state.update { it.copy(allProjects = TimelineProjectList(page.total, shown.rows + page.rows.filter { r -> r.project.id !in have }, page.nextBefore)) }
+            _state.update { it.copy(allProjects = TimelineProjectList(page.total, shown.rows + page.rows.filter { r -> r.project.id !in have }, page.nextBefore), listPages = it.listPages + (TimelinePlace.Projects to ((it.listPages[TimelinePlace.Projects] ?: 0) + 1))) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
