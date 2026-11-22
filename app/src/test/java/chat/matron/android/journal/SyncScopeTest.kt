@@ -470,6 +470,32 @@ class SyncScopeTest {
         engine.endSync()
     }
 
+    /// Closed and reopened while its fetch still held the in-flight slot:
+    /// the reopen could not start a fetch, so the abandoned settle does.
+    @Test
+    fun aReopenDuringTheFetchIsFetchedOnceTheOldSettleGivesUp() = runBlocking {
+        val gate = CompletableDeferred<Unit>()
+        val pages = FakePages(listOf(event(5))).apply { this.gate = gate }
+        val socket = FakeWebSocketConnection().apply { serve(helloOK(6)); serve(cursorFrame(6)) }
+        val store = seededStore()
+        val engine = JournalSyncEngine(
+            api = FakeSnapshotSource(), store = store, connector = FakeConnector(listOf(socket)), token = "t",
+            ownSender = "user:alice", backoffBaseSeconds = 0.01, pages = pages, syncScope = SyncScope.FOR_YOU,
+            conversationSettleDelay = 50.milliseconds,
+        )
+        engine.beginSync()
+        engine.waitUntilReady()
+        engine.setViewing("c1")
+        waitUntil { pages.calls.isNotEmpty() }
+        engine.setViewing("c2")
+        engine.setViewing("c1") // blocked: the first fetch still holds its slot
+        pages.events = listOf(event(5), event(8))
+        gate.complete(Unit)
+        waitUntil { store.events("c1").map { it.seq } == listOf(5L, 8L) }
+        assertEquals(listOf(5L, 8L), store.events("c1").map { it.seq })
+        engine.endSync()
+    }
+
     @Test
     fun reopeningAChatWhileItsSettleIsPendingFetchesItAgain() = runBlocking {
         val pages = FakePages(listOf(event(5)))
