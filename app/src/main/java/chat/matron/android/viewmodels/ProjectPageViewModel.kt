@@ -227,7 +227,9 @@ class ProjectPageViewModel(
         loadingMoreFilesGeneration = generation
         _state.update { it.copy(filesPagingFailed = false) }
         try {
-            val page = projects.projectFiles(projectID, before = before)
+            val loaded = projects.projectFiles(projectID, before = before)
+            // A cursor that does not move on would read the same page forever.
+            val page = if (loaded.nextBefore == before) loaded.copy(nextBefore = null) else loaded
             if (generation == filesGeneration) _state.update { it.copy(files = shown.appending(page), filesVersion = it.filesVersion + 1) }
         } catch (cancel: CancellationException) {
             throw cancel
