@@ -201,6 +201,11 @@ interface AgentDao {
 
 @Dao
 interface EventDao {
+    /// Each conversation's read marker, for a snapshot that must not
+    /// overwrite an unread count a read changed while it was in flight.
+    @Query("SELECT id, read_up_to_seq FROM conversation")
+    suspend fun readMarks(): List<ReadMark>
+
     /// The seqs of [convoID]'s stored events older than [beforeSeq].
     @Query("SELECT seq FROM event WHERE convo_id = :convoID AND seq < :beforeSeq")
     suspend fun seqsBefore(convoID: String, beforeSeq: Long): List<Long>
@@ -218,6 +223,11 @@ interface EventDao {
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertIgnore(event: EventEntity)
+
+    /// [insertIgnore], returning the new row id, or -1 when the event was
+    /// already stored.
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIgnoreReturningRow(event: EventEntity): Long
 
     @Query("SELECT * FROM event WHERE seq = :seq")
     suspend fun byId(seq: Long): EventEntity?
@@ -732,3 +742,9 @@ interface MissionConversationDao {
     @Query("DELETE FROM mission_conversation")
     suspend fun deleteAll()
 }
+
+/// One conversation's read marker ([EventDao.readMarks]).
+data class ReadMark(
+    @androidx.room.ColumnInfo(name = "id") val id: String,
+    @androidx.room.ColumnInfo(name = "read_up_to_seq") val readUpToSeq: Long,
+)

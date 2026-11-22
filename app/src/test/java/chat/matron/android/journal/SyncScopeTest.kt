@@ -200,6 +200,76 @@ class SyncScopeTest {
         assertEquals("4 and 7 are unread", 2, row.unreadCount)
     }
 
+    private fun ownText(seq: Long, body: String) = JournalEvent.fromFrame(parseJsonObjectOrNull(
+        """{"kind":"journal","seq":$seq,"convo_id":"c1","ts":${seq * 1000},"sender":"user:alice","type":"text","payload":{"body":"$body"}}""",
+    )!!)!!
+
+    @Test
+    fun fetchingAnEventAgainDoesNotConfirmAnotherSend() = runBlocking {
+        val store = seededStore()
+        store.outboxInsert("a", "c1", "same", now = 0)
+        store.outboxInsert("b", "c1", "same", now = 0)
+        store.outboxMarkAttempt("a"); store.outboxMarkAttempt("b")
+        store.outboxMarkFailed("b", "rejected")
+        store.applyJournal(ownText(5, "same")) // confirms one of them
+        val left = store.outboxRows("c1").map { it.localID }
+        assertEquals(1, left.size)
+        // The same event fetched again on a For you only open.
+        store.insertConversationTail(listOf(ownText(5, "same")), "c1", reachesSyncedSeq = true)
+        assertEquals(left, store.outboxRows("c1").map { it.localID })
+    }
+
+    @Test
+    fun aScrollBackPageLandsOnlyIfTheOldestRowIsStillThere() = runBlocking {
+        val store = seededStore()
+        store.insertHistory(listOf(event(10), event(11)))
+        assertFalse(store.insertHistoryIfOldestIs("c1", 9, listOf(event(5))))
+        assertEquals(listOf(10L, 11L), store.events("c1").map { it.seq })
+        assertTrue(store.insertHistoryIfOldestIs("c1", 10, listOf(event(5))))
+        assertEquals(listOf(5L, 10L, 11L), store.events("c1").map { it.seq })
+    }
+
+    @Test
+    fun thePreviewFollowsAFetchedMessageEvenAfterABookkeepingFrame() = runBlocking {
+        val store = seededStore()
+        store.applyJournal(event(1))
+        // A live bookkeeping frame moves last_seq without a message.
+        store.applyJournal(JournalEvent.fromFrame(parseJsonObjectOrNull(
+            """{"kind":"journal","seq":9,"convo_id":"c1","ts":9000,"sender":"agent:a","type":"session_status","payload":{"state":"running"}}""",
+        )!!)!!)
+        store.insertConversationTail(listOf(event(5)), "c1", reachesSyncedSeq = true)
+        val row = store.conversations().single { it.id == "c1" }
+        assertEquals("m5", row.snippet)
+        assertEquals(9L, row.lastSeq)
+        assertEquals("running", row.sessionState)
+    }
+
+    @Test
+    fun aSnapshotDoesNotUndoAReadMadeWhileItWasOut() = runBlocking {
+        val store = seededStore()
+        store.refreshSummaries(listOf(ConvoSummaryDTO("c2", "", "waiting", 3, "", 0, unreadCount = 0)))
+        val marks = store.readMarks()
+        // c1 is read while the snapshot is out.
+        store.applyJournal(JournalEvent.fromFrame(parseJsonObjectOrNull(
+            """{"kind":"journal","seq":4,"convo_id":"c1","ts":4000,"sender":"user:alice","type":"read_marker","payload":{"up_to_seq":4}}""",
+        )!!)!!)
+        store.refreshSummaries(
+            listOf(
+                ConvoSummaryDTO("c1", "", "waiting", 4, "", 0, unreadCount = 6),
+                ConvoSummaryDTO("c2", "", "waiting", 3, "", 0, unreadCount = 2),
+            ),
+            adoptUnread = true, readMarksAtRequest = marks,
+        )
+        val rows = store.conversations().associateBy { it.id }
+        assertEquals("read since the request: its own count stands", 0, rows["c1"]!!.unreadCount)
+        assertEquals(2, rows["c2"]!!.unreadCount)
+        store.refreshSummaries(
+            listOf(ConvoSummaryDTO("c2", "", "waiting", 3, "", 0, unreadCount = 5)),
+            adoptUnread = true, keepUnread = setOf("c2"),
+        )
+        assertEquals("the chat on screen keeps its count", 2, store.conversations().single { it.id == "c2" }.unreadCount)
+    }
+
     @Test
     fun tailBelowAGapDropsTheStrandedOlderEvents() = runBlocking {
         val store = seededStore()
@@ -537,5 +607,55 @@ class SyncScopeTest {
         assertEquals(before + 2, snapshots)
         assertEquals("the journal's unread count is taken", 3, store.conversations().single { it.id == "c1" }.unreadCount)
         engine.endSync()
+    }
+
+    @Test
+    fun aScopeChangeDuringTheHandshakeReconnectsUnderTheNewScope() = runBlocking {
+        val first = FakeWebSocketConnection() // no hello_ok yet
+        val second = FakeWebSocketConnection().apply { serve(helloOK(0, sync = "everything")) }
+        val engine = makeEngine(seededStore(), listOf(first, second))
+        engine.beginSync()
+        waitUntil { first.sent.isNotEmpty() }
+        assertEquals("for_you", sentOps(first, "hello").single().stringOrNull("sync"))
+        engine.setSyncScope(SyncScope.EVERYTHING)
+        first.serve(helloOK(0))
+        waitUntil { second.sent.isNotEmpty() }
+        assertEquals("everything", sentOps(second, "hello").single().stringOrNull("sync"))
+        engine.waitUntilReady()
+        engine.endSync()
+    }
+
+    @Test
+    fun aSettleReadIsNotWrittenAfterTheChatCloses() = runBlocking {
+        val pages = FakePages(listOf(event(5)))
+        val socket = FakeWebSocketConnection().apply { serve(helloOK(6)); serve(cursorFrame(6)) }
+        val store = seededStore()
+        val engine = JournalSyncEngine(
+            api = FakeSnapshotSource(), store = store, connector = FakeConnector(listOf(socket)), token = "t",
+            ownSender = "user:alice", backoffBaseSeconds = 0.01, pages = pages, syncScope = SyncScope.FOR_YOU,
+            conversationSettleDelay = 300.milliseconds,
+        )
+        engine.beginSync()
+        engine.waitUntilReady()
+        engine.setViewing("c1")
+        waitUntil { store.events("c1").isNotEmpty() }
+        pages.events = listOf(event(5), event(9)) // only the settle read would bring 9
+        engine.setViewing("c2")
+        delay(600)
+        assertEquals(listOf(5L), store.events("c1").map { it.seq })
+        engine.endSync()
+    }
+
+    @Test
+    fun theSettingAppliesTheNewestChoice() = runBlocking {
+        val prefs = InMemoryKeyValueStore()
+        val applied = CopyOnWriteArrayList<SyncScope>()
+        val model = SyncScopeSettingModel(prefs, { delay(50); applied += it }, CoroutineScope(Dispatchers.Default))
+        model.select(SyncScope.FOR_YOU)
+        model.select(SyncScope.EVERYTHING)
+        waitUntil { applied.size == 2 }
+        delay(100)
+        assertEquals(SyncScope.EVERYTHING, applied.last())
+        assertEquals(SyncScope.EVERYTHING, SyncScope.stored(prefs))
     }
 }
