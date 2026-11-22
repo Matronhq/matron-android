@@ -57,6 +57,7 @@ import chat.matron.android.models.ProjectMilestone
 import chat.matron.android.viewmodels.ProjectPageState
 import chat.matron.android.viewmodels.ProjectPageViewModel
 import java.time.Instant
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import okhttp3.HttpUrl
 
@@ -116,7 +117,7 @@ fun ProjectScreen(
             when (ProjectScreenContent.of(state)) {
                 ProjectScreenContent.Page -> ProjectSummaryView(
                     page = page!!, image = page.media?.let { images[it.blobID] }, sections = sections,
-                    onOpenItem = onOpenItem, onOpenSection = onOpenSection, titleActions = { if (showsActions) ProjectActionsMenu(state, viewModel) },
+                    onOpenItem = onOpenItem, onOpenSection = onOpenSection, titleActions = { if (showsActions) ProjectActionsMenu(state, viewModel, scope) },
                 )
                 ProjectScreenContent.Missing -> ProjectPlaceholder(ProjectFormat.MISSING, ProjectFormat.MISSING_DETAIL)
                 ProjectScreenContent.Failed -> ProjectPlaceholder(TimelineFormat.FAILED, TimelineFormat.FAILED_DETAIL) {
@@ -164,6 +165,7 @@ fun ProjectSectionScreen(
     val title = ProjectFormat.sectionTitle(section)
     var gallery by remember { mutableStateOf<ImageGallery?>(null) }
     var sourceMessage by remember { mutableStateOf<String?>(null) }
+    var sourceJob by remember { mutableStateOf<Job?>(null) }
 
     ProjectScaffold(title = title, onBack = onBack) {
         PullToRefreshBox(
@@ -176,6 +178,7 @@ fun ProjectSectionScreen(
                 section == ProjectSection.HISTORY && state.historyLoaded -> ProjectHistoryView(
                     weeks = state.history, now = Instant.now(), images = images, hasMore = state.hasMoreHistory,
                     onOpenMilestone = onOpenMilestone, onLoadMore = { scope.launch { viewModel.loadMoreHistory() } },
+                    version = state.historyVersion, pagingFailed = state.historyPagingFailed,
                 )
                 section == ProjectSection.MISSIONS && state.openMissions != null -> ProjectMissionsListView(
                     open = state.openMissions!!, closed = state.closedMissions, now = Instant.now(), onOpenMission = onOpenMission,
@@ -184,8 +187,16 @@ fun ProjectSectionScreen(
                     files = state.files!!.rows, images = images, now = Instant.now(), hasMore = state.files!!.hasMore,
                     onOpenFile = { file ->
                         when (projectFileOpening(file)) {
-                            ProjectFileOpening.PICTURE -> gallery = projectGallery(state.files!!.rows, file, images, serverURL, media)
-                            ProjectFileOpening.SOURCE -> scope.launch { sourceMessage = onOpenFileSource(file.source) }
+                            // The latest tap wins: an earlier one still resolving
+                            // its item never navigates or explains after it.
+                            ProjectFileOpening.PICTURE -> {
+                                sourceJob?.cancel()
+                                gallery = projectGallery(state.files!!.rows, file, images, serverURL, media)
+                            }
+                            ProjectFileOpening.SOURCE -> {
+                                sourceJob?.cancel()
+                                sourceJob = scope.launch { sourceMessage = onOpenFileSource(file.source) }
+                            }
                         }
                     },
                     onLoadMore = { scope.launch { viewModel.loadMoreFiles() } },
