@@ -148,6 +148,30 @@ class TimelineListsTest {
     }
 
     @Test
+    fun aRefreshDuringANextPageReadCanPageAgain() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var olderReads = 0
+        val lists = object : FakeTimelineBase() {
+            override suspend fun finishedProjects(before: String?, limit: Int?): TimelineFinishedPage {
+                if (before == null) return TimelineFinishedPage(listOf(FinishedProject(TimelineFixtures.docs, now)), "c1")
+                olderReads += 1
+                if (olderReads == 1) hold.await()
+                return TimelineFinishedPage(listOf(FinishedProject(TimelineFixtures.pricing, now)), null)
+            }
+        }
+        val vm = TimelineViewModel(lists, scope)
+        vm.loadList(TimelinePlace.Finished)
+        val stale = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined).launch { vm.loadMoreFinished() }
+        vm.refresh()
+        vm.loadList(TimelinePlace.Finished)
+        vm.loadMoreFinished()
+        assertEquals(listOf("pj_docs", "pj_pricing"), vm.state.value.finished.map { it.project.id })
+        hold.complete(Unit)
+        stale.join()
+        assertEquals(2, vm.state.value.finished.size)
+    }
+
+    @Test
     fun aReloadedFirstPageClearsTheRetry() = runBlocking {
         val lists = object : FakeTimelineBase() {
             override suspend fun finishedProjects(before: String?, limit: Int?): TimelineFinishedPage {

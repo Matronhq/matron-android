@@ -200,8 +200,10 @@ class TimelineViewModel(
     private var finishedNextBefore: String? = null
     private var finishedGeneration = 0
     private var projectsGeneration = 0
-    private var isLoadingFinished = false
-    private var isLoadingProjects = false
+    /// The list generation a next-page read is in flight for: a read of a
+    /// list a reload has since replaced does not hold up the new one's paging.
+    private var loadingFinishedGeneration: Int? = null
+    private var loadingProjectsGeneration: Int? = null
     private val askingProjectIDs = mutableSetOf<String>()
     private var showJob: Job? = null
 
@@ -493,9 +495,9 @@ class TimelineViewModel(
 
     suspend fun loadMoreFinished() {
         val before = finishedNextBefore ?: return
-        if (isLoadingFinished) return
-        isLoadingFinished = true
+        if (loadingFinishedGeneration == finishedGeneration) return
         val generation = finishedGeneration
+        loadingFinishedGeneration = generation
         _state.update { it.copy(pagingFailed = it.pagingFailed - TimelinePlace.Finished) }
         try {
             val page = timeline.finishedProjects(before = before)
@@ -510,16 +512,16 @@ class TimelineViewModel(
         } catch (error: Throwable) {
             if (generation == finishedGeneration) _state.update { it.copy(pagingFailed = it.pagingFailed + TimelinePlace.Finished) }
         } finally {
-            isLoadingFinished = false
+            if (loadingFinishedGeneration == generation) loadingFinishedGeneration = null
         }
     }
 
     suspend fun loadMoreProjects() {
         val shown = _state.value.allProjects ?: return
         val before = shown.nextBefore ?: return
-        if (isLoadingProjects) return
-        isLoadingProjects = true
+        if (loadingProjectsGeneration == projectsGeneration) return
         val generation = projectsGeneration
+        loadingProjectsGeneration = generation
         _state.update { it.copy(pagingFailed = it.pagingFailed - TimelinePlace.Projects) }
         try {
             val page = timeline.timelineProjects(before = before)
@@ -531,7 +533,7 @@ class TimelineViewModel(
         } catch (error: Throwable) {
             if (generation == projectsGeneration) _state.update { it.copy(pagingFailed = it.pagingFailed + TimelinePlace.Projects) }
         } finally {
-            isLoadingProjects = false
+            if (loadingProjectsGeneration == generation) loadingProjectsGeneration = null
         }
     }
 
