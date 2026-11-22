@@ -39,6 +39,8 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
@@ -61,6 +63,7 @@ import androidx.navigation.compose.navigation
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import chat.matron.android.designsystem.AppLockShield
+import chat.matron.android.designsystem.BlockedLinkHost
 import chat.matron.android.designsystem.LocalAppLockActive
 import chat.matron.android.designsystem.LocalTrackerLinkTitles
 import chat.matron.android.designsystem.MatronAppearance
@@ -115,6 +118,7 @@ import chat.matron.android.models.MatronDebug
 import chat.matron.android.sync.OutboxCatchUpWorker
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.UserSession
+import chat.matron.android.models.isSameSignIn
 import chat.matron.android.platform.AndroidBiometricAuthenticator
 import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.VoiceRecorderHandoff
@@ -241,11 +245,49 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
         Surface(modifier = Modifier.fillMaxSize()) {
             var bootstrapped by remember { mutableStateOf(false) }
             var session by remember { mutableStateOf<UserSession?>(null) }
+            // The sign-in the server revoked, while the sign-in screen it led
+            // to is up: that screen says why. Saved with the activity, as the
+            // saved session is already gone: a recreated activity must still
+            // say why and keep the account filled in.
+            var revokedSession by rememberSaveable(stateSaver = RevokedSessionSaver) {
+                mutableStateOf<UserSession?>(null)
+            }
+
+            // The server revoked this device's token (signed out from another
+            // device): the same sign-out as the Settings button, then the
+            // sign-in screen with the reason. Unlike the user's own sign-out
+            // this does not wait for the app lock: the session is already gone
+            // on the server, and what the wipe removes is exactly what the
+            // lock was guarding. A revoke for any other sign-in is ignored.
+            val onRevoked: (UserSession) -> Unit = remember {
+                { revoked ->
+                    if (revokeSignsOut(current = session, revoked = revoked)) {
+                        revokedSession = revoked
+                        OutboxCatchUpWorker.cancel(context)
+                        deps.signOut()
+                        appLock.resetForSignOut()
+                        session = null
+                    }
+                }
+            }
+            DisposableEffect(Unit) {
+                onDispose { if (deps.onCredentialsRevoked === onRevoked) deps.onCredentialsRevoked = null }
+            }
 
             LaunchedEffect(Unit) {
-                session = runCatching { deps.auth.restoreSession() }
+                // Before any session is published: a restored session whose
+                // device was signed out elsewhere is refused on its first
+                // connect.
+                deps.onCredentialsRevoked = onRevoked
+                val restored = runCatching { deps.auth.restoreSession() }
                     .onFailure { MatronDebug.breadcrumb("restoreSession threw — starting signed out: $it") }
                     .getOrNull()
+                // Never publish a sign-in a revoke has just signed out.
+                session = publishableRestoredSession(restored, revokedSession)
+                // The notice belongs to the sign-in screen it led to: once a
+                // session is up again (a sign-in that finished while the
+                // activity was being recreated), it is over.
+                if (session != null) revokedSession = null
                 bootstrapped = true
             }
 
@@ -268,7 +310,13 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
             when {
                 !bootstrapped -> LoadingScreen()
                 session == null -> {
-                    val vm = remember { SignInViewModel(auth = deps.auth, deviceDisplayName = "Matron Android") }
+                    val vm = remember(revokedSession) {
+                        SignInViewModel(
+                            auth = deps.auth,
+                            deviceDisplayName = "Matron Android",
+                            signedOutRemotely = revokedSession,
+                        )
+                    }
                     val linkVm = remember {
                         LinkSignInViewModel(
                             auth = deps.auth,
@@ -300,40 +348,75 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                                 // Signing in interactively IS an authentication;
                                 // the new session must not open behind a shield.
                                 appLock.noteSignedIn()
+                                revokedSession = null
                                 session = s
                             }
                         },
                     )
                 }
-                else -> SignedInApp(
-                    deps = deps,
-                    session = session!!,
-                    incomingLinks = incomingLinks,
-                    appearance = appearance,
-                    appLock = appLock,
-                    onAppearanceChange = { next ->
-                        appearance = next
-                        prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
-                    },
-                    // Refused while locked: signing out clears the lock, so it
-                    // must not be reachable from behind the shield. Unreachable
-                    // in practice (the menu isn't composed while locked) — the
-                    // guard belongs with the lock state regardless.
-                    onSignOut = {
-                        appLock.signOutIfUnlocked {
-                            OutboxCatchUpWorker.cancel(context)
-                            deps.signOut()
-                            // Per-account state, cleared like the rest: the next
-                            // account starts opted out.
-                            appLock.resetForSignOut()
-                            session = null
-                        }
-                    },
-                )
+                // Links in message and item text that are not web or email
+                // links are never opened; this shows the prompt that says so.
+                // Inside the theme and below the lock check, so a lock
+                // removes an open prompt along with everything else.
+                else -> BlockedLinkHost {
+                    SignedInApp(
+                        deps = deps,
+                        session = session!!,
+                        incomingLinks = incomingLinks,
+                        appearance = appearance,
+                        appLock = appLock,
+                        onAppearanceChange = { next ->
+                            appearance = next
+                            prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
+                        },
+                        // Refused while locked: signing out clears the lock, so it
+                        // must not be reachable from behind the shield. Unreachable
+                        // in practice (the menu isn't composed while locked) — the
+                        // guard belongs with the lock state regardless.
+                        onSignOut = {
+                            appLock.signOutIfUnlocked {
+                                OutboxCatchUpWorker.cancel(context)
+                                deps.signOut()
+                                // Per-account state, cleared like the rest: the next
+                                // account starts opted out.
+                                appLock.resetForSignOut()
+                                // The user's own sign-out: no "signed out from
+                                // another device" notice.
+                                revokedSession = null
+                                session = null
+                            }
+                        },
+                    )
+                }
             }
         }
     }
 }
+
+/// Whether a revoke found for [revoked] signs the app out, given the session
+/// on screen. The same sign-in, not just the same account: a late revoke for
+/// the sign-in before this one must not sign this one out. With no session
+/// published yet (a revoke found while the launch is still restoring) it
+/// does.
+fun revokeSignsOut(current: UserSession?, revoked: UserSession): Boolean =
+    current == null || current.isSameSignIn(revoked)
+
+/// Keeps the revoked sign-in across activity recreation, without its token:
+/// the screen needs only the account, journal and device.
+val RevokedSessionSaver: Saver<UserSession?, Any> = Saver(
+    save = { session -> session?.let { arrayListOf(it.userID, it.deviceID, it.homeserverURL) } ?: arrayListOf<String>() },
+    restore = { saved ->
+        @Suppress("UNCHECKED_CAST")
+        (saved as? List<String>)?.takeIf { it.size == 3 }?.let {
+            UserSession(userID = it[0], deviceID = it[1], homeserverURL = it[2], accessToken = "")
+        }
+    },
+)
+
+/// The restored session to publish at launch: never one a revoke has just
+/// signed out.
+fun publishableRestoredSession(restored: UserSession?, revoked: UserSession?): UserSession? =
+    restored?.takeUnless { revoked != null && it.isSameSignIn(revoked) }
 
 /**
  * Builds the "open a spawned session's room" callback the agent-spawn card
@@ -574,7 +657,7 @@ private fun SignedInApp(
     // results survive a trip to another tab and back.
     val tabSearchVM = remember(session.userID, goToResolver) {
         SearchViewModel(
-            deps.search,
+            deps.messageSearch(session),
             emptyList(),
             numberLookup = { num -> (goToResolver.find(num) as? GoToNumberResolver.Found.Hit)?.hit },
             trackerSearch = deps.trackerSearch(session),
@@ -993,7 +1076,9 @@ private fun SignedInApp(
                             viewModel = chatListVM,
                             connectionState = connectionState,
                             hasEverConnected = hasEverConnected,
-                            searchAvailable = deps.search != null,
+                            // Message search asks the journal first, so it no
+                            // longer needs this device's index to work.
+                            searchAvailable = true,
                             chat = deps.chatService(session),
                             onOpenChat = { shell.openChat(it) },
                             onNewChat = { newChatTarget = NewChatTarget.CONVERSATIONS },
@@ -1019,55 +1104,50 @@ private fun SignedInApp(
                     chatDestinations(AppTab.CONVERSATIONS)
 
                     composable("search") {
-                        val searchService = deps.search
-                        if (searchService == null) {
-                            // Navigation is a side effect — never call it straight from
-                            // the composable body (bugbot "Search route pops during
-                            // composition").
-                            LaunchedEffect(Unit) { nav.popBackStack() }
-                        } else {
-                            val searchVM = remember {
-                                SearchViewModel(searchService, allChats, numberLookup = { num ->
-                                    (goToResolver.find(num) as? GoToNumberResolver.Found.Hit)?.hit
-                                })
-                            }
-                            SearchScreen(
-                                viewModel = searchVM,
-                                // A result REPLACES the Conversations path (the shell's
-                                // openChat pops search along with anything else over
-                                // the list).
-                                onSelectChat = { chat -> shell.openChat(chat.id) },
-                                onSelectMessage = { hit ->
-                                    // Arm the (cached) chat VM's in-conversation search
-                                    // with the query, then navigate: a cold VM parks the
-                                    // jump until its first snapshot lands (apple #172).
-                                    val query = searchVM.trimmedQuery
-                                    val (chatVM, _) = vmCache.viewModels(hit.roomID)
-                                    // sessionScope, not this route's composition scope:
-                                    // the navigation below cancels the latter before the
-                                    // query's first suspend (Bugbot, #56).
-                                    sessionScope.launch { chatVM.beginChatSearch(query) }
-                                    shell.openChat(hit.roomID)
-                                },
-                                // A number hit: the item is pushed over the
-                                // search (back returns to the results); a mission
-                                // or a milestone's mission opens on its own tab.
-                                onSelectNumber = { hit ->
-                                    when (val opened = goToResolver.open(hit)) {
-                                        is GoToNumberResolver.Opened.Message -> opened.text
-                                        is GoToNumberResolver.Opened.Target -> {
-                                            when (val target = opened.target) {
-                                                is GoToTarget.Item -> nav.pushItem(AppTab.CONVERSATIONS.routePrefix, target.itemID)
-                                                is GoToTarget.Mission -> shell.openMission(target.missionID)
-                                            }
-                                            null
-                                        }
-                                    }
-                                },
-                                onBack = { nav.popBackStack() },
-                                liveChats = allChats,
-                            )
+                        // Server first, so search works even when the local
+                        // index could not be opened.
+                        val searchService = remember(session.userID) { deps.messageSearch(session) }
+                        val searchVM = remember {
+                            SearchViewModel(searchService, allChats, numberLookup = { num ->
+                                (goToResolver.find(num) as? GoToNumberResolver.Found.Hit)?.hit
+                            })
                         }
+                        SearchScreen(
+                            viewModel = searchVM,
+                            // A result REPLACES the Conversations path (the shell's
+                            // openChat pops search along with anything else over
+                            // the list).
+                            onSelectChat = { chat -> shell.openChat(chat.id) },
+                            onSelectMessage = { hit ->
+                                // Arm the (cached) chat VM's in-conversation search
+                                // with the query, then navigate: a cold VM parks the
+                                // jump until its first snapshot lands (apple #172).
+                                val query = searchVM.trimmedQuery
+                                val (chatVM, _) = vmCache.viewModels(hit.roomID)
+                                // sessionScope, not this route's composition scope:
+                                // the navigation below cancels the latter before the
+                                // query's first suspend (Bugbot, #56).
+                                sessionScope.launch { chatVM.beginChatSearch(query) }
+                                shell.openChat(hit.roomID)
+                            },
+                            // A number hit: the item is pushed over the
+                            // search (back returns to the results); a mission
+                            // or a milestone's mission opens on its own tab.
+                            onSelectNumber = { hit ->
+                                when (val opened = goToResolver.open(hit)) {
+                                    is GoToNumberResolver.Opened.Message -> opened.text
+                                    is GoToNumberResolver.Opened.Target -> {
+                                        when (val target = opened.target) {
+                                            is GoToTarget.Item -> nav.pushItem(AppTab.CONVERSATIONS.routePrefix, target.itemID)
+                                            is GoToTarget.Mission -> shell.openMission(target.missionID)
+                                        }
+                                        null
+                                    }
+                                }
+                            },
+                            onBack = { nav.popBackStack() },
+                            liveChats = allChats,
+                        )
                     }
 
                     composable("settings") {

@@ -39,9 +39,16 @@ object MatronItemLink {
         /// A well-formed `matron://item/<n>` — open tracker item `n` in-app.
         data class OpenTrackerItem(val num: Int) : Action
 
-        /// Hand to the OS (the pre-existing default for http(s) and for any
-        /// scheme we have no opinion about).
+        /// Hand to the OS: web (`http`/`https`) and email (`mailto`) links
+        /// only.
         data class System(val url: String) : Action
+
+        /// Any other scheme (`tel:`, `intent:`, `file:`, another app's own
+        /// scheme…). Not opened; the user is told so and offered a copy
+        /// ([BlockedLinkPrompt]). Text in a message or an item is written by
+        /// someone else, and a tap on such a link could launch another app,
+        /// a local file or a system screen in one step.
+        data class Blocked(val url: String) : Action
 
         /// Consume silently — matrix-internal URLs, and any `matron://` URL
         /// that is not a canonical item link.
@@ -75,8 +82,9 @@ object MatronItemLink {
         return if (number > 0) number else null
     }
 
-    /// Message-body link policy. `matron://item/<n>` first; then the
-    /// pre-existing scheme policy, unchanged apart from `matron` itself.
+    /// Message-body link policy. `matron://item/<n>` first; then the scheme
+    /// policy: other `matron` and matrix URLs are swallowed, web and email
+    /// links go to the OS, and everything else is blocked.
     fun action(url: String): Action {
         itemNumber(url)?.let { return Action.OpenTrackerItem(it) }
         return when (scheme(url)) {
@@ -87,9 +95,17 @@ object MatronItemLink {
             "matron" -> Action.Swallow
             // Swallowed until permalink / content-URI handling lands.
             "matrix", "mxc" -> Action.Swallow
-            else -> Action.System(url)
+            else -> if (opensInSystem(url)) Action.System(url) else Action.Blocked(url)
         }
     }
+
+    /// Schemes a link in message or item text may hand to the OS.
+    val systemSchemes: Set<String> = setOf("http", "https", "mailto")
+
+    /// Whether [url] is a web or email link: the only links the app opens
+    /// outside itself from text it did not write. The scheme compares
+    /// case-insensitively; a URL with no scheme at all is not one.
+    fun opensInSystem(url: String): Boolean = scheme(url) in systemSchemes
 
     /// A URL trimmed to what is safe to write into a log or breadcrumb:
     /// `scheme://host` plus the path, never the query or the fragment. A
@@ -112,16 +128,23 @@ object MatronItemLink {
             ?: url.substringBefore(':', "").takeIf { it.isNotEmpty() && !it.contains('/') }?.lowercase()
 }
 
-/// Routes a tapped message-body link (port of the Swift `MarkdownText.handle`):
+/// Routes a tapped message-body link (port of the Swift `LinkTapRouter`):
 /// an item link goes to [openItem] when a host installed one and is swallowed
 /// otherwise (the scheme is unregistered — never hand it to the OS); matrix
-/// and non-item `matron://` URLs are swallowed; everything else goes to
-/// [openExternally]. Pure, so the policy is pinned without rendering.
-fun handleMessageLink(url: String, openItem: ((Int) -> Unit)?, openExternally: (String) -> Unit) {
+/// and non-item `matron://` URLs are swallowed; web and email links go to
+/// [openExternally]; any other scheme goes to [presentBlocked] and is never
+/// opened. Pure, so the policy is pinned without rendering.
+fun handleMessageLink(
+    url: String,
+    openItem: ((Int) -> Unit)?,
+    presentBlocked: (String) -> Unit = {},
+    openExternally: (String) -> Unit,
+) {
     when (val action = MatronItemLink.action(url)) {
         is MatronItemLink.Action.OpenTrackerItem -> openItem?.invoke(action.num)
         MatronItemLink.Action.Swallow -> Unit
         is MatronItemLink.Action.System -> openExternally(action.url)
+        is MatronItemLink.Action.Blocked -> presentBlocked(action.url)
     }
 }
 
@@ -139,9 +162,10 @@ val LocalOpenTrackerItem = compositionLocalOf<((Int) -> Unit)?> { null }
 @Composable
 fun rememberMessageLinkOpener(): (String) -> Unit {
     val openItem by rememberUpdatedState(LocalOpenTrackerItem.current)
+    val presentBlocked by rememberUpdatedState(LocalPresentBlockedLink.current)
     val uriHandler = LocalUriHandler.current
     return remember(uriHandler) {
-        { url -> handleMessageLink(url, openItem) { external -> runCatching { uriHandler.openUri(external) } } }
+        { url -> handleMessageLink(url, openItem, presentBlocked) { external -> runCatching { uriHandler.openUri(external) } } }
     }
 }
 

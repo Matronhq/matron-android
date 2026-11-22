@@ -37,6 +37,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -227,6 +229,31 @@ data class ItemStatusRow(val line: String?, val note: String?)
 fun itemStatusRow(comment: TrackerComment): ItemStatusRow =
     ItemStatusRow(itemStatusLine(comment), comment.body.takeIf { it.isNotBlank() })
 
+/// Every image the thread shows, in the order it shows them: the item's
+/// own, then each comment's, oldest first; within a card, the images placed
+/// in its text first, in reading order, then the ones listed after it
+/// ([splitInlineAttachments]). What the fullscreen viewer swipes through
+/// from a tapped image. A status change with no note draws no card, so its
+/// attachments are not on screen and are left out. An image shown more than
+/// once (the same blob attached again later) is listed once, where it first
+/// appears: a tap on any copy of it then has one place in the gallery,
+/// rather than the counter and neighbours of whichever copy came first.
+fun itemThreadImages(item: TrackerItem?, comments: List<TrackerComment>): List<TrackerAttachment> {
+    fun shown(body: String, attachments: List<TrackerAttachment>): List<TrackerAttachment> {
+        val split = splitInlineAttachments(body, attachments)
+        val inline = split.segments.mapNotNull { (it as? InlineSegment.Attachment)?.attachment }
+        return (inline + split.trailing).filter { it.isImage }
+    }
+    val cards = buildList {
+        if (item != null) add(item.body to item.attachments)
+        for (c in comments) {
+            val body = if (c.kind == TrackerComment.Kind.STATUS) itemStatusRow(c).note ?: continue else c.body
+            add(body to c.attachments)
+        }
+    }
+    return cards.flatMap { (body, attachments) -> shown(body, attachments) }.distinctBy { it.blobRef }
+}
+
 /// Maps outbox progress to the shared send glyph: a fresh comment that hasn't
 /// attempted a send yet reads as "Sending…"; once at least one attempt has
 /// been made without an error it's genuinely waiting on connectivity
@@ -363,7 +390,14 @@ fun ItemDetailView(
     /// can persist it for next time.
     onBottomVisibilityChange: ((Boolean) -> Unit)? = null,
     listState: LazyListState = rememberLazyListState(),
-) {
+    /// Copied files or images pasted into the reply field
+    /// ([AttachmentPasteTarget]). `null` keeps text-only paste.
+    onPasteAttachments: ((List<android.net.Uri>) -> Unit)? = null,
+    /// The file chips' Save button, and whether an attachment is being
+    /// fetched for one. `null` draws the chips without it.
+    onSaveAttachment: ((TrackerAttachment) -> Unit)? = null,
+    isSavingAttachment: (TrackerAttachment) -> Boolean = { false },
+) = CompositionLocalProvider(LocalItemAttachmentSave provides ItemAttachmentSave(onSaveAttachment, isSavingAttachment)) {
     val item = model.item
     val rowCount = model.comments.size + model.pending.size
     var placed by remember(item.id) { mutableStateOf(false) }
@@ -421,7 +455,7 @@ fun ItemDetailView(
                 if (hasMeta) item(key = "meta") { Meta(item, onOpenLink) }
                 if (hasBody) {
                     item(key = "body") {
-                        ItemCard(mine = item.createdBy == ItemAuthor.USER) {
+                        ItemCard(mine = item.createdBy == ItemAuthor.USER, copyText = itemCardCopyText(item.body, item.attachments)) {
                             AuthorCaption(item.attributionText ?: if (item.createdBy == ItemAuthor.USER) "You" else "Agent", item.createdAt, now)
                             ItemContent(item.body, item.attachments, image, onOpenAttachment, onOpenLink)
                         }
@@ -466,6 +500,7 @@ fun ItemDetailView(
                 onSubmit = onSubmit, onAttach = onAttach, onVoiceNote = onVoiceNote,
                 attachments = attachments, onRemoveAttachment = onRemoveAttachment,
                 voice = voice, onCancelRecording = onCancelRecording,
+                onPasteAttachments = onPasteAttachments,
             )
         }
     }
@@ -579,6 +614,15 @@ internal fun AuthorCaption(
 /// Renders a list of attachments with the shared chat-timeline primitives so
 /// items match the conversation surface. Audio gets a bespoke transcript
 /// treatment — neither shared primitive covers audio playback yet.
+/// The thread's file-chip Save, read by every attachment row however deep
+/// in the body or a comment it sits.
+private class ItemAttachmentSave(
+    val save: ((TrackerAttachment) -> Unit)?,
+    val isSaving: (TrackerAttachment) -> Boolean,
+)
+
+private val LocalItemAttachmentSave = compositionLocalOf { ItemAttachmentSave(null) { false } }
+
 @Composable
 private fun Attachments(list: List<TrackerAttachment>, image: (TrackerAttachment) -> Any?, onOpen: (TrackerAttachment) -> Unit) {
     list.forEach { a ->
@@ -601,7 +645,16 @@ private fun Attachments(list: List<TrackerAttachment>, image: (TrackerAttachment
                     Text(caption, style = ItemTypography.bodyStyle(), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            else -> AttachmentFile(filename = a.name, sizeBytes = a.size.takeIf { it > 0 }, onTap = { onOpen(a) })
+            else -> {
+                val save = LocalItemAttachmentSave.current
+                AttachmentFile(
+                    filename = a.name,
+                    sizeBytes = a.size.takeIf { it > 0 },
+                    isLoading = save.isSaving(a),
+                    onTap = { onOpen(a) },
+                    onSave = save.save?.let { { it(a) } },
+                )
+            }
         }
     }
 }
@@ -668,14 +721,14 @@ private fun CommentView(
                 )
             }
             row.note?.let { note ->
-                ItemCard(mine = c.author == ItemAuthor.USER) {
+                ItemCard(mine = c.author == ItemAuthor.USER, copyText = itemCardCopyText(note, c.attachments)) {
                     AuthorCaption(c.attributionText ?: c.authorName, c.createdAt, now, c.authorConversation, openableConvoIDs, onOpenConversation)
                     ItemContent(note, c.attachments, image, onOpen, onOpenLink)
                 }
             }
         }
     } else {
-        ItemCard(mine = c.author == ItemAuthor.USER) {
+        ItemCard(mine = c.author == ItemAuthor.USER, copyText = itemCardCopyText(c.body, c.attachments)) {
             AuthorCaption(c.attributionText ?: c.authorName, c.createdAt, now, c.authorConversation, openableConvoIDs, onOpenConversation)
             ItemContent(c.body, c.attachments, image, onOpen, onOpenLink)
             ActionButtons(c.actions, chosen, actionsEnabled, onTapAction)
@@ -752,18 +805,41 @@ private fun ItemBody(markdown: String, onOpenLink: (String) -> Unit) {
     )
 }
 
+/// What a card's long-press Copy copies: the body's markdown as written,
+/// without its inline attachment refs, each text part trimmed and the parts
+/// a blank line apart. `null` (no Copy) for a card with no text, such as
+/// one that only carries attachments.
+fun itemCardCopyText(body: String, attachments: List<TrackerAttachment>): String? =
+    splitInlineAttachments(body, attachments).segments
+        .mapNotNull { (it as? InlineSegment.Text)?.markdown?.trim()?.takeIf(String::isNotEmpty) }
+        .joinToString("\n\n")
+        .ifEmpty { null }
+
 /// The thread's card chrome — the chat bubble surfaces on a rounded
 /// rectangle with the bubble shadow — shared by the body card, the comment
 /// cards and the pending rows so they read as one thread.
+///
+/// With [copyText], a long-press beside the card's words (the space past a
+/// short line, between paragraphs, its padding or its caption) offers Copy
+/// for the whole text, as a chat bubble does ([LongPressCopy]). The words
+/// themselves keep their own taps (links); code blocks keep their own copy
+/// button.
 @Composable
-private fun ItemCard(mine: Boolean, alpha: Float = 1f, content: @Composable () -> Unit) {
+private fun ItemCard(mine: Boolean, alpha: Float = 1f, copyText: String? = null, content: @Composable () -> Unit) {
     val colors = MatronThemeColors.current
+    val copy = rememberLongPressCopy(copyText)
     Surface(
         shape = RoundedCornerShape(10.dp),
         color = (if (mine) colors.bubbleMe else colors.bubbleBot).copy(alpha = alpha),
         shadowElevation = 1.dp,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(Modifier.padding(ItemTypography.cardPadding), verticalArrangement = Arrangement.spacedBy(6.dp)) { content() }
+        Box {
+            Column(
+                Modifier.fillMaxWidth().then(copy.modifier).padding(ItemTypography.cardPadding),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) { content() }
+            copy.Menu()
+        }
     }
 }

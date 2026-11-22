@@ -45,7 +45,8 @@ private const val FILTER_DEBOUNCE_MS = 150L
 
 /// The For you tab's root (app shell, spec §3; once "Decisions"): every open item awaiting
 /// the user across every conversation, and on its Done tab every closed
-/// question, decision and notice, fed by the shell's app-wide
+/// question, decision and notice, and on its Spare allowance tab the
+/// backlog of open tasks labelled `spare-allowance`, fed by the shell's app-wide
 /// `ItemsPanelViewModel(convoID = null)`. The SHELL starts and stops that
 /// view model (its badge must be live app-wide, not only while this tab
 /// shows); this screen only reads it. Refresh failures surface through the
@@ -97,6 +98,9 @@ fun DecisionsScreen(
             else -> decided.take(decidedVisibleCount)
         }
     }
+    // The spare-allowance backlog, only while its tab shows, like Done's.
+    val spareAllowance by viewModel.spareAllowance.collectAsStateWithLifecycle()
+    val spare = remember(tab, spareAllowance) { if (tab == ForYouTab.SPARE) spareAllowance else emptyList() }
     // The Done captions' clock, ticking only while that tab shows.
     var now by remember { mutableStateOf(Instant.now()) }
     LaunchedEffect(tab) {
@@ -106,7 +110,7 @@ fun DecisionsScreen(
         }
     }
 
-    val origins = remember(awaiting, closed) { (awaiting + closed).map { it.originConvoID }.distinct() }
+    val origins = remember(awaiting, closed, spare) { (awaiting + closed + spare).map { it.originConvoID }.distinct() }
     LaunchedEffect(origins) {
         if (origins.isNotEmpty()) titles = runCatching { originLabels() }.getOrDefault(emptyMap())
     }
@@ -138,6 +142,9 @@ fun DecisionsScreen(
                 val allClosedRows = remember(closed, titles) { closed.map { DecisionsRow(it, titles[it.originConvoID]) } }
                 val openRows = remember(allOpenRows, filterQuery) { allOpenRows.filter { decisionsRowMatches(it, filterQuery) } }
                 val closedRows = remember(allClosedRows, filterQuery) { allClosedRows.filter { decisionsRowMatches(it, filterQuery) } }
+                val spareRows = remember(spare, titles, filterQuery) {
+                    spare.map { DecisionsRow(it, titles[it.originConvoID]) }.filter { decisionsRowMatches(it, filterQuery) }
+                }
                 DecisionsListView(
                     model = DecisionsListModel(
                         rows = openRows,
@@ -147,6 +154,7 @@ fun DecisionsScreen(
                         closed = closedRows,
                         closedTotalCount = if (searching) closedRows.size else decided.size,
                         query = query,
+                        spare = spareRows,
                     ),
                     onQueryChange = { query = it },
                     onSearchEverything = onSearchEverything,
