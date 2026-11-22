@@ -252,6 +252,9 @@ class TimelineViewModel(
     suspend fun refresh() {
         refreshEpoch += 1
         fresh.clear()
+        // A next page still on its way belongs to the lists this replaces.
+        projectsGeneration += 1
+        finishedGeneration += 1
         // A refresh overtakes what a list was still waiting on.
         listVisit += 1
         // Refreshes can overlap (a pull while the tab's own re-read runs):
@@ -454,7 +457,9 @@ class TimelineViewModel(
             val generation = projectsGeneration
             try {
                 val list = timeline.timelineProjects()
-                _state.update { it.copy(projectsSupported = true) }
+                // An answer a refresh overtook says nothing, not even whether
+                // the journal has the list.
+                if (epoch == refreshEpoch) _state.update { it.copy(projectsSupported = true) }
                 if (epoch == refreshEpoch && generation == projectsGeneration) {
                     _state.update { it.copy(allProjects = list, pagingFailed = it.pagingFailed - TimelinePlace.Projects, listPages = it.listPages + (TimelinePlace.Projects to ((it.listPages[TimelinePlace.Projects] ?: 0) + 1))) }
                     fresh += TimelinePlace.Projects
@@ -462,7 +467,7 @@ class TimelineViewModel(
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (error: Throwable) {
-                if (error is JournalApiError.NotFound) _state.update { it.copy(projectsSupported = false) }
+                if (error is JournalApiError.NotFound && epoch == refreshEpoch) _state.update { it.copy(projectsSupported = false) }
             }
         }
     }

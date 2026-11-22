@@ -60,6 +60,21 @@ class ProjectFilesTest {
     }
 
     @Test
+    fun aFilesCursorThatDoesNotMoveOnEndsTheList() = runBlocking {
+        val projects = object : FakeProjects() {
+            override suspend fun projectFiles(id: String, before: String?, limit: Int?) =
+                if (before == null) ProjectFilesPage(2, listOf(file("a", type = "image/png")), "c1") else ProjectFilesPage(2, emptyList(), "c1")
+        }
+        val timeline = object : FakeTimelineBase() {
+            override suspend fun timelineProject(id: String) = TimelineProjectPage(TimelineProjectRef(id, 12, "Docs site launch"))
+        }
+        val vm = ProjectPageViewModel("pj_docs", timeline, projects)
+        vm.loadFiles()
+        vm.loadMoreFiles()
+        assertFalse(vm.state.value.files!!.hasMore)
+    }
+
+    @Test
     fun theViewerOpensNeighboursFromTheGridsBytes() = runBlocking {
         val files = listOf(file("a", type = "image/png"), file("b", type = "image/png"))
         var fetched = 0
