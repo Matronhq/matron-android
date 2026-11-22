@@ -32,6 +32,11 @@ interface ChatService {
     /// refresh).
     suspend fun forceSnapshot()
 
+    /// The chat list came on screen. On the For you only sync scope most
+    /// messages never reach the device, so the list re-reads the journal's
+    /// snapshot for its states and unread counts. Default: nothing to do.
+    fun listDidAppear() {}
+
     /// Mutes notifications for `roomID`. Idempotent.
     suspend fun mute(roomID: String)
 

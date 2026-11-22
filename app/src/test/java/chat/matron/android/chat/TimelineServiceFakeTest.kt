@@ -56,6 +56,9 @@ class FakeTimelineService : TimelineService {
     val sentImages = mutableListOf<SentMedia>()
     val sentFiles = mutableListOf<SentMedia>()
     var paginateCalls = 0
+    /// What [isFetchingLatest] reports; tests flip it.
+    val fetchingLatest = kotlinx.coroutines.flow.MutableStateFlow(false)
+    override fun isFetchingLatest(): kotlinx.coroutines.flow.Flow<Boolean> = fetchingLatest
     var markReadCalls = 0
     val retrySendCalls = mutableListOf<String>()
     val discardSendCalls = mutableListOf<String>()

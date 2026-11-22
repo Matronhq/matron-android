@@ -166,6 +166,11 @@ data class ConvoSummaryDTO(
     /// `JournalStore.upsertSummary`): after that the archive feed keeps it
     /// current.
     val archivedAt: Long? = null,
+    /// The journal's unread count for this conversation, `null` from a
+    /// journal that sends none. Taken only on the [SyncScope.FOR_YOU] scope
+    /// (`JournalStore.refreshSummaries`), where most messages never reach
+    /// this device to be counted here.
+    val unreadCount: Int? = null,
 )
 
 /// One row of `GET /devices`. Timestamps are epoch ms; `lastSeenAt` is null for
@@ -404,7 +409,7 @@ class JournalApi(
     /// token has been revoked. Not told about requests sent without a token,
     /// transport failures, or answers to a token since replaced.
     private val authResponses: ((Int) -> Unit)? = null,
-) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding, RoutinesProviding, NewChatDefaultsProviding,
+) : SnapshotSource, ConversationPageSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding, RoutinesProviding, NewChatDefaultsProviding,
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NotifySettingsProviding, NumberLookupProviding,
     TrackerSearching, JournalSearching,
     ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding, ContactsProviding,
@@ -717,6 +722,7 @@ class JournalApi(
                 participants = c.longArrayOrNull("participants"),
                 participantConvos = c.stringArrayOrNull("participant_convos"),
                 archivedAt = c.longOrNull("archived_at"),
+                unreadCount = c.longOrNull("unread_count")?.toInt(),
             )
         }
         // Absent field (old server) → null, present-but-empty → empty list:
@@ -735,7 +741,7 @@ class JournalApi(
         )
     }
 
-    suspend fun messages(convoID: String, beforeSeq: Long?, limit: Int): List<JournalEvent> {
+    override suspend fun messages(convoID: String, beforeSeq: Long?, limit: Int): List<JournalEvent> {
         val query = buildList {
             add("limit" to limit.toString())
             if (beforeSeq != null) add("before_seq" to beforeSeq.toString())

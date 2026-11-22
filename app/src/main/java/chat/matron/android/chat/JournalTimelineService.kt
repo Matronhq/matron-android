@@ -34,6 +34,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -179,6 +180,15 @@ class JournalTimelineService(
             pendingAnchor = null
             if (tail.isEmpty()) olderEvents = emptyList() // a wipe empties everything
             tailEvents = tail
+            remerge()
+        }
+
+        /// The store dropped this conversation's older events (a For you only
+        /// fetch that could not reach them): the rows revealed beneath the
+        /// window go too, or they would show next to the new ones as if
+        /// nothing came between. Scrolling back fetches them again.
+        fun forgetOlder() = synchronized(lock) {
+            olderEvents = emptyList()
             remerge()
         }
 
@@ -481,6 +491,9 @@ class JournalTimelineService(
             }
             close()
         }
+        val historyResetJob = launch {
+            engine.historyResets(convoID).collect { overlay.forgetOlder(); signal() }
+        }
         val ephemeralJob = launch {
             engine.ephemerals(convoID).collect { overlay.applyEphemeral(it); signal() }
         }
@@ -523,6 +536,7 @@ class JournalTimelineService(
         awaitClose {
             if (itemsSignal === registration) itemsSignal = null
             viewingJob.cancel()
+            historyResetJob.cancel()
             storeJob.cancel()
             ephemeralJob.cancel()
             activityJob.cancel()
@@ -532,7 +546,9 @@ class JournalTimelineService(
             sweepJob.cancel()
             emitJob.cancel()
             ticks.close()
-            scope.launch { runCatching { engine.setViewing(null) } }
+            // Only if no other chat took the viewing set since: the next
+            // timeline can register before this one's teardown runs.
+            scope.launch { runCatching { engine.clearViewing(convoID) } }
         }
     }
 
@@ -653,6 +669,10 @@ class JournalTimelineService(
         }
         val before = store.minSeq(convoID)
         val events = api.messages(convoID, before, requestSize)
+        // An opened chat's For you only fetch dropped the older rows while
+        // this page was out: it is below a gap now, so land nothing and let
+        // the next scroll page from the new oldest row.
+        if (before != null && store.minSeq(convoID) != before) return true
         val newOnes = events.filter { before == null || it.seq < before }
         store.insertHistory(newOnes)
         // Below the tail anchor the observation won't see these; hand them to
@@ -677,6 +697,9 @@ class JournalTimelineService(
         }
         return newOnes.isNotEmpty()
     }
+
+    override fun isFetchingLatest(): Flow<Boolean> =
+        engine.fetchingConversations.map { convoID in it }.distinctUntilChanged()
 
     override fun sessionStatus(): Flow<SessionStatusUpdate> = engine.sessionStatus(convoID)
 

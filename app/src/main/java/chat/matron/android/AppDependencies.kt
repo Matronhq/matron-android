@@ -102,6 +102,8 @@ import chat.matron.android.viewmodels.KeyValueBoxCapacityCache
 import chat.matron.android.viewmodels.KeyValueStore
 import chat.matron.android.viewmodels.RecentStartFolders
 import chat.matron.android.viewmodels.SharedPreferencesKeyValueStore
+import chat.matron.android.viewmodels.SyncScopeSettingModel
+import chat.matron.android.journal.SyncScope
 import chat.matron.android.models.SyncConnectionState
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
@@ -440,6 +442,9 @@ class AppDependencies(
             search = search,
             archive = ArchiveSync(store = store, writer = api),
             credentialSignals = revocation::handle,
+            pages = api,
+            // Settings › Sync on this device: per device, not per account.
+            syncScope = SyncScope.stored(preferences),
         )
         val maintenance = JournalMaintenance(
             store = store,
@@ -752,6 +757,12 @@ class AppDependencies(
 
     /** The session's pinned desk chats (journal "Pinned desk chats"). */
     fun pinsSync(session: UserSession): PinsSyncing = core(session).pinsSync
+
+    /** Settings › Sync on this device: saved here, applied by the session's engine. */
+    fun makeSyncScopeSettingModel(session: UserSession, scope: CoroutineScope): SyncScopeSettingModel {
+        val engine = core(session).engine
+        return SyncScopeSettingModel(preferences = preferences, apply = engine::setSyncScope, scope = scope)
+    }
 
     /** The session's journal-held Coordinator (Coordinator redesign §3a). */
     fun coordinatorSync(session: UserSession): CoordinatorSync = core(session).coordinatorSync

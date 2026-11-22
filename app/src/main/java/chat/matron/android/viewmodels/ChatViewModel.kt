@@ -459,6 +459,12 @@ class ChatViewModel(
     private var statusTask: Job? = null
     private var sessionStateTask: Job? = null
     private var connectionTask: Job? = null
+    private var fetchingLatestTask: Job? = null
+
+    /// The chat's newest events are being fetched because it was opened (For
+    /// you only): the screen shows a loading strip over the transcript.
+    private val _isFetchingLatest = MutableStateFlow(false)
+    val isFetchingLatest: StateFlow<Boolean> = _isFetchingLatest.asStateFlow()
     private var emptyDebounceTask: Job? = null
     private var resumeTask: Job? = null
     private var historyRefillTask: Job? = null
@@ -1460,6 +1466,17 @@ class ChatViewModel(
             }
         }
 
+        fetchingLatestTask?.cancel()
+        fetchingLatestTask = scope.launch {
+            timeline.isFetchingLatest().collect { fetching ->
+                val finished = _isFetchingLatest.value && !fetching
+                _isFetchingLatest.value = fetching
+                // The read marker sent on open predates what the fetch
+                // brought in: mark the chat read up to its new newest row.
+                if (finished) markAsRead()
+            }
+        }
+
         firstSignal.await()
         return task
     }
@@ -1479,6 +1496,9 @@ class ChatViewModel(
         sessionStateTask = null
         connectionTask?.cancel()
         connectionTask = null
+        fetchingLatestTask?.cancel()
+        fetchingLatestTask = null
+        _isFetchingLatest.value = false
         emptyDebounceTask?.cancel()
         emptyDebounceTask = null
         resumeTask?.cancel()

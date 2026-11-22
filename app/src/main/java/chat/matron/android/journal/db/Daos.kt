@@ -201,6 +201,14 @@ interface AgentDao {
 
 @Dao
 interface EventDao {
+    /// The seqs of [convoID]'s stored events older than [beforeSeq].
+    @Query("SELECT seq FROM event WHERE convo_id = :convoID AND seq < :beforeSeq")
+    suspend fun seqsBefore(convoID: String, beforeSeq: Long): List<Long>
+
+    /// Drops [convoID]'s stored events older than [beforeSeq].
+    @Query("DELETE FROM event WHERE convo_id = :convoID AND seq < :beforeSeq")
+    suspend fun deleteBefore(convoID: String, beforeSeq: Long)
+
     /// Every stored event of [convoIDs] (the archive purge).
     @Query("DELETE FROM event WHERE convo_id IN (:convoIDs)")
     suspend fun deleteForConversations(convoIDs: List<String>)
@@ -349,6 +357,9 @@ interface EventDao {
 
 @Dao
 interface SummaryEntryDao {
+    @Query("DELETE FROM summary_entry WHERE convo_id = :convoID AND seq < :beforeSeq")
+    suspend fun deleteBefore(convoID: String, beforeSeq: Long)
+
     /// Idempotent on the (convo_id, seq) key: replay/pagination can hand the
     /// same summary event to the store more than once.
     @Insert(onConflict = OnConflictStrategy.IGNORE)

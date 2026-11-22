@@ -535,6 +535,20 @@ class JournalTimelineServiceTest {
         assertEquals(TimelineSendState.Failed("Not delivered"), overlay.sendState(failedRow))
     }
 
+    @Test fun forgetOlderDropsRevealedRowsAndKeepsTheTail() {
+        // A For you only fetch that could not reach the stored copy drops the
+        // older rows from the store; the rows revealed beneath the window
+        // must go from the timeline too.
+        val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
+        val epoch = overlay.rebaseForNewTailSubscription(10)
+        overlay.setTail(listOf(ev(10, payload = body("a")), ev(11, payload = body("b"))), epoch)
+        overlay.prependOlder(listOf(ev(3, payload = body("c")), ev(4, payload = body("d"))))
+        assertEquals(listOf(3L, 4L, 10L, 11L), overlay.events.map { it.seq })
+        overlay.forgetOlder()
+        assertEquals(listOf(10L, 11L), overlay.events.map { it.seq })
+        assertEquals(10L, overlay.localRevealBoundary)
+    }
+
     @Test fun reconcileDoesNotSuppressNeverAttemptedSend() {
         // Mirrors outboxDeleteFirstMatching's `attempts > 0` rule: an own row
         // with the same body as a row this device NEVER sent (queued offline;

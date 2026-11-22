@@ -7,12 +7,17 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.withContext
 
 /// Per-room timeline access, one instance per open room. Ported from
 /// matron-apple's `TimelineService` protocol. `items()` is the read side (full
 /// snapshots, newest last); the rest are the write side.
 interface TimelineService {
+    /// Whether the conversation's newest events are being fetched because it
+    /// was opened (the For you only sync scope): the chat says it is loading.
+    fun isFetchingLatest(): Flow<Boolean> = flowOf(false)
+
     /// Full timeline snapshots, newest item last.
     fun items(): Flow<List<TimelineItem>>
 

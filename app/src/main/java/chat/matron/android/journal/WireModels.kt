@@ -347,7 +347,15 @@ sealed interface ServerFrame {
         /// a journal that does not sync the archive, or when the hello did
         /// not ask.
         val archive: ArchiveDelta? = null,
+        /// `hello_ok.sync`: the scope this socket got (protocol "Sync
+        /// scope"). `null` from a journal that predates the field, which
+        /// sends everything whatever the hello asked for.
+        val sync: SyncScope? = null,
     ) : ServerFrame
+    /// `{kind:'control', op:'cursor', seq}`: a [SyncScope.FOR_YOU] replay is
+    /// over and reached [seq]. Its frames skip most seqs, so the client
+    /// takes this as its cursor.
+    data class Cursor(val seq: Long) : ServerFrame
     /// `requestID` correlates RPC errors back to their `agent_request`; null for
     /// ordinary op errors.
     data class Error(
@@ -627,7 +635,9 @@ sealed interface ServerFrame {
                     coordinator = HelloCoordinator.from(obj),
                     settings = UserSettingsDecoding.settings(obj.objectOrNull("settings")),
                     archive = ArchiveDelta.decode(obj["archive"]),
+                    sync = SyncScope.fromWire(obj.stringOrNull("sync")),
                 )
+                "cursor" -> obj.longOrNull("seq")?.let { Cursor(it) } ?: UnknownControl(op)
                 "settings" -> UserSettingsDecoding.settings(obj.objectOrNull("settings"))?.let { SettingsFrame(it) }
                 "error" -> Error(
                     code = obj.stringOrNull("code") ?: "unknown",
@@ -654,7 +664,14 @@ enum class MediaKind(val wire: String) {
 sealed interface ClientOp {
     /// [archiveSince] asks for the archive changes since that cursor in
     /// `hello_ok` (0 = the whole set); `null` leaves it out.
-    data class Hello(val token: String, val cursor: Long?, val archiveSince: Long? = null) : ClientOp
+    /// [sync] names this device's scope (protocol "Sync scope"); `null`
+    /// leaves it out.
+    data class Hello(
+        val token: String,
+        val cursor: Long?,
+        val archiveSince: Long? = null,
+        val sync: SyncScope? = null,
+    ) : ClientOp
     data class Send(val convoID: String, val body: String, val localID: String) : ClientOp
     /// A media `send`: `type` is the wire kind (`"file"`/`"image"`), `blobRef`
     /// the id from a prior `POST /media` upload. `caption` is the composer text
@@ -699,6 +716,7 @@ sealed interface ClientOp {
                 put("token", token)
                 put("cursor", cursor?.let { JsonPrimitive(it) } ?: JsonNull)
                 archiveSince?.let { put("archive_since", it) }
+                sync?.let { put("sync", it.wire) }
             }
             is Send -> buildJsonObject {
                 put("op", "send")

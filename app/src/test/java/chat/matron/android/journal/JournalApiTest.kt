@@ -69,7 +69,7 @@ class JournalApiTest {
         val snap = api(token = "t").snapshot()
         assertEquals(9L, snap.seq)
         assertEquals(
-            listOf(ConvoSummaryDTO("c1", "T", "waiting", 9, "s", 5, 7000)),
+            listOf(ConvoSummaryDTO("c1", "T", "waiting", 9, "s", 5, 7000, unreadCount = 2)),
             snap.conversations,
         )
     }

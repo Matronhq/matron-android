@@ -102,6 +102,8 @@ class JournalChatService(
 
     override suspend fun forceSnapshot() = engine.refreshSummaries()
 
+    override fun listDidAppear() = engine.chatListDidAppear()
+
     override suspend fun mute(roomID: String) = store.setMuted(true, roomID)
 
 

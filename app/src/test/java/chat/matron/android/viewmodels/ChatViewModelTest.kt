@@ -32,7 +32,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -457,6 +459,21 @@ class ChatViewModelTest {
         val vm = makeVM(scope, fake)
         vm.markAsRead()
         assertEquals(1, fake.markReadCalls)
+    }
+
+    @Test
+    fun anOpenedChatsFetchShowsLoadingThenMarksItReadAgain() = vmTest { scope ->
+        val fake = FakeTimelineService()
+        fake.snapshotsToEmit = listOf(listOf(textItem("1")))
+        val vm = makeVM(scope, fake)
+        vm.start()
+        fake.fetchingLatest.value = true
+        withTimeout(2000) { vm.isFetchingLatest.first { it } }
+        val before = fake.markReadCalls
+        fake.fetchingLatest.value = false
+        withTimeout(2000) { vm.isFetchingLatest.first { !it } }
+        withTimeout(2000) { while (fake.markReadCalls == before) delay(10) }
+        assertEquals(before + 1, fake.markReadCalls)
     }
 
     @Test

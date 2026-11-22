@@ -1307,6 +1307,9 @@ private fun SignedInApp(
                         val coordinatorConsent = remember(session.userID) {
                             deps.makeCoordinatorConsentSettingViewModel(session, sessionScope)
                         }
+                        val syncScopeSetting = remember(session.userID) {
+                            deps.makeSyncScopeSettingModel(session, sessionScope)
+                        }
                         DeviceSettingsScreen(
                             session = session,
                             devicesApi = deps.devicesService(session),
@@ -1335,6 +1338,7 @@ private fun SignedInApp(
                             approvalKeys = approvalKeys,
                             onApprovalKeys = { nav.navigate("approval-keys") },
                             newChatDefaults = newChatDefaults,
+                            syncScope = syncScopeSetting,
                             onBack = { nav.popBackStack() },
                         )
                     }

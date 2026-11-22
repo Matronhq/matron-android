@@ -87,6 +87,106 @@ class JournalStore(
 
     suspend fun cursor(): Long = metaDao.value(CURSOR_KEY)?.toLongOrNull() ?: 0
 
+    // MARK: Sync scope
+    //
+    // What the [SyncScope.FOR_YOU] scope needs from the mirror (protocol
+    // "Sync scope"): the replay's closing `cursor` frame, and a record of how
+    // far each conversation is complete, since most conversations' events no
+    // longer arrive as they happen.
+    //
+    // The record: every conversation is complete up to `for_you_since`, the
+    // cursor when this device stopped mirroring everything. A conversation
+    // fetched since then is complete up to its own `synced_seq:<id>`. Both
+    // live in `meta`, so [wipe] clears them with everything else.
+
+    /// Moves the cursor forward to [seq], never back.
+    suspend fun advanceCursor(seq: Long) {
+        db.withTransaction {
+            val current = metaDao.value(CURSOR_KEY)?.toLongOrNull() ?: 0
+            if (seq > current) metaDao.upsert(MetaEntity(CURSOR_KEY, seq.toString()))
+        }
+    }
+
+    /// The cursor when this device last switched to [SyncScope.FOR_YOU], or
+    /// `null` when it has not since the mirror was last reset.
+    suspend fun forYouSince(): Long? = metaDao.value(FOR_YOU_SINCE_KEY)?.toLongOrNull()
+
+    /// Records the switch to [SyncScope.FOR_YOU]. Kept as it is if already
+    /// set: the mirror stopped being complete at the first switch, not a
+    /// later one.
+    suspend fun markForYouStart() {
+        db.withTransaction {
+            if (metaDao.value(FOR_YOU_SINCE_KEY) != null) return@withTransaction
+            val cursor = metaDao.value(CURSOR_KEY)?.toLongOrNull() ?: 0
+            metaDao.upsert(MetaEntity(FOR_YOU_SINCE_KEY, cursor.toString()))
+        }
+    }
+
+    /// How far [convoID] is known to be complete: its own record, else the
+    /// switch point, else nothing (an empty mirror is complete up to 0).
+    suspend fun syncedSeq(convoID: String): Long =
+        metaDao.value(syncedSeqKey(convoID))?.toLongOrNull() ?: forYouSince() ?: 0
+
+    /// Records that [convoID] is complete up to [seq], never moving back.
+    suspend fun setSyncedSeq(convoID: String, seq: Long) {
+        db.withTransaction { raiseSyncedSeq(convoID, seq) }
+    }
+
+    private suspend fun raiseSyncedSeq(convoID: String, seq: Long) {
+        val key = syncedSeqKey(convoID)
+        val current = metaDao.value(key)?.toLongOrNull()
+        if (seq > (current ?: -1)) metaDao.upsert(MetaEntity(key, seq.toString()))
+    }
+
+    /// Lands a conversation's newest events, fetched because it was opened.
+    ///
+    /// With [reachesSyncedSeq] false they did not reach back to what the
+    /// mirror already held, so the stored events older than them are cut off
+    /// from the present by a gap. Those are dropped in the same transaction:
+    /// an open timeline must never show them next to the new ones as if
+    /// nothing came between. Scrolling back fetches them again from the
+    /// journal (`paginateBackward` pages below the oldest stored event).
+    ///
+    /// Returns the seqs dropped, for the search index.
+    suspend fun insertConversationTail(
+        events: List<JournalEvent>,
+        convoID: String,
+        reachesSyncedSeq: Boolean,
+        now: Long = System.currentTimeMillis(),
+    ): List<Long> {
+        val sorted = events.filter { it.convoID == convoID }.sortedBy { it.seq }
+        val oldest = sorted.firstOrNull()?.seq ?: return emptyList()
+        val newest = sorted.last().seq
+        return db.withTransaction {
+            val dropped = if (reachesSyncedSeq) emptyList() else eventDao.seqsBefore(convoID, oldest)
+            if (dropped.isNotEmpty()) {
+                eventDao.deleteBefore(convoID, oldest)
+                summaryEntryDao.deleteBefore(convoID, oldest)
+            }
+            // Nested: Room joins the open transaction.
+            insertHistory(sorted, now)
+            raiseSyncedSeq(convoID, newest)
+            // The chat list row learns what the fetch found: most of these
+            // events never came down the socket, so nothing else moved it.
+            val convo = conversationDao.byId(convoID)
+            val newestMessage = sorted.lastOrNull { it.type in JournalEventType.MESSAGE_TYPES }
+            if (convo != null && newest > convo.lastSeq) {
+                var updated = convo.copy(lastSeq = newest)
+                if (newestMessage != null && newestMessage.seq > convo.lastSeq) {
+                    val stored = tombstonedForStorage(newestMessage, now)
+                    updated = updated.copy(
+                        snippet = snippet(newestMessage),
+                        lastMessageType = newestMessage.type,
+                        expiredSnippet = expiredSnippet(newestMessage.type, stored.payload),
+                        lastActivityTS = max(convo.lastActivityTS ?: 0, newestMessage.ts.toEpochMilli()),
+                    )
+                }
+                conversationDao.upsert(updated)
+            }
+            dropped
+        }
+    }
+
     // MARK: Snapshot
 
     suspend fun applyColdSnapshot(convos: List<ConvoSummaryDTO>, headSeq: Long) {
@@ -96,13 +196,16 @@ class JournalStore(
         }
     }
 
-    suspend fun refreshSummaries(convos: List<ConvoSummaryDTO>) {
+    /// [adoptUnread]: take the journal's unread counts. A device on the
+    /// [SyncScope.FOR_YOU] scope never sees most messages arrive, so its own
+    /// count would stay at zero for every conversation it has not opened.
+    suspend fun refreshSummaries(convos: List<ConvoSummaryDTO>, adoptUnread: Boolean = false) {
         db.withTransaction {
-            for (c in convos) upsertSummary(c, resetLocalState = false)
+            for (c in convos) upsertSummary(c, resetLocalState = false, adoptUnread = adoptUnread)
         }
     }
 
-    private suspend fun upsertSummary(c: ConvoSummaryDTO, resetLocalState: Boolean) {
+    private suspend fun upsertSummary(c: ConvoSummaryDTO, resetLocalState: Boolean, adoptUnread: Boolean = false) {
         val existing = conversationDao.byId(c.id)
         if (existing != null) {
             var updated = existing.copy(title = c.title, sessionState = c.sessionState)
@@ -158,6 +261,8 @@ class JournalStore(
             if (ts != null && ts > (updated.lastActivityTS ?: 0)) {
                 updated = updated.copy(lastActivityTS = ts)
             }
+            val unread = c.unreadCount
+            if (adoptUnread && unread != null) updated = updated.copy(unreadCount = unread)
             conversationDao.upsert(updated)
         } else {
             conversationDao.upsert(
@@ -166,7 +271,7 @@ class JournalStore(
                     lastSeq = c.lastSeq, snippet = c.snippet, createdAt = c.createdAt,
                     lastActivityTS = c.lastTS, muted = false, hidden = false,
                     readUpToSeq = if (resetLocalState) c.lastSeq else 0,
-                    unreadCount = 0, parentConvoID = c.parentConvoID,
+                    unreadCount = if (adoptUnread) c.unreadCount ?: 0 else 0, parentConvoID = c.parentConvoID,
                     agentDeviceID = c.agentDeviceID,
                     participants = c.participants?.let(ConversationEntity::encodeParticipants),
                     participantConvos = c.participantConvos?.let(ConversationEntity::encodeParticipantConvos),
@@ -1558,6 +1663,13 @@ class JournalStore(
 
     companion object {
         private const val CURSOR_KEY = "cursor"
+
+        /// `meta` key of the cursor when this device switched to
+        /// [SyncScope.FOR_YOU].
+        internal const val FOR_YOU_SINCE_KEY = "for_you_since"
+
+        /// `meta` key of how far a fetched conversation is complete.
+        internal fun syncedSeqKey(convoID: String) = "synced_seq:$convoID"
 
         /// `meta` key of the archive feed's cursor ([ArchiveSync]). Absent
         /// until this device first synced the archive with the journal.
