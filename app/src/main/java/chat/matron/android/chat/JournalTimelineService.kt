@@ -34,6 +34,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -166,10 +167,16 @@ class JournalTimelineService(
         /// reach the anchor become the "older" prefix so the transcript doesn't
         /// blink to the window, and any tail from a previous subscription is
         /// fenced by epoch.
-        fun rebaseForNewTailSubscription(anchor: Long): Int = synchronized(lock) {
+        ///
+        /// [trimBelowAnchor]: drop the held rows below the new anchor too, so
+        /// a window moved up (after a For you only gap drop) really shrinks;
+        /// rows a stale observation delivered in the meantime go with them.
+        fun rebaseForNewTailSubscription(anchor: Long, trimBelowAnchor: Boolean = false): Int = synchronized(lock) {
             tailEpoch += 1
             pendingAnchor = anchor
-            olderEvents = if ((eventsList.lastOrNull()?.seq ?: -1L) >= anchor) eventsList else emptyList()
+            val held = if (trimBelowAnchor) eventsList.filter { it.seq >= anchor } else eventsList
+            olderEvents = if ((held.lastOrNull()?.seq ?: -1L) >= anchor) held else emptyList()
+            if (trimBelowAnchor) eventsList = olderEvents
             tailEvents = emptyList()
             tailEpoch
         }
@@ -179,6 +186,15 @@ class JournalTimelineService(
             pendingAnchor = null
             if (tail.isEmpty()) olderEvents = emptyList() // a wipe empties everything
             tailEvents = tail
+            remerge()
+        }
+
+        /// The store dropped this conversation's older events (a For you only
+        /// fetch that could not reach them): the rows revealed beneath the
+        /// window go too, or they would show next to the new ones as if
+        /// nothing came between. Scrolling back fetches them again.
+        fun forgetOlder() = synchronized(lock) {
+            olderEvents = emptyList()
             remerge()
         }
 
@@ -465,7 +481,7 @@ class JournalTimelineService(
         // Fire viewing concurrently — the local mirror is the source of truth for
         // what to draw, so the first paint isn't held hostage to a round trip.
         val viewingJob = launch { engine.setViewing(convoID) }
-        val storeJob = launch {
+        fun tailSubscription(trimBelowAnchor: Boolean = false) = launch {
             // Baseline BEFORE the first flow emission: persisted rows are
             // history and must never retire echoes (see seedBaseline).
             overlay.seedBaseline(runCatching { store.maxSeq(convoID) }.getOrNull() ?: 0L)
@@ -474,12 +490,24 @@ class JournalTimelineService(
             // second) otherwise re-read and re-decoded the entire history.
             // Older rows are revealed locally on scroll-up (apple #171).
             val anchor = runCatching { store.tailWindowStart(convoID, fetchWindow) }.getOrDefault(0L)
-            val epoch = overlay.rebaseForNewTailSubscription(anchor)
+            val epoch = overlay.rebaseForNewTailSubscription(anchor, trimBelowAnchor)
             store.eventsFlow(convoID, anchor).collect { tail ->
                 overlay.setTail(tail, epoch)
                 signal()
             }
             close()
+        }
+        var storeJob = tailSubscription()
+        val historyResetJob = launch {
+            engine.historyResets(convoID).collect {
+                // The older rows went from the store, and a much newer tail
+                // came in: forget what was revealed and observe a window
+                // anchored on the new tail, so the observation stays bounded.
+                storeJob.cancel()
+                overlay.forgetOlder()
+                signal()
+                storeJob = tailSubscription(trimBelowAnchor = true)
+            }
         }
         val ephemeralJob = launch {
             engine.ephemerals(convoID).collect { overlay.applyEphemeral(it); signal() }
@@ -523,6 +551,7 @@ class JournalTimelineService(
         awaitClose {
             if (itemsSignal === registration) itemsSignal = null
             viewingJob.cancel()
+            historyResetJob.cancel()
             storeJob.cancel()
             ephemeralJob.cancel()
             activityJob.cancel()
@@ -532,7 +561,9 @@ class JournalTimelineService(
             sweepJob.cancel()
             emitJob.cancel()
             ticks.close()
-            scope.launch { runCatching { engine.setViewing(null) } }
+            // Only if no other chat took the viewing set since: the next
+            // timeline can register before this one's teardown runs.
+            scope.launch { runCatching { engine.clearViewing(convoID) } }
         }
     }
 
@@ -654,7 +685,11 @@ class JournalTimelineService(
         val before = store.minSeq(convoID)
         val events = api.messages(convoID, before, requestSize)
         val newOnes = events.filter { before == null || it.seq < before }
-        store.insertHistory(newOnes)
+        // Checked in the insert's own transaction: an opened chat's For you
+        // only fetch that dropped the older rows while this page was out
+        // leaves it below a gap, so nothing lands and the next scroll pages
+        // from the new oldest row.
+        if (!store.insertHistoryIfOldestIs(convoID, before, newOnes)) return true
         // Below the tail anchor the observation won't see these; hand them to
         // the overlay directly — but only when a subscription has rebased
         // (boundary known). With no subscription yet, prepending would put
@@ -677,6 +712,9 @@ class JournalTimelineService(
         }
         return newOnes.isNotEmpty()
     }
+
+    override fun isFetchingLatest(): Flow<Boolean> =
+        engine.fetchingConversations.map { convoID in it }.distinctUntilChanged()
 
     override fun sessionStatus(): Flow<SessionStatusUpdate> = engine.sessionStatus(convoID)
 

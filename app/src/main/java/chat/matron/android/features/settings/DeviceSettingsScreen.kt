@@ -52,6 +52,7 @@ import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
 import chat.matron.android.viewmodels.AccountEmailViewModel
 import chat.matron.android.viewmodels.ApprovalKeysScreenModel
 import chat.matron.android.viewmodels.ChangePasswordViewModel
+import chat.matron.android.viewmodels.SyncScopeSettingModel
 import kotlinx.coroutines.launch
 
 /**
@@ -112,6 +113,8 @@ fun DeviceSettingsScreen(
     /// Settings → New chats: the user's default model and effort. `null`
     /// in hosts without a session (previews); says so on an older journal.
     newChatDefaults: NewChatDefaultsStore? = null,
+    /// Settings › Sync on this device. `null` hides the section (previews).
+    syncScope: SyncScopeSettingModel? = null,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -192,6 +195,8 @@ fun DeviceSettingsScreen(
             if (notices != null) NoticesSection(notices)
 
             if (autoArchive != null) AutoArchiveSection(autoArchive)
+
+            if (syncScope != null) SyncScopeSection(syncScope)
 
             SettingsSection("Appearance") {
                 AppearancePicker(selected = appearance, onSelect = onAppearanceChange)

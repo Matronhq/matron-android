@@ -135,6 +135,41 @@ class JournalTimelineServiceTest {
         engine.endSync()
     }
 
+    /// A For you only open that cannot reach the stored copy drops the older
+    /// rows; the timeline then observes a window anchored on the new tail,
+    /// not the stale one, so it stays bounded.
+    @Test fun aGapDropRebasesTheTailWindow() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(ev(1, payload = body("old one")))
+        store.applyJournal(ev(2, payload = body("old two")))
+        store.markForYouStart()
+        val far = (1000L until 1700L).map { ev(it, payload = body("new $it")) }
+        val pages = chat.matron.android.journal.ConversationPageSource { convo, before, limit ->
+            far.filter { it.convoID == convo && (before == null || it.seq < before) }.takeLast(limit)
+        }
+        val socket = FakeWebSocketConnection().also {
+            it.serve("""{"kind":"control","op":"hello_ok","seq":2000,"sync":"for_you"}""")
+            it.serve("""{"kind":"control","op":"cursor","seq":2000}""")
+        }
+        val api = JournalApi("https://x")
+        val engine = JournalSyncEngine(
+            api, store, FakeConnector(listOf(socket)), token = "t", ownSender = "user:alice", search = null,
+            backoffBaseSeconds = 0.01, pages = pages, syncScope = chat.matron.android.journal.SyncScope.FOR_YOU,
+            conversationSettleDelay = 10.milliseconds,
+        )
+        val service = JournalTimelineService("c1", store, engine, api, makeSession(), fetchWindow = 50)
+        engine.beginSync()
+        engine.waitUntilReady()
+        val (collector, task) = collectItems(service.items())
+        waitUntil(5000) { collector.last()?.lastOrNull()?.id == "1699" }
+        waitUntil(5000) { collector.last()?.size == 50 }
+        val items = collector.last()!!
+        assertEquals("the window is anchored on the new tail", 50, items.size)
+        assertFalse(items.any { it.id == "1" || it.id == "2" })
+        task.cancel()
+        engine.endSync()
+    }
+
     // MARK: (b) ephemeral overlay inserts + finalize removes it
 
     @Test fun ephemeralOverlayInsertsAndFinalizeRemoves() = runBlocking {
@@ -533,6 +568,33 @@ class JournalTimelineServiceTest {
         overlay.setSyncState(SyncConnectionState.Offline(null))
         assertEquals(TimelineSendState.Queued, overlay.sendState(attempted))
         assertEquals(TimelineSendState.Failed("Not delivered"), overlay.sendState(failedRow))
+    }
+
+    @Test fun aRebaseAfterAGapDropTrimsRowsBelowTheNewAnchor() {
+        // A stale observation can still deliver every row from the old
+        // anchor before the new one starts; the rebase must not keep them.
+        val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
+        val first = overlay.rebaseForNewTailSubscription(1)
+        overlay.setTail((1L..100L).map { ev(it, payload = body("m$it")) }, first)
+        overlay.forgetOlder()
+        val second = overlay.rebaseForNewTailSubscription(90, trimBelowAnchor = true)
+        assertEquals((90L..100L).toList(), overlay.events.map { it.seq })
+        overlay.setTail((90L..101L).map { ev(it, payload = body("m$it")) }, second)
+        assertEquals((90L..101L).toList(), overlay.events.map { it.seq })
+    }
+
+    @Test fun forgetOlderDropsRevealedRowsAndKeepsTheTail() {
+        // A For you only fetch that could not reach the stored copy drops the
+        // older rows from the store; the rows revealed beneath the window
+        // must go from the timeline too.
+        val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
+        val epoch = overlay.rebaseForNewTailSubscription(10)
+        overlay.setTail(listOf(ev(10, payload = body("a")), ev(11, payload = body("b"))), epoch)
+        overlay.prependOlder(listOf(ev(3, payload = body("c")), ev(4, payload = body("d"))))
+        assertEquals(listOf(3L, 4L, 10L, 11L), overlay.events.map { it.seq })
+        overlay.forgetOlder()
+        assertEquals(listOf(10L, 11L), overlay.events.map { it.seq })
+        assertEquals(10L, overlay.localRevealBoundary)
     }
 
     @Test fun reconcileDoesNotSuppressNeverAttemptedSend() {

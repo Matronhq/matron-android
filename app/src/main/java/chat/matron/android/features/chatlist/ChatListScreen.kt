@@ -113,6 +113,10 @@ fun ChatListScreen(
         if (!isLoading) LaunchTimeline.shared.mark(LaunchTimeline.Mark.FIRST_LIST_PAINT)
     }
 
+    // On "For you only" the list's states and unread counts come from the
+    // journal's snapshot: coming on screen re-reads it (paced by the engine).
+    LaunchedEffect(viewModel) { viewModel.listDidAppear() }
+
     var overflowOpen by remember { mutableStateOf(false) }
 
     // iOS shows this list plain on systemBackground (white), not on the

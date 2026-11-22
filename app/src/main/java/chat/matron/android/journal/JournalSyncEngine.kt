@@ -40,6 +40,8 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonElement
 
 /// How many reconnect-replay journal frames land per store transaction. The
@@ -47,6 +49,22 @@ import kotlinx.serialization.json.JsonElement
 /// ~40 commits instead of 10k, small enough that the first screenful paints
 /// without waiting for the whole backlog.
 private const val REPLAY_BATCH_SIZE = 250
+
+/// One fetch of an opened conversation ([SyncScope.FOR_YOU]) reads at most
+/// this many pages of this size. A gap longer than that is not filled: the
+/// stored events before it are dropped, and scrolling back fetches them again.
+internal const val CONVERSATION_PAGE_SIZE = 200
+internal const val CONVERSATION_MAX_PAGES = 3
+
+/// Fetch attempts per open while the socket stays up. A reconnect's `cursor`
+/// frame starts afresh for whatever is still on screen.
+private const val CONVERSATION_CATCH_UP_ATTEMPTS = 4
+
+/// The second read after an opened conversation's fetch takes one page this size.
+private const val SETTLE_PAGE_SIZE = 50
+
+/// On [SyncScope.FOR_YOU] the chat list re-reads the snapshot at most this often.
+private const val LIST_REFRESH_INTERVAL_MS = 60_000L
 
 /// Lifecycle-level errors surfaced by the engine. The messages surface
 /// verbatim in UI banners — without them, an offline send rendered as the
@@ -99,6 +117,11 @@ interface SearchIndexer {
     /// pairs with the no-op [resetBackfill]: a fake that never resets never
     /// moves the generation.
     suspend fun backfillGeneration(): Long = 0
+
+    /// Drops indexed events the store no longer holds (a
+    /// [SyncScope.FOR_YOU] fetch that cut off a conversation's older
+    /// events): a hit on one would open a timeline without it. Default no-op.
+    suspend fun removeIndexed(eventIDs: List<String>) {}
 }
 
 /// What [JournalSyncEngine.coordinatorUpdates] carries (Coordinator
@@ -143,6 +166,20 @@ class JournalSyncEngine(
     /// (`hello_ok`) or refused (`auth`). Feeds the app's
     /// [CredentialRevocationMonitor].
     private val credentialSignals: ((CredentialSignal) -> Unit)? = null,
+    /// Reads an opened conversation's newest pages on the
+    /// [SyncScope.FOR_YOU] scope. `null` in hosts that never fetch: such an
+    /// engine connects with the scope but leaves opened chats as they are.
+    private val pages: ConversationPageSource? = null,
+    /// This device's sync scope at launch (Settings › Sync on this device);
+    /// [setSyncScope] changes it.
+    syncScope: SyncScope = SyncScope.EVERYTHING,
+    /// How long after an opened conversation's fetch a second, one-page read
+    /// runs. The journal's HTTP reads and its socket are not ordered against
+    /// each other, so an event written while the `viewing` op was on its way
+    /// could be in neither; the second read picks it up.
+    private val conversationSettleDelay: Duration = 1500.milliseconds,
+    /// Wall clock (ms) for the chat list's refresh pacing; tests move it.
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : SyncService {
     private val scope = CoroutineScope(dispatcher + SupervisorJob())
     private val lock = Any()
@@ -171,6 +208,46 @@ class JournalSyncEngine(
     private var catchUpCompleteHandler: (() -> Unit)? = null
     private val readyWaiters = mutableListOf<CancellableContinuation<Unit>>()
     private val lastSessionStatus = mutableMapOf<String, SessionStatusUpdate>()
+
+    // MARK: Sync scope state (guarded by `lock`)
+
+    /// This device's sync scope (protocol "Sync scope"), named in every
+    /// hello. On [SyncScope.FOR_YOU] the socket carries the tracker,
+    /// missions, the Coordinator conversation and conversation metadata,
+    /// plus the conversation on screen; any other conversation is fetched
+    /// when it is opened ([catchUpConversation]).
+    private val _syncScope = MutableStateFlow(syncScope)
+    /// The scope the live socket's `hello_ok` said it got; `null` from a
+    /// journal that predates the field (it sends everything).
+    private var liveHelloSync: SyncScope? = null
+    /// Whether the live [SyncScope.FOR_YOU] socket's replay is over (its
+    /// `cursor` frame arrived). Until then the journal holds back the
+    /// socket's live frames, so a conversation fetched then could miss what
+    /// lands between the fetch and the end of the replay.
+    private var scopedReplayDone = false
+    /// Conversations on screen fetched since the live socket came up: only
+    /// these are known to be complete up to the cursor.
+    private val caughtUpViewed = mutableSetOf<String>()
+    /// Fetched on this socket, waiting for their settle read, with the
+    /// viewing generation they were fetched in: not fetched again while that
+    /// viewing lasts. A chat reopened since is fetched afresh.
+    private val settlingViewed = mutableMapOf<String, Int>()
+    /// Conversation → the socket its running fetch belongs to. A fetch from
+    /// a socket since replaced must not hold back the new socket's.
+    private val catchUpsInFlight = mutableMapOf<String, JournalConnection>()
+    /// Bumped whenever the conversation on screen changes. A fetch that
+    /// sees it move while it runs may predate events the socket never
+    /// carried, so it does not mark the conversation complete.
+    private var viewingGeneration = 0
+    private val _fetchingConversations = MutableStateFlow<Set<String>>(emptySet())
+    private val historyResetListeners = mutableMapOf<UUID, Pair<String, () -> Unit>>()
+    /// Serialises viewing changes (the local owner, the departure mark and
+    /// the socket op) and a fetched chat's late settle write against them.
+    private val viewingMutex = Mutex()
+    /// Serialises sync scope changes.
+    private val scopeMutex = Mutex()
+    /// When the chat list last asked for a [SyncScope.FOR_YOU] refresh.
+    private var lastListRefreshAt: Long? = null
 
     // Fan-out registries: id -> (convoID filter, delivery callback). Guarded by `lock`.
     private val ephemeralListeners = mutableMapOf<UUID, Pair<String, (EphemeralUpdate) -> Unit>>()
@@ -347,6 +424,10 @@ class JournalSyncEngine(
             // `viewing` replay repopulates it.
             lastSessionStatus.clear()
             pendingAutoOpen.clear()
+            caughtUpViewed.clear()
+            settlingViewed.clear()
+            catchUpsInFlight.clear()
+            scopedReplayDone = false
             waiters = readyWaiters.toList(); readyWaiters.clear()
             rpc = rpcPending.values.toList(); rpcPending.clear()
         }
@@ -623,10 +704,276 @@ class JournalSyncEngine(
     /// stored history alone.
     fun viewedConversationIDs(): Set<String> = synchronized(lock) { setOfNotNull(viewingConvoID) }
 
-    suspend fun setViewing(convoID: String?) {
-        synchronized(lock) { viewingConvoID = convoID }
+    suspend fun setViewing(convoID: String?): Unit = viewingMutex.withLock {
+        val left = synchronized(lock) {
+            val previous = viewingConvoID
+            viewingConvoID = convoID
+            if (previous != convoID) viewingGeneration += 1
+            previous?.takeIf { it != convoID }
+        }
+        left?.let { noteConversationLeft(it) }
         val connection = synchronized(lock) { liveConnection }
         runCatching { connection?.send(ClientOp.Viewing(convoID)) }
+        convoID?.let { startConversationCatchUp(it) }
+    }
+
+    /// The timeline showing [convoID] went away. Clears the viewing set only
+    /// if it still names [convoID]: a chat opened since must stay viewed
+    /// (its timeline can register before the old one's teardown runs).
+    suspend fun clearViewing(convoID: String): Unit = viewingMutex.withLock {
+        if (synchronized(lock) { viewingConvoID } != convoID) return@withLock
+        val stillViewed = synchronized(lock) {
+            if (viewingConvoID != convoID) true else { viewingConvoID = null; viewingGeneration += 1; false }
+        }
+        if (stillViewed) return@withLock
+        noteConversationLeft(convoID)
+        val connection = synchronized(lock) { liveConnection }
+        runCatching { connection?.send(ClientOp.Viewing(null)) }
+    }
+
+    // MARK: Sync scope
+
+    /// This device's sync scope, for Settings.
+    val syncScope: StateFlow<SyncScope> get() = _syncScope.asStateFlow()
+
+    /// The conversations whose newest events are being fetched because they
+    /// were opened ([SyncScope.FOR_YOU]): the chat shows that it is loading.
+    val fetchingConversations: StateFlow<Set<String>> get() = _fetchingConversations.asStateFlow()
+
+    /// Fires when a [SyncScope.FOR_YOU] fetch dropped [convoID]'s older
+    /// stored events (they were cut off from the present by a gap): an open
+    /// timeline forgets the older rows it had revealed.
+    fun historyResets(convoID: String): Flow<Unit> = callbackFlow {
+        val id = UUID.randomUUID()
+        synchronized(lock) { historyResetListeners[id] = convoID to { trySend(Unit) } }
+        awaitClose { synchronized(lock) { historyResetListeners.remove(id) } }
+    }
+
+    /// Switches this device's sync scope and reconnects under it.
+    ///
+    /// To [SyncScope.FOR_YOU]: the mirror stays as it is, and the switch
+    /// point is recorded, since every conversation is complete up to it.
+    /// Back to [SyncScope.EVERYTHING]: the mirror is missing whatever the
+    /// scoped socket never carried, and nothing can tell which events those
+    /// were, so the next connect rebuilds it from the snapshot, as after
+    /// `snapshot_required`.
+    suspend fun setSyncScope(scope: SyncScope): Unit = scopeMutex.withLock {
+        // Serialised, so each change reads the scope the previous one stored.
+        if (_syncScope.value == scope) return@withLock
+        if (scope == SyncScope.FOR_YOU) runCatching { store.markForYouStart() }
+        val connection = synchronized(lock) {
+            _syncScope.value = scope
+            liveConnection?.also { pathChangeReconnect = true }
+        }
+        // A deliberate reconnect: straight back to Connecting, no offline
+        // banner (the same path as a network change). A connect still in its
+        // handshake sees the change when it installs its socket.
+        connection?.close()
+    }
+
+    /// Whether this device's stored session state for [convoID] follows the
+    /// journal as it changes. On [SyncScope.EVERYTHING] the socket carries
+    /// every conversation's `session_status`. On [SyncScope.FOR_YOU] it
+    /// carries only the Coordinator conversation's; any other conversation's
+    /// state is whatever the last snapshot said, which may be long out of
+    /// date.
+    fun followsSessionStateLive(convoID: String): Boolean = synchronized(lock) {
+        _syncScope.value != SyncScope.FOR_YOU || lastCoordinatorSnapshot?.convoID == convoID
+    }
+
+    /// The chat list came on screen. On [SyncScope.FOR_YOU] most messages
+    /// never reach this device, so the list's snippets, states and unread
+    /// counts come from the snapshot: read it again, at most once a minute.
+    fun chatListDidAppear() {
+        val now = clock()
+        val due = synchronized(lock) {
+            if (_syncScope.value != SyncScope.FOR_YOU || liveConnection == null) return
+            val last = lastListRefreshAt
+            (last == null || now - last >= LIST_REFRESH_INTERVAL_MS).also { if (it) lastListRefreshAt = now }
+        }
+        // The same single job a connect uses: a newer read replaces an
+        // older one rather than racing it to the store.
+        if (due) startRefreshSummaries()
+    }
+
+    /// Fetches what [convoID] is missing, unless a fetch is already running
+    /// on this socket or it was fetched since this socket came up.
+    /// [attempt] counts the retries after a failed fetch.
+    private fun startConversationCatchUp(convoID: String, attempt: Int = 0) {
+        val source = pages ?: return
+        val (connection, generation) = synchronized(lock) {
+            val connection = liveConnection ?: return
+            if (_syncScope.value != SyncScope.FOR_YOU || !scopedReplayDone || liveHelloSync != SyncScope.FOR_YOU) return
+            if (viewingConvoID != convoID || convoID in caughtUpViewed) return
+            if (settlingViewed[convoID] == viewingGeneration) return
+            if (catchUpsInFlight[convoID] === connection) return
+            catchUpsInFlight[convoID] = connection
+            _fetchingConversations.value = _fetchingConversations.value + convoID
+            connection to viewingGeneration
+        }
+        scope.launch { catchUpConversation(source, convoID, connection, generation, attempt) }
+    }
+
+    /// Fetches an opened conversation's newest events until they reach what
+    /// the mirror already holds ([JournalStore.syncedSeq]), or for at most
+    /// [CONVERSATION_MAX_PAGES] pages of [CONVERSATION_PAGE_SIZE].
+    ///
+    /// The `viewing` op has gone out before this runs, so from about now on
+    /// the socket carries this conversation's new events, and the fetch only
+    /// has to cover what came before. The read [conversationSettleDelay]
+    /// later covers an event written while that op was on its way.
+    private suspend fun catchUpConversation(
+        source: ConversationPageSource,
+        convoID: String,
+        connection: JournalConnection,
+        generation: Int,
+        attempt: Int,
+    ) {
+        var refetch = false
+        var retry = false
+        var settle = false
+        try {
+            val floor = store.syncedSeq(convoID)
+            val fetched = mutableListOf<JournalEvent>()
+            var before: Long? = null
+            var reaches = false
+            for (i in 0 until CONVERSATION_MAX_PAGES) {
+                val page = source.messages(convoID, before, CONVERSATION_PAGE_SIZE).sortedBy { it.seq }
+                fetched.addAll(0, page)
+                val oldest = page.firstOrNull()
+                if (oldest == null || page.size < CONVERSATION_PAGE_SIZE || oldest.seq <= floor + 1) {
+                    reaches = true
+                    break
+                }
+                before = oldest.seq
+            }
+            // A wipe or a newer socket since: these rows answer an older question.
+            if (synchronized(lock) { liveConnection } !== connection) return
+            val dropped = store.insertConversationTail(fetched, convoID, reachesSyncedSeq = reaches)
+            if (dropped.isNotEmpty()) {
+                val listeners = synchronized(lock) {
+                    historyResetListeners.values.filter { it.first == convoID }.map { it.second }
+                }
+                listeners.forEach { it() }
+            }
+            indexFetched(fetched, dropped)
+            synchronized(lock) {
+                val stillViewed = viewingConvoID == convoID
+                if (viewingGeneration != generation) {
+                    // It left the screen (and maybe came back) while the
+                    // fetch ran: what the socket carried in between is not
+                    // known, so it is not complete. Still on screen: fetch
+                    // again once this one is out of the way.
+                    refetch = stillViewed
+                } else if (stillViewed) {
+                    // Complete up to the cursor only once the settle read
+                    // has covered the handover (see settleConversation).
+                    settle = true
+                    settlingViewed[convoID] = generation
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            MatronDebug.breadcrumb("conversation catch-up failed: $e")
+            // A dropped socket: the reconnect's `cursor` frame runs this again
+            // for whatever is still on screen. A failed request on a live
+            // socket would otherwise leave the chat on its old copy until it
+            // is reopened, so try again, backing off.
+            retry = attempt + 1 < CONVERSATION_CATCH_UP_ATTEMPTS &&
+                synchronized(lock) { liveConnection } === connection
+        } finally {
+            synchronized(lock) {
+                if (catchUpsInFlight[convoID] === connection) catchUpsInFlight.remove(convoID)
+                if (convoID !in catchUpsInFlight) {
+                    _fetchingConversations.value = _fetchingConversations.value - convoID
+                }
+            }
+        }
+        when {
+            refetch -> startConversationCatchUp(convoID)
+            retry -> scope.launch {
+                delay((min(backoffBaseSeconds * 2.0.pow(attempt.toDouble()), 30.0) * 1000).toLong().milliseconds)
+                if (synchronized(lock) { liveConnection } === connection) startConversationCatchUp(convoID, attempt + 1)
+            }
+            settle -> scope.launch { settleConversation(source, convoID, connection, generation) }
+        }
+    }
+
+    /// The second, one-page read after an opened conversation's fetch (see
+    /// [conversationSettleDelay]). Best effort: the socket carries what
+    /// comes next either way.
+    private suspend fun settleConversation(
+        source: ConversationPageSource,
+        convoID: String,
+        connection: JournalConnection,
+        generation: Int,
+    ) {
+        try {
+            settle(source, convoID, connection, generation)
+        } finally {
+            synchronized(lock) { if (settlingViewed[convoID] == generation) settlingViewed.remove(convoID) }
+            // Reopened while this waited (possibly before its fetch had even
+            // let go of the in-flight slot, so the reopen could not start
+            // one): fetch for the new viewing now. A no-op when the chat is
+            // closed, caught up, or already being fetched.
+            startConversationCatchUp(convoID)
+        }
+    }
+
+    private suspend fun settle(source: ConversationPageSource, convoID: String, connection: JournalConnection, generation: Int) {
+        delay(conversationSettleDelay)
+        fun sameSessionLocked() =
+            liveConnection === connection && viewingGeneration == generation && viewingConvoID == convoID
+        fun sameSession() = synchronized(lock) { sameSessionLocked() }
+        if (!sameSession()) return
+        val page = runCatching { source.messages(convoID, null, SETTLE_PAGE_SIZE) }.getOrNull() ?: return
+        // Written only while the chat is still on screen in the session that
+        // asked, checked under the lock every viewing change takes: once it
+        // closes, the socket stops carrying it and its mark is set at the
+        // cursor, and a page landed after that could leave a hole marked
+        // complete.
+        viewingMutex.withLock {
+            if (!sameSession()) return@withLock
+            runCatching { store.insertConversationTail(page, convoID, reachesSyncedSeq = true) }
+                .onSuccess {
+                    indexFetched(page, emptyList())
+                    // Only now is everything the socket carried for it, up to
+                    // the cursor, known to be stored: leaving records that. A
+                    // chat closed before this keeps the mark its fetch proved.
+                    // Checked again in the same critical section: a socket
+                    // installed during the write clears the set and must
+                    // not inherit this mark.
+                    synchronized(lock) { if (sameSessionLocked()) caughtUpViewed += convoID }
+                }
+        }
+    }
+
+    private fun indexFetched(fetched: List<JournalEvent>, dropped: List<Long>) {
+        val search = this.search ?: return
+        if (fetched.isEmpty() && dropped.isEmpty()) return
+        scope.launch {
+            // The dropped events leave search with the store: a hit on one
+            // would open a timeline that no longer holds it.
+            if (dropped.isNotEmpty()) runCatching { search.removeIndexed(dropped.map(Long::toString)) }
+            val indexedAt = Instant.now()
+            for (event in fetched) {
+                val body = event.previewText(indexedAt)
+                if (!body.isNullOrEmpty()) {
+                    runCatching { search.index(event.convoID, event.seq.toString(), event.sender, event.ts, body) }
+                }
+            }
+        }
+    }
+
+    /// The conversation on screen changed away from [convoID]. Everything
+    /// the socket carried for it up to the cursor is stored, so the next
+    /// open fetches only what came after.
+    private suspend fun noteConversationLeft(convoID: String) {
+        val wasCaughtUp = synchronized(lock) {
+            _syncScope.value == SyncScope.FOR_YOU && caughtUpViewed.remove(convoID)
+        }
+        if (wasCaughtUp) runCatching { store.setSyncedSeq(convoID, store.cursor()) }
     }
 
     /// Inserts a placeholder conversation row for a convo id learned
@@ -638,10 +985,20 @@ class JournalSyncEngine(
 
     suspend fun refreshSummaries() {
         val (epoch, settings) = synchronized(lock) { storeEpoch to settingsEpoch }
+        // A chat read while the snapshot is out keeps its own count; without
+        // the markers to tell, no count is taken this time.
+        val readMarks = if (_syncScope.value == SyncScope.FOR_YOU) runCatching { store.readMarks() }.getOrNull() else null
+        val adoptUnread = readMarks != null
         val snapshot = runCatching { api.snapshot() }.getOrNull() ?: return
         if (synchronized(lock) { storeEpoch } != epoch) return // store wiped mid-flight; stale
         publishSnapshotSettings(snapshot, settings)
-        runCatching { store.refreshSummaries(snapshot.conversations) }
+        val viewed = synchronized(lock) { setOfNotNull(viewingConvoID) }
+        runCatching {
+            store.refreshSummaries(
+                snapshot.conversations, adoptUnread = adoptUnread,
+                readMarksAtRequest = readMarks, keepUnread = viewed,
+            )
+        }
         runCatching { store.replaceAgents(snapshot.agents) }
     }
 
@@ -1097,15 +1454,56 @@ class JournalSyncEngine(
         while (scope.isActive) {
             try {
                 setState(SyncConnectionState.Connecting)
+                val scopeNow = _syncScope.value
+                // Back on Everything with a mirror that was For you only: it
+                // lacks whatever that socket never carried, so rebuild it.
+                // Read from the store rather than remembered, so a switch
+                // made offline, or just before the app was killed, still
+                // takes effect; a failed wipe leaves the marker to retry.
+                if (scopeNow == SyncScope.EVERYTHING && store.forYouSince() != null) {
+                    MatronDebug.breadcrumb("sync scope back to everything — rebuilding the local mirror")
+                    resetMirror()
+                    // Connecting on a half-wiped mirror would skip the
+                    // snapshot and leave the gaps for good: back off and try
+                    // the wipe again.
+                    if (store.forYouSince() != null) throw MirrorResetFailed()
+                }
                 coldStartIfNeeded()
+                // Every conversation is complete up to here. Idempotent, and
+                // also covers a scope that came from settings at launch.
+                if (scopeNow == SyncScope.FOR_YOU) store.markForYouStart()
                 val cursor = store.cursor()
                 val helloToken = synchronized(lock) { token.also { attemptToken = it } }
                 val (connection, hello) = JournalConnection.establishWithHello(
                     connector = connector, wsUrl = api.wsUrl, token = helloToken, cursor = cursor,
                     archiveSince = archive?.helloArchiveSince(),
+                    sync = scopeNow,
                 )
                 val headSeq = hello.headSeq
-                synchronized(lock) { liveConnection = connection; attempt = 0 }
+                // The scope changed while this hello was out: the socket was
+                // set up for the old one, and setSyncScope had no socket to
+                // close. Drop it and connect again under the new scope.
+                // Checked and installed in one critical section, the one
+                // setSyncScope takes: a change either lands before (seen
+                // here) or after (it finds this socket and closes it).
+                val scopeMoved = synchronized(lock) {
+                    val moved = _syncScope.value != scopeNow
+                    if (moved) {
+                        pathChangeReconnect = true
+                    } else {
+                        liveConnection = connection; attempt = 0
+                        // Fetched over the last socket; this one starts behind them.
+                        liveHelloSync = hello.sync
+                        scopedReplayDone = false
+                        caughtUpViewed.clear()
+                        settlingViewed.clear()
+                    }
+                    moved
+                }
+                if (scopeMoved) {
+                    connection.close()
+                    throw ScopeChangedDuringHandshake()
+                }
                 credentialSignals?.invoke(CredentialSignal.Accepted)
                 // The journal greets no device of a locked account.
                 accountLock?.noteSocketAccepted()
@@ -1187,7 +1585,25 @@ class JournalSyncEngine(
                             if (replayBuffer.isNotEmpty()) {
                                 appliedSinceAck = drainReplay(connection, appliedSinceAck)
                             }
-                            appliedSinceAck = handleFrame(frame, connection, headSeq, appliedSinceAck)
+                            if (frame is ServerFrame.Cursor) {
+                                if (hello.sync == SyncScope.FOR_YOU) {
+                                    // A For you only replay is over. Its frames
+                                    // skip most seqs, so take the head it
+                                    // reached as the cursor.
+                                    store.advanceCursor(frame.seq)
+                                    runCatching { connection.send(ClientOp.Ack(store.cursor())) }
+                                    appliedSinceAck = 0
+                                    synchronized(lock) { scopedReplayDone = true }
+                                    if (!caughtUp && store.cursor() >= headSeq) {
+                                        caughtUp = true
+                                        setState(SyncConnectionState.Running)
+                                    }
+                                    // The replay never carries the chat on screen.
+                                    synchronized(lock) { viewingConvoID }?.let { startConversationCatchUp(it) }
+                                }
+                            } else {
+                                appliedSinceAck = handleFrame(frame, connection, headSeq, appliedSinceAck)
+                            }
                         }
                     }
                     // Socket ended with a partial batch pending: land it now.
@@ -1421,17 +1837,7 @@ class JournalSyncEngine(
                 // cache, then wipe the mirror. Force the reconnect
                 // deterministically by exiting the frame loop.
                 MatronDebug.breadcrumb("snapshot_required: replay gap too large — wiping local mirror")
-                synchronized(lock) {
-                    refreshJob?.cancel()
-                    storeEpoch += 1
-                    lastSessionStatus.clear()
-                    // The rows those verdicts waited on are about to go; a
-                    // re-fetched convo arrives via the cold snapshot, not as a
-                    // live birth.
-                    pendingAutoOpen.clear()
-                }
-                runCatching { store.wipe() }
-                    .onFailure { MatronDebug.breadcrumb("snapshot_required: store.wipe failed: $it") }
+                resetMirror()
                 throw SnapshotRequiredExit()
             }
             is ServerFrame.DeviceMeta -> {
@@ -1459,10 +1865,38 @@ class JournalSyncEngine(
             }
             is ServerFrame.ArchiveFrame -> archive?.apply(frame.delta)
             is ServerFrame.Panic -> if (frame.on) accountLock?.noteLockedBySocket(AccountLock(frame.since, frame.unlock))
+            // Handled in the run loop, which owns the replay state.
+            is ServerFrame.Cursor -> Unit
             is ServerFrame.HelloOK, is ServerFrame.UnknownControl -> Unit // post-hello control frames are advisory
         }
         return appliedSinceAck
     }
+
+    /// Wipes the mirror for a fresh bootstrap (`snapshot_required`, or the
+    /// switch back to [SyncScope.EVERYTHING]). Cancels any in-flight
+    /// refreshSummaries() first (its response is stale relative to the
+    /// wipe), bumps the epoch to fence it and drops the status replay cache.
+    /// The next connect's [coldStartIfNeeded] refills the store.
+    private suspend fun resetMirror() {
+        synchronized(lock) {
+            refreshJob?.cancel()
+            storeEpoch += 1
+            lastSessionStatus.clear()
+            // The rows those verdicts waited on are about to go; a re-fetched
+            // convo arrives via the cold snapshot, not as a live birth.
+            pendingAutoOpen.clear()
+            caughtUpViewed.clear()
+            settlingViewed.clear()
+        }
+        runCatching { store.wipe() }
+            .onFailure { MatronDebug.breadcrumb("mirror reset: store.wipe failed: $it") }
+    }
+
+    /// The scope changed while a hello was out; the loop connects again.
+    private class ScopeChangedDuringHandshake : Exception("The sync scope changed while connecting.")
+
+    /// The switch back to [SyncScope.EVERYTHING] could not wipe the mirror.
+    private class MirrorResetFailed : Exception("The local copy could not be reset.")
 
     private suspend fun coldStartIfNeeded() {
         val emptyConvos = runCatching { store.conversations().isEmpty() }.getOrDefault(true)
@@ -1506,8 +1940,11 @@ class JournalSyncEngine(
         }
     }
 
-    private suspend fun startRefreshSummaries() {
+    private fun startRefreshSummaries() {
         synchronized(lock) {
+            // Stamped for the chat list's pacing: a read that starts now
+            // covers its next minute too.
+            lastListRefreshAt = clock()
             refreshJob?.cancel()
             refreshJob = scope.launch { refreshSummaries() } // title/state stopgap
         }

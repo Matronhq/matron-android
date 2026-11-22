@@ -178,6 +178,7 @@ fun ChatScreen(
     notify: NotifySettingsStore? = null,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
+    val isFetchingLatest by chatVM.isFetchingLatest.collectAsStateWithLifecycle()
     val chatSearch by chatVM.chatSearch.collectAsStateWithLifecycle()
     val chatSearchScope = rememberCoroutineScope()
     val children by stripVM.children.collectAsStateWithLifecycle()
@@ -410,6 +411,7 @@ fun ChatScreen(
                             .padding(0.dp),
                     )
                 }
+                if (isFetchingLatest) ChatFetchingStrip()
                 if (shouldShowCompactHeader(sessionStatus?.context)) {
                     CompactContextBanner(
                         tokens = sessionStatus!!.context!!.tokens,
@@ -637,7 +639,10 @@ fun TimelineList(
     onJumpToLastOwnMessage: (() -> Unit)? = null,
 ) {
     val rows by chatVM.windowedRows.collectAsStateWithLifecycle()
-    val settledEmpty by chatVM.settledEmpty.collectAsStateWithLifecycle()
+    val settledEmptyNow by chatVM.settledEmpty.collectAsStateWithLifecycle()
+    // Not "No messages yet" while the opened chat's messages are on their way.
+    val fetchingLatest by chatVM.isFetchingLatest.collectAsStateWithLifecycle()
+    val settledEmpty = settledEmptyNow && !fetchingLatest
     val lastRenderableItemID by chatVM.lastRenderableItemID.collectAsStateWithLifecycle()
     val children by stripVM.children.collectAsStateWithLifecycle()
     val attachmentError by chatVM.attachmentError.collectAsStateWithLifecycle()
