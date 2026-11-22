@@ -29,6 +29,17 @@ class PushKeyStoreTest {
     }
 
     @Test
+    fun concurrentRegistrationsAgreeOnOneKey() {
+        val keys = PushKeyStore(InMemorySessionStore())
+        val results = java.util.concurrent.ConcurrentLinkedQueue<String?>()
+        val threads = (1..8).map { Thread { results.add(keys.publicKeyForRegistration()) } }
+        threads.forEach(Thread::start)
+        threads.forEach(Thread::join)
+        assertEquals(1, results.toSet().size)
+        assertEquals(results.first(), PushBox.encodeBase64Url(X25519.publicFromPrivate(keys.privateKey()!!)))
+    }
+
+    @Test
     fun aStoreThatCannotHoldTheKeyRegistersNone() {
         val broken = object : SessionStore {
             override fun set(value: String, key: String) = throw IllegalStateException("keystore unavailable")

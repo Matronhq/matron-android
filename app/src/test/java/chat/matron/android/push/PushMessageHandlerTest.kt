@@ -110,6 +110,9 @@ class PushMessageHandlerTest {
         assertEquals("Not confirmed: Ship", n.extras.getCharSequence(NotificationCompat.EXTRA_SUB_TEXT).toString())
         assertEquals(0, n.actions?.size ?: 0)
         assertEquals(PushTap("c-9", "it_77", null), PushTap.from(shadowOf(n.contentIntent).savedIntent))
+        // A read of the chat elsewhere takes the notice away too.
+        handler.handle(mapOf("type" to "read", "convo_id" to "c-9"))
+        assertEquals(emptyList<Any>(), posted())
     }
 
     @Test

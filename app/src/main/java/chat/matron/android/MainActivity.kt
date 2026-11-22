@@ -1417,9 +1417,12 @@ private fun SignedInApp(
 
                     composable("notifications") {
                         val registration by deps.pushRegistration.collectAsStateWithLifecycle()
-                        // Read on each visit: the user may have just changed it in Android's settings.
-                        val enabled = remember(registration) {
-                            androidx.core.app.NotificationManagerCompat.from(deps.context).areNotificationsEnabled()
+                        // Read again whenever the screen resumes: the user may
+                        // have just changed it in Android's settings and come back.
+                        var enabled by remember { mutableStateOf(true) }
+                        androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
+                            enabled = androidx.core.app.NotificationManagerCompat.from(deps.context).areNotificationsEnabled()
+                            onPauseOrDispose { }
                         }
                         NotificationSettingsScreen(
                             store = deps.notifySettings(session),

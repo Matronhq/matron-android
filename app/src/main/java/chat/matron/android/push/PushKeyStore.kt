@@ -24,7 +24,10 @@ class PushKeyStore(private val store: SessionStore) {
     /// The public half to register (unpadded base64url), making the key
     /// first if there is none. Null when the store cannot hold it: the
     /// device then registers without a key and its notifications keep their
-    /// fixed text.
+    /// fixed text. Synchronized: the sign-in registration and a token
+    /// refresh can ask at the same moment, and two fresh keys would leave
+    /// the journal sealing to one the phone no longer holds.
+    @Synchronized
     fun publicKeyForRegistration(): String? {
         privateKey()?.let { return publicOf(it) }
         val fresh = X25519.generatePrivateKey()
@@ -34,6 +37,7 @@ class PushKeyStore(private val store: SessionStore) {
     }
 
     /// Sign-out: the next session registers a new key.
+    @Synchronized
     fun delete() {
         runCatching { store.delete(ACCOUNT) }
     }

@@ -180,6 +180,8 @@ class PushNotifier(private val context: Context) {
             .setStyle(NotificationCompat.BigTextStyle().bigText(display.body))
             .setAutoCancel(true)
             .setContentIntent(openIntent(display))
+            // So a read of the chat on another device takes it away too.
+            .addExtras(Bundle().apply { putString(PushNotificationActions.Key.CONVO_ID, display.convoID) })
         runCatching { manager.notify(tag, NOTIFICATION_ID, builder.build()) }
     }
 
