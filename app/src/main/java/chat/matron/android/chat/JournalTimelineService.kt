@@ -475,7 +475,7 @@ class JournalTimelineService(
         // Fire viewing concurrently — the local mirror is the source of truth for
         // what to draw, so the first paint isn't held hostage to a round trip.
         val viewingJob = launch { engine.setViewing(convoID) }
-        val storeJob = launch {
+        fun tailSubscription() = launch {
             // Baseline BEFORE the first flow emission: persisted rows are
             // history and must never retire echoes (see seedBaseline).
             overlay.seedBaseline(runCatching { store.maxSeq(convoID) }.getOrNull() ?: 0L)
@@ -491,8 +491,17 @@ class JournalTimelineService(
             }
             close()
         }
+        var storeJob = tailSubscription()
         val historyResetJob = launch {
-            engine.historyResets(convoID).collect { overlay.forgetOlder(); signal() }
+            engine.historyResets(convoID).collect {
+                // The older rows went from the store, and a much newer tail
+                // came in: forget what was revealed and observe a window
+                // anchored on the new tail, so the observation stays bounded.
+                storeJob.cancel()
+                overlay.forgetOlder()
+                signal()
+                storeJob = tailSubscription()
+            }
         }
         val ephemeralJob = launch {
             engine.ephemerals(convoID).collect { overlay.applyEphemeral(it); signal() }
