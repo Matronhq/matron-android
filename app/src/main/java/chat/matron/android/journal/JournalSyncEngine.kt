@@ -180,6 +180,8 @@ class JournalSyncEngine(
     private val conversationSettleDelay: Duration = 1500.milliseconds,
     /// Per-day counts of sync work, shown in Settings. `null` counts nothing.
     val stats: SyncStatsRecorder? = null,
+    /// Wall clock (ms) for the chat list's refresh pacing; tests move it.
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : SyncService {
     private val scope = CoroutineScope(dispatcher + SupervisorJob())
     private val lock = Any()
@@ -781,13 +783,16 @@ class JournalSyncEngine(
     /// The chat list came on screen. On [SyncScope.FOR_YOU] most messages
     /// never reach this device, so the list's snippets, states and unread
     /// counts come from the snapshot: read it again, at most once a minute.
-    fun chatListDidAppear(now: Long = System.currentTimeMillis()) {
+    fun chatListDidAppear() {
+        val now = clock()
         val due = synchronized(lock) {
             if (_syncScope.value != SyncScope.FOR_YOU || liveConnection == null) return
             val last = lastListRefreshAt
             (last == null || now - last >= LIST_REFRESH_INTERVAL_MS).also { if (it) lastListRefreshAt = now }
         }
-        if (due) scope.launch { refreshSummaries() }
+        // The same single job a connect uses: a newer read replaces an
+        // older one rather than racing it to the store.
+        if (due) startRefreshSummaries()
     }
 
     /// Fetches what [convoID] is missing, unless a fetch is already running
@@ -1913,8 +1918,11 @@ class JournalSyncEngine(
         }
     }
 
-    private suspend fun startRefreshSummaries() {
+    private fun startRefreshSummaries() {
         synchronized(lock) {
+            // Stamped for the chat list's pacing: a read that starts now
+            // covers its next minute too.
+            lastListRefreshAt = clock()
             refreshJob?.cancel()
             refreshJob = scope.launch { refreshSummaries() } // title/state stopgap
         }
