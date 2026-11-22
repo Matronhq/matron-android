@@ -199,6 +199,8 @@ class ItemsSync(
     /// The workers taking [pendingRefetches], at most [REFETCH_WIDTH] at once,
     /// so a new item's refetch does not wait behind every other one.
     private val refetchWorkers = mutableSetOf<Job>()
+    /// List reads started by [launchRefresh], joined by [stop].
+    private val launchedRefreshes = mutableSetOf<Job>()
 
     /// Set by [stop], cleared by [start]. Every write site in refresh /
     /// refetch / drain re-checks this immediately after its await, before
@@ -253,8 +255,22 @@ class ItemsSync(
         launchRefresh()
     }
 
+    /// A list read nobody awaits (catch-up start, foreground). Tracked like
+    /// the marker workers, so [stop] cancels and joins it too.
     private fun launchRefresh() {
-        scope.launch { refresh(ItemsScope.All) }
+        synchronized(lock) {
+            if (stopped) return
+            lateinit var job: Job
+            job = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    refresh(ItemsScope.All)
+                } finally {
+                    synchronized(lock) { launchedRefreshes.remove(job) }
+                }
+            }
+            launchedRefreshes += job
+            job.start()
+        }
     }
 
     private fun queueRefetch(id: String) {
@@ -308,7 +324,7 @@ class ItemsSync(
         synchronized(lock) {
             stopped = true
             toJoin = listOfNotNull(markerJob, stateJob, retryJob) +
-                inFlightRefreshes.values + inFlightRefetches.values + drainJobs + refetchWorkers
+                inFlightRefreshes.values + inFlightRefetches.values + drainJobs + refetchWorkers + launchedRefreshes
             pendingRefetches.clear()
             markerJob = null; stateJob = null; retryJob = null
             // Sign-out wipes the store, so no local write survives to defend.

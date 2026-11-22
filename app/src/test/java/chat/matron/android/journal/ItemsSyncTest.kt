@@ -408,6 +408,24 @@ class ItemsSyncTest {
         assertEquals("a stopped sync reads nothing", stopped, api.listQueries.size)
     }
 
+    /// A list read the catch-up started is cancelled and joined by stop():
+    /// nothing it fetched lands after sign-out.
+    @Test
+    fun stopJoinsTheCatchUpListRead() = runBlocking {
+        val api = FakeItems()
+        api.listResponses = listOf(ItemsPage(listOf(item("a", 1, 10_000)), null))
+        api.blockNextList = true
+        val rig = make(api)
+        rig.sync.start()
+        waitUntil { rig.states.subscriptionCount.value > 0 }
+        rig.states.value = SyncConnectionState.CatchingUp
+        waitUntil { api.isListGated }
+        rig.sync.stop()
+        api.releaseListGate()
+        delay(150)
+        assertTrue("nothing lands after stop", rig.store.items(ItemsScope.All).isEmpty())
+    }
+
     /// A `refreshItem` that lands while another refetch of the same id is in
     /// flight must not return until the store holds the server's thread — it
     /// waits for the in-flight run, which then runs once more.
