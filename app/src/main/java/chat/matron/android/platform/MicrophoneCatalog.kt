@@ -29,7 +29,12 @@ class MicrophoneCatalog(context: Context) {
     /// note then records from the system's choice).
     fun device(id: String?): AudioDeviceInfo? {
         if (id == null) return null
-        return inputs().firstOrNull { offered(it.type, Build.VERSION.SDK_INT) && microphone(it)?.id == id }
+        val matches = inputs().filter { offered(it.type, Build.VERSION.SDK_INT) && microphone(it)?.id == id }
+        // "Phone microphone" stands for several built-in mics in no set
+        // order: point the note at the voice (bottom) mic, not whichever
+        // the system lists first (a camera or back mic).
+        if (id == BUILT_IN_ID) return builtInIndex(matches.map { it.address })?.let(matches::get)
+        return matches.firstOrNull()
     }
 
     private fun inputs(): List<AudioDeviceInfo> =
@@ -39,6 +44,15 @@ class MicrophoneCatalog(context: Context) {
 
     companion object {
         const val BUILT_IN_ID = "builtin"
+
+        /// Which of the built-in mics (by their addresses: "bottom", "back",
+        /// "top"...) a "Phone microphone" pick records from: the bottom one,
+        /// which phones use for calls, else the first. `null` when none.
+        internal fun builtInIndex(addresses: List<String?>): Int? {
+            if (addresses.isEmpty()) return null
+            val bottom = addresses.indexOfFirst { it.equals("bottom", ignoreCase = true) }
+            return if (bottom >= 0) bottom else 0
+        }
 
         /// The pickable microphone for [device], or `null` for an input the
         /// user can't hold up to their mouth.

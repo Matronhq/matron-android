@@ -9,6 +9,13 @@ import org.junit.Test
 
 class MicrophoneCatalogTest {
     @Test
+    fun phoneMicrophone_recordsFromTheBottomMic() {
+        assertEquals(1, MicrophoneCatalog.builtInIndex(listOf("back", "bottom", "top")))
+        assertEquals(0, MicrophoneCatalog.builtInIndex(listOf("", null)))
+        assertNull(MicrophoneCatalog.builtInIndex(emptyList()))
+    }
+
+    @Test
     fun kinds_keepHeldInputsAndDropTheRest() {
         assertEquals(MicrophoneCatalog.Kind.BUILT_IN, MicrophoneCatalog.kindOf(AudioDeviceInfo.TYPE_BUILTIN_MIC))
         assertEquals(MicrophoneCatalog.Kind.WIRED, MicrophoneCatalog.kindOf(AudioDeviceInfo.TYPE_WIRED_HEADSET))
