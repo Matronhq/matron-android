@@ -207,8 +207,12 @@ class TimelineViewModel(
         started = true
         showJob?.cancel()
         showJob = scope.launch {
-            if (first) start() else refresh()
-            if (_state.value.isSupported == true) loadCounts()
+            if (first) {
+                start()
+                if (_state.value.isSupported == true) loadCounts()
+            } else {
+                refresh()
+            }
         }
     }
 
@@ -230,6 +234,8 @@ class TimelineViewModel(
         _state.update { it.copy(isRefreshing = true) }
         try {
             start()
+            // The counts on the week page's rows are read again too.
+            if (_state.value.isSupported == true) loadCounts()
         } finally {
             _state.update { it.copy(isRefreshing = false) }
         }
@@ -418,8 +424,10 @@ class TimelineViewModel(
         val epoch = refreshEpoch
         try {
             when (place) {
-                TimelinePlace.Quiet -> timeline.wentQuiet().let { list -> if (epoch == refreshEpoch) _state.update { it.copy(quiet = list) } }
-                TimelinePlace.Long -> timeline.openLong().let { list -> if (epoch == refreshEpoch) _state.update { it.copy(long = list) } }
+                // An answer a refresh has overtaken is dropped, and the list
+                // stays unread so its next visit asks again.
+                TimelinePlace.Quiet -> timeline.wentQuiet().let { list -> if (epoch != refreshEpoch) return; _state.update { it.copy(quiet = list) } }
+                TimelinePlace.Long -> timeline.openLong().let { list -> if (epoch != refreshEpoch) return; _state.update { it.copy(long = list) } }
                 TimelinePlace.Finished -> {
                     val generation = ++finishedGeneration
                     val page = timeline.finishedProjects()
