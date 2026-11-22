@@ -49,7 +49,7 @@ fun TimelineListScreen(
     var refreshing by remember { mutableStateOf(false) }
     LaunchedEffect(viewModel, place) { viewModel.loadList(place) }
     // A list's error is its own: nothing of it follows Back to the week page.
-    DisposableEffect(viewModel) { onDispose { viewModel.dismissListError() } }
+    DisposableEffect(viewModel) { onDispose { viewModel.leaveList() } }
     val now = Instant.now()
 
     ProjectScaffold(title = TimelineListCopy.title(place), onBack = onBack) {
