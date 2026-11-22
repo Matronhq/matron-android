@@ -157,6 +157,7 @@ fun ProjectSectionScreen(
                 section == ProjectSection.HISTORY && state.historyLoaded -> ProjectHistoryView(
                     weeks = state.history, now = Instant.now(), images = images, hasMore = state.hasMoreHistory,
                     onOpenMilestone = onOpenMilestone, onLoadMore = { scope.launch { viewModel.loadMoreHistory() } },
+                    version = state.historyVersion, pagingFailed = state.historyPagingFailed,
                 )
                 section == ProjectSection.MISSIONS && state.openMissions != null -> ProjectMissionsListView(
                     open = state.openMissions!!, closed = state.closedMissions, now = Instant.now(), onOpenMission = onOpenMission,
