@@ -91,6 +91,7 @@ import chat.matron.android.features.chatlist.ChatListScreen
 import chat.matron.android.features.chatlist.NewChatSheet
 import chat.matron.android.features.chatlist.currentSummary
 import chat.matron.android.features.items.ItemDetailScreen
+import chat.matron.android.features.share.ShareShortcuts
 import chat.matron.android.features.items.ItemsScreen
 import chat.matron.android.viewmodels.ItemReadMemory
 import chat.matron.android.features.onboarding.SignInScreen
@@ -328,6 +329,9 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                         onSignOut = {
                             appLock.signOutIfUnlocked {
                                 OutboxCatchUpWorker.cancel(context)
+                                // The next account must not be offered this
+                                // one's conversations in the share sheet.
+                                ShareShortcuts.clear(context)
                                 deps.signOut()
                                 // Per-account state, cleared like the rest: the next
                                 // account starts opted out.
@@ -645,6 +649,14 @@ private fun SignedInApp(
 
     val groups by chatListVM.groups.collectAsStateWithLifecycle()
     val allChats = remember(groups) { groups.flatMap { it.summaries } }
+    // The most recent conversations as direct-share targets in the system
+    // share sheet. Republished only when which ones (or their names) change,
+    // and after a pause, so a busy list doesn't churn the system's ranking.
+    val shareTargets = remember(allChats, coordinatorConvoID) { ShareShortcuts.targets(allChats, coordinatorConvoID) }
+    LaunchedEffect(shareTargets.map { it.id to it.title }) {
+        kotlinx.coroutines.delay(2_000)
+        ShareShortcuts.publish(deps.context, shareTargets)
+    }
     // Archived conversations are not in the list's groups; a chat opened
     // from Archived (or search) takes its header from here instead.
     val archivedFlow = remember(session.userID) { deps.chatService(session).archivedChatSummaries() }

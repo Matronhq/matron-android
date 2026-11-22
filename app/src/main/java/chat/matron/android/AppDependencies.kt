@@ -490,6 +490,9 @@ class AppDependencies(
         if (startedHere && !isAppVisible()) engine.endSync()
     }
 
+    /** Whether the session's offline outbox still holds unsent messages (the share screen waits on it). */
+    suspend fun hasPendingOutbox(session: UserSession): Boolean = core(session).engine.hasPendingOutbox()
+
     fun chatService(session: UserSession): ChatService {
         val core = core(session)
         return JournalChatService(store = core.store, engine = core.engine)
