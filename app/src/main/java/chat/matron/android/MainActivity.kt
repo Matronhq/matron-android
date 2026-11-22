@@ -1512,6 +1512,7 @@ private fun SignedInApp(
                             onOpenItem = { shell.pushMissionItem(it) },
                             onOpenSection = { shell.openProjectSection(projectVM.projectID, it.wire) },
                             showsActions = true,
+                            actionsScope = sessionScope,
                         )
                     }
                     composable(
