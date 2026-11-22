@@ -562,6 +562,37 @@ class ItemDetailViewModel(
         }
     }
 
+    /// Sends the boxes ticked on a multi-select question as one answer: on
+    /// the follow-up [comment] that asks it, or on the item's own question
+    /// when [comment] is `null`. Queued through the outbox like a tap, with
+    /// the labels as the body (what the journal itself stores for an answer
+    /// with none), so one sent offline lands when the connection is back.
+    /// The labels go in the order the question offers them. The same guards
+    /// as a tap: ignored while the item is closed, for a question that is
+    /// not multi-select, for nothing ticked or a label not offered, and when
+    /// exactly these labels are already the answer (queued or landed).
+    suspend fun sendSelection(comment: TrackerComment?, labels: Collection<String>) {
+        tapMutex.withLock {
+            val current = _item.value ?: return
+            if (current.state != ItemState.OPEN) return
+            val asking = comment?.let { c ->
+                runCatching { store.comments(itemID) }.getOrNull()?.firstOrNull { it.id == c.id } ?: c
+            }
+            val offered = asking?.actions ?: current.actions
+            val multiSelect = asking?.multiSelect ?: current.multiSelect
+            if (!multiSelect || labels.isEmpty() || !offered.containsAll(labels)) return
+            val ordered = offered.filter { it in labels }
+            val queued = runCatching { store.itemOutboxRows(itemID) }.getOrElse { _pendingComments.value }
+            val pending = if (asking != null) pendingSelections(queued)[asking.id] else pendingItemSelection(queued)
+            val answer = pending ?: asking?.answeredLabels ?: current.answeredLabels
+            if (answer.toSet() == ordered.toSet()) return
+            sync.enqueueComment(
+                itemID, UUID.randomUUID().toString(), ordered.joinToString(", "), emptyList(),
+                replyTo = asking?.id, selected = ordered,
+            )
+        }
+    }
+
     /// Sends a recorded voice note together with whatever the composer
     /// holds, as ONE comment: the draft as its body, the recording
     /// (`voice-note.m4a`, `audio/mp4`) as the first attachment, then the
@@ -1131,6 +1162,27 @@ class ItemDetailViewModel(
                 put(replyTo, action)
             }
         }
+
+        /// The multi-select answers still in the outbox, as asking-comment id
+        /// → every label ticked (the latest wins). Like [pendingTaps], the
+        /// thread draws these as chosen straight away; a refused one is not
+        /// an answer.
+        fun pendingSelections(pending: List<ItemOutboxEntity>): Map<String, List<String>> = buildMap {
+            for (row in pending) {
+                if (row.isRejected) continue
+                val payload = runCatching { MatronJson.decodeFromString(ItemsSync.CommentPayload.serializer(), row.payloadJson) }.getOrNull() ?: continue
+                val selected = payload.selected?.takeIf { it.isNotEmpty() } ?: continue
+                val replyTo = payload.replyTo ?: continue
+                put(replyTo, selected)
+            }
+        }
+
+        /// The latest multi-select answer to the item's own question still in
+        /// the outbox (a row with `selected` and no `replyTo`), or `null`.
+        fun pendingItemSelection(pending: List<ItemOutboxEntity>): List<String>? = pending.filterNot { it.isRejected }.mapNotNull { row ->
+            val payload = runCatching { MatronJson.decodeFromString(ItemsSync.CommentPayload.serializer(), row.payloadJson) }.getOrNull()
+            payload?.selected?.takeIf { it.isNotEmpty() && payload.replyTo == null }
+        }.lastOrNull()
 
         /// The cancelled replies an edit still in the outbox stands in for: the
         /// thread leaves them out already, as it will once the edit lands.

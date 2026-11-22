@@ -144,7 +144,9 @@ interface ItemsProviding {
     /// [action] is a tap on a one-tap answer button; with [replyTo] (the id
     /// of the comment that offered it) the tap answers that comment's
     /// buttons, without it the item's own. [replaces] names the user's own
-    /// cancelled reply this one is the edited version of.
+    /// cancelled reply this one is the edited version of. [selected] is an
+    /// answer to a multi-select question (every label ticked, never with
+    /// [action]); [replyTo] works for it as for a tap.
     suspend fun commentItem(
         id: String,
         body: String,
@@ -153,6 +155,7 @@ interface ItemsProviding {
         action: String? = null,
         replyTo: String? = null,
         replaces: String? = null,
+        selected: List<String>? = null,
     ): ItemCommentResult
     suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem
     suspend fun reopenItem(id: String, comment: String?): TrackerItem
