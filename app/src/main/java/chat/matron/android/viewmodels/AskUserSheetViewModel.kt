@@ -53,7 +53,9 @@ class AskUserSheetViewModel(
     /// suspended does NOT revoke the in-flight answer. Dismissal-without-Send is
     /// handled by the view layer.
     suspend fun send() {
-        if (isExpired || _isSending.value || hasSent) return
+        // Not while an edit holds the message, or is on its way to: Send now
+        // would deliver the original the edit is replacing.
+        if (isExpired || _isSending.value || hasSent || _isEditing.value || _isSendingEdit.value) return
         _isSending.value = true
         try {
             when (event.replyChannel) {
@@ -76,6 +78,98 @@ class AskUserSheetViewModel(
             _error.value = error.message ?: error.toString()
         } finally {
             _isSending.value = false
+        }
+    }
+
+    // MARK: Editing a queued message
+
+    /// The editor's text while a queued message is being edited.
+    var editText: String = ""
+
+    /// The message is held on the bridge's queue and the editor is open.
+    private val _isEditing = MutableStateFlow(false)
+    val isEditing: StateFlow<Boolean> = _isEditing.asStateFlow()
+
+    /// An Edit, Save or Cancel edit is on its way to the journal.
+    private val _isSendingEdit = MutableStateFlow(false)
+    val isSendingEdit: StateFlow<Boolean> = _isSendingEdit.asStateFlow()
+
+    private val _editError = MutableStateFlow<String?>(null)
+    val editError: StateFlow<String?> = _editError.asStateFlow()
+
+    /// Whether this card offers Edit at all ([AskUserEvent.queuedEdit]).
+    val offersEdit: Boolean get() = event.queuedEdit != null && !hasSent && !isExpired
+
+    /// How long the bridge holds the message before it goes as it was.
+    val holdMinutes: Int get() = maxOf(1, (event.queuedEdit?.holdSeconds ?: 600) / 60)
+
+    /// Save is pointless on an empty editor: the bridge refuses an empty edit.
+    val canSaveEdit: Boolean get() = editText.isNotBlank()
+
+    /// Edit: hold the message on the bridge's queue, then open the editor
+    /// with its text. The editor only opens once the hold has reached the
+    /// journal, so an edit never runs while the message can still go out.
+    suspend fun beginEdit() {
+        val edit = event.queuedEdit ?: return
+        if (_isEditing.value || _isSendingEdit.value || hasSent || _isSending.value) return
+        _isSendingEdit.value = true
+        try {
+            timeline.sendQueuedEdit(AskUserEvent.QueuedEdit.HOLD_CHOICE, null, promptEventID)
+            editText = edit.text
+            _editError.value = null
+            _isEditing.value = true
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            _editError.value = "Couldn't hold the message for editing. ${error.message ?: error}"
+        } finally {
+            _isSendingEdit.value = false
+        }
+    }
+
+    /// Save: the edited text takes the message's place in the queue (or goes
+    /// at once if the agent finished its turn meanwhile). Unchanged text just
+    /// releases the hold.
+    suspend fun saveEdit() {
+        if (!_isEditing.value || _isSendingEdit.value || hasSent) return
+        val text = editText.trim()
+        if (text.isEmpty()) return
+        if (text == event.queuedEdit?.text?.trim()) {
+            cancelEdit()
+            return
+        }
+        _isSendingEdit.value = true
+        try {
+            timeline.sendQueuedEdit(AskUserEvent.QueuedEdit.SAVE_CHOICE, text, promptEventID)
+            hasSent = true
+            _isEditing.value = false
+            _editError.value = null
+            onClose()
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            _editError.value = "Couldn't save the edit. ${error.message ?: error}"
+        } finally {
+            _isSendingEdit.value = false
+        }
+    }
+
+    /// Cancel edit: release the hold; the message keeps its original text.
+    /// The editor closes either way: a release that doesn't reach the bridge
+    /// still ends when the hold times out.
+    suspend fun cancelEdit() {
+        if (!_isEditing.value || _isSendingEdit.value) return
+        _isSendingEdit.value = true
+        _isEditing.value = false
+        try {
+            timeline.sendQueuedEdit(AskUserEvent.QueuedEdit.CANCEL_CHOICE, null, promptEventID)
+            _editError.value = null
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            _editError.value = "Couldn't release the message. It goes with its original text within $holdMinutes minutes."
+        } finally {
+            _isSendingEdit.value = false
         }
     }
 
