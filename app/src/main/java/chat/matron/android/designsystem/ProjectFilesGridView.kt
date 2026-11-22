@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -129,7 +130,9 @@ fun ProjectFilesGridView(
     images: Map<String, Any>,
     now: Instant,
     hasMore: Boolean,
-    onOpenFile: (ProjectFile) -> Unit,
+    /// A tile was tapped: the file, and the picture the tile shows (null
+    /// while it hasn't loaded), so the viewer can open on it at once.
+    onOpenFile: (ProjectFile, Any?) -> Unit,
     onLoadMore: () -> Unit,
     modifier: Modifier = Modifier,
     /// Bumped by each reload of the first page, so the end asks again.
@@ -157,10 +160,13 @@ fun ProjectFilesGridView(
             items(files, key = { it.id }) { file ->
                 // A tile loads its picture while it is on screen and lets go of
                 // it when it scrolls away; the host's cache bounds what is kept.
-                val image by produceState(images[file.blobID], file.blobID, loadImage) {
-                    if (value == null && file.isImage && loadImage != null) value = loadImage(file.blobID)
+                // Keyed on the file alone: the host's loader is a new lambda
+                // on each recomposition, and a load must not restart with it.
+                val load by rememberUpdatedState(loadImage)
+                val image by produceState(images[file.blobID], file.blobID) {
+                    if (value == null && file.isImage) load?.let { value = it(file.blobID) }
                 }
-                ProjectFileTile(file, image, now, onOpen = { onOpenFile(file) })
+                ProjectFileTile(file, image, now, onOpen = { onOpenFile(file, image) })
             }
             if (hasMore && pagingFailed) {
                 item(key = "retry:${files.size}", span = { GridItemSpan(maxLineSpan) }) {
