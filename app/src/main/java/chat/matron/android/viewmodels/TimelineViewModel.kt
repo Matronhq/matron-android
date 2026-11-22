@@ -460,7 +460,8 @@ class TimelineViewModel(
                 // An answer a refresh overtook says nothing, not even whether
                 // the journal has the list.
                 if (epoch == refreshEpoch) _state.update { it.copy(projectsSupported = true) }
-                if (epoch == refreshEpoch && generation == projectsGeneration) {
+                // A visit that read (and maybe paged) the list meanwhile keeps it.
+                if (epoch == refreshEpoch && generation == projectsGeneration && TimelinePlace.Projects !in fresh) {
                     _state.update { it.copy(allProjects = list, pagingFailed = it.pagingFailed - TimelinePlace.Projects, listPages = it.listPages + (TimelinePlace.Projects to ((it.listPages[TimelinePlace.Projects] ?: 0) + 1))) }
                     fresh += TimelinePlace.Projects
                 }
