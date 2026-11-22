@@ -448,9 +448,12 @@ fun ChatHeaderTitle(
     onOpenProject: ((String) -> Unit)?,
 ) {
     val openMission = onOpenMission
+    // The title opens the mission the line names, once the line is read,
+    // so the two never disagree; before that, the cached mission.
+    val titleMission = missionLine?.missionID ?: missionID
     Column(
-        modifier = if (missionID != null && openMission != null) {
-            Modifier.clickable(onClickLabel = "Open this conversation's mission") { openMission(missionID) }
+        modifier = if (titleMission != null && openMission != null) {
+            Modifier.clickable(onClickLabel = "Open this conversation's mission") { openMission(titleMission) }
         } else {
             Modifier
         },
