@@ -20,6 +20,8 @@ import chat.matron.android.models.MissionState
 import chat.matron.android.models.Project
 import chat.matron.android.models.ProjectDetail
 import chat.matron.android.models.ProjectFilesPage
+import chat.matron.android.models.ProjectFile
+import chat.matron.android.models.ProjectFileSource
 import chat.matron.android.models.ProjectMilestone
 import chat.matron.android.models.TimelineHistoryWeek
 import chat.matron.android.models.FinishedProject
@@ -187,6 +189,15 @@ object ProjectsFixtures {
             closedAt = now.minusSeconds(86_400 * 7), createdAt = now),
     )
 
+    val docsFiles = listOf(
+        ProjectFile("bl_docs", "docs-home.png", "image/png", 245_760, missionNum = 20, source = ProjectFileSource.Chat("c20", 12), postedAt = today.minusSeconds(3 * 3600)),
+        ProjectFile("bl_help", "search-results.png", "image/png", 198_000, missionNum = 20, source = ProjectFileSource.Item(41), postedAt = daysAgo(1)),
+        ProjectFile("bl_tour", "docs-tour.mp4", "video/mp4", 8_912_896, missionNum = 21, source = ProjectFileSource.Chat("c21", 30), postedAt = daysAgo(2)),
+        ProjectFile("bl_brief", "style-guide.pdf", "application/pdf", 1_258_291, missionNum = 18, source = ProjectFileSource.Item(33), postedAt = daysAgo(5)),
+        ProjectFile("bl_nav", "navigation.png", "image/png", 120_000, missionNum = 20, source = ProjectFileSource.Chat("c20", 7), postedAt = daysAgo(9)),
+        ProjectFile("bl_zip", "api-reference.zip", "application/zip", 3_000_000, missionNum = 21, source = ProjectFileSource.Item(36), postedAt = daysAgo(12)),
+    )
+
     /// The projects routes, answering from the fixtures and recording writes.
     open class Projects : ProjectsProviding {
         val writes = mutableListOf<String>()
@@ -195,7 +206,7 @@ object ProjectsFixtures {
             Project(id = app.id, num = app.num, title = app.title), Project(id = pricing.id, num = pricing.num, title = pricing.title),
         )
         override suspend fun project(id: String) = ProjectDetail(Project(id = docs.id, num = docs.num, title = docs.title), docsMissions)
-        override suspend fun projectFiles(id: String, before: String?, limit: Int?) = ProjectFilesPage()
+        override suspend fun projectFiles(id: String, before: String?, limit: Int?) = ProjectFilesPage(docsFiles.size, docsFiles, null)
         override suspend fun mergeProject(id: String, into: String) { writes += "merge" }
         override suspend fun renameProject(id: String, title: String) { writes += "rename" }
         override suspend fun closeProject(id: String, summary: String) { writes += "close" }

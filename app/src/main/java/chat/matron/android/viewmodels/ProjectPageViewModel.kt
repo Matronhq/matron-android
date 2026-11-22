@@ -5,6 +5,7 @@ import chat.matron.android.journal.ProjectsProviding
 import chat.matron.android.journal.TimelineProviding
 import chat.matron.android.models.Mission
 import chat.matron.android.models.MissionState
+import chat.matron.android.models.ProjectFilesPage
 import chat.matron.android.models.TimelineHistoryWeek
 import chat.matron.android.models.TimelineProjectPage
 import java.time.Instant
@@ -39,6 +40,18 @@ data class ProjectPageState(
     /// by when they closed; null until read.
     val openMissions: List<Mission>? = null,
     val closedMissions: List<Mission> = emptyList(),
+    /// The project's files and pictures, newest first, as far as they have
+    /// been paged; null until read.
+    val files: ProjectFilesPage? = null,
+    /// Bumped each time a page of the files lands: the grid's end asks for
+    /// the next page again even when the list kept its length.
+    val filesVersion: Int = 0,
+    /// Bumped by each read of the files' first page (a refresh), not by
+    /// older pages: tiles ask again for pictures that failed on a refresh,
+    /// and paging never cancels a picture still loading.
+    val filesReloads: Int = 0,
+    /// The last next-page read of the files failed: the grid's end offers Retry.
+    val filesPagingFailed: Boolean = false,
     val error: String? = null,
 )
 
@@ -71,6 +84,12 @@ class ProjectPageViewModel(
     private var historyAsked = false
     private var missionsAsked = false
     private var missionsGeneration = 0
+    private var filesAsked = false
+    private var filesGeneration = 0
+    private var isReloadingFiles = false
+    /// The files list a next-page read is in flight for: a read of a list
+    /// a reload has since replaced does not hold up the new list's paging.
+    private var loadingMoreFilesGeneration: Int? = null
 
     /// Reads the page: on arrival, on coming back, and for "Try again".
     suspend fun refreshPage() {
@@ -102,6 +121,7 @@ class ProjectPageViewModel(
         if (_state.value.isMissing) return
         if (historyAsked) loadHistory()
         if (missionsAsked) loadMissions()
+        if (filesAsked) loadFiles()
     }
 
     /// Reads the history's first page unless it has loaded (or is being read).
@@ -179,6 +199,59 @@ class ProjectPageViewModel(
             throw cancel
         } catch (error: Throwable) {
             if (generation == missionsGeneration) _state.update { it.copy(error = error.message) }
+        }
+    }
+
+    /// Reads the files' first page unless they have loaded (or are being
+    /// read): the Files section coming on screen again keeps what was paged.
+    suspend fun loadFilesIfNeeded() {
+        if (_state.value.files != null || isReloadingFiles) return
+        loadFiles()
+    }
+
+    /// Reads the first page of the project's files, replacing what was loaded.
+    suspend fun loadFiles() {
+        filesAsked = true
+        val generation = ++filesGeneration
+        // A next-page read of the list this replaces is dropped, and paging
+        // waits for this first page.
+        isReloadingFiles = true
+        try {
+            val page = projects.projectFiles(projectID)
+            if (generation == filesGeneration) _state.update { it.copy(files = page, filesVersion = it.filesVersion + 1, filesReloads = it.filesReloads + 1, filesPagingFailed = false) }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            // Said in an alert over the files on screen (before any, the
+            // screen offers Try again); the grid's end asks again from the
+            // list shown, so paging never stalls behind the failed reload.
+            if (generation == filesGeneration) _state.update { it.copy(error = error.message, filesVersion = it.filesVersion + 1, filesReloads = it.filesReloads + 1, filesPagingFailed = false) }
+        } finally {
+            if (generation == filesGeneration) isReloadingFiles = false
+        }
+    }
+
+    /// Reads the next (older) page of files while there is one. A failure
+    /// leaves Retry at the end of the grid.
+    suspend fun loadMoreFiles() {
+        val shown = _state.value.files ?: return
+        val before = shown.nextBefore ?: return
+        if (isReloadingFiles || loadingMoreFilesGeneration == filesGeneration) return
+        val generation = filesGeneration
+        loadingMoreFilesGeneration = generation
+        _state.update { it.copy(filesPagingFailed = false) }
+        try {
+            val loaded = projects.projectFiles(projectID, before = before)
+            // A cursor that does not move on would read the same page forever.
+            val page = if (loaded.nextBefore == before) loaded.copy(nextBefore = null) else loaded
+            if (generation == filesGeneration) _state.update { it.copy(files = shown.appending(page), filesVersion = it.filesVersion + 1) }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            // Said by the Retry at the grid's end, not in an alert.
+            if (generation == filesGeneration) _state.update { it.copy(filesPagingFailed = true) }
+        } finally {
+            if (loadingMoreFilesGeneration == generation) loadingMoreFilesGeneration = null
         }
     }
 

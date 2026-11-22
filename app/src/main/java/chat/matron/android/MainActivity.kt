@@ -99,6 +99,7 @@ import chat.matron.android.designsystem.TimelineListCopy
 import chat.matron.android.features.projects.ProjectScreen
 import chat.matron.android.features.projects.ProjectSectionScreen
 import chat.matron.android.designsystem.ProjectSection
+import chat.matron.android.models.ProjectFileSource
 import chat.matron.android.features.missions.missionOpenConversationOutcome
 import chat.matron.android.features.chat.ChatScreen
 import chat.matron.android.features.chat.ChatVMCache
@@ -1519,6 +1520,22 @@ private fun SignedInApp(
                             onBack = { nav.popBackStack() },
                             onOpenMission = { shell.pushMission(it) },
                             onOpenMilestone = { onOpenConversationFromMissions(it.milestone.convoID); jumpToMilestone(it.milestone.convoID, it.milestone.seq) },
+                            onOpenFileSource = { source ->
+                                when (source) {
+                                    is ProjectFileSource.Chat -> {
+                                        onOpenConversationFromMissions(source.convoID)
+                                        jumpToMilestone(source.convoID, source.seq)
+                                        null
+                                    }
+                                    // The item by its number; when it can't be opened, the
+                                    // resolver's words say why.
+                                    is ProjectFileSource.Item -> when (val outcome = deps.trackerItemLinkOutcome(source.num, session)) {
+                                        is TrackerItemLinkOutcome.Open -> { shell.pushMissionItem(outcome.itemID); null }
+                                        is TrackerItemLinkOutcome.Explain -> outcome.message
+                                        else -> null
+                                    }
+                                }
+                            },
                         )
                     }
                     // The lists below the weeks, pushed from the week page.

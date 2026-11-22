@@ -98,6 +98,24 @@ class ProjectPageScreenTest {
     }
 
     @Test
+    fun filesSection() {
+        for (appearance in listOf(MatronAppearance.Light, MatronAppearance.Dark)) {
+            show(appearance) {
+                val viewModel = remember { vm() }
+                ProjectSectionScreen(viewModel, ProjectSection.FILES, ProjectsFixtures.Media(), serverURL, onBack = {}, onOpenMission = {}, onOpenMilestone = {})
+            }.use {
+                node(By.desc("File style-guide.pdf, #33 · 5d"))
+                screenshot("project-files-${appearance.name.lowercase()}")
+                if (appearance == MatronAppearance.Light) {
+                    node(By.descStartsWith("Image search-results.png")).click()
+                    device.wait(Until.hasObject(By.textContains("2")), timeout)
+                    screenshot("project-files-viewer")
+                }
+            }
+        }
+    }
+
+    @Test
     fun missionPageNamesItsProject() {
         val mission = ProjectsFixtures.docsMissions.first().copy(body = "Make every guide and API page searchable from the header.")
         show(MatronAppearance.Light) {
