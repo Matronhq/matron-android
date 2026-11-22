@@ -21,7 +21,7 @@ class MicrophoneCatalog(context: Context) {
     /// Android 9, where a recorder can't be pointed at an input.
     fun list(): List<Microphone> {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return emptyList()
-        val devices = inputs()
+        val devices = inputs().filter { offered(it.type, Build.VERSION.SDK_INT) }
         return devices.mapNotNull(::microphone).distinct().sortedBy { if (it.id == BUILT_IN_ID) 0 else 1 }
     }
 
@@ -29,7 +29,7 @@ class MicrophoneCatalog(context: Context) {
     /// note then records from the system's choice).
     fun device(id: String?): AudioDeviceInfo? {
         if (id == null) return null
-        return inputs().firstOrNull { microphone(it)?.id == id }
+        return inputs().firstOrNull { offered(it.type, Build.VERSION.SDK_INT) && microphone(it)?.id == id }
     }
 
     private fun inputs(): List<AudioDeviceInfo> =
@@ -77,6 +77,14 @@ class MicrophoneCatalog(context: Context) {
             Kind.USB -> product.ifBlank { "USB microphone" }
             Kind.BLUETOOTH -> product.ifBlank { "Bluetooth headset" }
         }
+
+        /// Whether an input of [type] is offered on Android [sdk]. A Bluetooth
+        /// headset's microphone needs a call-audio link the app switches on;
+        /// before Android 12 that link is the legacy SCO one, which comes up
+        /// asynchronously behind a broadcast, so Bluetooth is offered from
+        /// Android 12 on only (Android itself may still route to it).
+        internal fun offered(type: Int, sdk: Int): Boolean =
+            kindOf(type) != Kind.BLUETOOTH || sdk >= Build.VERSION_CODES.S
 
         /// Bluetooth inputs only reach a recorder over a call-audio link that
         /// has to be switched on first (SCO, or LE Audio's equivalent).

@@ -48,6 +48,11 @@ class MediaRecorderAudioRecording(
     @Volatile
     private var started = false
 
+    /// Held by a reroute while it runs and by [stop] while it ends the
+    /// capture: a reroute never touches a released recorder, and never
+    /// switches the Bluetooth link back on after [stop] switched it off.
+    private val routeLock = Any()
+
     /// Mid-note reroutes run here, one at a time. Moving a running capture
     /// waits on the audio system, which can take seconds for an input that
     /// is slow to come up; the main thread must not wait with it.
@@ -86,8 +91,9 @@ class MediaRecorderAudioRecording(
         // uploaded. release() runs regardless so the recorder is never
         // leaked either way.
         setOnMicrophoneChanged(null)
-        // A reroute still queued must not touch the released recorder.
-        started = false
+        // A reroute still queued must not touch the released recorder; one
+        // under way finishes before the capture ends.
+        synchronized(routeLock) { started = false }
         rerouter.shutdown()
         val stopped = runCatching { recorder.stop() }.isSuccess
         runCatching { recorder.release() }
@@ -114,7 +120,13 @@ class MediaRecorderAudioRecording(
         // reroutes the capture there and then, in the same file. The routing
         // listener reports when the new input has taken over.
         if (!started) return
-        runCatching { rerouter.execute { if (started && preferredDevice === device) runCatching { applyPreferredDevice() } } }
+        runCatching {
+            rerouter.execute {
+                synchronized(routeLock) {
+                    if (started && preferredDevice === device) runCatching { applyPreferredDevice() }
+                }
+            }
+        }
     }
 
     override fun setOnMicrophoneChanged(listener: (() -> Unit)?) {
@@ -138,37 +150,24 @@ class MediaRecorderAudioRecording(
         recorder.setPreferredDevice(device)
     }
 
-    /// Switches on the call-audio link a Bluetooth headset's microphone needs.
+    /// Switches on the call-audio link a Bluetooth headset's microphone
+    /// needs (Android 12+; the catalogue offers Bluetooth inputs only there).
+    /// The audio system brings the link up and moves the capture once it is
+    /// connected; the routing listener then names the headset in the bar.
     private fun holdCommunicationLink(input: AudioDeviceInfo) {
         val manager = audioManager ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // The link is chosen by its output side: the same headset.
-            val output = manager.availableCommunicationDevices.firstOrNull {
-                it.type == input.type && it.address == input.address
-            } ?: manager.availableCommunicationDevices.firstOrNull { it.type == input.type }
-            if (output != null && manager.setCommunicationDevice(output)) holdsCommunicationLink = true
-        } else {
-            @Suppress("DEPRECATION")
-            manager.startBluetoothSco()
-            @Suppress("DEPRECATION")
-            manager.isBluetoothScoOn = true
-            holdsCommunicationLink = true
-        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        // The link is chosen by its output side: the same headset.
+        val output = manager.availableCommunicationDevices.firstOrNull {
+            it.type == input.type && it.address == input.address
+        } ?: manager.availableCommunicationDevices.firstOrNull { it.type == input.type }
+        if (output != null && manager.setCommunicationDevice(output)) holdsCommunicationLink = true
     }
 
     private fun releaseCommunicationLink() {
         if (!holdsCommunicationLink) return
         holdsCommunicationLink = false
         val manager = audioManager ?: return
-        runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                manager.clearCommunicationDevice()
-            } else {
-                @Suppress("DEPRECATION")
-                manager.isBluetoothScoOn = false
-                @Suppress("DEPRECATION")
-                manager.stopBluetoothSco()
-            }
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) runCatching { manager.clearCommunicationDevice() }
     }
 }

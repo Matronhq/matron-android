@@ -44,4 +44,12 @@ class MicrophoneCatalogTest {
         assertEquals("7:x", microphoneMenuSelection(phone, "7:x"))
         assertNull(microphoneMenuSelection(null, null))
     }
+
+    @Test
+    fun bluetooth_isOfferedFromAndroid12Only() {
+        assertEquals(false, MicrophoneCatalog.offered(AudioDeviceInfo.TYPE_BLUETOOTH_SCO, 30))
+        assertEquals(true, MicrophoneCatalog.offered(AudioDeviceInfo.TYPE_BLUETOOTH_SCO, 31))
+        assertEquals(true, MicrophoneCatalog.offered(AudioDeviceInfo.TYPE_USB_HEADSET, 28))
+        assertEquals(true, MicrophoneCatalog.offered(AudioDeviceInfo.TYPE_BUILTIN_MIC, 28))
+    }
 }
