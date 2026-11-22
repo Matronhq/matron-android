@@ -148,6 +148,15 @@ object StepUpTap {
         synchronized(tapKeys) { tapKeys.remove(tapKey(itemID, replyTo, label)) }
     }
 
+    /// Whether the journal refused the tap outright, so it cannot have
+    /// landed: a 4xx, other than a timeout or a throttle.
+    internal fun refusedOutright(e: Throwable): Boolean = when (e) {
+        JournalApiError.ApprovalRequired, is JournalApiError.ApprovalInvalid, JournalApiError.Conflict,
+        JournalApiError.Forbidden, JournalApiError.NotFound, JournalApiError.Unauthenticated -> true
+        is JournalApiError.Http -> e.status in 400..499 && e.status != 408 && e.status != 429
+        else -> false
+    }
+
     const val MAY_HAVE_BEEN_SENT = "The connection dropped after your answer went out, so it may have been sent. Refreshing the item."
 
     /// Signs and posts the tap when it needs a signature.
@@ -216,9 +225,10 @@ object StepUpTap {
                 // stays for the next try.
                 throw e
             } catch (e: Throwable) {
-                // The journal answered, and refused: nothing landed, so the
-                // next try is a new tap with a key of its own.
-                answered(item.id, comment?.id, label)
+                // A definite refusal: nothing landed, so the next try is a new
+                // tap with a key of its own. A server error or a throttle says
+                // nothing about whether it landed: the key stays.
+                if (refusedOutright(e)) answered(item.id, comment?.id, label)
                 throw e
             }
             answered(item.id, comment?.id, label)
@@ -241,7 +251,15 @@ object StepUpTap {
             }
             return Outcome.Failed(e.message ?: e.toString())
         } finally {
-            if (!landed) runCatching { sync.refreshItem(item.id) }
+            if (!landed) {
+                try {
+                    sync.refreshItem(item.id)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    // A refetch that fails changes nothing here.
+                }
+            }
         }
     }
 }
