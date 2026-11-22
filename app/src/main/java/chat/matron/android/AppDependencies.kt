@@ -936,6 +936,11 @@ class AppDependencies(
         }
         runCatching { search?.wipe() }
             .onFailure { MatronDebug.breadcrumb("freshLogin: search.wipe failed: $it") }
+        // Cached media too: a sign-out whose teardown never finished (the
+        // process died first) would otherwise leave the previous account's
+        // images and files on disk.
+        runCatching { withContext(Dispatchers.IO) { MediaDiskCache.removeAllOnDisk(mediaCacheRoot) } }
+            .onFailure { MatronDebug.breadcrumb("freshLogin: media cache wipe failed: $it") }
     }
 
     // MARK: - Test seams (mirror AppDependenciesTests.swift)

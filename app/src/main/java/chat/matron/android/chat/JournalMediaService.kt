@@ -2,6 +2,7 @@ package chat.matron.android.chat
 
 import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalApiError
+import chat.matron.android.models.MatronDebug
 import kotlinx.coroutines.CancellationException
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -32,16 +33,24 @@ class JournalMediaService(
     override suspend fun fetchOutcome(url: String): MediaFetchOutcome {
         val blobRef = blobRef(url, api.serverURL) ?: return MediaFetchOutcome.Failure
         cache?.data(blobRef)?.let { return MediaFetchOutcome.Data(it) }
-        return try {
-            val bytes = api.mediaData(blobRef)
-            cache?.store(bytes, blobRef)
-            MediaFetchOutcome.Data(bytes)
+        val bytes = try {
+            api.mediaData(blobRef)
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            if (error is JournalApiError.NotFound) MediaFetchOutcome.NotFound
+            return if (error is JournalApiError.NotFound) MediaFetchOutcome.NotFound
             else MediaFetchOutcome.Failure
         }
+        // The blob is already here: a cache that can't take it costs only a
+        // later re-fetch, never this fetch.
+        try {
+            cache?.store(bytes, blobRef)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Exception) {
+            MatronDebug.breadcrumb("JournalMediaService: media cache write failed: $error")
+        }
+        return MediaFetchOutcome.Data(bytes)
     }
 
     companion object {

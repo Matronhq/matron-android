@@ -12,6 +12,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.File
 
 /// Ported from matron-apple's `JournalMediaServiceTests`. The Apple suite stubs
 /// `URLProtocol` (host-agnostic); here `MockWebServer` backs the [JournalApi],
@@ -104,5 +105,14 @@ class JournalMediaServiceTest {
         assertNull(cache.data("b1"))
         assertEquals("LATER", cached.image(url)?.let { String(it) })
         assertEquals(2, server.requestCount)
+    }
+
+    /// A cache that can't take the blob never fails the fetch itself.
+    @Test fun aCacheThatCannotWriteStillReturnsTheBlob() = runBlocking {
+        val blocked = temp.newFile("not-a-directory")
+        val cached = JournalMediaService(JournalApi(server.url("/")), MediaDiskCache(File(blocked, "media")))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("PNGDATA"))
+        val outcome = cached.fetchOutcome(server.url("/media/b1").toString())
+        assertEquals("PNGDATA", String((outcome as MediaFetchOutcome.Data).bytes))
     }
 }
