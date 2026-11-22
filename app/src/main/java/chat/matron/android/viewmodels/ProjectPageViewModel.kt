@@ -70,7 +70,7 @@ class ProjectPageViewModel(
     private var pageGeneration = 0
     private var historyGeneration = 0
     private var historyNextBefore: String? = null
-    private var isLoadingMoreHistory = false
+    private var loadingMoreHistoryGeneration: Int? = null
     private var isReloadingHistory = false
     /// The sections the reader opened: a refresh (or Try again) reads them
     /// again even when their first read failed.
@@ -150,9 +150,11 @@ class ProjectPageViewModel(
 
     suspend fun loadMoreHistory() {
         val before = historyNextBefore ?: return
-        if (isLoadingMoreHistory || isReloadingHistory) return
-        isLoadingMoreHistory = true
+        // A read of a list a reload has since replaced does not hold up the
+        // new list's paging.
+        if (isReloadingHistory || loadingMoreHistoryGeneration == historyGeneration) return
         val generation = historyGeneration
+        loadingMoreHistoryGeneration = generation
         _state.update { it.copy(historyPagingFailed = false) }
         try {
             val loaded = timeline.timelineProjectHistory(projectID, before = before)
@@ -167,9 +169,10 @@ class ProjectPageViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            if (generation == historyGeneration) _state.update { it.copy(error = error.message, historyPagingFailed = true) }
+            // Said by the Retry at the end of the list, not in an alert.
+            if (generation == historyGeneration) _state.update { it.copy(historyPagingFailed = true) }
         } finally {
-            isLoadingMoreHistory = false
+            if (loadingMoreHistoryGeneration == generation) loadingMoreHistoryGeneration = null
         }
     }
 
