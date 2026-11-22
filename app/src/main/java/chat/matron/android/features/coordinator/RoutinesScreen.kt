@@ -115,6 +115,7 @@ fun RoutineEditorScreen(
 ) {
     val routines by viewModel.routines.collectAsStateWithLifecycle()
     val loadError by viewModel.loadError.collectAsStateWithLifecycle()
+    val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val routine = routineID?.let { id -> routines?.firstOrNull { it.id == id } }
     val scope = rememberCoroutineScope()
     // Opened without the list (restored after the process was killed, say):
@@ -139,7 +140,7 @@ fun RoutineEditorScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
                 ) {
                     val error = loadError
-                    if (error == null) {
+                    if (error == null || isLoading) {
                         CircularProgressIndicator()
                     } else {
                         Text(

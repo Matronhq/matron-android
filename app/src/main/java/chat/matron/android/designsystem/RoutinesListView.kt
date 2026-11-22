@@ -72,7 +72,8 @@ enum class RoutinesListState { UNSUPPORTED, LOADING, LOAD_FAILED, EMPTY, POPULAT
 
 fun routinesListState(model: RoutinesListModel): RoutinesListState = when {
     !model.isSupported -> RoutinesListState.UNSUPPORTED
-    model.routines == null && model.loadError != null -> RoutinesListState.LOAD_FAILED
+    // A retry after a failed first load shows the spinner, not the old error.
+    model.routines == null && model.loadError != null && !model.isLoading -> RoutinesListState.LOAD_FAILED
     model.routines == null -> RoutinesListState.LOADING
     model.routines.isEmpty() -> RoutinesListState.EMPTY
     else -> RoutinesListState.POPULATED

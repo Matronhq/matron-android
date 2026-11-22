@@ -25,6 +25,8 @@ class RoutinesListViewTest {
         assertEquals(RoutinesListState.UNSUPPORTED, routinesListState(RoutinesListModel(null, isSupported = false, isLoading = false)))
         assertEquals(RoutinesListState.LOADING, routinesListState(RoutinesListModel(null, isSupported = true, isLoading = true)))
         assertEquals(RoutinesListState.LOAD_FAILED, routinesListState(RoutinesListModel(null, true, false, loadError = "x")))
+        // Try again after that failure: loading, not the old error.
+        assertEquals(RoutinesListState.LOADING, routinesListState(RoutinesListModel(null, true, true, loadError = "x")))
         assertEquals(RoutinesListState.EMPTY, routinesListState(RoutinesListModel(emptyList(), true, false)))
         assertEquals(RoutinesListState.POPULATED, routinesListState(RoutinesListModel(listOf(routine()), true, false, loadError = "x")))
     }
