@@ -102,7 +102,7 @@ fun ProjectScreen(
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     LaunchedEffect(viewModel) { viewModel.refreshPage() }
-    val images = rememberTimelineImages(listOfNotNull(state.page?.media?.takeIf { !it.isVideo }?.blobID), media, serverURL)
+    val images = rememberTimelineImages(listOfNotNull(state.page?.media?.takeIf { !it.isVideo }?.blobID), media, serverURL, reload = state.pageLoads)
 
     ProjectScaffold(title = state.page?.let { "#${it.project.num}" } ?: "Project", onBack = onBack) {
         PullToRefreshBox(
@@ -152,14 +152,19 @@ fun ProjectSectionScreen(
         when (section) {
             ProjectSection.HISTORY -> viewModel.loadHistoryIfNeeded()
             ProjectSection.MISSIONS -> viewModel.loadMissions()
-            ProjectSection.FILES -> viewModel.loadFiles()
+            ProjectSection.FILES -> viewModel.loadFilesIfNeeded()
         }
     }
+<<<<<<< HEAD
     // The history's pictures (one per week at most) load with the list; the
     // Files grid loads its own, on screen, into a bounded cache.
     val pictures = state.history.mapNotNull { it.media }.filter { !it.isVideo }.map { it.blobID }.distinct()
     val images = rememberTimelineImages(pictures, media, serverURL)
     val thumbnails = remember(media, serverURL) { ThumbnailCache(media, serverURL) }
+=======
+    val pictures = state.history.mapNotNull { it.media }.filter { !it.isVideo }.map { it.blobID }
+    val images = rememberTimelineImages(pictures, media, serverURL, reload = state.historyVersion)
+>>>>>>> feat/projects-lists
     val title = ProjectFormat.sectionTitle(section)
     var gallery by remember { mutableStateOf<ImageGallery?>(null) }
     var sourceMessage by remember { mutableStateOf<String?>(null) }
