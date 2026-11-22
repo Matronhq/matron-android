@@ -8,7 +8,11 @@ import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.TrackerItem
 import chat.matron.android.models.TrackerLink
+import chat.matron.android.journal.approvals.SignedApproval
+import java.io.File
 import java.time.Instant
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
@@ -68,6 +72,18 @@ data class ItemDetail(val item: TrackerItem, val comments: List<TrackerComment>)
 data class ItemCommentResult(
     val item: TrackerItem,
     val comment: TrackerComment,
+    val link: String? = null,
+    val askId: String? = null,
+)
+
+/// A signed tap's answer: the item as it now stands and the tap's comment.
+/// [comment] is null for an answer on a consent request's item, which the
+/// journal applies to the request itself and records no comment for.
+/// [link] and [askId]: an Approve on an agent's invite ask answers with the
+/// invite link, this once, as an ordinary tap does ([ItemCommentResult]).
+data class ItemTapResult(
+    val item: TrackerItem,
+    val comment: TrackerComment?,
     val link: String? = null,
     val askId: String? = null,
 )
@@ -140,7 +156,8 @@ interface ItemsProviding {
     suspend fun updateItem(id: String, patch: ItemPatch): TrackerItem
     /// [action] is a tap on a one-tap answer button; with [replyTo] (the id
     /// of the comment that offered it) the tap answers that comment's
-    /// buttons, without it the item's own.
+    /// buttons, without it the item's own. [replaces] names the user's own
+    /// cancelled reply this one is the edited version of.
     suspend fun commentItem(
         id: String,
         body: String,
@@ -148,7 +165,21 @@ interface ItemsProviding {
         idempotencyKey: String?,
         action: String? = null,
         replyTo: String? = null,
+        replaces: String? = null,
     ): ItemCommentResult
+    /// A tap carrying the user's signed approval: a button on a step-up item
+    /// or follow-up question (an `item_tap` statement), or Approve on a
+    /// consent request aimed at a protected box (a `consent` statement). Sent at once, never
+    /// queued: a nonce lives five minutes and a signature must not wait on
+    /// disk. A provider that cannot carry an approval refuses the tap rather
+    /// than sending it unsigned.
+    suspend fun tapItem(
+        id: String,
+        action: String,
+        replyTo: String?,
+        approval: SignedApproval,
+        idempotencyKey: String,
+    ): ItemTapResult = throw JournalApiError.ApprovalRequired
     suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem
     suspend fun reopenItem(id: String, comment: String?): TrackerItem
     suspend fun rankItem(id: String, change: ItemRankChange): TrackerItem
@@ -156,4 +187,11 @@ interface ItemsProviding {
     /// item/comment attachment carries. [progress] is the composer's upload
     /// meter; the tracker's callers leave it null.
     suspend fun uploadMedia(data: ByteArray, contentType: String, progress: ((Double) -> Unit)? = null): String
+
+    /// Uploads [file] through `POST /media`, streaming it from disk so a large
+    /// attachment (up to [chat.matron.android.models.AttachmentLimits.MAX_BYTES])
+    /// is never held in memory whole. The default reads the file and forwards
+    /// to the byte upload, so fakes compile unchanged; [JournalApi] streams.
+    suspend fun uploadMedia(file: File, contentType: String, progress: ((Double) -> Unit)? = null): String =
+        uploadMedia(withContext(Dispatchers.IO) { file.readBytes() }, contentType, progress)
 }

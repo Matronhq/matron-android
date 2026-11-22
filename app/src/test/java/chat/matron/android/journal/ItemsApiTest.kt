@@ -89,7 +89,15 @@ class ItemsApiTest {
         server.enqueue(json(201, """{"item":$itemJSON,"comment":$commentJSON}"""))
         api().commentItem("it_1", "hi", emptyList(), idempotencyKey = "k4")
         val typed = parseJsonObjectOrNull(server.takeRequest().body.readUtf8())!!
-        assertNull(typed["action"]); assertNull(typed["reply_to"])
+        assertNull(typed["action"]); assertNull(typed["reply_to"]); assertNull(typed["replaces"])
+    }
+
+    @Test
+    fun commentItemSendsTheReplyAnEditReplaces() = runBlocking {
+        server.enqueue(json(201, """{"item":$itemJSON,"comment":$commentJSON}"""))
+        api().commentItem("it_1", "Use the green one", emptyList(), idempotencyKey = "k5", replaces = "ic_1")
+        val edit = parseJsonObjectOrNull(server.takeRequest().body.readUtf8())!!
+        assertEquals("ic_1", edit.stringOrNull("replaces"))
     }
 
     /// A refused comment hands its body's `error`, `message`, `reason` and

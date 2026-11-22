@@ -68,6 +68,19 @@ interface ItemsSyncing {
     /// closed. Landing the returned item first makes the local state honest
     /// whatever the refetch does.
     suspend fun applyItem(item: TrackerItem)
+
+    /// Writes a tap the journal has just taken, posted directly rather than
+    /// through the outbox (a signed step-up tap): the item, the tap's
+    /// comment, and the asking comment's choice, in one write, as a drained
+    /// outbox row lands. The refetch that follows can fail.
+    /// [link] and [askId] are an invite ask's one-time link, shown as a
+    /// drained tap's is.
+    suspend fun applyTapResult(
+        item: TrackerItem,
+        comment: chat.matron.android.models.TrackerComment?,
+        link: String? = null,
+        askId: String? = null,
+    ) = applyItem(item)
     /// [action] + [replyTo] make the comment a tap on one of the buttons the
     /// comment [replyTo] offers (see [ItemsProviding.commentItem]). Returns
     /// whether the outbox insert itself succeeded, like [enqueueCreate].
@@ -82,6 +95,9 @@ interface ItemsSyncing {
         attachments: List<TrackerAttachment>,
         action: String? = null,
         replyTo: String? = null,
+        /// The user's own cancelled reply this one is the edited version of:
+        /// the journal records it, and every app shows the edit in its place.
+        replaces: String? = null,
     ): Boolean
 
     /// Returns whether the outbox insert itself succeeded — `false` when the
@@ -385,6 +401,25 @@ class ItemsSync(
         run.join()
     }
 
+    override suspend fun applyTapResult(
+        item: TrackerItem,
+        comment: chat.matron.android.models.TrackerComment?,
+        link: String?,
+        askId: String?,
+    ) {
+        if (stopped) return
+        link?.let { onInviteLink?.invoke(it, askId) }
+        synchronized(lock) { localItemWrites[item.id] = (localItemWrites[item.id] ?: 0) + 1 }
+        try {
+            // No outbox row to remove: the tap never went through it.
+            store.commitOutboxResult(item, comment, deletingLocalID = "")
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            MatronDebug.breadcrumb("ItemsSync: applying a signed tap on ${item.id} failed: $error")
+        }
+    }
+
     override suspend fun applyItem(item: TrackerItem) {
         if (stopped) return
         // Claimed BEFORE the write, so a refetch response that lands in
@@ -428,6 +463,9 @@ class ItemsSync(
         /// taps existed).
         val action: String? = null,
         val replyTo: String? = null,
+        /// The cancelled reply this one is the edited version of (`replaces`
+        /// on the comment POST). On the first part of a reply only.
+        val replaces: String? = null,
     )
 
     /// Only the fields the apps-side create flow currently needs.
@@ -451,13 +489,14 @@ class ItemsSync(
         attachments: List<TrackerAttachment>,
         action: String?,
         replyTo: String?,
+        replaces: String?,
     ): Boolean {
         // An enqueue racing sign-out must not insert after the outbox wipe has
         // already run — `stop()` is called before the wipe, so this flag being
         // set means the outbox is either already cleared or about to be.
         if (stopped) return false
         val createdAt = System.currentTimeMillis()
-        val rows = commentParts(body, attachments, action, replyTo).mapIndexed { index, part ->
+        val rows = commentParts(body, attachments, action, replyTo, replaces).mapIndexed { index, part ->
             ItemOutboxEntity(
                 localID = partLocalID(localID, index), itemID = itemID, op = ItemOutboxEntity.OP_COMMENT,
                 payloadJson = MatronJson.encodeToString(CommentPayload.serializer(), part),
@@ -477,7 +516,7 @@ class ItemsSync(
         if (row.op == ItemOutboxEntity.OP_COMMENT && payload != null && payload.attachments.size > ATTACHMENTS_MAX) {
             // Queued before replies were split (or refused for its size): it
             // can only ever be refused again as it stands.
-            val parts = commentParts(payload.body, payload.attachments, payload.action, payload.replyTo).mapIndexed { index, part ->
+            val parts = commentParts(payload.body, payload.attachments, payload.action, payload.replyTo, payload.replaces).mapIndexed { index, part ->
                 row.copy(
                     localID = partLocalID(localID, index),
                     payloadJson = MatronJson.encodeToString(CommentPayload.serializer(), part),
@@ -622,6 +661,14 @@ class ItemsSync(
         // A lost or rejected session, not a permanently-bad request.
         JournalApiError.Unauthenticated, JournalApiError.BadCredentials, JournalApiError.Forbidden -> FailureDisposition.PAUSE
         JournalApiError.Conflict -> FailureDisposition.POISON
+        // A tap the journal will not take unsigned (the item became step-up,
+        // or the account got a key, after it was queued): refused for good,
+        // with the reason shown, so the person can tap again and sign. Never
+        // a pause: the rest of the outbox must not wait behind it.
+        JournalApiError.ApprovalRequired, is JournalApiError.ApprovalInvalid -> FailureDisposition.POISON
+        // The whole account is locked: nothing is wrong with the row. Left
+        // queued until the lock is cleared.
+        is JournalApiError.AccountLocked -> FailureDisposition.PAUSE
         // The journal never deletes items server-side — a 404 on a write is
         // far likelier "this journal doesn't have the tracker routes yet" than
         // "the item was deleted out from under us". `refresh` catching its own
@@ -666,7 +713,7 @@ class ItemsSync(
                         if (itemID == null || payload == null) { store.itemOutboxDelete(row.localID); continue }
                         val result = api.commentItem(
                             itemID, payload.body, payload.attachments, idempotencyKey = row.localID,
-                            action = payload.action, replyTo = payload.replyTo,
+                            action = payload.action, replyTo = payload.replyTo, replaces = payload.replaces,
                         )
                         if (stopped) return DrainOutcome.Clean
                         // Keep the posted comment locally BEFORE the coalesced
@@ -750,9 +797,10 @@ class ItemsSync(
             attachments: List<TrackerAttachment>,
             action: String? = null,
             replyTo: String? = null,
+            replaces: String? = null,
         ): List<CommentPayload> =
             attachments.chunked(ATTACHMENTS_MAX).ifEmpty { listOf(emptyList()) }.mapIndexed { index, chunk ->
-                if (index == 0) CommentPayload(body, chunk, action, replyTo) else CommentPayload("", chunk)
+                if (index == 0) CommentPayload(body, chunk, action, replyTo, replaces) else CommentPayload("", chunk)
             }
 
         /// The outbox id (and Idempotency-Key) of part [index] of the reply
@@ -767,6 +815,10 @@ class ItemsSync(
         /// own `message`; else, for too many attachments, that in words; else
         /// its `reason`; else the bare status.
         fun rejectionReason(error: Throwable): String {
+            if (error === JournalApiError.ApprovalRequired) {
+                return "This answer needs a signature from your approval key. Tap the button again to approve it."
+            }
+            if (error is JournalApiError.ApprovalInvalid) return error.message ?: "The approval was refused."
             val http = error as? JournalApiError.Http
             http?.bodyMessage?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
             if (http?.code == TOO_MANY_ATTACHMENTS) {

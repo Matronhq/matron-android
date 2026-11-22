@@ -5,6 +5,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.platform.testTag
+import chat.matron.android.models.ConversationRoom
+import kotlinx.coroutines.flow.MutableStateFlow
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,6 +29,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.PushPin
 import chat.matron.android.features.pins.ChatPinMenu
+import chat.matron.android.viewmodels.NotifySettingsStore
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -36,7 +41,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -79,6 +83,7 @@ import chat.matron.android.designsystem.JumpToBottomButton
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.PaginatingHeader
 import chat.matron.android.designsystem.ChatTopTrailingControls
+import chat.matron.android.designsystem.RoomsChip
 import chat.matron.android.designsystem.chatTopTrailingShowsJump
 import chat.matron.android.designsystem.SubtaskLinkCard
 import chat.matron.android.designsystem.TimelineLoadingIndicator
@@ -164,6 +169,13 @@ fun ChatScreen(
     missionLine: ChatMissionLine? = null,
     /// Opens the project named on [missionLine].
     onOpenProject: ((String) -> Unit)? = null,
+    /// The agent-chat rooms this conversation is in: the header's
+    /// "Rooms · n" chip and the sheet it opens. `null` (previews/tests)
+    /// offers no chip.
+    conversationRooms: ConversationRoomsHost? = null,
+    /// The "⋮" menu's Notifications entry (this chat's own level and mute).
+    /// `null` (previews/tests) offers none.
+    notify: NotifySettingsStore? = null,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val chatSearch by chatVM.chatSearch.collectAsStateWithLifecycle()
@@ -175,9 +187,22 @@ fun ChatScreen(
     val sessionStatus by chatVM.sessionStatus.collectAsStateWithLifecycle()
 
     var showSessionStatus by remember { mutableStateOf(false) }
+    var showRoomsSheet by remember { mutableStateOf(false) }
+    val noRooms = remember { MutableStateFlow(emptyList<ConversationRoom>()) }
+    val conversationRoomList by (conversationRooms?.rooms ?: noRooms).collectAsStateWithLifecycle()
     var showMediaBrowser by remember { mutableStateOf(false) }
     var showSwitcher by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
+    var notifyMenuOpen by remember { mutableStateOf(false) }
+    // The Notifications submenu opens a frame after the overflow menu closes,
+    // so the closing popup's outside-tap or focus loss can't dismiss it.
+    var notifyMenuRequested by remember { mutableStateOf(false) }
+    LaunchedEffect(notifyMenuRequested) {
+        if (!notifyMenuRequested) return@LaunchedEffect
+        androidx.compose.runtime.withFrameNanos { }
+        notifyMenuOpen = true
+        notifyMenuRequested = false
+    }
     var previewModel by remember { mutableStateOf<Any?>(null) }
     val compactScope = rememberCoroutineScope()
     // The gallery a timeline tap opens: every image in the conversation,
@@ -240,6 +265,8 @@ fun ChatScreen(
                         chatTitle = chatTitle, boxName = boxName, sessionShort = sessionShort, boxShort = boxShort,
                         roomBoxNames = roomBoxNames, roomBoxShorts = roomBoxShorts, workdir = sessionStatus?.workdir,
                         missionID = missionID, onOpenMission = onOpenMission, missionLine = missionLine, onOpenProject = onOpenProject,
+                        roomCount = if (conversationRooms != null) conversationRoomList.size else 0,
+                        onOpenRooms = { showRoomsSheet = true },
                     )
                 },
                 navigationIcon = {
@@ -311,6 +338,20 @@ fun ChatScreen(
                                 )
                             }
                         }
+                        if (notify != null) {
+                            val notifyView by notify.view.collectAsStateWithLifecycle()
+                            val notifyClock by notify.clock.collectAsStateWithLifecycle()
+                            val notifyState = notify.state(chatVM.roomID, notifyView, notifyClock)
+                            DropdownMenuItem(
+                                text = { Text("Notifications") },
+                                leadingIcon = { Icon(convoNotifyIcon(notifyState), contentDescription = null) },
+                                onClick = {
+                                    menuOpen = false
+                                    notifyMenuRequested = true
+                                },
+                                modifier = Modifier.testTag("chat-menu-notifications"),
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("Session Info") },
                             leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
@@ -318,6 +359,14 @@ fun ChatScreen(
                                 menuOpen = false
                                 showSessionStatus = true
                             },
+                        )
+                    }
+                    if (notify != null) {
+                        ConvoNotifyMenu(
+                            store = notify,
+                            convoID = chatVM.roomID,
+                            expanded = notifyMenuOpen,
+                            onDismiss = { notifyMenuOpen = false },
                         )
                     }
                 },
@@ -403,6 +452,22 @@ fun ChatScreen(
             )
         }
     }
+    if (showRoomsSheet && conversationRooms != null) {
+        // Full height straight away: a room's timeline wants the room.
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(onDismissRequest = { showRoomsSheet = false }, sheetState = sheetState) {
+            ConversationRoomsSheet(
+                rooms = conversationRoomList,
+                host = conversationRooms,
+                onDone = { showRoomsSheet = false },
+                // Close first, then open: the destination is under the sheet.
+                onOpenConversation = { id ->
+                    showRoomsSheet = false
+                    onOpenConversation(id)
+                },
+            )
+        }
+    }
     if (showMediaBrowser && mediaBrowser != null) {
         // skipPartiallyExpanded: the media grid wants its full height straight
         // away (NewChatSheet precedent).
@@ -446,6 +511,10 @@ fun ChatHeaderTitle(
     onOpenMission: ((String) -> Unit)?,
     missionLine: ChatMissionLine?,
     onOpenProject: ((String) -> Unit)?,
+    /// How many agent-chat rooms the conversation is in: the "Rooms · n"
+    /// chip after the mission line; 0 draws none.
+    roomCount: Int = 0,
+    onOpenRooms: () -> Unit = {},
 ) {
     val openMission = onOpenMission
     // The title opens the mission the line names, once the line is read,
@@ -493,7 +562,7 @@ fun ChatHeaderTitle(
         // line so the header keeps the app bar's two-line height at any
         // font size; when space is short both truncate.
         val context = chatContextLine(boxName, workdir)
-        if (context != null || missionLine != null) {
+        if (context != null || missionLine != null || roomCount > 0) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 context?.let {
                     Text(
@@ -510,6 +579,8 @@ fun ChatHeaderTitle(
                     )
                 }
                 missionLine?.let { line -> ChatMissionLineView(line, onOpenMission, onOpenProject, Modifier.weight(1.5f, fill = false)) }
+                // The rooms chip keeps its size; the path and mission truncate first.
+                RoomsChip(count = roomCount, onClick = onOpenRooms, modifier = Modifier.testTag("chat.roomsChip"))
             }
         }
     }

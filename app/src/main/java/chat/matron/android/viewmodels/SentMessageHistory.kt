@@ -42,6 +42,9 @@ class SentMessageHistory {
     /// Whether a recall walk is currently active.
     val isNavigating: Boolean get() = recallIndex != null
 
+    /// The draft stashed when the current walk began; `null` outside a walk.
+    val stashed: String? get() = if (isNavigating) stashedDraft.orEmpty() else null
+
     /// Begins or continues walking backwards (Up). The first call stashes
     /// [currentDraft] so a later Down can restore it, and returns the most recent
     /// sent message. Subsequent calls walk toward older entries. Returns `null`
