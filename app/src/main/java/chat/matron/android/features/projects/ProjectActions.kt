@@ -78,7 +78,7 @@ fun ProjectActionsMenu(
             )
             if (viewModel.canAsk) {
                 DropdownMenuItem(
-                    text = { Text(if (state.asked) ProjectActionsFormat.ASKED else ProjectActionsFormat.ASK) }, enabled = !state.asked && !state.isAsking,
+                    text = { Text(if (state.asked) ProjectActionsFormat.ASKED else ProjectActionsFormat.ASK) }, enabled = !state.asked && !state.isAsking && !state.isBusy,
                     onClick = { open = false; scope.launch { viewModel.ask() } },
                 )
             }

@@ -162,6 +162,26 @@ class ProjectActionsTest {
     }
 
     @Test
+    fun anAskAndAMergeNeverOverlap() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val (vm, projects, _) = setup()
+        val pages = Pages().apply {
+            pages["pj_docs"] = TimelineProjectPage(docs)
+            pages["pj_promo"] = TimelineProjectPage(promo)
+        }
+        val slow = ProjectPageViewModel("pj_docs", pages, projects, askCoordinator = { hold.await() })
+        slow.refreshPage(); slow.loadActionTargets()
+        val asking = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined).launch { slow.ask() }
+        assertFalse("no writes while the question is on its way", slow.state.value.actions.merge)
+        assertFalse(slow.merge("pj_promo"))
+        hold.complete(Unit)
+        asking.join()
+        assertTrue(slow.state.value.asked)
+        assertTrue(slow.state.value.actions.merge)
+        vm.refreshPage()
+    }
+
+    @Test
     fun aListsFailureFromBeforeAMergeIsNotSaidAfterIt() = runBlocking {
         val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
         var reads = 0
