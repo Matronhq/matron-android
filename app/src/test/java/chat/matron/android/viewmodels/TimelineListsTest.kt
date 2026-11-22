@@ -196,6 +196,44 @@ class TimelineListsTest {
     }
 
     @Test
+    fun aNextPageOvertakenByARefreshIsDropped() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val lists = object : FakeTimelineBase() {
+            override suspend fun timelineProjects(before: String?, limit: Int?): TimelineProjectList {
+                if (before == null) return TimelineProjectList(2, listOf(TimelineProjectRow(TimelineFixtures.docs)), "p1")
+                hold.await()
+                return TimelineProjectList(2, listOf(TimelineProjectRow(TimelineFixtures.promo)), null)
+            }
+        }
+        val vm = TimelineViewModel(lists, scope)
+        vm.loadList(TimelinePlace.Projects)
+        val stale = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined).launch { vm.loadMoreProjects() }
+        vm.refresh()
+        hold.complete(Unit)
+        stale.join()
+        assertEquals(listOf("pj_docs"), vm.state.value.allProjects?.rows?.map { it.project.id })
+    }
+
+    @Test
+    fun aStale404FromTheCountsKeepsAllProjects() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var reads = 0
+        val lists = object : FakeTimelineBase() {
+            override suspend fun timelineProjects(before: String?, limit: Int?): TimelineProjectList {
+                reads += 1
+                if (reads == 1) { hold.await(); throw JournalApiError.NotFound }
+                return TimelineProjectList(1, listOf(TimelineProjectRow(TimelineFixtures.docs)))
+            }
+        }
+        val vm = TimelineViewModel(lists, scope)
+        val stale = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined).launch { vm.loadCounts() }
+        vm.refresh()
+        hold.complete(Unit)
+        stale.join()
+        assertTrue(vm.state.value.showsAllProjects)
+    }
+
+    @Test
     fun aReloadedFirstPageClearsTheRetry() = runBlocking {
         val lists = object : FakeTimelineBase() {
             override suspend fun finishedProjects(before: String?, limit: Int?): TimelineFinishedPage {
