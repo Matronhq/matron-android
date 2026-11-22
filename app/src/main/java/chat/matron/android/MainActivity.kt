@@ -76,6 +76,8 @@ import chat.matron.android.designsystem.tabRootSwipe
 import chat.matron.android.features.coordinator.CoordinatorChooserSheet
 import chat.matron.android.features.coordinator.CoordinatorRoot
 import chat.matron.android.features.coordinator.CoordinatorSetupView
+import chat.matron.android.features.coordinator.RoutineEditorScreen
+import chat.matron.android.features.coordinator.RoutinesScreen
 import chat.matron.android.features.coordinator.coordinatorRoot
 import chat.matron.android.features.decisions.DecisionsScreen
 import chat.matron.android.features.missions.MissionDetailScreen
@@ -561,6 +563,7 @@ private fun SignedInApp(
     var coordinatorError by remember { mutableStateOf<String?>(null) }
     // Pinned desk chats (journal "Pinned desk chats"): the Pinned section,
     // the pin menus and Settings → Pinned chats share one controller.
+    val routinesVM = remember(session.userID) { deps.makeRoutinesViewModel(session, sessionScope) }
     val pinsController = remember(session.userID) { PinsController(deps.pinsSync(session), sessionScope) }
     val pins by pinsController.sync.pins.collectAsStateWithLifecycle()
     val boxNames by remember(session.userID) { deps.agentNamesFlow(session) }.collectAsStateWithLifecycle(emptyMap())
@@ -1103,6 +1106,7 @@ private fun SignedInApp(
                                 onChoose = { showCoordinatorChooser = true },
                                 onClear = { shell.assignCoordinator(null, persistCoordinator) },
                                 consent = coordinatorConsent,
+                                onRoutines = { nav.navigate("routines") },
                             ),
                             onPinnedChats = if (pins != null) ({ nav.navigate("pinned-chats") }) else null,
                             onPeople = { nav.navigate("people") },
@@ -1117,6 +1121,27 @@ private fun SignedInApp(
 
                     composable("people") {
                         PeopleScreen(viewModel = peopleVM, onBack = { nav.popBackStack() })
+                    }
+
+                    composable("routines") {
+                        RoutinesScreen(
+                            viewModel = routinesVM,
+                            onSelect = { id -> nav.navigate("routine/$id") },
+                            onNew = { nav.navigate("routine-new") },
+                            onBack = { nav.popBackStack() },
+                        )
+                    }
+
+                    composable("routine-new") {
+                        RoutineEditorScreen(viewModel = routinesVM, routineID = null, onBack = { nav.popBackStack() })
+                    }
+
+                    composable("routine/{id}") { entry ->
+                        RoutineEditorScreen(
+                            viewModel = routinesVM,
+                            routineID = entry.arguments?.getString("id"),
+                            onBack = { nav.popBackStack() },
+                        )
                     }
 
                     composable("pinned-chats") {
