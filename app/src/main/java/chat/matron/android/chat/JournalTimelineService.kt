@@ -21,6 +21,7 @@ import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.TimelineSendState
 import chat.matron.android.models.UserSession
 import chat.matron.android.search.SearchService
+import java.io.File
 import java.time.Instant
 import java.util.UUID
 import kotlin.time.Duration
@@ -574,6 +575,11 @@ class JournalTimelineService(
         )
     }
 
+    override suspend fun sendQueuedEdit(choice: String, text: String?, inReplyTo: String) {
+        val targetSeq = inReplyTo.toLongOrNull() ?: throw JournalChatError.InvalidPromptReference(inReplyTo)
+        engine.sendOp(ClientOp.PromptReply(convoID, targetSeq, choice = choice, text = text))
+    }
+
     override suspend fun sendImage(data: ByteArray, filename: String, mimeType: String, caption: String?) =
         sendMedia(data, filename, mimeType, type = MediaKind.IMAGE, caption = caption, progress = null)
 
@@ -600,16 +606,34 @@ class JournalTimelineService(
     ) = sendMedia(data, filename, mimeType, type = MediaKind.FILE, caption = caption, batch = batch,
         progress = progress)
 
+    /// Streams the upload from [file] rather than reading it into memory.
+    override suspend fun sendAttachment(
+        file: File, filename: String, mimeType: String, isImage: Boolean, caption: String?,
+        batch: AttachmentBatchTag?, progress: ((Double) -> Unit)?,
+    ) {
+        val size = file.length()
+        val blobRef = api.uploadMedia(file, mimeType, progress)
+        sendMediaOp(blobRef, filename, mimeType, if (isImage) MediaKind.IMAGE else MediaKind.FILE,
+            size.toInt(), caption, batch)
+    }
+
     private suspend fun sendMedia(
         data: ByteArray, filename: String, mimeType: String, type: MediaKind, caption: String?,
         batch: AttachmentBatchTag? = null,
         progress: ((Double) -> Unit)?,
     ) {
         val blobRef = api.uploadMedia(data, mimeType, progress)
+        sendMediaOp(blobRef, filename, mimeType, type, data.size, caption, batch)
+    }
+
+    private suspend fun sendMediaOp(
+        blobRef: String, filename: String, mimeType: String, type: MediaKind, size: Int, caption: String?,
+        batch: AttachmentBatchTag?,
+    ) {
         engine.sendOp(
             ClientOp.SendMedia(
                 convoID = convoID, type = type, blobRef = blobRef, name = filename,
-                contentType = mimeType, size = data.size, caption = caption, batch = batch,
+                contentType = mimeType, size = size, caption = caption, batch = batch,
                 localID = UUID.randomUUID().toString(),
             )
         )

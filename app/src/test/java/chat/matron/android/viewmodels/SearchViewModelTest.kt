@@ -305,6 +305,29 @@ class SearchViewModelTest {
         assertEquals(null, vm.numberHit.value)
     }
 
+    /// Message search asks the journal, so answers can land out of order: a
+    /// slow one for `rel` must not replace the results for `release`.
+    @Test
+    fun aStaleMessageAnswerNeverOverwritesTheCurrentQuery() = runBlocking {
+        fun hit(id: String, room: String) =
+            SearchHit(id = id, roomID = room, sender = "agent:x", timestamp = Instant.ofEpochSecond(1), snippet = "")
+        val slow = CompletableDeferred<Unit>()
+        val fakeSearch = FakeSearchService().apply { queryGate = slow }
+        val vm = SearchViewModel(fakeSearch, emptyList())
+        vm.query = "rel"
+        val first = launch { vm.search() }
+        while (fakeSearch.queryCalls == 0) yield()
+        fakeSearch.queryGate = null
+        fakeSearch.hits = listOf(hit("2", "current"))
+        vm.query = "release"
+        vm.search()
+        assertEquals(listOf("current"), vm.messageHits.value.map { it.roomID })
+        fakeSearch.hits = listOf(hit("1", "stale"))
+        slow.complete(Unit)
+        first.join()
+        assertEquals("the late answer for rel is dropped", listOf("current"), vm.messageHits.value.map { it.roomID })
+    }
+
     /// Each keystroke starts its own search: a slow answer for `41` must not
     /// land once the query has become `412`.
     @Test
