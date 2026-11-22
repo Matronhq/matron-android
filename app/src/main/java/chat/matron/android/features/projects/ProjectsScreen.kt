@@ -51,6 +51,9 @@ import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.TimelineFormat
 import chat.matron.android.designsystem.TimelineWeekLayout
 import chat.matron.android.designsystem.TimelineWeekView
+import chat.matron.android.designsystem.TimelineListCopy
+import chat.matron.android.designsystem.timelineFootRows
+import chat.matron.android.models.TimelinePlace
 import chat.matron.android.models.TimelineWeekSummary
 import chat.matron.android.viewmodels.KeyValueStore
 import chat.matron.android.viewmodels.TimelineState
@@ -116,6 +119,9 @@ fun ProjectsScreen(
     onOpenMissions: () -> Unit,
     onOpenMemories: () -> Unit,
     onOpenProject: ((String) -> Unit)? = null,
+    /// Opens one of the lists below the weeks (all projects, went quiet,
+    /// open a long time, finished); null offers none.
+    onOpenList: ((TimelinePlace) -> Unit)? = null,
     rootGesture: Modifier = Modifier,
     legacy: @Composable () -> Unit,
 ) {
@@ -132,7 +138,12 @@ fun ProjectsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { WeekMenu(state, onPick = { viewModel.selectInBackground(it) }, onEarlier = { scope.launch { viewModel.loadEarlierWeeks() } }) },
+                title = {
+                    WeekMenu(
+                        state, onPick = { viewModel.selectInBackground(it) }, onEarlier = { scope.launch { viewModel.loadEarlierWeeks() } },
+                        onAllProjects = onOpenList?.takeIf { state.showsAllProjects }?.let { open -> { open(TimelinePlace.Projects) } },
+                    )
+                },
                 actions = {
                     IconButton(onClick = onOpenMissions, modifier = Modifier.testTag("projects.missions")) {
                         Icon(Icons.Outlined.SportsScore, contentDescription = "Missions")
@@ -159,7 +170,22 @@ fun ProjectsScreen(
                         onLayoutChange = { layout = it; layoutStore.setString(TimelineWeekLayout.STORAGE_KEY, it.wire) },
                         onOpenProject = onOpenProject,
                         onLoadMore = { viewModel.loadMoreWeekProjectsInBackground() },
-                    )
+                    ) {
+                        if (onOpenList != null) {
+                            timelineFootRows(
+                                showsAllProjects = state.showsAllProjects,
+                                counts = { place ->
+                                    when (place) {
+                                        TimelinePlace.Projects -> state.allProjects?.total
+                                        TimelinePlace.Quiet -> state.quiet?.total
+                                        TimelinePlace.Long -> state.long?.total
+                                        else -> null
+                                    }
+                                },
+                                onOpenList = onOpenList,
+                            )
+                        }
+                    }
                     TimelineWeekContent.NothingYet -> Placeholder(TimelineFormat.NOTHING_YET, TimelineFormat.NOTHING_YET_DETAIL)
                     TimelineWeekContent.Failed -> Placeholder(TimelineFormat.FAILED, TimelineFormat.FAILED_DETAIL) {
                         Button(onClick = { scope.launch { viewModel.refresh() } }) { Text(TimelineFormat.TRY_AGAIN) }
@@ -184,7 +210,7 @@ fun ProjectsScreen(
 /// The title as a menu: the weeks newest first, the picked one checked,
 /// then "Earlier weeks" while the journal has more.
 @Composable
-private fun WeekMenu(state: TimelineState, onPick: (String) -> Unit, onEarlier: () -> Unit) {
+private fun WeekMenu(state: TimelineState, onPick: (String) -> Unit, onEarlier: () -> Unit, onAllProjects: (() -> Unit)? = null) {
     var open by remember { mutableStateOf(false) }
     val choices = weekChoices(state.weeks)
     Box {
@@ -208,6 +234,14 @@ private fun WeekMenu(state: TimelineState, onPick: (String) -> Unit, onEarlier: 
             if (state.hasEarlierWeeks) {
                 HorizontalDivider()
                 DropdownMenuItem(text = { Text(TimelineFormat.EARLIER_WEEKS) }, onClick = { onEarlier() })
+            }
+            if (onAllProjects != null) {
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = { Text(TimelineListCopy.ALL_PROJECTS) },
+                    leadingIcon = { Icon(Icons.Outlined.Layers, contentDescription = null) },
+                    onClick = { open = false; onAllProjects() },
+                )
             }
         }
     }

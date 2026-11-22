@@ -305,6 +305,11 @@ class AppShellNavigation(var host: Host? = null) {
     /// files) on the Projects stack. Idempotent for the section on top.
     fun openProjectSection(projectID: String, section: String) = pushOnMissions(projectSectionRoute(projectID, section))
 
+    /// Push one of the timeline's lists ([list] is `projects`, `quiet`,
+    /// `long` or `finished`) on the Projects stack. Idempotent for the list
+    /// on top.
+    fun openTimelineList(list: String) = pushOnMissions(timelineListRoute(list))
+
     private fun pushOnMissions(value: String) {
         if (missionsPath.lastOrNull() == value) return
         missionsPath = missionsPath + value
@@ -586,6 +591,7 @@ class AppShellNavigation(var host: Host? = null) {
         /// A project's page, and one section of it, on the Projects stack.
         fun projectRoute(projectID: String): String = "project/$projectID"
         fun projectSectionRoute(projectID: String, section: String): String = "project/$projectID/$section"
+        fun timelineListRoute(list: String): String = "timeline/$list"
 
         /// Apple's `MissionRoute.pathValue`.
         fun missionRoute(missionID: String): String = "mission/$missionID"

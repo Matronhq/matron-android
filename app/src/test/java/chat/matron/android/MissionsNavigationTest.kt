@@ -254,6 +254,17 @@ class MissionsNavigationTest {
     }
 
     @Test
+    fun theTimelinesListsPushOnTheProjectsStack() {
+        val (nav, host) = nav()
+        nav.noteDestination(AppTab.MISSIONS, "e0", null)
+        nav.openTimelineList("quiet")
+        nav.openTimelineList("quiet")
+        nav.openProject("pj_promo")
+        assertEquals(listOf("timeline/quiet", "project/pj_promo"), nav.missionsPath)
+        assertEquals(listOf("pushOnMissions:timeline/quiet", "pushOnMissions:project/pj_promo"), host.commands)
+    }
+
+    @Test
     fun aProjectChipOnAChatTabOpensTheProjectOnItsOwnTab() {
         val (nav, host) = nav()
         nav.openProject("pj_docs")

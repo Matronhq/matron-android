@@ -84,6 +84,8 @@ import chat.matron.android.features.memories.MemoriesScreen
 import chat.matron.android.features.memories.MemoryEditorScreen
 import chat.matron.android.features.missions.MissionsScreen
 import chat.matron.android.features.projects.ProjectsScreen
+import chat.matron.android.features.projects.TimelineListScreen
+import chat.matron.android.designsystem.TimelineListCopy
 import chat.matron.android.features.projects.ProjectScreen
 import chat.matron.android.features.projects.ProjectSectionScreen
 import chat.matron.android.designsystem.ProjectSection
@@ -570,7 +572,13 @@ private fun SignedInApp(
     val missionsVM = remember(session.userID) { deps.makeMissionsListViewModel(session, sessionScope) }
     // The Projects timeline (the Missions tab's root): session-long, so the
     // picked week survives a tab switch. It reads when the tab first shows.
-    val timelineVM = remember(session.userID) { deps.makeTimelineViewModel(session, sessionScope) }
+    val timelineVM = remember(session.userID) {
+        deps.makeTimelineViewModel(session, sessionScope) { question ->
+            // "Ask the Coordinator" on a stalled project: a message in its room.
+            val coordinator = deps.coordinatorSync(session).convoID.value ?: throw IllegalStateException("Choose a Coordinator in Settings first.")
+            deps.timelineService(session, coordinator).sendText(question, null)
+        }
+    }
     // Settings → People; session-wide so an invite deep link can open its
     // accept card before the screen is up.
     val inviteLinks = remember(session.userID) { deps.revealedInviteLinks(session) }
@@ -1195,6 +1203,7 @@ private fun SignedInApp(
                             onOpenMissions = { shell.openMissionsList() },
                             onOpenMemories = { shell.openMemories() },
                             onOpenProject = { shell.openProject(it) },
+                            onOpenList = { place -> TimelineListCopy.wire(place)?.let { shell.openTimelineList(it) } },
                             rootGesture = rootSwipe,
                         ) {
                             // A journal without the timeline keeps the missions list here.
@@ -1242,6 +1251,19 @@ private fun SignedInApp(
                             onBack = { nav.popBackStack() },
                             onOpenMission = { shell.pushMission(it) },
                             onOpenMilestone = { onOpenConversationFromMissions(it.milestone.convoID); jumpToMilestone(it.milestone.convoID, it.milestone.seq) },
+                        )
+                    }
+                    // The lists below the weeks, pushed from the week page.
+                    composable(
+                        route = "${AppTab.MISSIONS.routePrefix}timeline/{list}",
+                        arguments = listOf(navArgument("list") { type = NavType.StringType }),
+                    ) { entry ->
+                        val place = TimelineListCopy.place(entry.arguments?.getString("list")) ?: return@composable
+                        TimelineListScreen(
+                            viewModel = timelineVM,
+                            place = place,
+                            onBack = { nav.popBackStack() },
+                            onOpenProject = { shell.openProject(it) },
                         )
                     }
                     // The missions list, pushed from the Projects toolbar.
