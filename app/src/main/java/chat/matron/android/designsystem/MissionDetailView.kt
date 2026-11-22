@@ -19,6 +19,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.SportsScore
+import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.ui.platform.testTag
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -134,6 +138,19 @@ data class MissionDetailModel(
     }
 }
 
+/// The header chip naming the project a mission is filed in.
+data class MissionProjectChip(val projectID: String, val title: String) {
+    val accessibilityLabel: String get() = "Project: $title. Opens the project"
+}
+
+/// The chip for [mission]'s project: its title once read, else its number;
+/// null for a mission in no project.
+fun missionProjectChip(mission: Mission, title: String?): MissionProjectChip? {
+    val id = mission.projectID ?: return null
+    val label = title?.takeIf { it.isNotBlank() } ?: mission.projectNum?.let { "Project #$it" } ?: "Project"
+    return MissionProjectChip(id, label)
+}
+
 /// The close confirmation's title — what the user actually sees. Pure so
 /// the "close confirmation counts" requirement is pinned without a view.
 fun missionCloseConfirmationTitle(openItems: Int): String =
@@ -179,6 +196,9 @@ fun MissionDetailView(
     onRefresh: () -> Unit,
     isRefreshing: Boolean = false,
     modifier: Modifier = Modifier,
+    /// The project the mission is filed in, as its header chip; null for none.
+    projectChip: MissionProjectChip? = null,
+    onOpenProject: (String) -> Unit = {},
 ) {
     var showingClose by remember { mutableStateOf(false) }
     val mission = model.mission
@@ -188,7 +208,7 @@ fun MissionDetailView(
             return@PullToRefreshBox
         }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
-            item(key = "header") { MissionHeader(mission) }
+            item(key = "header") { MissionHeader(mission, projectChip, onOpenProject) }
             item(key = "milestones-header") {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -281,7 +301,7 @@ private fun PageSectionHeader(title: String) {
 }
 
 @Composable
-private fun MissionHeader(mission: Mission) {
+private fun MissionHeader(mission: Mission, projectChip: MissionProjectChip?, onOpenProject: (String) -> Unit) {
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.Top) {
             Text("#${mission.num}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 3.dp))
@@ -289,6 +309,14 @@ private fun MissionHeader(mission: Mission) {
             Text(
                 MissionGlyph.label(mission.state), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold,
                 color = MissionGlyph.tint(mission.state), modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+        projectChip?.let { chip ->
+            AssistChip(
+                onClick = { onOpenProject(chip.projectID) },
+                label = { Text(chip.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                leadingIcon = { Icon(Icons.Outlined.Layers, contentDescription = null, modifier = Modifier.size(AssistChipDefaults.IconSize)) },
+                modifier = Modifier.semantics { contentDescription = chip.accessibilityLabel }.testTag("mission.projectChip"),
             )
         }
         if (mission.body.isNotEmpty()) MarkdownText(mission.body, textStyle = MaterialTheme.typography.bodyMedium)

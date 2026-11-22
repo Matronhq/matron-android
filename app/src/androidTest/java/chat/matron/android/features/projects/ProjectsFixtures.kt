@@ -9,7 +9,19 @@ import chat.matron.android.chat.MediaService
 import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.TimelineFinishedPage
 import chat.matron.android.journal.TimelineHistoryPage
+import chat.matron.android.journal.ProjectsProviding
 import chat.matron.android.journal.TimelineProviding
+import chat.matron.android.models.ConversationMissionLink
+import chat.matron.android.models.Milestone
+import chat.matron.android.models.MilestoneKind
+import chat.matron.android.models.Mission
+import chat.matron.android.models.MissionLastMilestone
+import chat.matron.android.models.MissionState
+import chat.matron.android.models.Project
+import chat.matron.android.models.ProjectDetail
+import chat.matron.android.models.ProjectFilesPage
+import chat.matron.android.models.ProjectMilestone
+import chat.matron.android.models.TimelineHistoryWeek
 import chat.matron.android.journal.TimelineWeeksPage
 import chat.matron.android.models.StalledList
 import chat.matron.android.models.TimelineItemRef
@@ -96,8 +108,74 @@ object ProjectsFixtures {
         override suspend fun openLong() = StalledList(0, emptyList())
         override suspend fun finishedProjects(before: String?, limit: Int?) = TimelineFinishedPage(emptyList(), null)
         override suspend fun timelineProjects(before: String?, limit: Int?) = TimelineProjectList(0, emptyList())
-        override suspend fun timelineProject(id: String): TimelineProjectPage = throw JournalApiError.NotFound
-        override suspend fun timelineProjectHistory(id: String, before: String?, limit: Int?) = TimelineHistoryPage(emptyList(), null)
+        override suspend fun timelineProject(id: String): TimelineProjectPage =
+            if (id == docs.id) docsPage else throw JournalApiError.NotFound
+        override suspend fun timelineProjectHistory(id: String, before: String?, limit: Int?) = TimelineHistoryPage(docsHistory, null)
+    }
+
+    val docsPage = TimelineProjectPage(
+        project = docs, isLive = true, state = "open",
+        sentence = "The docs site is live on example.com; search is next.",
+        next = "Add search across the guides and the API reference.",
+        needsYou = listOf(TimelineItemRef("it_31", 31, "Pick a colour theme for code samples"), TimelineItemRef("it_32", 32, "Approve the getting-started copy")),
+        needsYouTotal = 4,
+        media = TimelineMedia("bl_docs", "image/png", "docs-home.png"),
+        weeks = 6, missionsOpen = 2, missionsDone = 3, files = 7,
+    )
+
+    private fun milestone(num: Int, title: String, day: String, mission: Int) = ProjectMilestone(
+        Milestone(id = "ml_$num", missionID = "ms_$mission", num = num, kind = MilestoneKind.PROGRESS, title = title,
+            convoID = "c$mission", seq = num.toLong(), createdAt = Instant.parse("${day}T10:00:00Z")),
+        mission,
+    )
+
+    val docsHistory = listOf(
+        TimelineHistoryWeek(
+            "2026-11-16", at("2026-11-16"), at("2026-11-23"), sentence = "The docs site went live.",
+            media = TimelineMedia("bl_docs", "image/png", "docs-home.png"),
+            milestones = listOf(milestone(51, "Deployed the site to production", "2026-11-18", 20), milestone(50, "API reference generated", "2026-11-17", 21)),
+            moreMilestones = 2,
+        ),
+        TimelineHistoryWeek(
+            "2026-11-09", at("2026-11-09"), at("2026-11-16"), sentence = "Navigation and search were wired up on staging.",
+            milestones = listOf(milestone(44, "Sidebar navigation done", "2026-11-12", 20)),
+        ),
+        TimelineHistoryWeek(
+            "2026-11-02", at("2026-11-02"), at("2026-11-09"),
+            milestones = listOf(milestone(38, "Picked the static site generator", "2026-11-03", 20)),
+        ),
+    )
+
+
+    val docsMissions = listOf(
+        Mission(id = "ms_20", num = 20, title = "Docs search", originConvoID = "c20", status = "Indexing the guides; the API pages are next.",
+            projectID = docs.id, projectNum = docs.num, lastMilestoneAt = now, createdAt = now),
+        Mission(id = "ms_21", num = 21, title = "API reference", originConvoID = "c21", projectID = docs.id, projectNum = docs.num,
+            lastMilestone = MissionLastMilestone(50, "API reference generated", MilestoneKind.PROGRESS, now.minusSeconds(7200)),
+            lastMilestoneAt = now.minusSeconds(7200), createdAt = now),
+        Mission(id = "ms_17", num = 17, title = "Pick a site generator", state = MissionState.CLOSED, originConvoID = "c17",
+            closeSummary = "Chose a static generator; builds in under a minute.", closedAt = now.minusSeconds(86_400 * 14), createdAt = now),
+        Mission(id = "ms_18", num = 18, title = "Getting-started guide", state = MissionState.CLOSED, originConvoID = "c18",
+            closeSummary = "Written, reviewed by bob, published.", closedAt = now.minusSeconds(86_400 * 3), createdAt = now),
+        Mission(id = "ms_19", num = 19, title = "Domain and hosting", state = MissionState.CLOSED, originConvoID = "c19",
+            closedAt = now.minusSeconds(86_400 * 7), createdAt = now),
+    )
+
+    /// The projects routes, answering from the fixtures and recording writes.
+    open class Projects : ProjectsProviding {
+        val writes = mutableListOf<String>()
+        override suspend fun listProjects(openOnly: Boolean) = listOf(
+            Project(id = docs.id, num = docs.num, title = docs.title), Project(id = promo.id, num = promo.num, title = promo.title),
+            Project(id = app.id, num = app.num, title = app.title), Project(id = pricing.id, num = pricing.num, title = pricing.title),
+        )
+        override suspend fun project(id: String) = ProjectDetail(Project(id = docs.id, num = docs.num, title = docs.title), docsMissions)
+        override suspend fun projectFiles(id: String, before: String?, limit: Int?) = ProjectFilesPage()
+        override suspend fun mergeProject(id: String, into: String) { writes += "merge" }
+        override suspend fun renameProject(id: String, title: String) { writes += "rename" }
+        override suspend fun closeProject(id: String, summary: String) { writes += "close" }
+        override suspend fun setMissionProject(missionID: String, project: String?) =
+            Mission(id = missionID, num = 20, title = "Docs search", originConvoID = "c20", projectID = project)
+        override suspend fun conversationMissions(convoID: String) = emptyList<ConversationMissionLink>()
     }
 
     /// Pictures drawn on the device: a gradient per blob, nothing fetched.

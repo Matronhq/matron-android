@@ -104,6 +104,10 @@ import java.util.concurrent.atomic.AtomicLong
 /// v21 adds multi-select questions: `item.multi_select` and
 /// `item.chosen_actions_json` (every label of the latest answer). Additive;
 /// cached rows read as one-tap until their next fetch.
+///
+/// v22 adds `mission.project_id` and `mission.project_num`: the project a
+/// mission is filed in. Additive; cached rows read unfiled until their next
+/// fetch.
 @Database(
     entities = [
         ConversationEntity::class, EventEntity::class, MetaEntity::class, OutboxEntity::class,
@@ -111,7 +115,7 @@ import java.util.concurrent.atomic.AtomicLong
         ItemEntity::class, ItemCommentEntity::class, ItemOutboxEntity::class,
         MissionEntity::class, MilestoneEntity::class, MissionConversationEntity::class,
     ],
-    version = 21,
+    version = 22,
     exportSchema = false,
 )
 abstract class MatronDatabase : RoomDatabase() {
@@ -424,11 +428,20 @@ abstract class MatronDatabase : RoomDatabase() {
             }
         }
 
+        /// v22: the project a mission is filed in (`mission.project_id`,
+        /// `project_num`), for the project chip on a mission's page. Additive.
+        val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `mission` ADD COLUMN `project_id` TEXT")
+                db.execSQL("ALTER TABLE `mission` ADD COLUMN `project_num` INTEGER")
+            }
+        }
+
         private val MIGRATIONS = listOf(
             MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
             MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12,
             MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17,
-            MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21,
+            MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22,
         )
 
         /// Production, file-backed at the given path. [onOpened] fires from

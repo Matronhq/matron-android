@@ -592,6 +592,10 @@ data class MissionEntity(
     /// cached before v17 read null until their next fetch.
     val status: String? = null,
     @ColumnInfo(name = "status_contributor") val statusContributor: String? = null,
+    /// The project the mission is filed in and its number (v22); rows cached
+    /// before v22 read null until their next fetch.
+    @ColumnInfo(name = "project_id") val projectID: String? = null,
+    @ColumnInfo(name = "project_num") val projectNum: Int? = null,
 ) {
     /// Serializable mirror of `MissionLastMilestone` with wire-shaped keys,
     /// so the stored JSON reads the same as the payload it came from.
@@ -620,6 +624,7 @@ data class MissionEntity(
             openItems = openItems, needsYou = needsYou, conversationCount = conversationCount,
             milestoneCount = milestoneCount, lastMilestone = last,
             status = status, statusContributor = statusContributor,
+            projectID = projectID, projectNum = projectNum,
         )
     }
 
@@ -633,6 +638,7 @@ data class MissionEntity(
             openItems = m.openItems, needsYou = m.needsYou, conversationCount = m.conversationCount,
             milestoneCount = m.milestoneCount,
             status = m.status, statusContributor = m.statusContributor,
+            projectID = m.projectID, projectNum = m.projectNum,
             lastMilestoneJson = m.lastMilestone?.let {
                 MatronJson.encodeToString(
                     LastMilestone.serializer(),

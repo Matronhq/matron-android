@@ -56,6 +56,7 @@ import chat.matron.android.viewmodels.AccountEmailViewModel
 import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
 import chat.matron.android.viewmodels.MissionsListViewModel
 import chat.matron.android.viewmodels.TimelineViewModel
+import chat.matron.android.viewmodels.ProjectPageViewModel
 import chat.matron.android.viewmodels.GoToNumberResolver
 import chat.matron.android.viewmodels.TrackerItemLinkResolver
 import chat.matron.android.journal.JournalApi
@@ -782,6 +783,22 @@ class AppDependencies(
      */
     fun makeTimelineViewModel(session: UserSession, scope: CoroutineScope): TimelineViewModel =
         TimelineViewModel(timeline = core(session).api, scope = scope)
+
+    /** A project's page (or one of its sections): a fresh view model per screen. */
+    fun makeProjectPageViewModel(session: UserSession, projectID: String): ProjectPageViewModel {
+        val api = core(session).api
+        return ProjectPageViewModel(projectID = projectID, timeline = api, projects = api)
+    }
+
+    /** A project's title, for the chip on a mission's page; null when it can't be read. */
+    suspend fun projectTitle(session: UserSession, projectID: String): String? =
+        try {
+            core(session).api.timelineProject(projectID).project.title
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            null
+        }
 
     /** The Memories list VM, per screen showing (spec 2026-09-27 memories). */
     fun makeMemoriesListViewModel(session: UserSession, scope: CoroutineScope): MemoriesListViewModel =

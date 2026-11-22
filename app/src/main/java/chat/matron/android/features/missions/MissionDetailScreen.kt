@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -26,6 +27,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.MissionDetailModel
 import chat.matron.android.designsystem.MissionDetailView
+import chat.matron.android.designsystem.missionProjectChip
 import chat.matron.android.models.Milestone
 import chat.matron.android.viewmodels.MissionDetailViewModel
 import kotlinx.coroutines.launch
@@ -43,6 +45,11 @@ fun MissionDetailScreen(
     onOpenMilestone: (convoID: String, seq: Long) -> Unit,
     onOpenItem: (String) -> Unit,
     onOpenConversation: (String) -> Unit,
+    /// The title of the project the mission is filed in, read for its chip;
+    /// null leaves the chip on the project's number.
+    projectTitle: suspend (String) -> String? = { null },
+    /// Opens that project's page; null shows no chip.
+    onOpenProject: ((String) -> Unit)? = null,
 ) {
     val mission by viewModel.mission.collectAsStateWithLifecycle()
     val milestones by viewModel.milestones.collectAsStateWithLifecycle()
@@ -55,6 +62,10 @@ fun MissionDetailScreen(
     val error by viewModel.error.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
     var isRefreshing by remember { mutableStateOf(false) }
+    val projectID = mission?.projectID
+    val resolvedTitle by produceState<String?>(initialValue = null, projectID) {
+        value = projectID?.let { projectTitle(it) }
+    }
 
     DisposableEffect(viewModel) {
         viewModel.start()
@@ -92,6 +103,8 @@ fun MissionDetailScreen(
                     }
                 },
                 isRefreshing = isRefreshing,
+                projectChip = if (onOpenProject == null) null else mission?.let { missionProjectChip(it, resolvedTitle) },
+                onOpenProject = { id -> onOpenProject?.invoke(id) },
             )
         }
     }
