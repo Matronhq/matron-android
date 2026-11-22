@@ -481,7 +481,9 @@ class AppDependencies(
                 // emulators without secure hardware; release builds refuse it.
                 allowSoftwareKeys = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0,
             ),
-            store = ApprovalKeyStore(preferences, ApprovalCenter.journalHost(session.homeserverURL) ?: session.homeserverURL, session.userID),
+            // One record per journal account: the journal's host and port
+            // and any base path it is served under.
+            store = ApprovalKeyStore(preferences, ApprovalCenter.journalScope(session.homeserverURL), session.userID),
             user = session.userID,
             deviceID = session.deviceID.toLongOrNull(),
             deviceName = approvalKeyName,

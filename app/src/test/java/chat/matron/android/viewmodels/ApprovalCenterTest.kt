@@ -160,13 +160,13 @@ class ApprovalCenterTest {
     fun keyExistsForALiveKeyKeepsIt() = runTest {
         val center = center()
         center.refresh()
-        val made = SoftwareKeyProvider().create()
-        store.save(made)
-        // Listed live on the server, but this centre's last read predates it.
-        journal.keys += ApprovalKeyDTO(made.keyID, made.publicKey, "Pixel", 7)
-        journal.refuseEnrolWith = ApprovalKeyError.KeyExists
+        // The enrolment lands, but is answered key_exists (a retry racing a
+        // lost answer): the recovery read finds it live, and it is kept.
+        journal.keyExistsAfterEnrol = true
         center.enrol("secret", "123456")
-        assertEquals(made, store.load())
+        val kept = store.load()!!
+        assertEquals(kept.keyID, journal.keys.single().keyID)
+        assertEquals(false, journal.keyExistsAfterEnrol)
         assertEquals(ApprovalCenter.Status.Ready, center.status.value)
     }
 
@@ -240,9 +240,11 @@ class ApprovalCenterTest {
         enrolled(first)
         val newStore = ApprovalKeyStore(InMemoryKeyValueStore(), "journal.example", "alice")
         val second = ApprovalCenter(journal, SoftwareKeyProvider(), newStore, "alice", 8, "New phone", "journal.example")
+        journal.callerDevice = 8
         second.refresh()
         second.requestFromAnotherDevice()
         assertEquals(ApprovalCenter.Status.WaitingForApproval, second.status.value)
+        journal.callerDevice = 7
         first.refresh()
         val request = journal.requests.single()
         assertEquals(newStore.load()!!.keyID, request.keyID)
@@ -252,6 +254,17 @@ class ApprovalCenterTest {
         first.confirm()
         approving.await()
         assertTrue(journal.keys.any { it.keyID == request.keyID && it.enrolledVia == ApprovalKeyDTO.EnrolledVia.DEVICE })
+        // The new phone's key is attached to it: it can approve now.
+        journal.callerDevice = 8
+        second.refresh()
+        assertEquals(ApprovalCenter.Status.Ready, second.status.value)
+    }
+
+    @Test
+    fun aKeyRecordFollowsTheJournalsBasePath() {
+        assertEquals("journal.example/team-a", ApprovalCenter.journalScope("https://Journal.Example/team-a/"))
+        assertEquals("journal.example", ApprovalCenter.journalScope("https://journal.example/"))
+        assertEquals("journal.example:8443/b", ApprovalCenter.journalScope("https://journal.example:8443/b"))
     }
 
     @Test

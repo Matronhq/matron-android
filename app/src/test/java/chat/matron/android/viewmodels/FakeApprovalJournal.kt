@@ -65,9 +65,13 @@ class FakeApprovalJournal(
         val keyID = ApprovalKeyEncoding.keyID(ApprovalKeyEncoding.data(publicKey)!!)
         if (keys.any { it.keyID == keyID }) throw ApprovalKeyError.KeyExists
         val key = ApprovalKeyDTO(keyID, publicKey, name, callerDevice).also { keys += it }
+        // Made, but answered as if it had been there all along.
+        if (keyExistsAfterEnrol) { keyExistsAfterEnrol = false; throw ApprovalKeyError.KeyExists }
         if (loseEnrolAnswer) { loseEnrolAnswer = false; throw JournalApiError.Transport("connection lost") }
         return key
     }
+    /// The next enrolment is made, then answered `key_exists`.
+    var keyExistsAfterEnrol = false
     /// The next enrolment is made, but its answer never arrives.
     var loseEnrolAnswer = false
 
@@ -77,16 +81,18 @@ class FakeApprovalJournal(
         val id = "kr_${++requestCount}"
         requests += ApprovalKeyRequestDTO(id, keyID, name)
         pendingPublicKeys[id] = publicKey
+        requestDevices[id] = callerDevice
         return id
     }
     private val pendingPublicKeys = mutableMapOf<String, String>()
     private var requestCount = 0
+    private val requestDevices = mutableMapOf<String, Long>()
 
     override suspend fun approveApprovalKeyRequest(id: String, approval: SignedApproval): ApprovalKeyDTO {
         val request = requests.firstOrNull { it.id == id } ?: throw JournalApiError.NotFound
         check(approval, "account", mapOf("op" to "enrol_key", "key_id" to request.keyID))
         requests.remove(request)
-        return ApprovalKeyDTO(request.keyID, pendingPublicKeys.remove(id) ?: "", request.name, 99, ApprovalKeyDTO.EnrolledVia.DEVICE)
+        return ApprovalKeyDTO(request.keyID, pendingPublicKeys.remove(id) ?: "", request.name, requestDevices.remove(id), ApprovalKeyDTO.EnrolledVia.DEVICE)
             .also { keys += it }
     }
 
