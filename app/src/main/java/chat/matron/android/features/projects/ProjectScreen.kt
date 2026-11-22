@@ -94,12 +94,16 @@ fun ProjectScreen(
     onOpenItem: (String) -> Unit,
     onOpenSection: (ProjectSection) -> Unit,
     sections: List<ProjectSection> = PROJECT_PAGE_SECTIONS,
-    titleActions: @Composable (ProjectPageState) -> Unit = {},
+    /// Shows the "⋯" menu beside the title (rename, merge, close, add a mission).
+    showsActions: Boolean = false,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
-    LaunchedEffect(viewModel) { viewModel.refreshPage() }
+    LaunchedEffect(viewModel) {
+        viewModel.refreshPage()
+        if (showsActions) viewModel.loadActionTargets()
+    }
     val images = rememberTimelineImages(listOfNotNull(state.page?.media?.takeIf { !it.isVideo }?.blobID), media, serverURL)
 
     ProjectScaffold(title = state.page?.let { "#${it.project.num}" } ?: "Project", onBack = onBack) {
@@ -112,7 +116,7 @@ fun ProjectScreen(
             when (ProjectScreenContent.of(state)) {
                 ProjectScreenContent.Page -> ProjectSummaryView(
                     page = page!!, image = page.media?.let { images[it.blobID] }, sections = sections,
-                    onOpenItem = onOpenItem, onOpenSection = onOpenSection, titleActions = { titleActions(state) },
+                    onOpenItem = onOpenItem, onOpenSection = onOpenSection, titleActions = { if (showsActions) ProjectActionsMenu(state, viewModel) },
                 )
                 ProjectScreenContent.Missing -> ProjectPlaceholder(ProjectFormat.MISSING, ProjectFormat.MISSING_DETAIL)
                 ProjectScreenContent.Failed -> ProjectPlaceholder(TimelineFormat.FAILED, TimelineFormat.FAILED_DETAIL) {

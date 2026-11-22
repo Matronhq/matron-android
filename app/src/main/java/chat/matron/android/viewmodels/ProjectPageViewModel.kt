@@ -1,10 +1,12 @@
 package chat.matron.android.viewmodels
 
 import chat.matron.android.journal.JournalApiError
+import chat.matron.android.journal.ProjectCloseError
 import chat.matron.android.journal.ProjectsProviding
 import chat.matron.android.journal.TimelineProviding
 import chat.matron.android.models.Mission
 import chat.matron.android.models.MissionState
+import chat.matron.android.models.Project
 import chat.matron.android.models.ProjectFilesPage
 import chat.matron.android.models.TimelineHistoryWeek
 import chat.matron.android.models.TimelineProjectPage
@@ -34,8 +36,57 @@ data class ProjectPageState(
     /// The project's files and pictures, newest first, as far as they have
     /// been paged; null until read.
     val files: ProjectFilesPage? = null,
+    /// What the "⋯" menu offers: open missions in no project (to add), and
+    /// the other open projects (to merge into); [actionsLoaded] once read.
+    val unfiled: List<Mission> = emptyList(),
+    val mergeTargets: List<Project> = emptyList(),
+    val actionsLoaded: Boolean = false,
+    /// "Ask the Coordinator about this" was sent from this page.
+    val asked: Boolean = false,
+    /// A write is in flight: the menu's writes wait for it.
+    val isBusy: Boolean = false,
     val error: String? = null,
-)
+) {
+    /// Which of the "⋯" entries can be chosen.
+    val actions: ProjectActionsAvailability
+        get() = ProjectActionsAvailability.of(
+            isOpen = page?.isOpen == true && !isBusy, isLoaded = actionsLoaded,
+            hasUnfiled = unfiled.isNotEmpty(), hasMergeTargets = mergeTargets.isNotEmpty(),
+        )
+}
+
+/// Which of a project page's "⋯" entries can be chosen. The writes need an
+/// open project and its lists loaded; a list with nothing in it is a dimmed
+/// entry, never a menu that opens empty. Ported from matron-apple's
+/// `ProjectActionsAvailability`.
+data class ProjectActionsAvailability(val addMission: Boolean, val rename: Boolean, val merge: Boolean, val close: Boolean) {
+    companion object {
+        fun of(isOpen: Boolean, isLoaded: Boolean, hasUnfiled: Boolean, hasMergeTargets: Boolean): ProjectActionsAvailability {
+            val writable = isOpen && isLoaded
+            return ProjectActionsAvailability(
+                addMission = writable && hasUnfiled, rename = writable, merge = writable && hasMergeTargets, close = writable,
+            )
+        }
+    }
+}
+
+/// The words of a project page's "⋯" menu and what follows from it.
+object ProjectActionsFormat {
+    const val ADD_MISSION = "Add a mission"
+    const val ASK = "Ask the Coordinator about this"
+    const val ASKED = "Asked the Coordinator"
+    const val RENAME = "Rename…"
+    const val MERGE_INTO = "Merge into…"
+    const val CLOSE = "Close project…"
+    /// The summary the journal records with a close made from the app.
+    const val CLOSE_SUMMARY = "Closed from the app."
+    const val NOT_OPEN = "This project is closed, so it can't be changed."
+
+    fun askMessage(title: String): String = "Tell me about the project “$title”: where it is and what is next."
+    fun closeConfirmation(title: String): String = "Close “$title”? Its missions stay as they are."
+    fun mergeConfirmation(title: String, into: String): String =
+        "Merge “$title” into “$into”? Its missions move there and this project closes."
+}
 
 /// Backs one project's page on the Projects tab: the page itself, its
 /// week-by-week history a page at a time once the reader opens it, and its
@@ -48,7 +99,19 @@ class ProjectPageViewModel(
     projectID: String,
     private val timeline: TimelineProviding,
     private val projects: ProjectsProviding,
+    /// Open missions filed in no project, from the local cache.
+    private val unfiledMissions: suspend () -> List<Mission> = { emptyList() },
+    /// Sends a question to the Coordinator's conversation; null hides the Ask.
+    private val askCoordinator: (suspend (String) -> Unit)? = null,
+    /// A mission was filed here: refresh its cached row.
+    private val missionChanged: suspend (String) -> Unit = {},
+    /// The project was changed from this page: the timeline's lists that
+    /// name it read again.
+    private val projectChanged: () -> Unit = {},
 ) {
+    /// Whether the page offers "Ask the Coordinator about this".
+    val canAsk: Boolean get() = askCoordinator != null
+
     /// The project every read asks for: the one given, then the one it was merged into.
     var projectID: String = projectID
         private set
@@ -194,6 +257,101 @@ class ProjectPageViewModel(
         } finally {
             isLoadingMoreFiles = false
         }
+    }
+
+    // MARK: The "⋯" menu
+
+    /// Reads what the menu lists: open missions in no project and the other
+    /// open projects.
+    suspend fun loadActionTargets() {
+        try {
+            val open = projects.listProjects(openOnly = true)
+            val unfiled = unfiledMissions()
+            _state.update { s ->
+                s.copy(
+                    mergeTargets = open.filter { it.id != projectID && it.state == MissionState.OPEN }.sortedBy { it.title.lowercase() },
+                    unfiled = unfiled.filter { it.state == MissionState.OPEN && it.projectID == null },
+                    actionsLoaded = true,
+                )
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            _state.update { it.copy(error = error.message) }
+        }
+    }
+
+    /// `PATCH /projects/:id {title}`. False when the journal refused.
+    suspend fun rename(title: String): Boolean {
+        val trimmed = title.trim()
+        if (trimmed.isEmpty()) return false
+        return write { projects.renameProject(projectID, trimmed) }
+    }
+
+    /// Merges this project into [into]: its missions move there and this
+    /// project closes, so the page becomes [into]'s.
+    suspend fun merge(into: String): Boolean {
+        val from = projectID
+        val ok = write(reload = false) { projects.mergeProject(from, into) }
+        if (ok) {
+            projectID = into
+            _state.update { it.copy(redirectedTo = into) }
+            refresh()
+            loadActionTargets()
+        }
+        return ok
+    }
+
+    /// `POST /projects/:id/close` with the app's summary.
+    suspend fun close(): Boolean = write { projects.closeProject(projectID, ProjectActionsFormat.CLOSE_SUMMARY) }
+
+    /// Files [missionID] in this project.
+    suspend fun addMission(missionID: String): Boolean {
+        val ok = write {
+            projects.setMissionProject(missionID, projectID)
+            missionChanged(missionID)
+        }
+        if (ok) _state.update { s -> s.copy(unfiled = s.unfiled.filter { it.id != missionID }) }
+        return ok
+    }
+
+    /// Asks the Coordinator where the project is and what is next.
+    suspend fun ask() {
+        val send = askCoordinator ?: return
+        val title = _state.value.page?.project?.title ?: return
+        try {
+            send(ProjectActionsFormat.askMessage(title))
+            _state.update { it.copy(asked = true) }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            _state.update { it.copy(error = error.message) }
+        }
+    }
+
+    /// Runs one write: busy while it runs, the journal's refusal said in
+    /// words, then the page (and every section opened) read again.
+    private suspend fun write(reload: Boolean = true, body: suspend () -> Unit): Boolean {
+        if (_state.value.isBusy) return false
+        _state.update { it.copy(isBusy = true, error = null) }
+        try {
+            body()
+        } catch (cancel: CancellationException) {
+            _state.update { it.copy(isBusy = false) }
+            throw cancel
+        } catch (error: Throwable) {
+            val message = when (error) {
+                is ProjectCloseError -> error.message
+                JournalApiError.Conflict -> ProjectActionsFormat.NOT_OPEN
+                else -> error.message
+            }
+            _state.update { it.copy(isBusy = false, error = message) }
+            return false
+        }
+        _state.update { it.copy(isBusy = false) }
+        projectChanged()
+        if (reload) refresh()
+        return true
     }
 
     fun dismissError() {

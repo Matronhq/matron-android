@@ -115,6 +115,45 @@ class ProjectPageScreenTest {
         }
     }
 
+    private fun actionsVM() = ProjectPageViewModel(
+        ProjectsFixtures.docs.id, ProjectsFixtures.Timeline(), ProjectsFixtures.Projects(),
+        unfiledMissions = {
+            listOf(
+                chat.matron.android.models.Mission(id = "ms_30", num = 30, title = "Changelog page", originConvoID = "c30"),
+                chat.matron.android.models.Mission(id = "ms_31", num = 31, title = "Docs analytics", originConvoID = "c31"),
+            )
+        },
+        askCoordinator = {},
+    )
+
+    @Test
+    fun projectActions() {
+        show(MatronAppearance.Light) {
+            val viewModel = remember { actionsVM() }
+            ProjectScreen(viewModel, ProjectsFixtures.Media(), serverURL, onBack = {}, onOpenItem = {}, onOpenSection = {}, showsActions = true)
+        }.use {
+            node(By.desc("More")).click()
+            node(By.text("Close project…"))
+            screenshot("project-actions-menu")
+            node(By.text("Merge into…")).click()
+            node(By.text("Pricing page refresh"))
+            screenshot("project-actions-merge-pick")
+            node(By.text("Promo launch")).click()
+            node(By.textStartsWith("Merge “Docs site launch” into “Promo launch”?"))
+            screenshot("project-actions-merge-confirm")
+            node(By.text("Cancel")).click()
+            node(By.desc("More")).click()
+            node(By.text("Add a mission")).click()
+            node(By.text("#31 Docs analytics"))
+            screenshot("project-actions-add-mission")
+            node(By.text("Cancel")).click()
+            node(By.desc("More")).click()
+            node(By.text("Rename…")).click()
+            node(By.text("Rename project"))
+            screenshot("project-actions-rename")
+        }
+    }
+
     @Test
     fun missionPageNamesItsProject() {
         val mission = ProjectsFixtures.docsMissions.first().copy(body = "Make every guide and API page searchable from the header.")

@@ -573,13 +573,14 @@ private fun SignedInApp(
     val missionsVM = remember(session.userID) { deps.makeMissionsListViewModel(session, sessionScope) }
     // The Projects timeline (the Missions tab's root): session-long, so the
     // picked week survives a tab switch. It reads when the tab first shows.
-    val timelineVM = remember(session.userID) {
-        deps.makeTimelineViewModel(session, sessionScope) { question ->
-            // "Ask the Coordinator" on a stalled project: a message in its room.
+    // "Ask the Coordinator" from the Projects pages: a message in its room.
+    val askCoordinator: suspend (String) -> Unit = remember(session.userID) {
+        { question ->
             val coordinator = deps.coordinatorSync(session).convoID.value ?: throw IllegalStateException("Choose a Coordinator in Settings first.")
             deps.timelineService(session, coordinator).sendText(question, null)
         }
     }
+    val timelineVM = remember(session.userID) { deps.makeTimelineViewModel(session, sessionScope, askCoordinator) }
     // Settings → People; session-wide so an invite deep link can open its
     // accept card before the screen is up.
     val inviteLinks = remember(session.userID) { deps.revealedInviteLinks(session) }
@@ -1224,7 +1225,10 @@ private fun SignedInApp(
                         arguments = listOf(navArgument("projectID") { type = NavType.StringType }),
                     ) { entry ->
                         val projectID = entry.arguments?.getString("projectID") ?: return@composable
-                        val projectVM = remember(projectID) { deps.makeProjectPageViewModel(session, projectID) }
+                        val projectVM = remember(projectID) {
+                            // A change made here reads the timeline's lists again.
+                            deps.makeProjectPageViewModel(session, projectID, askCoordinator) { sessionScope.launch { timelineVM.refresh() } }
+                        }
                         ProjectScreen(
                             viewModel = projectVM,
                             media = deps.mediaService(session),
@@ -1232,6 +1236,7 @@ private fun SignedInApp(
                             onBack = { nav.popBackStack() },
                             onOpenItem = { shell.pushMissionItem(it) },
                             onOpenSection = { shell.openProjectSection(projectVM.projectID, it.wire) },
+                            showsActions = true,
                         )
                     }
                     composable(
