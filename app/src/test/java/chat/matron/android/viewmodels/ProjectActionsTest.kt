@@ -206,6 +206,17 @@ class ProjectActionsTest {
     }
 
     @Test
+    fun aMergeStartsTheSectionsOverForTheSurvivingProject() = runBlocking {
+        val (vm, projects, _) = setup()
+        projects.details["pj_docs"] = chat.matron.android.models.ProjectDetail(Project(id = "pj_docs", num = 12, title = "Docs site launch"), listOf(mission("ms_docs")))
+        vm.refreshPage(); vm.loadActionTargets(); vm.loadMissions()
+        assertEquals(listOf("ms_docs"), vm.state.value.openMissions?.map { it.id })
+        // The survivor's missions can't be read: none of the old ones stay.
+        assertTrue(vm.merge("pj_promo"))
+        kotlin.test.assertNull(vm.state.value.openMissions)
+    }
+
+    @Test
     fun refusalsAreSaidInWords() = runBlocking {
         val (vm, projects, _) = setup()
         vm.refreshPage(); vm.loadActionTargets()

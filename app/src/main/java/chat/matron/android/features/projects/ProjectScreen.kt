@@ -189,16 +189,17 @@ fun ProjectSectionScreen(
                 section == ProjectSection.FILES && state.files != null -> ProjectFilesGridView(
                     files = state.files!!.rows, images = emptyMap(), now = Instant.now(), hasMore = state.files!!.hasMore,
                     loadImage = { blobID -> thumbnails.load(blobID) },
-                    onOpenFile = { file ->
+                    onOpenFile = { file, shown ->
                         when (projectFileOpening(file)) {
                             // The latest tap wins: an earlier one still resolving
                             // its item never navigates or explains after it.
                             ProjectFileOpening.PICTURE -> {
                                 sourceJob?.cancel()
                                 val rows = state.files!!.rows
-                                val loaded = thumbnails[file.blobID]
+                                // The bytes the tile shows, else the cache's.
+                                val loaded = shown ?: thumbnails[file.blobID]
                                 if (loaded != null) {
-                                    gallery = projectGallery(rows, file, thumbnails.snapshot(), serverURL, media)
+                                    gallery = projectGallery(rows, file, thumbnails.snapshot() + (file.blobID to loaded), serverURL, media)
                                 } else {
                                     // Its thumbnail hasn't landed: fetch it, then open on it.
                                     sourceJob = scope.launch {

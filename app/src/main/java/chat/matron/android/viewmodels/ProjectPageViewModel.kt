@@ -279,7 +279,7 @@ class ProjectPageViewModel(
             // Said in an alert over the files on screen (before any, the
             // screen offers Try again); the grid's end asks again from the
             // list shown, so paging never stalls behind the failed reload.
-            if (generation == filesGeneration) _state.update { it.copy(error = error.message, filesVersion = it.filesVersion + 1) }
+            if (generation == filesGeneration) _state.update { it.copy(error = error.message, filesVersion = it.filesVersion + 1, filesPagingFailed = false) }
         } finally {
             if (generation == filesGeneration) isReloadingFiles = false
         }
@@ -358,8 +358,20 @@ class ProjectPageViewModel(
             // surviving project's page lands, the page shows its progress
             // (or its retry), never the old project under the new id. The
             // Ask was about the old project, and the lists are the new one's.
+            // The sections were the closed project's too: they start over,
+            // and any read still on its way for them is dropped.
+            historyGeneration += 1
+            missionsGeneration += 1
+            filesGeneration += 1
+            historyNextBefore = null
+            isReloadingHistory = false
+            isReloadingFiles = false
             _state.update {
-                it.copy(redirectedTo = into, page = null, asked = false, actionsLoaded = false, unfiled = emptyList(), mergeTargets = emptyList())
+                it.copy(
+                    redirectedTo = into, page = null, asked = false, actionsLoaded = false, unfiled = emptyList(), mergeTargets = emptyList(),
+                    history = emptyList(), historyLoaded = false, hasMoreHistory = false, historyPagingFailed = false,
+                    openMissions = null, closedMissions = emptyList(), files = null, filesPagingFailed = false,
+                )
             }
             refresh()
         }
