@@ -310,6 +310,17 @@ class ApprovalCenterTest {
     }
 
     @Test
+    fun aKeyWithNoBiometricLeftToUnlockItCannotSign() = runTest {
+        val provider = SoftwareKeyProvider()
+        enrolled(center(provider = provider))
+        val withoutBiometrics = SoftwareKeyProvider(ApprovalKeyAvailability.Unavailable("Set one up."))
+        val center = center(provider = withoutBiometrics)
+        center.refresh()
+        assertEquals(ApprovalCenter.Status.Unavailable("Set one up."), center.status.value)
+        assertEquals(false, center.canSign)
+    }
+
+    @Test
     fun journalHostKeepsOnlyANonDefaultPort() {
         assertEquals("journal.example", ApprovalCenter.journalHost("https://Journal.Example/"))
         assertEquals("journal.example", ApprovalCenter.journalHost("https://journal.example:443"))

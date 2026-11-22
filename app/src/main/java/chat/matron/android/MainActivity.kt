@@ -197,6 +197,8 @@ class MainActivity : FragmentActivity() {
             auth = AndroidBiometricAuthenticator(this),
             store = deps.preferences,
         )
+        // An approval key's biometric prompt is not the app going away.
+        chat.matron.android.platform.BiometricPromptHost.onPrompt = { showing -> appLock.noteSystemPrompt(showing) }
         setContent {
             // Read lazily by dispose handlers that must tell the lock shield's
             // teardown from the user's (see LocalAppLockActive).
@@ -368,36 +370,37 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                 // Inside the theme and below the lock check, so a lock
                 // removes an open prompt along with everything else.
                 else -> BlockedLinkHost {
-                    SignedInApp(
-                        deps = deps,
-                        session = session!!,
-                        incomingLinks = incomingLinks,
-                        appearance = appearance,
-                        appLock = appLock,
-                        onAppearanceChange = { next ->
-                            appearance = next
-                            prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
-                        },
-                        // Refused while locked: signing out clears the lock, so it
-                        // must not be reachable from behind the shield. Unreachable
-                        // in practice (the menu isn't composed while locked) — the
-                        // guard belongs with the lock state regardless.
-                        onSignOut = {
-                            appLock.signOutIfUnlocked {
-                                OutboxCatchUpWorker.cancel(context)
-                                deps.signOut()
-                                // Per-account state, cleared like the rest: the next
-                                // account starts opted out.
-                                appLock.resetForSignOut()
-                                // The user's own sign-out: no "signed out from
-                                // another device" notice.
-                                revokedSession = null
-                                session = null
-                            }
-                        },
-                    )
                     // The approval confirm sheet, over every screen of the app.
-                    ApprovalConfirmHost(remember(session!!.userID) { deps.approvalCenter(session!!) })
+                    ApprovalConfirmHost(remember(session!!.userID) { deps.approvalCenter(session!!) }) {
+                        SignedInApp(
+                            deps = deps,
+                            session = session!!,
+                            incomingLinks = incomingLinks,
+                            appearance = appearance,
+                            appLock = appLock,
+                            onAppearanceChange = { next ->
+                                appearance = next
+                                prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
+                            },
+                            // Refused while locked: signing out clears the lock, so it
+                            // must not be reachable from behind the shield. Unreachable
+                            // in practice (the menu isn't composed while locked) — the
+                            // guard belongs with the lock state regardless.
+                            onSignOut = {
+                                appLock.signOutIfUnlocked {
+                                    OutboxCatchUpWorker.cancel(context)
+                                    deps.signOut()
+                                    // Per-account state, cleared like the rest: the next
+                                    // account starts opted out.
+                                    appLock.resetForSignOut()
+                                    // The user's own sign-out: no "signed out from
+                                    // another device" notice.
+                                    revokedSession = null
+                                    session = null
+                                }
+                            },
+                        )
+                    }
                 }
             }
         }

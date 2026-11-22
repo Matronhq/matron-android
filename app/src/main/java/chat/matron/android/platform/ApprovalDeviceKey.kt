@@ -125,6 +125,13 @@ object BiometricPromptHost {
     }
 
     val activity: FragmentActivity? get() = current?.get()
+
+    /// Told when the system's biometric prompt goes up (true) and comes down
+    /// (false), on the main thread. The app lock listens: the prompt's own
+    /// stop and start of the activity is not the app leaving the foreground,
+    /// and locking then would tear down the signature the user just gave.
+    @Volatile
+    var onPrompt: ((showing: Boolean) -> Unit)? = null
 }
 
 /// The real thing: ECDSA P-256 in the Android Keystore (StrongBox when the
@@ -281,7 +288,9 @@ class KeystoreApprovalKey internal constructor(
             onInvalidated()
             throw ApprovalKeyFailure.Invalidated
         }
-        val authorised = suspendCancellableCoroutine { continuation ->
+        BiometricPromptHost.onPrompt?.invoke(true)
+        val authorised = try {
+            suspendCancellableCoroutine { continuation ->
             val settled = AtomicBoolean(false)
             val callback = object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
@@ -309,6 +318,9 @@ class KeystoreApprovalKey internal constructor(
                 .build()
             continuation.invokeOnCancellation { runCatching { prompt.cancelAuthentication() } }
             prompt.authenticate(info, BiometricPrompt.CryptoObject(signature))
+            }
+        } finally {
+            BiometricPromptHost.onPrompt?.invoke(false)
         }
         try {
             authorised.update(data)

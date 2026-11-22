@@ -196,8 +196,9 @@ class ApprovalKeysScreenTest {
                 activity.setContent {
                     MatronTheme(MatronAppearance.Light) {
                         androidx.compose.material3.Surface(Modifier.fillMaxSize()) {
-                            ApprovalKeysScreen(model, onBack = {}, poll = false)
-                            chat.matron.android.designsystem.ApprovalConfirmHost(center)
+                            chat.matron.android.designsystem.ApprovalConfirmHost(center) {
+                                ApprovalKeysScreen(model, onBack = {}, poll = false)
+                            }
                         }
                     }
                 }

@@ -251,6 +251,22 @@ class AppLockControllerTest {
     }
 
     @Test
+    fun anApprovalKeysPromptIsNotARoundTrip() = runBlocking {
+        val lock = makeController()
+        lock.setEnabled(true)
+        lock.setTimeout(AppLockTimeout.IMMEDIATELY)
+        lock.noteSystemPrompt(showing = true)
+        lock.noteBackgrounded()
+        lock.noteForegrounded()
+        lock.noteSystemPrompt(showing = false)
+        assertFalse(lock.isLocked.value)
+        // Once it is down, a real trip away locks as before.
+        lock.noteBackgrounded()
+        lock.noteForegrounded()
+        assertTrue(lock.isLocked.value)
+    }
+
+    @Test
     fun repeatedBackgrounded_keepsEarliestTimestamp() = runBlocking {
         // A stop/start blip on the way out must not restart the countdown from
         // a later moment than the user's actual departure.
