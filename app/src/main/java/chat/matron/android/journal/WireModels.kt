@@ -355,7 +355,17 @@ sealed interface ServerFrame {
         val ref: String?,
         val requestID: String?,
         val detail: String?,
+        /// On an `account_locked` refusal: when the lock began (epoch ms),
+        /// and whether this device was frozen rather than signed out (it can
+        /// unlock the account with its approval key).
+        val since: Long? = null,
+        val unlock: Boolean = false,
     ) : ServerFrame
+
+    /// `{kind:"panic", on, since, unlock?}`: the whole account was locked
+    /// (sent just before the journal closes the socket). [unlock] says this
+    /// device was frozen, not signed out, and can unlock it.
+    data class Panic(val on: Boolean, val since: Long?, val unlock: Boolean) : ServerFrame
     data object SnapshotRequired : ServerFrame
     data class UnknownControl(val op: String) : ServerFrame
     /// The user changed a journal-held setting on some device
@@ -446,6 +456,11 @@ sealed interface ServerFrame {
                 "archive" -> ArchiveDelta.decode(obj)?.let { ArchiveFrame(it) }
                 "notify" -> NotifySettings.decode(obj.objectOrNull("settings"))?.let { NotifyFrame(it) }
                 "control" -> decodeControl(obj)
+                "panic" -> Panic(
+                    on = obj.boolOrNull("on") ?: true,
+                    since = obj.longOrNull("since"),
+                    unlock = obj.boolOrNull("unlock") ?: false,
+                )
                 else -> null
             }
         }
@@ -619,6 +634,8 @@ sealed interface ServerFrame {
                     ref = obj.stringOrNull("ref"),
                     requestID = obj.stringOrNull("request_id"),
                     detail = obj.stringOrNull("detail"),
+                    since = obj.longOrNull("since"),
+                    unlock = obj.boolOrNull("unlock") ?: false,
                 )
                 "snapshot_required" -> SnapshotRequired
                 else -> UnknownControl(op)

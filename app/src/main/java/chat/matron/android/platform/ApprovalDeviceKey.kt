@@ -90,6 +90,13 @@ class ApprovalKeyStore(private val store: KeyValueStore, host: String, user: Str
     fun delete() {
         store.remove(name)
     }
+
+    /// The journal's name as statements carry it (`GET /approval-keys`'s
+    /// `journal`), kept for a cold start while the account is locked: the
+    /// keys cannot be read then, and the server address may not be the name.
+    var lastJournal: String?
+        get() = store.getString("$name-journal")
+        set(value) { if (value == null) store.remove("$name-journal") else store.setString("$name-journal", value) }
 }
 
 /// Makes and loads the device's key. A seam so the approval centre's tests

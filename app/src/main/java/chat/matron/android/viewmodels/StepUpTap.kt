@@ -152,7 +152,8 @@ object StepUpTap {
     /// landed: a 4xx, other than a timeout or a throttle.
     internal fun refusedOutright(e: Throwable): Boolean = when (e) {
         JournalApiError.ApprovalRequired, is JournalApiError.ApprovalInvalid, JournalApiError.Conflict,
-        JournalApiError.Forbidden, JournalApiError.NotFound, JournalApiError.Unauthenticated -> true
+        JournalApiError.Forbidden, JournalApiError.NotFound, JournalApiError.Unauthenticated,
+        is JournalApiError.AccountLocked -> true
         is JournalApiError.Http -> e.status in 400..499 && e.status != 408 && e.status != 429
         else -> false
     }

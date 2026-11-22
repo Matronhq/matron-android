@@ -46,6 +46,8 @@ import chat.matron.android.viewmodels.ConversationRoomsViewModel
 import chat.matron.android.viewmodels.NotifySettingsStore
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
 import chat.matron.android.viewmodels.ApprovalCenter
+import chat.matron.android.viewmodels.AccountLockMonitor
+import chat.matron.android.viewmodels.AccountUnlockModel
 import chat.matron.android.viewmodels.ApprovalKeysScreenModel
 import chat.matron.android.platform.ApprovalKeyStore
 import chat.matron.android.platform.KeystoreApprovalKeyProvider
@@ -487,6 +489,9 @@ class AppDependencies(
             pinsSync = pinsSync, coordinatorSync = coordinatorSync, notifySettings = notifySettings,
             revocation = revocation, userID = session.userID,
         )
+        // The account lock: every answer and the socket say whether it holds.
+        api.accountLock = accountLock
+        engine.accountLock = accountLock
         core.approvals = ApprovalCenter(
             api = api,
             keys = KeystoreApprovalKeyProvider(
@@ -624,6 +629,57 @@ class AppDependencies(
     }
 
     fun syncService(session: UserSession): SyncService = core(session).engine
+
+    /**
+     * Whether the journal says the account is locked (HTTP 423, the socket's
+     * `panic` frame or a refused hello). One for the app: one account is
+     * signed in at a time.
+     */
+    @Volatile
+    private var signingOut = false
+
+    val accountLock: AccountLockMonitor = AccountLockMonitor().also { monitor ->
+        // Replies held while the account was locked go once it is cleared.
+        monitor.whenCleared {
+            // Not the outbox of a sign-in that is going.
+            if (signingOut) return@whenCleared
+            // Read under the monitor every other use of `cores` takes: this
+            // runs on the socket's or OkHttp's thread.
+            synchronized(this@AppDependencies) { cores.values.toList() }
+                .forEach { core -> appScope.launch { core.itemsSync.drainOutbox() } }
+        }
+    }
+
+    /**
+     * Unlocking the account from this device, when the lock froze it: the
+     * confirm sheet and signature, `POST /panic/unlock`, then the new token
+     * saved and swapped into the API client and the socket. An answer that
+     * comes back after a sign-out (or a new sign-in) is thrown away.
+     */
+    fun makeAccountUnlockModel(session: UserSession): AccountUnlockModel {
+        val core = core(session)
+        val center = approvalCenter(session)
+        return AccountUnlockModel(
+            monitor = accountLock,
+            api = core.api,
+            sign = { since -> center.signUnlock(since, AccountUnlockModel.unlockDetail(since)) },
+            adoptToken = { token ->
+                // Saved first, so the next launch has it; then every client of
+                // this session uses it.
+                val saved = runCatching { auth.persist(session.copy(accessToken = token)) }.isSuccess
+                core.api.setToken(token)
+                core.engine.replaceToken(token)
+                saved
+            },
+            isCurrent = { synchronized(this) { cores.values.any { it === core } } },
+            // No revocation sign-out while the unlock swaps the token: the old
+            // token is refused from the moment the journal unlocks.
+            attempt = AccountUnlockModel.Attempt(
+                begin = { core.revocation.hold() },
+                end = { tookNewToken -> core.revocation.release(discard = tookNewToken) },
+            ),
+        )
+    }
 
     /** The session's approval centre: keys, and the confirm sheet signing goes through. */
     fun approvalCenter(session: UserSession): ApprovalCenter = core(session).approvals!!
@@ -1079,6 +1135,18 @@ class AppDependencies(
     @Synchronized
     fun signOut() {
         val oldCores = cores.values.toList()
+        // A lock (or its warning) belongs to the sign-in that is going. Its
+        // clients stop reporting first: teardown's own requests (push
+        // deregistration) would otherwise answer 423 and put the old
+        // account's lock back for the next sign-in.
+        for (core in oldCores) {
+            core.api.accountLock = null
+            core.engine.accountLock = null
+        }
+        signingOut = true
+        accountLock.cleared()
+        signingOut = false
+        accountLock.dismissWarning()
         val oldUserIDs = cores.values.map { it.userID }.distinct()
         // Disarm first: the teardown below still talks to the server with the
         // old token (push deregistration), and a revoked token's 401s must not
