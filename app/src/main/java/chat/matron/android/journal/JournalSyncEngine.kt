@@ -923,9 +923,9 @@ class JournalSyncEngine(
 
     private suspend fun settle(source: ConversationPageSource, convoID: String, connection: JournalConnection, generation: Int) {
         delay(conversationSettleDelay)
-        fun sameSession() = synchronized(lock) {
+        fun sameSessionLocked() =
             liveConnection === connection && viewingGeneration == generation && viewingConvoID == convoID
-        }
+        fun sameSession() = synchronized(lock) { sameSessionLocked() }
         if (!sameSession()) return
         val page = runCatching { source.messages(convoID, null, SETTLE_PAGE_SIZE) }.getOrNull() ?: return
         // Written only while the chat is still on screen in the session that
@@ -941,7 +941,10 @@ class JournalSyncEngine(
                     // Only now is everything the socket carried for it, up to
                     // the cursor, known to be stored: leaving records that. A
                     // chat closed before this keeps the mark its fetch proved.
-                    synchronized(lock) { caughtUpViewed += convoID }
+                    // Checked again in the same critical section: a socket
+                    // installed during the write clears the set and must
+                    // not inherit this mark.
+                    synchronized(lock) { if (sameSessionLocked()) caughtUpViewed += convoID }
                 }
         }
     }
