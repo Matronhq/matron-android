@@ -42,6 +42,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -798,10 +801,15 @@ fun itemSelectionLine(comment: TrackerComment): String? =
 @Composable
 private fun MultiSelectAnswers(actions: List<String>, chosen: List<String>, enabled: Boolean, onSend: (List<String>) -> Unit) {
     if (actions.isEmpty()) return
-    var ticked by remember(actions, chosen) { mutableStateOf(chosen.toSet()) }
+    // Saveable, so ticks not yet sent survive the question scrolling out of
+    // the thread (which disposes its row) and a configuration change.
+    var ticked by rememberSaveable(actions, chosen, saver = TickedSaver) { mutableStateOf(chosen.toSet()) }
+    // A closed item's rows are the record of the answer sent, never of
+    // ticks left unsent when it closed.
+    val shown = if (enabled) ticked else chosen.toSet()
     Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
         for (label in actions) {
-            val isTicked = label in ticked
+            val isTicked = label in shown
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -825,6 +833,11 @@ private fun MultiSelectAnswers(actions: List<String>, chosen: List<String>, enab
         }
     }
 }
+
+private val TickedSaver = listSaver<MutableState<Set<String>>, String>(
+    save = { it.value.toList() },
+    restore = { mutableStateOf(it.toSet()) },
+)
 
 /// The one-tap answers under the comment that asks, or under the item's
 /// title for the item's own buttons. The chosen one is filled;

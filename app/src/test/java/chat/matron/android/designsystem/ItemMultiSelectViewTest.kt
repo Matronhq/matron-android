@@ -1,6 +1,8 @@
 package chat.matron.android.designsystem
 
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
@@ -88,6 +90,31 @@ class ItemMultiSelectViewTest {
         show(question(chosen = listOf("Docs", "Search"), state = ItemState.CLOSED))
         compose.onNodeWithText("Docs").assertIsOn()
         compose.onNodeWithText("Send").assertDoesNotExist()
+    }
+
+    @Test
+    fun ticksLeftUnsentAreNotShownOnceTheItemCloses() {
+        var item by androidx.compose.runtime.mutableStateOf(question(chosen = listOf("Billing")))
+        compose.setContent {
+            MatronTheme(appearance = MatronAppearance.Light) {
+                Surface {
+                    ItemDetailView(
+                        model = ItemDetailModel(
+                            item = item, comments = emptyList(), pending = emptyList(),
+                            context = ItemContext(null, null, null), availableResolutions = emptyList(), isBusy = false,
+                            loadedCommentCount = 0,
+                        ),
+                        draft = "", onDraftChange = {}, image = { null }, onOpenAttachment = {}, onOpenLink = {},
+                        onOpenConversation = {}, onSubmit = {}, onAttach = {}, onVoiceNote = {}, now = now,
+                    )
+                }
+            }
+        }
+        compose.onNodeWithText("Docs").performClick()
+        compose.onNodeWithText("Docs").assertIsOn()
+        compose.runOnIdle { item = item.copy(state = ItemState.CLOSED, resolution = ItemResolution.ANSWERED) }
+        compose.onNodeWithText("Docs").assertIsOff()
+        compose.onNodeWithText("Billing").assertIsOn()
     }
 
     @Test
