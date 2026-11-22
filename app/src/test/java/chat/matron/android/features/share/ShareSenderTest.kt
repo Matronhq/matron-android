@@ -72,6 +72,18 @@ class ShareSenderTest {
     }
 
     @Test
+    fun aBatchIsDrawnUpAgainWhenNothingWentBeforeAFileWasRemoved() = runBlocking {
+        val a = sharedFile("a.png")
+        val b = sharedFile("b.png")
+        transport.failOnce += "a.png"
+        runCatching { sender.send("c1", "", listOf(a, b)) {} }
+        assertFalse(sender.hasSentAnything)
+        // The user took b off and sent again: a goes alone, untagged.
+        sender.send("c1", "", listOf(a)) {}
+        assertEquals(listOf(FakeShareTransport.Sent("c1", "a.png", null, null)), transport.sent)
+    }
+
+    @Test
     fun aConnectionThatWontComeUpSendsNothing() = runBlocking {
         transport.connectError = ShareConnectError()
         runCatching { sender.send("c1", "hi", emptyList()) {} }

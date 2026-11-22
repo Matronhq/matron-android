@@ -93,10 +93,13 @@ class ShareItemLoaderTest {
     }
 
     @Test
-    fun staleWorkDirectoriesAreCleared() {
-        val keep = java.io.File(work, "keep").apply { mkdirs() }
-        java.io.File(work, "old").mkdirs()
-        ShareItemLoader.clearStale(work, keep)
-        assertEquals(listOf("keep"), work.listFiles()!!.map { it.name })
+    fun onlyOldWorkDirectoriesAreCleared() {
+        val now = System.currentTimeMillis()
+        val keep = java.io.File(work, "keep").apply { mkdirs(); setLastModified(now - 2 * ShareItemLoader.STALE_AFTER_MILLIS) }
+        java.io.File(work, "old").apply { mkdirs(); setLastModified(now - 2 * ShareItemLoader.STALE_AFTER_MILLIS) }
+        // Another share, still on screen.
+        java.io.File(work, "live").apply { mkdirs(); setLastModified(now - 60_000) }
+        ShareItemLoader.clearStale(work, keep, now)
+        assertEquals(setOf("keep", "live"), work.listFiles()!!.map { it.name }.toSet())
     }
 }

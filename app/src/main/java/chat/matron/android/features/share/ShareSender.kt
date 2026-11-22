@@ -82,6 +82,10 @@ class ShareSender(private val transport: ShareTransport, private val newBatchID:
             transport.sendText(convoID, text)
             messageSent = true
         } else {
+            // Until something has gone, the files can still change (one
+            // removed after a failed connect), so the batch is drawn up
+            // afresh; once one has gone, the rest keep the tags it started.
+            if (sent.isEmpty()) tags.clear()
             if (tags.isEmpty() && files.size > 1) {
                 val batch = newBatchID()
                 files.forEachIndexed { index, file ->

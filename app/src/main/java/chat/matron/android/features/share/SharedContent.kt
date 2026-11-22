@@ -220,9 +220,16 @@ object ShareItemLoader {
     private fun fallbackName(mimeType: String?): String =
         if (mimeType?.startsWith("image/") == true) "shared-image" else "shared-file"
 
+    /// How old a work directory must be before it counts as left behind.
+    /// Two shares can be on screen at once (from two apps, in two tasks), so
+    /// a newer directory may belong to one still open.
+    const val STALE_AFTER_MILLIS: Long = 24 * 60 * 60 * 1000
+
     /// Empties work directories a share left behind (the process was ended
-    /// mid-share), keeping [keep].
-    fun clearStale(root: File, keep: File?) {
-        root.listFiles()?.forEach { if (it != keep) it.deleteRecursively() }
+    /// mid-share): those untouched for [STALE_AFTER_MILLIS], never [keep].
+    fun clearStale(root: File, keep: File?, now: Long = System.currentTimeMillis()) {
+        root.listFiles()?.forEach {
+            if (it != keep && now - it.lastModified() > STALE_AFTER_MILLIS) it.deleteRecursively()
+        }
     }
 }
