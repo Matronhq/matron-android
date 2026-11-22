@@ -955,9 +955,10 @@ class JournalSyncEngine(
 
     suspend fun refreshSummaries() {
         val (epoch, settings) = synchronized(lock) { storeEpoch to settingsEpoch }
-        val adoptUnread = _syncScope.value == SyncScope.FOR_YOU
-        // A chat read while the snapshot is out keeps its own count.
-        val readMarks = if (adoptUnread) runCatching { store.readMarks() }.getOrNull() else null
+        // A chat read while the snapshot is out keeps its own count; without
+        // the markers to tell, no count is taken this time.
+        val readMarks = if (_syncScope.value == SyncScope.FOR_YOU) runCatching { store.readMarks() }.getOrNull() else null
+        val adoptUnread = readMarks != null
         val snapshot = runCatching { api.snapshot() }.getOrNull() ?: return
         if (synchronized(lock) { storeEpoch } != epoch) return // store wiped mid-flight; stale
         publishSnapshotSettings(snapshot, settings)
@@ -1452,19 +1453,25 @@ class JournalSyncEngine(
                 // The scope changed while this hello was out: the socket was
                 // set up for the old one, and setSyncScope had no socket to
                 // close. Drop it and connect again under the new scope.
+                // Checked and installed in one critical section, the one
+                // setSyncScope takes: a change either lands before (seen
+                // here) or after (it finds this socket and closes it).
                 val scopeMoved = synchronized(lock) {
-                    (_syncScope.value != scopeNow).also { moved -> if (moved) pathChangeReconnect = true }
+                    val moved = _syncScope.value != scopeNow
+                    if (moved) {
+                        pathChangeReconnect = true
+                    } else {
+                        liveConnection = connection; attempt = 0
+                        // Fetched over the last socket; this one starts behind them.
+                        liveHelloSync = hello.sync
+                        scopedReplayDone = false
+                        caughtUpViewed.clear()
+                    }
+                    moved
                 }
                 if (scopeMoved) {
                     connection.close()
                     throw ScopeChangedDuringHandshake()
-                }
-                synchronized(lock) {
-                    liveConnection = connection; attempt = 0
-                    // Fetched over the last socket; this one starts behind them.
-                    liveHelloSync = hello.sync
-                    scopedReplayDone = false
-                    caughtUpViewed.clear()
                 }
                 credentialSignals?.invoke(CredentialSignal.Accepted)
                 // The journal greets no device of a locked account.

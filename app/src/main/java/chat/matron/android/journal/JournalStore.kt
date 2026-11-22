@@ -303,8 +303,12 @@ class JournalStore(
                 updated = updated.copy(lastActivityTS = ts)
             }
             val unread = c.unreadCount
-            val readSinceRequest = readMarkAtRequest != null && readMarkAtRequest != NO_READ_MARK &&
-                readMarkAtRequest != existing.readUpToSeq
+            val readSinceRequest = when (readMarkAtRequest) {
+                null -> false
+                // No row at the request: one a read created since has a marker.
+                NO_READ_MARK -> existing.readUpToSeq != 0L
+                else -> readMarkAtRequest != existing.readUpToSeq
+            }
             if (adoptUnread && unread != null && !readSinceRequest) updated = updated.copy(unreadCount = unread)
             conversationDao.upsert(updated)
         } else {
