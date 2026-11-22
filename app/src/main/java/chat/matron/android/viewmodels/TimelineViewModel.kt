@@ -529,7 +529,9 @@ class TimelineViewModel(
 
     suspend fun loadMoreFinished() {
         val before = finishedNextBefore ?: return
-        if (loadingFinishedGeneration == finishedGeneration) return
+        // Until the list is read again after a refresh, its cursor is the
+        // old list's: no page is read off it.
+        if (TimelinePlace.Finished !in fresh || loadingFinishedGeneration == finishedGeneration) return
         val generation = finishedGeneration
         loadingFinishedGeneration = generation
         _state.update { it.copy(pagingFailed = it.pagingFailed - TimelinePlace.Finished) }
@@ -556,7 +558,7 @@ class TimelineViewModel(
     suspend fun loadMoreProjects() {
         val shown = _state.value.allProjects ?: return
         val before = shown.nextBefore ?: return
-        if (loadingProjectsGeneration == projectsGeneration) return
+        if (TimelinePlace.Projects !in fresh || loadingProjectsGeneration == projectsGeneration) return
         val generation = projectsGeneration
         loadingProjectsGeneration = generation
         _state.update { it.copy(pagingFailed = it.pagingFailed - TimelinePlace.Projects) }
