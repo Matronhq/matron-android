@@ -1,5 +1,6 @@
 package chat.matron.android.viewmodels
 
+import chat.matron.android.models.AttachmentLimits
 import java.io.File
 import java.util.UUID
 
@@ -56,6 +57,7 @@ object PastedAttachment {
             Kind.Text -> throw PastedAttachmentError.NotAnAttachment
             Kind.FileReference -> {
                 val ref = item.loadFileReference() ?: throw PastedAttachmentError.UnreadableItem
+                refuseOversize(ref.bytes.size, ref.filename)
                 val destination = stagingURL(ref.filename, stagingDirectory)
                 destination.writeBytes(ref.bytes)
                 destination
@@ -64,11 +66,20 @@ object PastedAttachment {
                 val bytes = item.loadData(kind.typeIdentifier)
                     ?: throw PastedAttachmentError.UnreadableItem
                 val name = filename(item.suggestedName, kind.typeIdentifier)
+                refuseOversize(bytes.size, name)
                 val destination = stagingURL(name, stagingDirectory)
                 destination.writeBytes(bytes)
                 destination
             }
         }
+    }
+
+    /// The largest item a paste will stage — the upload limit every other
+    /// entry point uses.
+    const val MAX_BYTES: Long = AttachmentLimits.MAX_BYTES
+
+    private fun refuseOversize(size: Int, name: String) {
+        if (AttachmentLimits.isOversize(size.toLong())) throw PastedAttachmentError.TooLarge(name)
     }
 
     /// Builds a unique staging file for a pasted item. The `UUID` prefix is what
@@ -153,4 +164,7 @@ sealed class PastedAttachmentError(override val message: String) : Exception(mes
 
     /// The provider delivered neither a file nor readable bytes.
     data object UnreadableItem : PastedAttachmentError("Couldn't read the pasted item.")
+
+    /// The item is over [AttachmentLimits.MAX_BYTES].
+    data class TooLarge(val name: String) : PastedAttachmentError(AttachmentLimits.oversizeMessage(name))
 }
