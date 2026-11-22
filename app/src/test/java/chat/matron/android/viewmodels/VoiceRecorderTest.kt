@@ -668,4 +668,119 @@ class VoiceRecorderTest {
         rec.sampleLevel()
         assertEquals("paused: no sample", 1, log.count { it.contains("level:") })
     }
+
+    // MARK: Microphone choice
+
+    /// A recorder whose input follows `useMicrophone`, like MediaRecorder's
+    /// preferred device: the pick reroutes a running capture.
+    private class RoutedFakeRecorder(private val mics: List<chat.matron.android.models.Microphone>) : AudioRecording {
+        val used = mutableListOf<String?>()
+        var recordCalls = 0
+        var listener: (() -> Unit)? = null
+        var routedID: String? = null
+
+        override fun record(): Boolean { recordCalls++; return true }
+        override fun pause() = true
+        override fun resume() = true
+        override fun stop(): Boolean { listener = null; return true }
+        override fun peakAmplitude() = 100
+        override val microphone get() = mics.firstOrNull { it.id == routedID } ?: mics.first()
+        override fun useMicrophone(id: String?) { used.add(id); routedID = id }
+        override fun setOnMicrophoneChanged(listener: (() -> Unit)?) { this.listener = listener }
+    }
+
+    private val phone = chat.matron.android.models.Microphone("builtin", "Phone microphone")
+    private val headset = chat.matron.android.models.Microphone("7:00:11:22:33:44:55", "Headset A")
+
+    private fun micRecorder(fake: RoutedFakeRecorder, prefs: MicrophonePreference = MicrophonePreference.InMemory()) =
+        VoiceRecorder(
+            requestPermission = { true },
+            makeRecorder = { fake },
+            tempDirectory = tempDir(),
+            listMicrophones = { listOf(phone, headset) },
+            preferences = prefs,
+        )
+
+    @Test
+    fun start_appliesTheRememberedPickBeforeCaptureAndNamesTheMicrophone() = runBlocking {
+        val fake = RoutedFakeRecorder(listOf(phone, headset))
+        val rec = micRecorder(fake, MicrophonePreference.InMemory(headset.id))
+        assertNull(rec.microphone.value)
+        rec.start()
+        assertEquals(listOf<String?>(headset.id), fake.used)
+        assertEquals(headset, rec.microphone.value)
+    }
+
+    @Test
+    fun start_withNoPick_followsTheSystem() = runBlocking {
+        val fake = RoutedFakeRecorder(listOf(phone, headset))
+        val rec = micRecorder(fake)
+        rec.start()
+        assertEquals(listOf<String?>(null), fake.used)
+        assertEquals(phone, rec.microphone.value)
+    }
+
+    @Test
+    fun selectMicrophone_midNote_movesTheSameRecordingAndIsRemembered() = runBlocking {
+        val fake = RoutedFakeRecorder(listOf(phone, headset))
+        val prefs = MicrophonePreference.InMemory()
+        val rec = micRecorder(fake, prefs)
+        rec.start()
+        rec.selectMicrophone(headset.id)
+        assertEquals("no second recorder: the capture moves", 1, fake.recordCalls)
+        assertEquals(headset, rec.microphone.value)
+        assertEquals(headset.id, rec.preferredMicrophoneID.value)
+        assertEquals(headset.id, prefs.load())
+        assertNotNull(rec.stop())
+    }
+
+    @Test
+    fun selectMicrophone_whenIdle_onlyRemembersThePick() {
+        val fake = RoutedFakeRecorder(listOf(phone, headset))
+        val prefs = MicrophonePreference.InMemory()
+        val rec = micRecorder(fake, prefs)
+        rec.selectMicrophone(headset.id)
+        assertTrue(fake.used.isEmpty())
+        assertEquals(headset.id, prefs.load())
+        assertNull(rec.microphone.value)
+    }
+
+    @Test
+    fun thePick_carriesOverToTheNextRecorder() = runBlocking {
+        val prefs = MicrophonePreference.InMemory()
+        micRecorder(RoutedFakeRecorder(listOf(phone, headset)), prefs).selectMicrophone(headset.id)
+        val fake = RoutedFakeRecorder(listOf(phone, headset))
+        val later = micRecorder(fake, prefs)
+        assertEquals(headset.id, later.preferredMicrophoneID.value)
+        later.start()
+        assertEquals(listOf<String?>(headset.id), fake.used)
+    }
+
+    @Test
+    fun aRouteChange_updatesTheNamedMicrophone_andStopClearsIt() = runBlocking {
+        val fake = RoutedFakeRecorder(listOf(phone, headset))
+        val rec = micRecorder(fake)
+        rec.start()
+        assertEquals(phone, rec.microphone.value)
+        // A headset plugged in mid-note takes over at the system's choice.
+        fake.routedID = headset.id
+        fake.listener?.invoke()
+        assertEquals(headset, rec.microphone.value)
+        rec.stop()
+        assertNull(rec.microphone.value)
+    }
+
+    @Test
+    fun cancel_clearsTheNamedMicrophone() = runBlocking {
+        val rec = micRecorder(RoutedFakeRecorder(listOf(phone, headset)))
+        rec.start()
+        rec.cancel()
+        assertNull(rec.microphone.value)
+    }
+
+    @Test
+    fun availableMicrophones_listsTheCatalogue() {
+        val rec = micRecorder(RoutedFakeRecorder(listOf(phone, headset)))
+        assertEquals(listOf(phone, headset), rec.availableMicrophones())
+    }
 }

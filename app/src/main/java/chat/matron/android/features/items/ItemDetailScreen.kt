@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.net.Uri
 import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -85,6 +86,9 @@ import chat.matron.android.models.TrackerComment
 import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.ItemDetailViewModel
 import chat.matron.android.viewmodels.ItemReadMemory
+import chat.matron.android.designsystem.MicrophoneMenu
+import chat.matron.android.platform.MicrophoneCatalog
+import chat.matron.android.platform.SharedPreferencesMicrophonePreference
 import chat.matron.android.viewmodels.MediaRecorderAudioRecording
 import chat.matron.android.viewmodels.VoiceRecorder
 import java.io.File
@@ -275,6 +279,7 @@ fun ItemDetailScreen(
         pendingPermission[0]?.complete(granted); pendingPermission[0] = null
     }
     val recorder = remember {
+        val microphones = MicrophoneCatalog(context)
         VoiceRecorder(
             requestPermission = {
                 if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
@@ -286,7 +291,9 @@ fun ItemDetailScreen(
                     deferred.await()
                 }
             },
-            makeRecorder = { file -> MediaRecorderAudioRecording(file) },
+            makeRecorder = { file -> MediaRecorderAudioRecording(file, microphones, context.getSystemService(AudioManager::class.java)) },
+            listMicrophones = microphones::list,
+            preferences = SharedPreferencesMicrophonePreference(context),
             tempDirectory = File(context.cacheDir, "voice").apply { mkdirs() },
             setKeepScreenAwake = { keepAwake ->
                 context.findActivity()?.window?.let { window ->
@@ -297,6 +304,8 @@ fun ItemDetailScreen(
         )
     }
     val recorderState by recorder.state.collectAsStateWithLifecycle()
+    val microphone by recorder.microphone.collectAsStateWithLifecycle()
+    val preferredMicrophoneID by recorder.preferredMicrophoneID.collectAsStateWithLifecycle()
     // True from the mic tap until the recorder has started (or failed): the
     // permission prompt's window, in which send must not post the text alone.
     var micStarting by remember { mutableStateOf(false) }
@@ -489,6 +498,14 @@ fun ItemDetailScreen(
                                 },
                                 voice = voice(),
                                 onCancelRecording = { recorder.cancel() },
+                                microphoneMenu = {
+                                    MicrophoneMenu(
+                                        current = microphone,
+                                        preferredID = preferredMicrophoneID,
+                                        available = recorder::availableMicrophones,
+                                        onSelect = recorder::selectMicrophone,
+                                    )
+                                },
                                 onTapAction = { comment, label -> scope.launch { viewModel.tapAction(comment, label) } },
                                 onTapItemAction = { label -> scope.launch { viewModel.tapItemAction(label) } },
                                 onRetryPending = { id -> scope.launch { viewModel.retryComment(id) } },

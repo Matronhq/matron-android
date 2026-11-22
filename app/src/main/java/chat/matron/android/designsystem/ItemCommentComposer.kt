@@ -181,6 +181,9 @@ fun ItemCommentComposer(
     /// A copied file or image pasted into the field goes to the tray
     /// ([AttachmentPasteTarget]). `null` keeps text-only paste.
     onPasteAttachments: ((List<Uri>) -> Unit)? = null,
+    /// Names the recording microphone and picks another (`MicrophoneMenu`),
+    /// shown under the strip while a note records.
+    microphoneMenu: (@Composable () -> Unit)? = null,
 ) {
     val hasAttachments = attachments.isNotEmpty()
     val sendable = itemCommentCanSubmit(draft, hasAttachments, voice)
@@ -194,6 +197,7 @@ fun ItemCommentComposer(
     ) {
         if (voice == ItemCommentVoice.RECORDING) {
             ItemCommentRecordingStrip(onCancel = onCancelRecording)
+            microphoneMenu?.let { menu -> Box(Modifier.padding(start = 52.dp)) { menu() } }
         }
         AttachmentTray(attachments = attachments, onRemove = onRemoveAttachment)
         Row(
