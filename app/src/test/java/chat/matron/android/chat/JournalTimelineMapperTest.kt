@@ -362,6 +362,18 @@ class JournalTimelineMapperTest {
         })))
     }
 
+    // MARK: - Editing a queued message
+
+    /// The mapper can't tell a queue card from any other prompt, so an
+    /// `edit` choice maps like every answer; the conversation decides whether
+    /// it answers its card (`ChatViewModel.isQueuedEditTap`).
+    @Test fun anEditChoiceMapsLikeAnyAnswer() {
+        val item = map(ev(31, "prompt_reply", sender = "user:alice", payload = buildJsonObject {
+            put("target_seq", 30); put("choice", "edit")
+        }))!!
+        assertEquals(TimelineItem.Kind.AskUserAnswer("30", listOf("edit")), item.kind)
+    }
+
     @Test fun imageBuildsMediaURL() {
         val item = map(ev(8, "image", payload = buildJsonObject {
             put("blob_ref", "b123"); put("content_type", "image/png")

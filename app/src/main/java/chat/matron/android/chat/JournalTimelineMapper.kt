@@ -14,6 +14,7 @@ import chat.matron.android.events.RoutineMarkerEvent
 import chat.matron.android.events.ConsentDecisionEvent
 import chat.matron.android.events.CoordinatorMarkerEvent
 import chat.matron.android.events.SpawnOutcome
+import chat.matron.android.events.SystemNoticeEvent
 import chat.matron.android.events.ToolCallEvent
 import chat.matron.android.journal.ActivityUpdate
 import chat.matron.android.journal.EventTombstone
@@ -51,6 +52,14 @@ object JournalTimelineMapper {
     /// namespaced so a bridge prompt id can never collide with an event seq.
     fun queuedReleaseAnswerKey(releasePromptID: String): String = "qr:$releasePromptID"
 
+    /// The queue-card choices that hold a queued message for editing and
+    /// release that hold. On a busy-queue card neither answers it: the
+    /// message is still queued and the card keeps its buttons
+    /// (`ChatViewModel.isQueuedEditTap`). On any other prompt they are
+    /// ordinary answers.
+    const val QUEUED_EDIT_HOLD_CHOICE = "edit"
+    const val QUEUED_EDIT_CANCEL_CHOICE = "edit_cancel"
+
     fun displayName(sender: String): String {
         val colon = sender.indexOf(':')
         if (colon >= 0 && sender.substring(0, colon) in setOf("user", "agent")) {
@@ -80,7 +89,10 @@ object JournalTimelineMapper {
                 // the marker, so the twin is hidden — rendering both would
                 // show the same reply twice.
                 if (event.isItemFallbackText()) return null
-                TimelineItem.Kind.Text(event.body() ?: "", null)
+                // A bridge notice about a turn it injected carries a compact
+                // summary; it renders as one expandable row, not a bubble.
+                SystemNoticeEvent.parse(payload)?.let { TimelineItem.Kind.SystemNotice(event.seq.toString(), it) }
+                    ?: TimelineItem.Kind.Text(event.body() ?: "", null)
             }
 
             JournalEventType.ITEM -> {

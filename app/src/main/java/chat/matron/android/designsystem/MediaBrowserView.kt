@@ -43,6 +43,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import coil.compose.AsyncImage
 import java.time.Instant
 
@@ -107,6 +108,8 @@ fun MediaBrowserView(
     thumbnailVersion: Int = 0,
     onMediaTap: (MediaBrowserMediaCell) -> Unit = {},
     onFileTap: (MediaBrowserFileRow) -> Unit = {},
+    /// The Files tab's Save button. `null` draws the rows without one.
+    onFileSave: ((MediaBrowserFileRow) -> Unit)? = null,
     onLinkTap: (MediaBrowserLinkRow) -> Unit = {},
 ) {
     var tab by remember { mutableStateOf(initialTab) }
@@ -126,7 +129,7 @@ fun MediaBrowserView(
             } else {
                 when (tab) {
                     MediaBrowserTab.Media -> MediaGrid(media, thumbnail, thumbnailVersion, onMediaTap)
-                    MediaBrowserTab.Files -> FileList(files, onFileTap)
+                    MediaBrowserTab.Files -> FileList(files, onFileTap, onFileSave)
                     MediaBrowserTab.Links -> LinkList(links, onLinkTap)
                 }
             }
@@ -170,6 +173,7 @@ private fun MediaGrid(
 private fun FileList(
     files: List<MediaBrowserFileRow>,
     onFileTap: (MediaBrowserFileRow) -> Unit,
+    onFileSave: ((MediaBrowserFileRow) -> Unit)?,
 ) {
     if (files.isEmpty()) {
         BrowserEmptyState(
@@ -187,6 +191,7 @@ private fun FileList(
                 isLoading = row.isLoading,
                 isExpired = row.expired,
                 onTap = { onFileTap(row) },
+                onSave = if (onFileSave != null && row.url != null) ({ onFileSave(row) }) else null,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             )
         }
@@ -279,8 +284,9 @@ private fun MediaThumbCell(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(28.dp),
             )
+            // A grid of thumbnails stays still, as a photo grid does.
             bytes != null -> AsyncImage(
-                model = bytes,
+                model = AnimatedImages.still(LocalContext.current, bytes),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),

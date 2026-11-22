@@ -150,6 +150,18 @@ class FakeTimelineService : TimelineService {
         sendFile(data, filename, mimeType, caption, progress)
     }
 
+    /// Name of every staged file handed to [sendAttachment], in order — pins
+    /// that the composer sends from the file rather than from bytes.
+    val attachmentFiles = mutableListOf<String>()
+
+    override suspend fun sendAttachment(
+        file: java.io.File, filename: String, mimeType: String, isImage: Boolean, caption: String?,
+        batch: AttachmentBatchTag?, progress: ((Double) -> Unit)?,
+    ) {
+        attachmentFiles.add(file.name)
+        super.sendAttachment(file, filename, mimeType, isImage, caption, batch, progress)
+    }
+
     override suspend fun retrySend(itemID: String) {
         retrySendCalls.add(itemID)
     }

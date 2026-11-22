@@ -2,6 +2,7 @@ package chat.matron.android.viewmodels
 
 import chat.matron.android.journal.JournalApiError
 import chat.matron.android.journal.db.ItemOutboxEntity
+import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.ItemAuthor
 import chat.matron.android.models.ItemAwaiting
 import chat.matron.android.models.ItemKind
@@ -64,6 +65,12 @@ class ItemDetailViewModelTest {
         /// completed-exceptionally gate fails the upload.
         var gate: CompletableDeferred<Unit>? = null
         val started = CompletableDeferred<Unit>()
+        /// The file name of every upload sent from a file.
+        val fileUploads = mutableListOf<String>()
+        override suspend fun uploadMedia(file: File, contentType: String, progress: ((Double) -> Unit)?): String {
+            fileUploads += file.name
+            return super.uploadMedia(file, contentType, progress)
+        }
         override suspend fun uploadMedia(data: ByteArray, contentType: String, progress: ((Double) -> Unit)?): String {
             onUploadStart(uploadStarts++)
             started.complete(Unit)
@@ -212,6 +219,41 @@ class ItemDetailViewModelTest {
         assertFalse(first.file.exists())
     }
 
+    /// The tray takes a file of exactly 100 MB and refuses one byte more,
+    /// with the shared wording, before anything is copied. Sparse files keep
+    /// the test cheap on disk.
+    @Test
+    fun aPickOver100MBIsRefusedAndExactly100MBIsStaged() = runBlocking {
+        val vm = ItemDetailViewModel("it_1", FakeItemsStore(), Api(), Sync(), this, staging)
+        val over = sparse("big.mov", AttachmentLimits.MAX_BYTES + 1)
+        vm.attachFiles(listOf(over))
+        assertTrue(vm.stagedAttachments.value.isEmpty())
+        assertEquals("big.mov is larger than 100 MB and wasn't attached.", vm.error.value)
+
+        vm.dismissError()
+        vm.attachFiles(listOf(sparse("edge.mov", AttachmentLimits.MAX_BYTES)))
+        assertEquals(listOf(AttachmentLimits.MAX_BYTES), vm.stagedAttachments.value.map { it.sizeBytes })
+        assertNull(vm.error.value)
+        vm.stagedAttachments.value.forEach { vm.removeAttachment(it.id) }
+    }
+
+    private fun sparse(name: String, length: Long): File =
+        File(Files.createTempDirectory("picked-").toFile(), name).also {
+            java.io.RandomAccessFile(it, "rw").use { raf -> raf.setLength(length) }
+        }
+
+    /// A send uploads each attachment from its staged file, not from bytes
+    /// read into memory first.
+    @Test
+    fun sendUploadsStraightFromTheStagedFile() = runBlocking {
+        val api = Api(); val sync = Sync()
+        val vm = ItemDetailViewModel("it_1", FakeItemsStore(), api, sync, this, staging)
+        vm.attachFiles(listOf(picked("a.png", byteArrayOf(1, 2, 3))))
+        vm.submitComment()
+        assertEquals(listOf("a.png"), api.fileUploads)
+        assertEquals(3L, sync.comments.single().third.single().size)
+    }
+
     @Test
     fun anUnreadablePickIsReportedAndStagesNothing() = runBlocking {
         val vm = ItemDetailViewModel("it_1", FakeItemsStore(), Api(), Sync(), this, staging)
@@ -303,10 +345,10 @@ class ItemDetailViewModelTest {
         // The enqueue is slow, and only once it returns is the row in the outbox.
         val sync = object : Sync() {
             override suspend fun enqueueComment(
-                itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>, action: String?, replyTo: String?,
+                itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>, action: String?, replyTo: String?, replaces: String?,
             ): Boolean {
                 kotlinx.coroutines.delay(50)
-                super.enqueueComment(itemID, localID, body, attachments, action, replyTo)
+                super.enqueueComment(itemID, localID, body, attachments, action, replyTo, replaces)
                 store.storedOutbox = store.storedOutbox + outboxTap(localID, action!!, replyTo!!)
                 return true
             }

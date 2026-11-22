@@ -171,6 +171,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.coil.compose)
+    // Animated GIF and WebP in image attachments (AnimatedImages).
+    implementation(libs.coil.gif)
     debugImplementation(libs.compose.ui.tooling)
 
     // QR *generation* only (Settings → Link a Device). Pure Java; scanning

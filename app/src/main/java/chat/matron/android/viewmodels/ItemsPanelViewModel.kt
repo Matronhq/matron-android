@@ -106,6 +106,12 @@ class ItemsPanelViewModel(
     /// The user's intent for how many [decided] rows to show;
     /// [decidedVisibleCount] is this capped at what exists.
     private var desiredDecidedVisibleCount = 0
+    /// The spare-allowance backlog, For you's Spare allowance tab: open
+    /// tasks labelled `spare-allowance`, in the task list's own order, next
+    /// first (one already started also carries `dispatched`). Only the
+    /// app-wide instance fills it, like [decided].
+    private val _spareAllowance = MutableStateFlow<List<TrackerItem>>(emptyList())
+    val spareAllowance: StateFlow<List<TrackerItem>> = _spareAllowance.asStateFlow()
     /// Which For you tab is showing. The host maps [decided] into rows only
     /// while it is [ForYouTab.CLOSED], so the open list never pays for it.
     private val _forYouTab = MutableStateFlow(ForYouTab.OPEN)
@@ -223,7 +229,11 @@ class ItemsPanelViewModel(
                 // Only the app-wide For you instance ever shows `decided`; a
                 // conversation's tasks page would redo this work on every
                 // emission of its own flow for a list nothing reads.
-                if (home == null && current is ItemsScope.All) updateDecided(decided(items))
+                if (home == null && current is ItemsScope.All) {
+                    updateDecided(decided(items))
+                    // `tasks` is already in rank order: filtering keeps it.
+                    _spareAllowance.value = s.tasks.filter { it.isSpareAllowanceTask }
+                }
             }
         }
         pendingCreatesJob?.cancel()

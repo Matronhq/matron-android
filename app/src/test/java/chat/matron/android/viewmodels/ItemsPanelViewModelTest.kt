@@ -64,6 +64,9 @@ internal class FakeItemsStore : ItemsStoreReading {
     /// The owner conversation's session state, as the item detail follows it.
     val ownerSession = MutableSharedFlow<String?>(replay = 1)
     override fun itemOwnerSessionStateFlow(convoID: String): Flow<String?> = ownerSession
+    /// The owner conversation's queue cards and releases.
+    val queuedRows = kotlinx.coroutines.flow.MutableStateFlow<List<chat.matron.android.journal.JournalEvent>>(emptyList())
+    override fun queuedReleaseEventsFlow(convoID: String): Flow<List<chat.matron.android.journal.JournalEvent>> = queuedRows
     override fun commentsFlow(itemID: String): Flow<List<TrackerComment>> {
         commentsSubscriptions += 1
         return comments
@@ -102,12 +105,15 @@ internal open class FakeItemsSync : ItemsSyncing {
     val taps = mutableListOf<Triple<String, String, String?>>()
     /// The local id of every queued comment, in order.
     val localIDs = mutableListOf<String>()
+    /// The `replaces` of every queued comment, in order.
+    val replacing = mutableListOf<String?>()
     override suspend fun enqueueComment(
-        itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>, action: String?, replyTo: String?,
+        itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>, action: String?, replyTo: String?, replaces: String?,
     ): Boolean {
         comments += Triple(itemID, body, attachments)
         if (action != null) taps += Triple(itemID, action, replyTo)
         localIDs += localID
+        replacing += replaces
         return commentSucceeds
     }
     override suspend fun enqueueCreate(localID: String, new: NewItem): Boolean { created += new; return createSucceeds }
@@ -131,7 +137,7 @@ internal open class FakeItemsApi : ItemsProviding {
     override suspend fun createItem(new: NewItem, idempotencyKey: String?): TrackerItem = error("unused")
     override suspend fun updateItem(id: String, patch: ItemPatch): TrackerItem = error("unused")
     override suspend fun commentItem(
-        id: String, body: String, attachments: List<TrackerAttachment>, idempotencyKey: String?, action: String?, replyTo: String?,
+        id: String, body: String, attachments: List<TrackerAttachment>, idempotencyKey: String?, action: String?, replyTo: String?, replaces: String?,
     ): ItemCommentResult = error("unused")
     override suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem = error("unused")
     override suspend fun reopenItem(id: String, comment: String?): TrackerItem = error("unused")
@@ -362,6 +368,37 @@ class ItemsPanelViewModelTest {
         sync.isSupported.value = false
         waitUntil { !vm.isSupported.value }
         assertFalse(vm.isSupported.value)
+        vm.stop()
+    }
+
+    @Test
+    fun spareAllowanceIsTheOpenLabelledTasksInRankOrder() = runBlocking {
+        val store = FakeItemsStore(); val sync = FakeItemsSync()
+        val vm = ItemsPanelViewModel(null, store, FakeItemsApi(), sync, this)
+        vm.start()
+        waitUntil { store.itemsSubscriptions == 1 }
+        val label = listOf(TrackerItem.SPARE_ALLOWANCE_LABEL)
+        store.items.emit(listOf(
+            t("late", 1, rank = 9.0).copy(labels = label),
+            t("next", 2, rank = 1.0, convo = "c2").copy(labels = label + "dispatched"),
+            t("plain", 3, rank = 2.0),
+            t("done", 4, state = ItemState.CLOSED, rank = 0.0, closedMs = 5).copy(labels = label),
+            t("q", 5, kind = ItemKind.QUESTION, awaiting = ItemAwaiting.USER, rank = 0.0).copy(labels = label),
+        ))
+        waitUntil { vm.spareAllowance.value.isNotEmpty() }
+        assertEquals(listOf("next", "late"), vm.spareAllowance.value.map { it.id })
+        vm.stop()
+    }
+
+    @Test
+    fun aConversationsTasksPageLeavesTheBacklogEmpty() = runBlocking {
+        val store = FakeItemsStore(); val sync = FakeItemsSync()
+        val vm = ItemsPanelViewModel("c1", store, FakeItemsApi(), sync, this)
+        vm.start()
+        waitUntil { store.itemsSubscriptions == 1 }
+        store.items.emit(listOf(t("a", 1, rank = 1.0).copy(labels = listOf(TrackerItem.SPARE_ALLOWANCE_LABEL))))
+        waitUntil { vm.sections.value.tasks.isNotEmpty() }
+        assertTrue(vm.spareAllowance.value.isEmpty())
         vm.stop()
     }
 

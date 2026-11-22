@@ -378,6 +378,11 @@ data class TrackerItem(
     /// you row's Seen button and swipe, and the detail screen's button.
     val canMarkSeen: Boolean get() = kind == ItemKind.NOTICE && state == ItemState.OPEN
 
+    /// An open task in the spare-allowance backlog: heavy, non-urgent work
+    /// started on a box whose weekly limit is about to reset with room left.
+    val isSpareAllowanceTask: Boolean
+        get() = kind == ItemKind.TASK && state == ItemState.OPEN && SPARE_ALLOWANCE_LABEL in labels
+
     /// A consent request's one-tap answers for its For you row: its own
     /// Approve and Decline (or Accept and Decline) while it waits on the
     /// user, so it is answered without finding the request card — the
@@ -395,6 +400,8 @@ data class TrackerItem(
     companion object {
         /// The label the journal puts on every consent request's item.
         const val CONSENT_LABEL = "consent"
+        /// The label that puts a task in the spare-allowance backlog.
+        const val SPARE_ALLOWANCE_LABEL = "spare-allowance"
         /// The answers a For you row may offer in place: each is final in one tap.
         val ROW_ANSWERS = setOf("Approve", "Accept", "Decline")
         /// Whether a consent answer says yes, for the filled button.
@@ -549,8 +556,10 @@ data class TrackerComment(
         /// edited one in its place, so the thread shows the edit alone. Only
         /// the user's own plain replies are ever left out, whatever a
         /// `replaces` names.
-        fun hidingReplaced(comments: List<TrackerComment>): List<TrackerComment> {
-            val replaced = comments.mapNotNullTo(HashSet()) { it.replaces }
+        /// [alsoReplaced] adds the replies an edit not yet on the journal (still
+        /// in the outbox) stands in for.
+        fun hidingReplaced(comments: List<TrackerComment>, alsoReplaced: Set<String> = emptySet()): List<TrackerComment> {
+            val replaced = comments.mapNotNullTo(HashSet()) { it.replaces } + alsoReplaced
             if (replaced.isEmpty()) return comments
             // Another person's reply (a contributor's, or one copied in by a
             // hand-over) also carries the user as author: never left out.
