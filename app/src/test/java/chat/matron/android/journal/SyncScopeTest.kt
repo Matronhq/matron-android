@@ -584,31 +584,38 @@ class SyncScopeTest {
 
     @Test
     fun theChatListRefreshIsPacedAndOnlyOnForYou() = runBlocking {
-        var snapshots = 0
+        val snapshots = java.util.concurrent.atomic.AtomicInteger()
         val source = object : SnapshotSource {
             override val wsUrl = "wss://x/ws"
             override suspend fun snapshot(): SnapshotResponse {
-                snapshots += 1
+                snapshots.incrementAndGet()
                 return SnapshotResponse(listOf(ConvoSummaryDTO("c1", "", "waiting", 3, "", 0, unreadCount = 3)), 3)
             }
         }
+        var now = 1_000_000L
         val store = seededStore()
         val socket = FakeWebSocketConnection().apply { serve(helloOK(0)); serve(cursorFrame(0)) }
-        val engine = makeEngine(store, listOf(socket), snapshot = source)
+        val engine = JournalSyncEngine(
+            api = source, store = store, connector = FakeConnector(listOf(socket)), token = "t",
+            ownSender = "user:alice", backoffBaseSeconds = 0.01, pages = FakePages(), syncScope = SyncScope.FOR_YOU,
+            clock = { now },
+        )
         engine.beginSync()
         engine.waitUntilReady()
         delay(100)
-        assertEquals("no chat list on screen: the connect reads no snapshot", 0, snapshots)
-        val before = snapshots
-        engine.chatListDidAppear(now = 1_000_000)
-        engine.chatListDidAppear(now = 1_030_000)
-        waitUntil { snapshots > before }
-        delay(50)
-        assertEquals(before + 1, snapshots)
+        assertEquals("no chat list on screen: the connect reads no snapshot", 0, snapshots.get())
+        engine.chatListDidAppear()
+        waitUntil { snapshots.get() == 1 }
         engine.chatListDidDisappear()
-        engine.chatListDidAppear(now = 1_061_000)
-        waitUntil { snapshots > before + 1 }
-        assertEquals(before + 2, snapshots)
+        now += 30_000
+        engine.chatListDidAppear()
+        delay(100)
+        assertEquals("within a minute of the last read", 1, snapshots.get())
+        engine.chatListDidDisappear()
+        now += 31_000
+        engine.chatListDidAppear()
+        waitUntil { snapshots.get() == 2 }
+        assertEquals(2, snapshots.get())
         assertEquals("the journal's unread count is taken", 3, store.conversations().single { it.id == "c1" }.unreadCount)
         engine.endSync()
     }
@@ -656,16 +663,22 @@ class SyncScopeTest {
     @Test
     fun returningToTheFrontRefreshesAChatListAlreadyShown() = runBlocking {
         val snapshots = CountingSnapshots()
+        var now = 1_000_000L
         val socket = FakeWebSocketConnection().apply { serve(helloOK(0)); serve(cursorFrame(0)) }
-        val engine = makeEngine(seededStore(), listOf(socket), snapshot = snapshots)
+        val engine = JournalSyncEngine(
+            api = snapshots, store = seededStore(), connector = FakeConnector(listOf(socket)), token = "t",
+            ownSender = "user:alice", backoffBaseSeconds = 0.01, pages = FakePages(), syncScope = SyncScope.FOR_YOU,
+            clock = { now },
+        )
         engine.beginSync()
         engine.waitUntilReady()
-        engine.appCameToFront(now = 1_000_000)
+        engine.appCameToFront()
         delay(100)
         assertEquals("no list on screen: nothing to refresh", 0, snapshots.count.get())
-        engine.chatListDidAppear(now = 1_000_000)
+        engine.chatListDidAppear()
         waitUntil { snapshots.count.get() == 1 }
-        engine.appCameToFront(now = 1_070_000)
+        now += 70_000
+        engine.appCameToFront()
         waitUntil { snapshots.count.get() == 2 }
         assertEquals(2, snapshots.count.get())
         engine.endSync()
