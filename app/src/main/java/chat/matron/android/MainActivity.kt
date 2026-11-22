@@ -89,6 +89,8 @@ import chat.matron.android.features.missions.missionOpenConversationOutcome
 import chat.matron.android.features.chat.ChatScreen
 import chat.matron.android.features.chat.ChatVMCache
 import chat.matron.android.features.chat.SubChatView
+import chat.matron.android.features.boxes.BoxSessionsScreen
+import chat.matron.android.features.boxes.BoxesScreen
 import chat.matron.android.features.chatlist.ChatListScreen
 import chat.matron.android.features.chatlist.NewChatSheet
 import chat.matron.android.features.chatlist.currentSummary
@@ -122,6 +124,8 @@ import chat.matron.android.models.isSameSignIn
 import chat.matron.android.platform.AndroidBiometricAuthenticator
 import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.VoiceRecorderHandoff
+import chat.matron.android.journal.DeviceDTO
+import chat.matron.android.viewmodels.BoxesViewModel
 import chat.matron.android.viewmodels.KeyValueBoxCapacityCache
 import chat.matron.android.viewmodels.ChatListViewModel
 import chat.matron.android.viewmodels.GoToNumberResolver
@@ -644,6 +648,11 @@ private fun SignedInApp(
     var connectionState by remember { mutableStateOf<SyncBannerState>(SyncBannerState.Connecting) }
     var hasEverConnected by remember { mutableStateOf(false) }
     var newChatTarget by remember { mutableStateOf<NewChatTarget?>(null) }
+    /// The box the Boxes screen's + opened New Chat on; null = the box list.
+    var newChatStartOn by remember { mutableStateOf<DeviceDTO?>(null) }
+    val boxesVM = remember(session.userID) {
+        BoxesViewModel(deps.boxesService(session), KeyValueBoxCapacityCache(session.userID, deps.preferences))
+    }
     var showCoordinatorChooser by remember { mutableStateOf(false) }
     // The tab whose "Go to number" button opened the dialog: the target is
     // pushed on THAT tab's stack where the tab can host it.
@@ -1090,6 +1099,53 @@ private fun SignedInApp(
                             boxNames = boxNames,
                             pinActions = pinsController,
                             onOpenArchived = { nav.navigate("archived") },
+                            onOpenBoxes = { nav.navigate("boxes") },
+                        )
+                    }
+
+                    composable("boxes") {
+                        BoxesScreen(
+                            viewModel = boxesVM,
+                            onStartSession = { device ->
+                                newChatStartOn = device
+                                newChatTarget = NewChatTarget.CONVERSATIONS
+                            },
+                            onOpenSessions = { id -> nav.navigate("boxes/$id") },
+                            onBack = { nav.popBackStack() },
+                        )
+                    }
+
+                    composable(
+                        route = "boxes/{boxID}",
+                        arguments = listOf(navArgument("boxID") { type = NavType.LongType }),
+                    ) { entry ->
+                        val boxID = entry.arguments?.getLong("boxID")
+                        val boxesState by boxesVM.state.collectAsStateWithLifecycle()
+                        // Restored here straight after a process death: the
+                        // Boxes screen that normally loads is not underneath.
+                        // Reloaded on every appear, as the Boxes screen is:
+                        // after a process death nothing else has loaded, and
+                        // back from a chat the sessions may have changed.
+                        LaunchedEffect(Unit) { boxesVM.load() }
+                        // The Boxes screen's watch stops when it leaves the
+                        // stack's top, so this list keeps itself current.
+                        LaunchedEffect(Unit) { boxesVM.watch() }
+                        val row = boxesVM.rows(boxesState).firstOrNull { it.id == boxID }
+                        BoxSessionsScreen(
+                            name = row?.device?.name.orEmpty(),
+                            sessions = row?.sessions.orEmpty(),
+                            // Pushed, as Archived does, so Back returns here
+                            // and then to Boxes. The Coordinator has its own
+                            // tab, so it goes through the shell.
+                            onOpenChat = { id ->
+                                if (id == shell.coordinatorConvoID) {
+                                    shell.openChat(id)
+                                } else {
+                                    nav.navigate("${AppTab.CONVERSATIONS.routePrefix}chat/$id")
+                                }
+                            },
+                            onBack = { nav.popBackStack() },
+                            hasLoaded = boxesState.hasLoaded,
                         )
                     }
 
@@ -1395,18 +1451,20 @@ private fun SignedInApp(
     val target = newChatTarget
     if (target != null) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(onDismissRequest = { newChatTarget = null }, sheetState = sheetState) {
+        ModalBottomSheet(onDismissRequest = { newChatTarget = null; newChatStartOn = null }, sheetState = sheetState) {
             NewChatSheet(
+                startOn = newChatStartOn,
                 api = deps.agentRPCService(session),
                 capacityCache = KeyValueBoxCapacityCache(session.userID, deps.preferences),
                 prepareConversation = { id -> deps.prepareConversation(session, id) },
                 onCreated = { convoID ->
                     newChatTarget = null
+                    newChatStartOn = null
                     // "New coordinator chat…" assigns the new id first (and
                     // synchronously), so the open lands on the Coordinator tab.
                     if (target == NewChatTarget.COORDINATOR) shell.chooseCoordinator(convoID, persistCoordinator) else shell.openChat(convoID)
                 },
-                onCancel = { newChatTarget = null },
+                onCancel = { newChatTarget = null; newChatStartOn = null },
             )
         }
     }

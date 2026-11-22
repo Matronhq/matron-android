@@ -719,6 +719,12 @@ class JournalApi(
         }
     }
 
+    /// `GET /roster` reduced to what the Boxes screen reads: each box's open
+    /// sessions and which sleeping boxes can be woken.
+    suspend fun roster(): RosterSnapshot =
+        RosterSnapshot.decode(request(path = "/roster"))
+            ?: throw JournalApiError.Transport("malformed roster response")
+
     /// `PUT /devices/:id/defaults` — sets (or, with a null value, clears)
     /// any subset of an agent box's defaults for new sessions, returning the
     /// full state the journal stored. The journal clears the model when the
