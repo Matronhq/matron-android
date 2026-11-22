@@ -353,7 +353,12 @@ class TimelineViewModel(
             // A hole that could not be filled: start over from the new weeks.
             if (kept.isNotEmpty() && !weeksAdjoin(fresh.lastOrNull()?.week, kept.first().week)) kept = emptyList()
             if (kept.isEmpty()) weeksNextBefore = cursor
-            _state.update { it.copy(weeks = fresh + kept, hasEarlierWeeks = weeksNextBefore != null, isSupported = true) }
+            val weeks = fresh + kept
+            _state.update { s ->
+                // A pick no longer in the list falls back to the newest week.
+                val selected = s.selectedWeek?.takeIf { key -> weeks.any { it.week == key } } ?: weeks.firstOrNull()?.week?.takeIf { s.selectedWeek != null }
+                s.copy(weeks = weeks, hasEarlierWeeks = weeksNextBefore != null, isSupported = true, selectedWeek = selected)
+            }
             return true
         } catch (cancel: CancellationException) {
             throw cancel
@@ -423,7 +428,7 @@ class TimelineViewModel(
                 val list = timeline.timelineProjects()
                 _state.update { it.copy(projectsSupported = true) }
                 if (epoch == refreshEpoch && generation == projectsGeneration) {
-                    _state.update { it.copy(allProjects = list) }
+                    _state.update { it.copy(allProjects = list, pagingFailed = it.pagingFailed - TimelinePlace.Projects) }
                     fresh += TimelinePlace.Projects
                 }
             } catch (cancel: CancellationException) {
@@ -448,9 +453,14 @@ class TimelineViewModel(
                 TimelinePlace.Finished -> {
                     val generation = ++finishedGeneration
                     val page = timeline.finishedProjects()
-                    if (generation != finishedGeneration) return
+                    if (generation != finishedGeneration || epoch != refreshEpoch) return
                     finishedNextBefore = page.nextBefore
-                    _state.update { it.copy(finished = page.rows, hasLoadedFinished = true, hasMoreFinished = page.nextBefore != null) }
+                    _state.update {
+                        it.copy(
+                            finished = page.rows, hasLoadedFinished = true, hasMoreFinished = page.nextBefore != null,
+                            pagingFailed = it.pagingFailed - TimelinePlace.Finished,
+                        )
+                    }
                 }
                 TimelinePlace.Projects -> {
                     val generation = ++projectsGeneration
@@ -460,8 +470,8 @@ class TimelineViewModel(
                         _state.update { it.copy(projectsSupported = false) }
                         throw error
                     }
-                    if (generation != projectsGeneration) return
-                    _state.update { it.copy(allProjects = page, projectsSupported = true) }
+                    if (generation != projectsGeneration || epoch != refreshEpoch) return
+                    _state.update { it.copy(allProjects = page, projectsSupported = true, pagingFailed = it.pagingFailed - TimelinePlace.Projects) }
                 }
                 is TimelinePlace.Week -> return
             }

@@ -120,7 +120,8 @@ fun ProjectScreen(
                 )
                 ProjectScreenContent.Missing -> ProjectPlaceholder(ProjectFormat.MISSING, ProjectFormat.MISSING_DETAIL)
                 ProjectScreenContent.Failed -> ProjectPlaceholder(TimelineFormat.FAILED, TimelineFormat.FAILED_DETAIL) {
-                    Button(onClick = { scope.launch { viewModel.refreshPage() } }) { Text(TimelineFormat.TRY_AGAIN) }
+                    // Everything the page read, the "⋯" lists included.
+                    Button(onClick = { scope.launch { viewModel.refresh() } }) { Text(TimelineFormat.TRY_AGAIN) }
                 }
                 ProjectScreenContent.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             }
@@ -188,6 +189,8 @@ fun ProjectSectionScreen(
                         }
                     },
                     onLoadMore = { scope.launch { viewModel.loadMoreFiles() } },
+                    version = state.filesVersion,
+                    pagingFailed = state.filesPagingFailed,
                 )
                 state.error != null -> ProjectPlaceholder(TimelineFormat.FAILED, TimelineFormat.FAILED_DETAIL) {
                     Button(onClick = { scope.launch { viewModel.refresh() } }) { Text(TimelineFormat.TRY_AGAIN) }
