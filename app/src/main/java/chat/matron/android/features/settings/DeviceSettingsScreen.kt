@@ -45,6 +45,7 @@ import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.AppLockTimeout
 import chat.matron.android.viewmodels.DevicesProviding
 import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
+import chat.matron.android.viewmodels.NewChatDefaultsStore
 import chat.matron.android.viewmodels.NoticesSettingViewModel
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
 import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
@@ -102,6 +103,9 @@ fun DeviceSettingsScreen(
     /// Settings → Security's "Email address" for password resets. `null` in
     /// hosts without a session; hidden too on a journal without it.
     accountEmail: AccountEmailViewModel? = null,
+    /// Settings → New chats: the user's default model and effort. `null`
+    /// in hosts without a session (previews); says so on an older journal.
+    newChatDefaults: NewChatDefaultsStore? = null,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -172,6 +176,8 @@ fun DeviceSettingsScreen(
             if (onPeople != null) PeopleSection(onPeople)
 
             if (coordinator != null) CoordinatorSection(coordinator)
+
+            if (newChatDefaults != null) NewChatDefaultsSection(newChatDefaults)
 
             if (onPinnedChats != null) PinnedChatsSection(onPinnedChats)
 

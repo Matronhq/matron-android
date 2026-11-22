@@ -1079,6 +1079,7 @@ private fun SignedInApp(
 
                     composable("settings") {
                         val noticesSetting = remember(session.userID) { deps.makeNoticesSettingViewModel(session, sessionScope) }
+                        val newChatDefaults = remember(session.userID) { deps.makeNewChatDefaultsStore(session, sessionScope) }
                         val autoArchiveSetting = remember(session.userID) {
                             deps.makeAutoArchiveSettingViewModel(session, sessionScope)
                         }
@@ -1111,6 +1112,7 @@ private fun SignedInApp(
                             twoFactor = twoFactorSetting,
                             changePassword = changePassword,
                             accountEmail = accountEmail,
+                            newChatDefaults = newChatDefaults,
                             onBack = { nav.popBackStack() },
                         )
                     }

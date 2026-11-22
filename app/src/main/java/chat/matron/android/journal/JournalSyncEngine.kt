@@ -179,6 +179,7 @@ class JournalSyncEngine(
     /// The user's journal-held settings as `hello_ok` and `settings` frames
     /// carry them — the settings screen's live feed.
     private val settingsListeners = mutableMapOf<UUID, (UserSettings) -> Unit>()
+    private val defaultsListeners = mutableMapOf<UUID, (NewChatDefaults) -> Unit>()
     /// Live `box_status` frames as `(deviceID, report)` — New Chat's feed.
     private val boxStatusListeners = mutableMapOf<UUID, (Pair<Long, BoxStatus>) -> Unit>()
     private val boxDefaultsListeners = mutableMapOf<UUID, (BoxDefaultsUpdate) -> Unit>()
@@ -693,6 +694,15 @@ class JournalSyncEngine(
         val id = UUID.randomUUID()
         synchronized(lock) { boxDefaultsListeners[id] = { u -> trySend(u) } }
         awaitClose { synchronized(lock) { boxDefaultsListeners.remove(id) } }
+    }
+
+    /// The user's default model and effort for new chats, as live `defaults`
+    /// frames bring them (any device's or agent's change, this device's own
+    /// echo included). No replay: a subscriber reads `GET /defaults` first.
+    fun defaultsUpdates(): Flow<NewChatDefaults> = callbackFlow {
+        val id = UUID.randomUUID()
+        synchronized(lock) { defaultsListeners[id] = { d -> trySend(d) } }
+        awaitClose { synchronized(lock) { defaultsListeners.remove(id) } }
     }
 
     /// The user's journal-held settings as each connect's `hello_ok` and
@@ -1325,6 +1335,9 @@ class JournalSyncEngine(
                 publishPinsLocked(frame.pins)
             }
             is ServerFrame.SettingsFrame -> fanOutSettings(frame.settings)
+            is ServerFrame.DefaultsFrame -> synchronized(lock) {
+                defaultsListeners.values.forEach { it(frame.defaults) }
+            }
             is ServerFrame.ArchiveFrame -> archive?.apply(frame.delta)
             is ServerFrame.HelloOK, is ServerFrame.UnknownControl -> Unit // post-hello control frames are advisory
         }

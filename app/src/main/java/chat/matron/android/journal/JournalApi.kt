@@ -367,7 +367,7 @@ class JournalApi(
     private val baseUrl: HttpUrl,
     private val client: OkHttpClient = OkHttpClient(),
     token: String? = null,
-) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding,
+) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding, NewChatDefaultsProviding,
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
     TrackerSearching,
     ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding, ContactsProviding,
@@ -1185,6 +1185,23 @@ class JournalApi(
 
     override suspend fun deleteMemory(name: String): Memory =
         MemoriesDecoding.memory(request(path = "/memories/${pathSegment(name)}", method = "DELETE"))
+
+    // MARK: New chat defaults
+    //
+    // The user's default model and effort for new chats. A journal that
+    // predates them 404s `GET /defaults`.
+
+    override suspend fun newChatDefaults(): NewChatDefaults =
+        NewChatDefaults.decode(request(path = "/defaults"))
+            ?: throw JournalApiError.Transport("malformed /defaults response")
+
+    override suspend fun setNewChatDefault(key: NewChatDefaults.Key, value: String?): NewChatDefaults =
+        NewChatDefaults.decode(
+            request(
+                path = "/defaults", method = "PUT",
+                jsonBody = buildJsonObject { put(key.wire, value?.let { JsonPrimitive(it) } ?: JsonNull) },
+            ),
+        ) ?: throw JournalApiError.Transport("malformed /defaults response")
 
     // MARK: Missions & milestones
     //

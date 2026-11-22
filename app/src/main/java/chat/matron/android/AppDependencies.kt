@@ -32,6 +32,7 @@ import chat.matron.android.journal.PinsSyncing
 import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
 import chat.matron.android.viewmodels.CoordinatorSetting
 import chat.matron.android.viewmodels.MemoriesListViewModel
+import chat.matron.android.viewmodels.NewChatDefaultsStore
 import chat.matron.android.viewmodels.MemoryEditorViewModel
 import chat.matron.android.viewmodels.MissionDetailViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
@@ -581,6 +582,12 @@ class AppDependencies(
      * session's API client, live-updated from the engine's settings frames.
      * One per settings screen showing.
      */
+    /** Settings → New chats: the user's default model and effort (`GET`/`PUT /defaults`). */
+    fun makeNewChatDefaultsStore(session: UserSession, scope: CoroutineScope): NewChatDefaultsStore {
+        val c = core(session)
+        return NewChatDefaultsStore(api = c.api, updates = { c.engine.defaultsUpdates() }, scope = scope)
+    }
+
     fun makeNoticesSettingViewModel(session: UserSession, scope: CoroutineScope): NoticesSettingViewModel {
         val c = core(session)
         return NoticesSettingViewModel(api = c.api, updates = { c.engine.settingsUpdates() }, scope = scope)

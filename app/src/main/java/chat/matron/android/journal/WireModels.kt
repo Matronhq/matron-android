@@ -384,6 +384,11 @@ sealed interface ServerFrame {
     /// reads the stored report off the next `GET /devices`.
     data class BoxStatusFrame(val deviceID: Long, val status: BoxStatus) : ServerFrame
 
+    /// The user's default model and effort for new chats changed (journal
+    /// `PUT /defaults` from any device or agent): the full new state.
+    /// Ephemeral, never replayed; a client re-reads `GET /defaults`.
+    data class DefaultsFrame(val defaults: NewChatDefaults) : ServerFrame
+
     /// One agent box's defaults for new sessions changed (journal "Box
     /// defaults", `PUT /devices/:id/defaults` from any device or agent) —
     /// the box's full new state. Transient like [DeviceMeta]: no seq, never
@@ -421,6 +426,7 @@ sealed interface ServerFrame {
                     // Key-presence, not value: only an explicit null clears a tag.
                     DeviceMeta(id, name, tagChar = obj.stringOrNull("tag_char"), tagCharKnown = obj.containsKey("tag_char"))
                 }
+                "defaults" -> NewChatDefaults.decode(obj)?.let { DefaultsFrame(it) }
                 "box_status" -> {
                     val id = obj.longOrNull("device_id") ?: return null
                     val status = BoxStatus.parse(obj) ?: return null
