@@ -211,8 +211,13 @@ class NotifySettingsStoreOrderingTest {
         val second = launch { store.setMode(NotifySettings.Mode.CUSTOM) }
         waitUntil { api.puts.size == 2 }
         val afterAll = NotifyChange.SetMode(NotifySettings.Mode.ALL).appliedTo(base)
-        api.puts[1].complete(NotifyChange.SetMode(NotifySettings.Mode.CUSTOM).appliedTo(afterAll)); second.join()
-        api.puts[0].complete(afterAll); first.join()
+        val afterBoth = NotifyChange.SetMode(NotifySettings.Mode.CUSTOM).appliedTo(afterAll)
+        api.puts[1].complete(afterBoth); second.join()
+        api.puts[0].complete(afterAll)
+        // The older answer is dropped and settled by a re-read.
+        waitUntil { api.gets.size == 2 }
+        assertEquals("the newer answer stands", NotifySettings.Mode.CUSTOM, store.view.value!!.settings.mode)
+        api.gets[1].complete(afterBoth); first.join()
         assertEquals(NotifySettings.Mode.CUSTOM, store.view.value!!.settings.mode)
     }
 
@@ -240,5 +245,39 @@ class NotifySettingsStoreOrderingTest {
         api.gets[1].complete(base.copy(settings = base.settings.copy(mode = NotifySettings.Mode.ALL))); newer.join()
         api.gets[0].complete(base); older.join()
         assertEquals(NotifySettings.Mode.ALL, store.view.value!!.settings.mode)
+    }
+}
+
+class NotifySettingsStoreRereadTest {
+    private val base = NotifyView(
+        NotifySettings(NotifySettings.Mode.COORDINATOR, NotifySettings.preset(NotifySettings.Mode.COORDINATOR)!!, true, emptyList()),
+        NotifyDeviceLevel.ALL,
+    )
+
+    @Test
+    fun aReReadThatRacedASaveDoesNotRevertIt() = runBlocking {
+        val gets = mutableListOf<CompletableDeferred<NotifyView>>()
+        val puts = mutableListOf<CompletableDeferred<NotifyView>>()
+        val api = object : NotifySettingsProviding {
+            override suspend fun notifySettings() = CompletableDeferred<NotifyView>().also { gets += it }.await()
+            override suspend fun updateNotify(change: NotifyChange) = CompletableDeferred<NotifyView>().also { puts += it }.await()
+        }
+        val store = NotifySettingsStore(api, { emptyFlow() }, { emptyFlow<SyncConnectionState>() }, now = { 1_000L }, dispatcher = Dispatchers.Unconfined)
+        val first = launch { store.refresh() }
+        waitUntil { gets.size == 1 }
+        gets[0].complete(base); first.join()
+
+        val save = launch { store.setMode(NotifySettings.Mode.ALL) }
+        waitUntil { puts.size == 1 }
+        // A reconnect re-read goes out after the save and reads the old state.
+        val reread = launch { store.refresh() }
+        waitUntil { gets.size == 2 }
+        gets[1].complete(base); reread.join()
+        assertEquals("the save still shows", NotifySettings.Mode.ALL, store.view.value!!.settings.mode)
+        val saved = NotifyChange.SetMode(NotifySettings.Mode.ALL).appliedTo(base)
+        puts[0].complete(saved)
+        waitUntil { gets.size == 3 }
+        gets[2].complete(saved); save.join()
+        assertEquals("the follow-up read restores the save", NotifySettings.Mode.ALL, store.view.value!!.settings.mode)
     }
 }

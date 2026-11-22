@@ -181,13 +181,19 @@ class NotifySettingsStore(
         }
         try {
             val answer = api.updateNotify(change)
-            synchronized(lock) {
-                pending.removeAll { it.first == id }
-                acceptLocked(answer, ticket)
+            val superseded = synchronized(lock) {
+                val taken = acceptLocked(answer, ticket)
                 _isSupported.value = true
                 _error.value = null
+                // Something sent after this write already set what is shown.
+                // A later write includes this one, but a re-read may have
+                // been answered before the journal applied it: read again,
+                // so an answer newer than both decides.
+                pending.removeAll { it.first == id }
                 recomputeLocked()
+                !taken
             }
+            if (superseded) refresh()
         } catch (cancel: CancellationException) {
             synchronized(lock) { pending.removeAll { it.first == id }; recomputeLocked() }
             throw cancel
@@ -210,9 +216,9 @@ class NotifySettingsStore(
     }
 
     /// Takes each part of a `GET`/`PUT` answer unless something newer
-    /// already set it. A `PUT` answer older than a live frame loses nothing:
-    /// the journal sends a frame for every change, this one's included.
-    private fun acceptLocked(answer: NotifyView, ticket: Long) {
+    /// already set it. `false` when either part was newer already.
+    private fun acceptLocked(answer: NotifyView, ticket: Long): Boolean {
+        val whole = ticket > settingsTicket && ticket > levelTicket
         if (ticket > settingsTicket) {
             settingsTicket = ticket
             confirmedSettings = answer.settings
@@ -222,6 +228,7 @@ class NotifySettingsStore(
             levelTicket = ticket
             confirmedLevel = answer.deviceLevel
         }
+        return whole
     }
 
     private fun recomputeLocked() {
