@@ -64,7 +64,7 @@ data class ChatMissionLine(
 
 /// The mission and project under a chat's title, each tappable: the mission
 /// opens its page, the project its page on the Projects tab. Small, one
-/// line, the mission name truncating first.
+/// line; the two share it, each truncating when space is short.
 @Composable
 fun ChatMissionLineView(line: ChatMissionLine, onOpenMission: ((String) -> Unit)?, onOpenProject: ((String) -> Unit)?, modifier: Modifier = Modifier) {
     val color = if (line.isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
@@ -84,7 +84,10 @@ fun ChatMissionLineView(line: ChatMissionLine, onOpenMission: ((String) -> Unit)
         val projectTitle = line.projectTitle
         if (projectID != null && projectTitle != null) {
             Row(
+                // Weighted like the mission, so a long project name shares
+                // the line rather than squeezing the mission out of it.
                 Modifier
+                    .weight(1f, fill = false)
                     .widthIn(max = 160.dp)
                     .then(if (onOpenProject != null) Modifier.clickable { onOpenProject(projectID) } else Modifier)
                     .clearAndSetSemantics { openable(line.projectLabel ?: projectTitle, onOpenProject?.let { open -> { open(projectID) } }) }
