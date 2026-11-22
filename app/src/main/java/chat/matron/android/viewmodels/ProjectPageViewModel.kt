@@ -48,6 +48,10 @@ data class ProjectPageState(
     /// Bumped each time a page of the files lands: the grid's end asks for
     /// the next page again even when the list kept its length.
     val filesVersion: Int = 0,
+    /// Bumped by each read of the files' first page (a refresh), not by
+    /// older pages: tiles ask again for pictures that failed on a refresh,
+    /// and paging never cancels a picture still loading.
+    val filesReloads: Int = 0,
     /// The last next-page read of the files failed: the grid's end offers Retry.
     val filesPagingFailed: Boolean = false,
     /// What the "⋯" menu offers: open missions in no project (to add), and
@@ -287,14 +291,14 @@ class ProjectPageViewModel(
         isReloadingFiles = true
         try {
             val page = projects.projectFiles(projectID)
-            if (generation == filesGeneration) _state.update { it.copy(files = page, filesVersion = it.filesVersion + 1, filesPagingFailed = false) }
+            if (generation == filesGeneration) _state.update { it.copy(files = page, filesVersion = it.filesVersion + 1, filesReloads = it.filesReloads + 1, filesPagingFailed = false) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
             // Said in an alert over the files on screen (before any, the
             // screen offers Try again); the grid's end asks again from the
             // list shown, so paging never stalls behind the failed reload.
-            if (generation == filesGeneration) _state.update { it.copy(error = error.message, filesVersion = it.filesVersion + 1, filesPagingFailed = false) }
+            if (generation == filesGeneration) _state.update { it.copy(error = error.message, filesVersion = it.filesVersion + 1, filesReloads = it.filesReloads + 1, filesPagingFailed = false) }
         } finally {
             if (generation == filesGeneration) isReloadingFiles = false
         }
