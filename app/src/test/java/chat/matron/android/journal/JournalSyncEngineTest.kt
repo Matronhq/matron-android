@@ -1018,6 +1018,57 @@ class JournalSyncEngineTest {
     }
 
     @Test
+    fun refusedHello_toldAsRejected_andOnlyOnce() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve("""{"kind":"control","op":"error","code":"auth"}""")
+        val signals = java.util.concurrent.CopyOnWriteArrayList<CredentialSignal>()
+        val engine = JournalSyncEngine(
+            api = FakeSnapshotSource(), store = seededStore(), connector = FakeConnector(listOf(socket)), token = "t",
+            ownSender = "user:alice", search = null, backoffBaseSeconds = 0.01, credentialSignals = { signals += it },
+        )
+        engine.beginSync()
+        waitUntil { !engine.isRunning() }
+        delay(50)
+        assertEquals(listOf<CredentialSignal>(CredentialSignal.Rejected), signals.toList())
+        engine.endSync()
+    }
+
+    @Test
+    fun acceptedHello_toldAsAccepted() = runBlocking {
+        val socket = FakeWebSocketConnection()
+        socket.serve(helloOK(0))
+        val signals = java.util.concurrent.CopyOnWriteArrayList<CredentialSignal>()
+        val engine = JournalSyncEngine(
+            api = FakeSnapshotSource(), store = seededStore(), connector = FakeConnector(listOf(socket)), token = "t",
+            ownSender = "user:alice", search = null, backoffBaseSeconds = 0.01, credentialSignals = { signals += it },
+        )
+        engine.beginSync()
+        waitUntil { signals.isNotEmpty() }
+        assertEquals(listOf<CredentialSignal>(CredentialSignal.Accepted), signals.toList())
+        engine.endSync()
+    }
+
+    /// An account lock refuses the hello with `account_locked`: that is not
+    /// this device's token being revoked, so it must never be told as a
+    /// rejection (the engine retries at the backoff's pace instead).
+    @Test
+    fun accountLockedHello_isNeverToldAsRejected() = runBlocking {
+        val locked = """{"kind":"control","op":"error","code":"account_locked","since":1700000000000}"""
+        val sockets = List(3) { FakeWebSocketConnection().apply { serve(locked) } }
+        val signals = java.util.concurrent.CopyOnWriteArrayList<CredentialSignal>()
+        val connector = FakeConnector(sockets)
+        val engine = JournalSyncEngine(
+            api = FakeSnapshotSource(), store = seededStore(), connector = connector, token = "t",
+            ownSender = "user:alice", search = null, backoffBaseSeconds = 0.001, credentialSignals = { signals += it },
+        )
+        engine.beginSync()
+        waitUntil { connector.connectCount >= 2 }
+        assertTrue("the engine keeps trying through a lock", connector.connectCount >= 2)
+        assertFalse(CredentialSignal.Rejected in signals)
+        engine.endSync()
+    }
+
+    @Test
     fun waitUntilReadyOnNeverStartedEngineThrows() = runBlocking {
         val engine = makeEngine(seededStore(), FakeConnector(emptyList()))
         try {
