@@ -142,6 +142,7 @@ class ProjectPageViewModel(
     private var missionsGeneration = 0
     private var filesAsked = false
     private var actionsAsked = false
+    private var actionsGeneration = 0
     private var filesGeneration = 0
     private var isReloadingFiles = false
     /// The files list a next-page read is in flight for: a read of a list
@@ -310,12 +311,17 @@ class ProjectPageViewModel(
     /// open projects.
     suspend fun loadActionTargets() {
         actionsAsked = true
+        // Only the newest read lands: one started before a merge never
+        // writes the old project's lists over the new one's.
+        val generation = ++actionsGeneration
+        val forProject = projectID
         try {
             val open = projects.listProjects(openOnly = true)
             val unfiled = unfiledMissions()
+            if (generation != actionsGeneration || forProject != projectID) return
             _state.update { s ->
                 s.copy(
-                    mergeTargets = open.filter { it.id != projectID && it.state == MissionState.OPEN }.sortedBy { it.title.lowercase() },
+                    mergeTargets = open.filter { it.id != forProject && it.state == MissionState.OPEN }.sortedBy { it.title.lowercase() },
                     unfiled = unfiled.filter { it.state == MissionState.OPEN && it.projectID == null },
                     actionsLoaded = true,
                 )
@@ -323,7 +329,7 @@ class ProjectPageViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            _state.update { it.copy(error = error.message) }
+            if (generation == actionsGeneration) _state.update { it.copy(error = error.message) }
         }
     }
 
