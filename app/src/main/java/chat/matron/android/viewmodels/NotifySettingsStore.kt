@@ -85,8 +85,18 @@ class NotifySettingsStore(
     private var settingsTicket = 0L
     private var levelTicket = 0L
     private var nextTicket = 1L
-    private val pending = mutableListOf<Pair<Int, NotifyChange>>()
+    /// Writes in flight, oldest first, each with the ticket it was sent with.
+    private val pending = mutableListOf<Pending>()
     private var nextWriteID = 0
+    /// The newest ticket of a `PUT` answer taken. The journal applies writes
+    /// in the order they arrive, so that answer already holds every older
+    /// write: those are no longer replayed on top of it.
+    private var writeTicket = 0L
+    /// Successful saves so far; a `GET` sent while a save was in flight
+    /// compares it to tell whether that save answered before it did.
+    private var savesDone = 0L
+
+    private data class Pending(val id: Int, val ticket: Long, val change: NotifyChange)
     private var jobs = listOf<Job>()
     private var expiryJob: Job? = null
 
@@ -126,14 +136,25 @@ class NotifySettingsStore(
 
     /// `GET /notify`. A transport failure keeps what is shown.
     suspend fun refresh() {
-        val ticket = synchronized(lock) { nextTicket++ }
+        val (ticket, savesAtSend) = synchronized(lock) {
+            nextTicket++ to savesDone.takeIf { pending.isNotEmpty() }
+        }
         try {
             val answer = api.notifySettings()
-            synchronized(lock) {
+            val readAgain = synchronized(lock) {
                 _isSupported.value = true
-                acceptLocked(answer, ticket)
-                recomputeLocked()
+                // Sent while a save was in flight, and that save has answered
+                // since: this snapshot may predate it, and the save's own
+                // answer is the better word. Read again instead.
+                if (savesAtSend != null && savesDone != savesAtSend) {
+                    true
+                } else {
+                    acceptLocked(answer, ticket)
+                    recomputeLocked()
+                    false
+                }
             }
+            if (readAgain) refresh()
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: JournalApiError.NotFound) {
@@ -175,31 +196,34 @@ class NotifySettingsStore(
     suspend fun apply(change: NotifyChange) {
         val (id, ticket) = synchronized(lock) {
             val id = nextWriteID++
-            pending += id to change
+            val ticket = nextTicket++
+            pending += Pending(id, ticket, change)
             recomputeLocked()
-            id to nextTicket++
+            id to ticket
         }
         try {
             val answer = api.updateNotify(change)
             val superseded = synchronized(lock) {
                 val taken = acceptLocked(answer, ticket)
+                writeTicket = maxOf(writeTicket, ticket)
+                savesDone++
                 _isSupported.value = true
                 _error.value = null
                 // Something sent after this write already set what is shown.
                 // A later write includes this one, but a re-read may have
                 // been answered before the journal applied it: read again,
                 // so an answer newer than both decides.
-                pending.removeAll { it.first == id }
+                pending.removeAll { it.id == id }
                 recomputeLocked()
                 !taken
             }
             if (superseded) refresh()
         } catch (cancel: CancellationException) {
-            synchronized(lock) { pending.removeAll { it.first == id }; recomputeLocked() }
+            synchronized(lock) { pending.removeAll { it.id == id }; recomputeLocked() }
             throw cancel
         } catch (error: Throwable) {
             synchronized(lock) {
-                pending.removeAll { it.first == id }
+                pending.removeAll { it.id == id }
                 _error.value = "Couldn't save notification settings: ${error.message ?: error}"
                 recomputeLocked()
             }
@@ -234,7 +258,7 @@ class NotifySettingsStore(
     private fun recomputeLocked() {
         val t = now()
         _clock.value = t
-        val shown = confirmedSettings?.let { NotifyView(it, confirmedLevel) }?.let { base -> pending.fold(base) { acc, (_, change) -> change.appliedTo(acc) } }
+        val shown = confirmedSettings?.let { NotifyView(it, confirmedLevel) }?.let { base -> pending.filter { it.ticket > writeTicket }.fold(base) { acc, p -> p.change.appliedTo(acc) } }
         _view.value = shown
         scheduleExpiryLocked(shown, t)
     }

@@ -213,6 +213,7 @@ class NotifySettingsStoreOrderingTest {
         val afterAll = NotifyChange.SetMode(NotifySettings.Mode.ALL).appliedTo(base)
         val afterBoth = NotifyChange.SetMode(NotifySettings.Mode.CUSTOM).appliedTo(afterAll)
         api.puts[1].complete(afterBoth); second.join()
+        assertEquals("the older write is not replayed over the newer answer", NotifySettings.Mode.CUSTOM, store.view.value!!.settings.mode)
         api.puts[0].complete(afterAll)
         // The older answer is dropped and settled by a re-read.
         waitUntil { api.gets.size == 2 }
@@ -279,5 +280,39 @@ class NotifySettingsStoreRereadTest {
         waitUntil { gets.size == 3 }
         gets[2].complete(saved); save.join()
         assertEquals("the follow-up read restores the save", NotifySettings.Mode.ALL, store.view.value!!.settings.mode)
+    }
+}
+
+class NotifySettingsStoreReadDuringSaveTest {
+    private val base = NotifyView(
+        NotifySettings(NotifySettings.Mode.COORDINATOR, NotifySettings.preset(NotifySettings.Mode.COORDINATOR)!!, true, emptyList()),
+        NotifyDeviceLevel.ALL,
+    )
+
+    @Test
+    fun aReadThatPredatesAnAnsweredSaveIsReadAgain() = runBlocking {
+        val gets = mutableListOf<CompletableDeferred<NotifyView>>()
+        val puts = mutableListOf<CompletableDeferred<NotifyView>>()
+        val api = object : NotifySettingsProviding {
+            override suspend fun notifySettings() = CompletableDeferred<NotifyView>().also { gets += it }.await()
+            override suspend fun updateNotify(change: NotifyChange) = CompletableDeferred<NotifyView>().also { puts += it }.await()
+        }
+        val store = NotifySettingsStore(api, { emptyFlow() }, { emptyFlow<SyncConnectionState>() }, now = { 1_000L }, dispatcher = Dispatchers.Unconfined)
+        val first = launch { store.refresh() }
+        waitUntil { gets.size == 1 }
+        gets[0].complete(base); first.join()
+
+        val save = launch { store.setMode(NotifySettings.Mode.ALL) }
+        waitUntil { puts.size == 1 }
+        val read = launch { store.refresh() }
+        waitUntil { gets.size == 2 }
+        val saved = NotifyChange.SetMode(NotifySettings.Mode.ALL).appliedTo(base)
+        puts[0].complete(saved); save.join()
+        // The read was answered from before the save.
+        gets[1].complete(base)
+        waitUntil { gets.size == 3 }
+        assertEquals("the stale read is not taken", NotifySettings.Mode.ALL, store.view.value!!.settings.mode)
+        gets[2].complete(saved); read.join()
+        assertEquals(NotifySettings.Mode.ALL, store.view.value!!.settings.mode)
     }
 }
