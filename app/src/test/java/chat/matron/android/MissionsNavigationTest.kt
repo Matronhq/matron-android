@@ -22,6 +22,7 @@ class MissionsNavigationTest {
         override fun pushMissionItem(itemID: String) { commands += "pushMissionItem:$itemID" }
         override fun pushItem(tab: AppTab, itemID: String) { commands += "pushItem:${tab.name}:$itemID" }
         override fun pushMemories() { commands += "pushMemories" }
+        override fun pushMissionsList() { commands += "pushMissionsList" }
         override fun pushMemory(name: String?) { commands += "pushMemory:${name ?: "new"}" }
         override fun popToRoot(tab: AppTab) { commands += "popToRoot:${tab.name}" }
         override fun popChats(count: Int) { commands += "popChats:$count" }
@@ -215,6 +216,30 @@ class MissionsNavigationTest {
         // destination is appended, not bound to the top.
         nav.noteDestination(AppTab.MISSIONS, "e3", "item/it_2")
         assertEquals(listOf("mission/ms_1", "item/it_1", "item/it_2"), nav.missionsPath)
+    }
+
+    // --- The missions list under the Projects timeline --------------------
+
+    @Test
+    fun openMissionsListPushesTheListOnTheProjectsStackOnce() {
+        val (nav, host) = nav()
+        nav.noteDestination(AppTab.MISSIONS, "e0", null)
+        nav.openMissionsList()
+        nav.openMissionsList()
+        assertEquals(listOf("missionlist"), nav.missionsPath)
+        assertEquals(listOf("pushMissionsList"), host.commands)
+        assertEquals(AppTab.MISSIONS, nav.tab.value)
+        // The controller's report of the pushed list binds to it, and a
+        // mission opened from the list pushes over it.
+        nav.noteDestination(AppTab.MISSIONS, "e1", AppShellNavigation.pathValue("missions/missionlist") { null })
+        nav.pushMission("ms_1")
+        assertEquals(listOf("missionlist", "mission/ms_1"), nav.missionsPath)
+    }
+
+    @Test
+    fun theProjectsTabKeepsItsMissionsIdentifiers() {
+        assertEquals("Projects", AppTab.MISSIONS.label)
+        assertEquals("missions/list", AppTab.MISSIONS.rootRoute)
     }
 
     // --- Memories (spec 2026-09-27) ---------------------------------------

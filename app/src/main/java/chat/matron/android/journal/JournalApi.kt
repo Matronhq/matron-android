@@ -9,6 +9,15 @@ import chat.matron.android.models.TrackerComment
 import chat.matron.android.models.Memory
 import chat.matron.android.models.Milestone
 import chat.matron.android.models.Mission
+import chat.matron.android.models.ConversationMissionLink
+import chat.matron.android.models.Project
+import chat.matron.android.models.ProjectDetail
+import chat.matron.android.models.ProjectFilesPage
+import chat.matron.android.models.StalledList
+import chat.matron.android.models.TimelineProjectList
+import chat.matron.android.models.TimelineProjectPage
+import chat.matron.android.models.TimelineWeek
+import chat.matron.android.models.TimelineWeekProjectsPage
 import chat.matron.android.models.TrackerItem
 import chat.matron.android.viewmodels.BoxStatus
 import kotlinx.serialization.json.JsonArray
@@ -371,7 +380,7 @@ class JournalApi(
     PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
     TrackerSearching,
     ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding, ContactsProviding,
-    InviteAskAnswering {
+    InviteAskAnswering, TimelineProviding, ProjectsProviding {
     constructor(baseUrl: String, client: OkHttpClient = OkHttpClient(), token: String? = null)
         : this(baseUrl.toHttpUrl(), client, token)
 
@@ -1215,6 +1224,83 @@ class JournalApi(
         MissionsDecoding.mission(
             request(path = "/missions/${pathSegment(id)}/close", method = "POST", jsonBody = buildJsonObject { put("summary", summary) }),
         )
+
+    // MARK: Projects timeline
+    //
+    // `GET /timeline/...`, ported from matron-apple's
+    // `JournalAPI+Timeline.swift`. Shapes and decoders in `TimelineApi.kt`.
+
+    override suspend fun timelineWeeks(before: String?, limit: Int?): TimelineWeeksPage =
+        TimelineDecoding.weeks(request(path = "/timeline/weeks", query = TimelineDecoding.pageQuery(before, limit)))
+
+    override suspend fun timelineWeek(week: String): TimelineWeek =
+        TimelineDecoding.week(request(path = "/timeline/weeks/${pathSegment(week)}"))
+
+    override suspend fun timelineWeekProjects(week: String, offset: Int, limit: Int?): TimelineWeekProjectsPage =
+        TimelineDecoding.weekProjects(
+            request(path = "/timeline/weeks/${pathSegment(week)}/projects", query = TimelineDecoding.weekProjectsQuery(offset, limit)),
+        )
+
+    override suspend fun wentQuiet(): StalledList = TimelineDecoding.stalled(request(path = "/timeline/quiet"))
+
+    override suspend fun openLong(): StalledList = TimelineDecoding.stalled(request(path = "/timeline/long"))
+
+    override suspend fun finishedProjects(before: String?, limit: Int?): TimelineFinishedPage =
+        TimelineDecoding.finished(request(path = "/timeline/finished", query = TimelineDecoding.pageQuery(before, limit)))
+
+    override suspend fun timelineProjects(before: String?, limit: Int?): TimelineProjectList =
+        TimelineDecoding.projects(request(path = "/timeline/projects", query = TimelineDecoding.pageQuery(before, limit)))
+
+    override suspend fun timelineProject(id: String): TimelineProjectPage =
+        TimelineDecoding.project(request(path = "/timeline/projects/${pathSegment(id)}"))
+
+    override suspend fun timelineProjectHistory(id: String, before: String?, limit: Int?): TimelineHistoryPage =
+        TimelineDecoding.history(
+            request(path = "/timeline/projects/${pathSegment(id)}/history", query = TimelineDecoding.pageQuery(before, limit)),
+        )
+
+    // MARK: Projects
+    //
+    // `/projects`, ported from matron-apple's `JournalAPI+Projects.swift`.
+    // Shapes and decoders in `ProjectsApi.kt`.
+
+    override suspend fun listProjects(openOnly: Boolean): List<Project> =
+        ProjectsDecoding.projects(request(path = "/projects", query = if (openOnly) listOf("state" to "open") else emptyList()))
+
+    override suspend fun project(id: String): ProjectDetail =
+        ProjectsDecoding.detail(request(path = "/projects/${pathSegment(id)}"))
+
+    override suspend fun projectFiles(id: String, before: String?, limit: Int?): ProjectFilesPage =
+        ProjectsDecoding.files(
+            request(path = "/projects/${pathSegment(id)}/feed", query = listOf("kind" to "files") + TimelineDecoding.pageQuery(before, limit)),
+        )
+
+    override suspend fun mergeProject(id: String, into: String) {
+        request(path = "/projects/${pathSegment(id)}/merge", method = "POST", jsonBody = buildJsonObject { put("into", into) })
+    }
+
+    override suspend fun renameProject(id: String, title: String) {
+        request(path = "/projects/${pathSegment(id)}", method = "PATCH", jsonBody = buildJsonObject { put("title", title) })
+    }
+
+    override suspend fun closeProject(id: String, summary: String) {
+        val (status, data) = raw(
+            "/projects/${pathSegment(id)}/close", "POST", jsonBody = buildJsonObject { put("summary", summary) },
+        )
+        if (status == 200) return
+        throw ProjectsDecoding.closeRefusal(status, parseJsonObjectOrNull(String(data, Charsets.UTF_8))) ?: error(status, data)
+    }
+
+    override suspend fun setMissionProject(missionID: String, project: String?): Mission =
+        MissionsDecoding.mission(
+            request(
+                path = "/missions/${pathSegment(missionID)}", method = "PATCH",
+                jsonBody = buildJsonObject { if (project == null) put("project", JsonNull) else put("project", project) },
+            ),
+        )
+
+    override suspend fun conversationMissions(convoID: String): List<ConversationMissionLink> =
+        ProjectsDecoding.conversationMissions(request(path = "/conversations/${pathSegment(convoID)}/missions"))
 
     // MARK: Pinned desk chats
     //

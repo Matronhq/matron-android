@@ -95,6 +95,10 @@ data class Mission(
     /// The contributor who last set [status], until the owner next sets it;
     /// null otherwise (the journal leaves the key out).
     val statusContributor: String? = null,
+    /// The project this mission is filed in, or null.
+    val projectID: String? = null,
+    /// That project's `#N`, for a chip when the project's title isn't known.
+    val projectNum: Int? = null,
 ) {
     /// What the mission is called wherever a number alone would be opaque.
     val label: String get() = "#$num $title"
@@ -130,6 +134,8 @@ data class Mission(
                 lastMilestone = json.objectOrNull("last_milestone")?.let(MissionLastMilestone::fromJson),
                 status = json.stringOrNull("status")?.takeIf(String::isNotBlank),
                 statusContributor = json.stringOrNull("status_contributor")?.takeIf(String::isNotBlank),
+                projectID = json.stringOrNull("project_id")?.takeIf(String::isNotEmpty),
+                projectNum = json.intOrNull("project_num"),
             )
         }
     }

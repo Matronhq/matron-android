@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.outlined.Search
@@ -54,6 +55,12 @@ fun MissionsScreen(
     onSelect: (String) -> Unit,
     /// The toolbar's Memories entry (spec 2026-09-27 memories).
     onOpenMemories: () -> Unit = {},
+    /// The bar's title: "Projects" where the list stands in for the
+    /// timeline at the tab's root.
+    title: String = "Missions",
+    /// Set when the list is pushed (under the Projects timeline): the bar
+    /// gets a back arrow.
+    onBack: (() -> Unit)? = null,
     rootGesture: Modifier = Modifier,
 ) {
     val open by viewModel.open.collectAsStateWithLifecycle()
@@ -71,7 +78,12 @@ fun MissionsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Missions") },
+                title = { Text(title) },
+                navigationIcon = {
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
+                    }
+                },
                 actions = {
                     IconButton(onClick = { focusManager.clearFocus(); onOpenMemories() }) { Icon(Icons.Outlined.Lightbulb, contentDescription = "Memories") }
                 },

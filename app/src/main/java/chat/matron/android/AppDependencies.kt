@@ -40,6 +40,7 @@ import chat.matron.android.viewmodels.ChangePasswordViewModel
 import chat.matron.android.viewmodels.AccountEmailViewModel
 import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
 import chat.matron.android.viewmodels.MissionsListViewModel
+import chat.matron.android.viewmodels.TimelineViewModel
 import chat.matron.android.viewmodels.GoToNumberResolver
 import chat.matron.android.viewmodels.TrackerItemLinkResolver
 import chat.matron.android.journal.JournalApi
@@ -530,6 +531,14 @@ class AppDependencies(
         val c = core(session)
         return MissionsListViewModel(store = c.store, sync = c.missionsSync, scope = scope)
     }
+
+    /**
+     * The Projects timeline's view model, one per signed-in session: the
+     * Projects tab's week page reads it, and it reads the journal only when
+     * the tab first shows.
+     */
+    fun makeTimelineViewModel(session: UserSession, scope: CoroutineScope): TimelineViewModel =
+        TimelineViewModel(timeline = core(session).api, scope = scope)
 
     /** The Memories list VM, per screen showing (spec 2026-09-27 memories). */
     fun makeMemoriesListViewModel(session: UserSession, scope: CoroutineScope): MemoriesListViewModel =
