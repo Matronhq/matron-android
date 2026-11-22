@@ -17,6 +17,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import chat.matron.android.models.Project
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.SportsScore
 import androidx.compose.material.icons.outlined.Layers
@@ -138,6 +142,43 @@ data class MissionDetailModel(
     }
 }
 
+/// The words of "Move to project…".
+object MoveToProjectCopy {
+    const val MOVE = "Move to project…"
+    const val FILE = "Add to a project…"
+
+    /// "Move to project…" for a mission in a project, "Add to a project…" otherwise.
+    fun label(currentProjectID: String?): String = if (currentProjectID == null) FILE else MOVE
+
+    /// Whether the menu has anywhere to move the mission.
+    fun hasTargets(currentProjectID: String?, targets: List<Project>): Boolean = targets.any { it.id != currentProjectID }
+}
+
+/// "Move to project…": every open project, the current one ticked and not
+/// choosable. No "Not in a project": a mission is moved, not taken out.
+/// Ported from matron-apple's `MoveToProjectMenu`.
+@Composable
+fun MoveToProjectMenu(currentProjectID: String?, targets: List<Project>, onMove: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        TextButton(
+            onClick = { open = true }, enabled = MoveToProjectCopy.hasTargets(currentProjectID, targets),
+            modifier = Modifier.testTag("missions.moveToProject"),
+        ) { Text(MoveToProjectCopy.label(currentProjectID)) }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            targets.forEach { project ->
+                val current = project.id == currentProjectID
+                DropdownMenuItem(
+                    text = { Text(project.title) },
+                    leadingIcon = { if (current) Icon(Icons.Filled.Check, contentDescription = "Current") else Spacer(Modifier.size(24.dp)) },
+                    enabled = !current,
+                    onClick = { open = false; onMove(project.id) },
+                )
+            }
+        }
+    }
+}
+
 /// The header chip naming the project a mission is filed in.
 data class MissionProjectChip(val projectID: String, val title: String) {
     val accessibilityLabel: String get() = "Project: $title. Opens the project"
@@ -199,6 +240,9 @@ fun MissionDetailView(
     /// The project the mission is filed in, as its header chip; null for none.
     projectChip: MissionProjectChip? = null,
     onOpenProject: (String) -> Unit = {},
+    /// The open projects the mission can move to; null offers no move.
+    moveTargets: List<Project>? = null,
+    onMove: (String) -> Unit = {},
 ) {
     var showingClose by remember { mutableStateOf(false) }
     val mission = model.mission
@@ -208,7 +252,7 @@ fun MissionDetailView(
             return@PullToRefreshBox
         }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
-            item(key = "header") { MissionHeader(mission, projectChip, onOpenProject) }
+            item(key = "header") { MissionHeader(mission, projectChip, onOpenProject, moveTargets, onMove) }
             item(key = "milestones-header") {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -301,7 +345,13 @@ private fun PageSectionHeader(title: String) {
 }
 
 @Composable
-private fun MissionHeader(mission: Mission, projectChip: MissionProjectChip?, onOpenProject: (String) -> Unit) {
+private fun MissionHeader(
+    mission: Mission,
+    projectChip: MissionProjectChip?,
+    onOpenProject: (String) -> Unit,
+    moveTargets: List<Project>?,
+    onMove: (String) -> Unit,
+) {
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.Top) {
             Text("#${mission.num}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 3.dp))
@@ -311,13 +361,18 @@ private fun MissionHeader(mission: Mission, projectChip: MissionProjectChip?, on
                 color = MissionGlyph.tint(mission.state), modifier = Modifier.padding(top = 6.dp),
             )
         }
-        projectChip?.let { chip ->
-            AssistChip(
-                onClick = { onOpenProject(chip.projectID) },
-                label = { Text(chip.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                leadingIcon = { Icon(Icons.Outlined.Layers, contentDescription = null, modifier = Modifier.size(AssistChipDefaults.IconSize)) },
-                modifier = Modifier.semantics { contentDescription = chip.accessibilityLabel }.testTag("mission.projectChip"),
-            )
+        if (projectChip != null || moveTargets != null) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                projectChip?.let { chip ->
+                    AssistChip(
+                        onClick = { onOpenProject(chip.projectID) },
+                        label = { Text(chip.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        leadingIcon = { Icon(Icons.Outlined.Layers, contentDescription = null, modifier = Modifier.size(AssistChipDefaults.IconSize)) },
+                        modifier = Modifier.weight(1f, fill = false).semantics { contentDescription = chip.accessibilityLabel }.testTag("mission.projectChip"),
+                    )
+                }
+                moveTargets?.let { targets -> MoveToProjectMenu(mission.projectID, targets, onMove) }
+            }
         }
         if (mission.body.isNotEmpty()) MarkdownText(mission.body, textStyle = MaterialTheme.typography.bodyMedium)
         mission.status?.let { status ->

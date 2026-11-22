@@ -99,7 +99,9 @@ import chat.matron.android.designsystem.TimelineListCopy
 import chat.matron.android.features.projects.ProjectScreen
 import chat.matron.android.features.projects.ProjectSectionScreen
 import chat.matron.android.designsystem.ProjectSection
+import chat.matron.android.designsystem.ChatMissionLine
 import chat.matron.android.models.ProjectFileSource
+import chat.matron.android.models.Project
 import chat.matron.android.features.missions.missionOpenConversationOutcome
 import chat.matron.android.features.chat.ChatScreen
 import chat.matron.android.features.chat.ChatVMCache
@@ -1049,6 +1051,7 @@ private fun SignedInApp(
                 // on THIS tab's stack (idempotent for the page already on top).
                 onOpenMission = { shell.pushMission(it) },
                 pinMenu = chatPinMenu(pins, convoID, pinsController),
+                onOpenProject = { shell.openProject(it) },
             )
         }
 
@@ -1080,6 +1083,8 @@ private fun SignedInApp(
                 onOpenConversation = open,
                 projectTitle = { deps.projectTitle(session, it) },
                 onOpenProject = { shell.openProject(it) },
+                projectTargets = { deps.openProjects(session) },
+                moveToProject = { mission, project -> deps.moveMission(session, mission, project) },
             )
         }
 
@@ -1195,6 +1200,7 @@ private fun SignedInApp(
                                     onOpenItems = { nav.navigate("${AppTab.COORDINATOR.routePrefix}items/$convoID") },
                                     onOpenItem = { nav.pushItem(AppTab.COORDINATOR.routePrefix, it) },
                                     onOpenMission = { shell.pushMission(it) },
+                                    onOpenProject = { shell.openProject(it) },
                                 )
                             }
                         }
@@ -1600,6 +1606,8 @@ private fun SignedInApp(
                             onOpenConversation = onOpenConversationFromMissions,
                             projectTitle = { deps.projectTitle(session, it) },
                             onOpenProject = { shell.openProject(it) },
+                            projectTargets = { deps.openProjects(session) },
+                            moveToProject = { mission, project -> deps.moveMission(session, mission, project) },
                         )
                     }
                     composable(
@@ -1856,6 +1864,8 @@ private fun MissionDetailRoute(
     onOpenConversation: (String) -> Unit,
     projectTitle: suspend (String) -> String?,
     onOpenProject: (String) -> Unit,
+    projectTargets: (suspend () -> List<Project>)? = null,
+    moveToProject: suspend (String, String) -> Unit = { _, _ -> },
 ) {
     val viewModel = remember(missionID) { vmCache.missionDetailViewModel(missionID) }
     MissionDetailScreen(
@@ -1866,6 +1876,8 @@ private fun MissionDetailRoute(
         onOpenConversation = onOpenConversation,
         projectTitle = projectTitle,
         onOpenProject = onOpenProject,
+        projectTargets = projectTargets,
+        moveToProject = moveToProject,
     )
 }
 
@@ -1954,6 +1966,8 @@ private fun ChatRoute(
     roomBoxShorts: List<String> = emptyList(),
     /// The "⋮" menu's pin entries; null offers none (the Coordinator root).
     pinMenu: ChatPinMenu? = null,
+    /// Opens a project from the mission line under the title.
+    onOpenProject: ((String) -> Unit)? = null,
 ) {
     // `[#65](matron://item/65)` links in any message body (apple #208):
     // resolved through the session's store + sync, opened where an inline
@@ -2025,8 +2039,22 @@ private fun ChatRoute(
             // affordance should appear. Keyed on convoID so a re-used route
             // never shows the previous room's mission for a frame.
             val missionID by produceState<String?>(initialValue = null, convoID) {
+                // A reused route never keeps the previous room's mission (the
+                // title tap would open it) while this room's is read.
+                value = null
                 deps.missionIDFlow(session, convoID).collect { value = it }
             }
+            // The mission and project under the title: read when the room opens
+            // and again whenever the cache says its mission changed.
+            // Held per room: a reused route never shows the previous room's
+            // line while this one's is read; a mission change in the same
+            // room, or a failed read, keeps the old line until a new one lands.
+            val missionLineState = remember(convoID) { mutableStateOf<ChatMissionLine?>(null) }
+            LaunchedEffect(convoID, missionID) {
+                // A failed read keeps the line already shown.
+                deps.chatMissionLine(session, convoID).onSuccess { missionLineState.value = it }
+            }
+            val missionLine = missionLineState.value
             // The header's "Rooms · n": the agent-chat rooms this
             // conversation is in, live off the store while the chat shows.
             val roomsScope = rememberCoroutineScope()
@@ -2066,6 +2094,8 @@ private fun ChatRoute(
                 missionID = missionID,
                 onOpenMission = onOpenMission,
                 pinMenu = pinMenu,
+                missionLine = missionLine,
+                onOpenProject = onOpenProject,
                 conversationRooms = conversationRooms,
                 notify = remember(session.userID) { deps.notifySettings(session) },
                 // Deferred: built when the browser sheet opens, on the sheet's own
