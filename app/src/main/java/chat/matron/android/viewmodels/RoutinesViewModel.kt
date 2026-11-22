@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /// Backs Settings → Coordinator → Routines: the user's Coordinator
@@ -27,6 +28,12 @@ import kotlinx.coroutines.launch
 /// Live: while started, every `routine` marker (create, edit, delete, fire)
 /// schedules one refetch after a short delay, so a burst costs a single
 /// `GET /routines`.
+///
+/// Threading: [scope] is the session's main-thread scope and every caller
+/// (the screens' coroutine scopes) runs on the main thread, so the request
+/// continuations resume there and the plain fields ([loadGeneration], the
+/// jobs) are only touched on one thread. The busy set is updated atomically
+/// all the same.
 class RoutinesViewModel(
     private val api: RoutinesProviding,
     private val markers: () -> Flow<RoutineMarkerEvent>,
@@ -136,7 +143,7 @@ class RoutinesViewModel(
     /// Pause (`false`) or resume (`true`).
     suspend fun setEnabled(enabled: Boolean, id: String) {
         if (id in _busyIDs.value) return
-        _busyIDs.value = _busyIDs.value + id
+        _busyIDs.update { it + id }
         try {
             replace(api.setRoutineEnabled(id, enabled))
         } catch (e: CancellationException) {
@@ -145,7 +152,7 @@ class RoutinesViewModel(
             _actionMessage.value = e.message ?: e.toString()
             if (e is RoutinesError.NotFound) load()
         } finally {
-            _busyIDs.value = _busyIDs.value - id
+            _busyIDs.update { it - id }
         }
     }
 
@@ -154,7 +161,7 @@ class RoutinesViewModel(
     /// it, otherwise what to tell the user (not sent, or the error).
     suspend fun run(id: String): String? {
         if (id in _busyIDs.value) return null
-        _busyIDs.value = _busyIDs.value + id
+        _busyIDs.update { it + id }
         return try {
             api.runRoutine(id).message
         } catch (e: CancellationException) {
@@ -162,7 +169,7 @@ class RoutinesViewModel(
         } catch (e: Exception) {
             e.message ?: e.toString()
         } finally {
-            _busyIDs.value = _busyIDs.value - id
+            _busyIDs.update { it - id }
         }
     }
 

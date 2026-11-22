@@ -11,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -21,6 +22,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -112,7 +114,12 @@ fun RoutineEditorScreen(
     onBack: () -> Unit,
 ) {
     val routines by viewModel.routines.collectAsStateWithLifecycle()
+    val loadError by viewModel.loadError.collectAsStateWithLifecycle()
     val routine = routineID?.let { id -> routines?.firstOrNull { it.id == id } }
+    val scope = rememberCoroutineScope()
+    // Opened without the list (restored after the process was killed, say):
+    // load it here rather than calling the routine missing.
+    LaunchedEffect(viewModel) { if (viewModel.routines.value == null) viewModel.load() }
 
     Scaffold(
         topBar = {
@@ -125,7 +132,25 @@ fun RoutineEditorScreen(
         },
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
-            if (routineID != null && routine == null) {
+            if (routineID != null && routines == null) {
+                Column(
+                    Modifier.fillMaxSize().padding(32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
+                ) {
+                    val error = loadError
+                    if (error == null) {
+                        CircularProgressIndicator()
+                    } else {
+                        Text(
+                            "Couldn't load routines: $error",
+                            color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        TextButton(onClick = { scope.launch { viewModel.load() } }) { Text("Try again") }
+                    }
+                }
+            } else if (routineID != null && routine == null) {
                 Column(
                     Modifier.fillMaxSize().padding(32.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
