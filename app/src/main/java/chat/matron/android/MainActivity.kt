@@ -2038,6 +2038,9 @@ private fun ChatRoute(
             // affordance should appear. Keyed on convoID so a re-used route
             // never shows the previous room's mission for a frame.
             val missionID by produceState<String?>(initialValue = null, convoID) {
+                // A reused route never keeps the previous room's mission (the
+                // title tap would open it) while this room's is read.
+                value = null
                 deps.missionIDFlow(session, convoID).collect { value = it }
             }
             // The mission and project under the title: read when the room opens
