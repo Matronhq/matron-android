@@ -23,6 +23,9 @@ data class ProjectPageState(
     val page: TimelineProjectPage? = null,
     /// The journal has no such project.
     val isMissing: Boolean = false,
+    /// Bumped each time the page lands: its picture is asked for again, so
+    /// one that failed gets another try on a refresh.
+    val pageLoads: Int = 0,
     /// The project the one asked for was merged into, once the journal says so.
     val redirectedTo: String? = null,
     /// The project's weeks newest first, as far as they have been paged.
@@ -168,7 +171,7 @@ class ProjectPageViewModel(
                     it.copy(redirectedTo = loaded.project.id, asked = false, actionsLoaded = false, unfiled = emptyList(), mergeTargets = emptyList())
                 }
             }
-            _state.update { it.copy(page = loaded, isMissing = false) }
+            _state.update { it.copy(page = loaded, isMissing = false, pageLoads = it.pageLoads + 1) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
@@ -266,6 +269,13 @@ class ProjectPageViewModel(
         } catch (error: Throwable) {
             if (generation == missionsGeneration) _state.update { it.copy(error = error.message) }
         }
+    }
+
+    /// Reads the files' first page unless they have loaded (or are being
+    /// read): the Files section coming on screen again keeps what was paged.
+    suspend fun loadFilesIfNeeded() {
+        if (_state.value.files != null || isReloadingFiles) return
+        loadFiles()
     }
 
     /// Reads the first page of the project's files, replacing what was loaded.
