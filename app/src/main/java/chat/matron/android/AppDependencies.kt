@@ -54,6 +54,12 @@ import chat.matron.android.journal.db.MatronDatabase
 import chat.matron.android.models.LaunchTimeline
 import chat.matron.android.models.MatronDebug
 import chat.matron.android.models.UserSession
+import chat.matron.android.models.journalStoreFileName
+import chat.matron.android.models.legacyJournalStoreFileName
+import chat.matron.android.models.signInKey
+import chat.matron.android.journal.CredentialRevocationMonitor
+import chat.matron.android.journal.CredentialSignal
+import chat.matron.android.journal.LegacyStoreFileMove
 import chat.matron.android.push.JournalPushService
 import chat.matron.android.push.PushService
 import chat.matron.android.search.SearchBackfillCoordinator
@@ -201,8 +207,12 @@ class AppDependencies(
     class JournalCore(
         val api: JournalApi,
         val db: MatronDatabase,
-        /** Where the mirror lives on disk — the Storage section's size row. */
-        val dbFile: File,
+        /**
+         * Where the mirror lives on disk — the Storage section's size row.
+         * `null` for a mirror in memory (an inert stack, or a launch whose old
+         * database could not be made whole — see [LegacyStoreFileMove]).
+         */
+        val dbFile: File?,
         val store: JournalStore,
         val engine: JournalSyncEngine,
         /**
@@ -239,12 +249,42 @@ class AppDependencies(
         /** Invite links waiting to be shown once; in memory only. */
         val inviteLinks: chat.matron.android.journal.RevealedInviteLinks =
             chat.matron.android.journal.RevealedInviteLinks(CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)),
+        /**
+         * Decides when the server has revoked this sign-in's token (see
+         * [CredentialRevocationMonitor]); fed by [api] and [engine]. Disarmed
+         * on an inert stack and by sign-out.
+         */
+        val revocation: CredentialRevocationMonitor = CredentialRevocationMonitor(onRevoked = {}).apply { cancel() },
+        /** The account this stack is for (its per-account caches are cleared with it). */
+        val userID: String = "",
     )
 
+    /**
+     * One journal stack per sign-in, keyed by [signInKey] (user, journal and
+     * device id), never by the user id alone: after a sign-out and a new
+     * sign-in to the same account, a late call for the old sign-in must not
+     * hand the new one the old token's stack.
+     */
     private val cores: MutableMap<String, JournalCore> = mutableMapOf()
 
-    /** Per-session [MediaService] cache — one instance (one image cache) per user. */
+    /**
+     * Sign-ins this object has signed out of. [core] refuses them: a screen
+     * that still holds the old session after sign-out gets an inert stack
+     * (see [refusedCore]) instead of a new live one on the revoked token.
+     */
+    private val retiredSignIns: MutableSet<String> = mutableSetOf()
+
+    /** The inert stacks handed to retired sign-ins, one each. */
+    private val refusedCores: MutableMap<String, JournalCore> = mutableMapOf()
+
+    /** Per-sign-in [MediaService] cache — one instance (one image cache) per sign-in. */
     private val mediaServices: MutableMap<String, MediaService> = mutableMapOf()
+
+    /**
+     * Revokes are handed to the host on the main thread: they are found on
+     * OkHttp's threads and in the sync engine's coroutines.
+     */
+    private val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /**
      * Per-room [TimelineService] cache, bounded LRU so a long session that visits
@@ -284,25 +324,83 @@ class AppDependencies(
      * fails to open is unrecoverable config; the exception propagates rather than
      * limping along with a null store every caller would have to guard.
      */
+    @Synchronized
     private fun core(session: UserSession): JournalCore {
-        cores[session.userID]?.let { return it }
+        val key = session.signInKey
+        cores[key]?.let { return it }
+        // A sign-in this object already signed out of: never a live stack
+        // again. Building one here would reopen the account's database and
+        // reconnect on the revoked token, and a new sign-in to the same
+        // account could then pick that stack up, be refused, and sign out.
+        if (key in retiredSignIns) return refusedCore(session)
+        val core = buildCore(session, dbFile = adoptLegacyStoreFile(session), live = true)
+        cores[key] = core
+        return core
+    }
+
+    /**
+     * An inert stack for a sign-in that has been signed out: its database is
+     * in memory, nothing in it is started, it holds no token, and its
+     * revocation check is off, so it can neither touch the next sign-in's
+     * files nor sign it out. Screens that outlive their session read empty
+     * data from it until they go away.
+     */
+    private fun refusedCore(session: UserSession): JournalCore =
+        refusedCores.getOrPut(session.signInKey) {
+            MatronDebug.breadcrumb("AppDependencies: refused a journal stack for a signed-out session")
+            buildCore(session, dbFile = null, live = false)
+        }
+
+    /** This sign-in's local journal mirror, named per sign-in. */
+    internal fun journalStoreFile(session: UserSession): File = File(journalDirectory, session.journalStoreFileName)
+
+    /**
+     * Moves the mirror an older build kept as `<user>.sqlite` to this
+     * sign-in's name, once. Only a restored session can find one: a fresh
+     * sign-in empties the directory first. Returns the file to open: the old
+     * one, for now, if the move could not finish, or `null` (an in-memory
+     * database for this launch) if the old one could not be made whole.
+     */
+    private fun adoptLegacyStoreFile(session: UserSession): File? = LegacyStoreFileMove.adopt(
+        legacy = File(journalDirectory, session.legacyJournalStoreFileName),
+        target = journalStoreFile(session),
+    )
+
+    /**
+     * Builds a journal stack. [live] `false` is the refused stack: no token,
+     * no revocation check, no search, no launch timings, and nothing started.
+     * [dbFile] `null` keeps the mirror in memory.
+     */
+    private fun buildCore(session: UserSession, dbFile: File?, live: Boolean): JournalCore {
+        // Built first so the API client and the engine report to it from
+        // their very first request: a revoke found while a restored session
+        // is still connecting at launch counts too.
+        val revocation = CredentialRevocationMonitor(
+            onRevoked = { mainScope.launch { credentialsRevoked(session) } },
+        )
+        if (!live) revocation.cancel()
         val api = JournalApi(
             baseUrl = session.homeserverURL,
             client = sharedClient,
-            token = session.accessToken,
+            token = if (live) session.accessToken else null,
+            authResponses = revocation::noteResponse,
         )
-        val dbFile = File(journalDirectory, "${session.userID.sanitizedForFilename()}.sqlite")
-        LaunchTimeline.shared.beginStoreOpen()
-        val db = journalDatabaseFactory(context, dbFile)
+        // The file-backed factory closes the store-open interval on first open.
+        if (live && dbFile != null) LaunchTimeline.shared.beginStoreOpen()
+        val db = if (dbFile != null) journalDatabaseFactory(context, dbFile) else MatronDatabase.inMemory(context)
         val store = JournalStore(db = db, ownSender = "user:${session.userID}")
+        val search = if (live) this.search else null
         val engine = JournalSyncEngine(
             api = api,
             store = store,
             connector = OkHttpWebSocketConnector(client = sharedClient),
-            token = session.accessToken,
+            // An inert stack's engine is never started; if something did
+            // start it, a hello with no token is simply refused.
+            token = if (live) session.accessToken else "",
             ownSender = "user:${session.userID}",
             search = search,
             archive = ArchiveSync(store = store, writer = api),
+            credentialSignals = revocation::handle,
         )
         val maintenance = JournalMaintenance(
             store = store,
@@ -344,12 +442,13 @@ class AppDependencies(
         )
         val core = JournalCore(
             api, db, dbFile, store, engine, maintenance, itemsSync, missionsSync, memoriesSync,
-            pinsSync = pinsSync, coordinatorSync = coordinatorSync,
+            pinsSync = pinsSync, coordinatorSync = coordinatorSync, revocation = revocation,
+            userID = session.userID,
         )
+        if (!live) return core
         core.itemsSync.onInviteLink = { link, askId ->
             core.inviteLinks.show(link, chat.matron.android.journal.RevealedInviteLinks.Source.ASK, askId)
         }
-        cores[session.userID] = core
         // Nothing proportional to store history runs on the launch path any
         // more (apple #212): the tool-output TTL sweep that used to be
         // launched here at store creation — a full `event` scan in one write
@@ -393,7 +492,8 @@ class AppDependencies(
      * worker-started process sweeps once `backgroundCatchUp` has built the
      * core it needs anyway.
      */
-    fun journalMaintenance(session: UserSession): JournalMaintenance? = cores[session.userID]?.maintenance
+    @Synchronized
+    fun journalMaintenance(session: UserSession): JournalMaintenance? = cores[session.signInKey]?.maintenance
 
     /**
      * Settings › Storage's numbers: on-disk size of the journal mirror and
@@ -496,7 +596,7 @@ class AppDependencies(
     }
 
     fun mediaService(session: UserSession): MediaService =
-        mediaServices.getOrPut(session.userID) { JournalMediaService(core(session).api) }
+        synchronized(this) { mediaServices.getOrPut(session.signInKey) { JournalMediaService(core(session).api) } }
 
     /**
      * The session's journal store, for read-only feature queries (media
@@ -733,7 +833,7 @@ class AppDependencies(
      * navigations reuse the same overlay state instead of rebuilding it.
      */
     fun timelineService(session: UserSession, roomID: String): TimelineService {
-        val key = TimelineCacheKey(userID = session.userID, roomID = roomID)
+        val key = TimelineCacheKey(signIn = session.signInKey, roomID = roomID)
         timelineCache[key]?.let { return it }
         val core = core(session)
         val service = JournalTimelineService(
@@ -794,9 +894,65 @@ class AppDependencies(
         BoxLetterMigration.run(boxLetterOverrides, serverTags) { id, letter -> core.api.setDeviceTag(id, letter) }
     }
 
+    /**
+     * Called on the main thread when the server has revoked the signed-in
+     * device's token (signed out from another device). The host runs its
+     * normal sign-out from here and shows the sign-in screen with a reason.
+     * A revoke found while no host is listening (a background catch-up with
+     * no activity up) is signed out for here and handed over as soon as a
+     * host sets this — see [credentialsRevoked].
+     */
+    var onCredentialsRevoked: ((UserSession) -> Unit)? = null
+        set(value) {
+            field = value
+            val pending = pendingRevokedSession ?: return
+            if (value == null) return
+            pendingRevokedSession = null
+            value(pending)
+        }
+
+    /**
+     * A revoke this object already signed out for because no host was
+     * listening; delivered to [onCredentialsRevoked] once it is set, so the
+     * sign-in screen still says why.
+     */
+    private var pendingRevokedSession: UserSession? = null
+
+    /**
+     * Forwards a revoke to [onCredentialsRevoked], only while the sign-in it
+     * was found for is still live. A late report from a stack that has
+     * already been torn down (the user signed out, or signed in again and got
+     * a new stack) is dropped, so one revoke signs out at most once. With no
+     * host listening, signs out right here (the wipe must not wait for a
+     * screen that may never open) and keeps the session for the host's
+     * notice. Main thread.
+     */
+    internal fun credentialsRevoked(session: UserSession) {
+        // `hasFired` tells this sign-in's current stack from one a sign-out
+        // already replaced: a fresh stack's monitor has not fired.
+        val core = synchronized(this) { cores[session.signInKey] }
+        if (core == null || !core.revocation.hasFired) return
+        MatronDebug.breadcrumb("AppDependencies: the server revoked this device's token — signing out")
+        onCredentialsRevoked?.let {
+            it(session)
+            return
+        }
+        signOut()
+        pendingRevokedSession = session
+    }
+
+    @Synchronized
     fun signOut() {
         val oldCores = cores.values.toList()
-        val oldUserIDs = cores.keys.toList()
+        val oldUserIDs = cores.values.map { it.userID }.distinct()
+        // Disarm first: the teardown below still talks to the server with the
+        // old token (push deregistration), and a revoked token's 401s must not
+        // ask for a second sign-out.
+        for (core in oldCores) core.revocation.cancel()
+        // These sign-ins are over: a late core() with one of them gets an
+        // inert stack, never a live one on the old token.
+        retiredSignIns += cores.keys
+        refusedCores.clear()
         // Chain onto any previous teardown: overwriting the job would leave
         // awaitPendingTeardown() watching only the newest one while an older
         // wipe/close still runs (bugbot "Sign-out drops prior teardown job").
@@ -909,8 +1065,15 @@ class AppDependencies(
      * Session restore must NOT call this — a restored session keeps its mirror.
      */
     suspend fun wipeLocalDataForFreshLogin() {
+        // Never a file a live stack holds open: deleting it under an open
+        // connection breaks that stack's next query ("disk I/O error").
+        val held = synchronized(this) { cores.values.mapNotNull { it.dbFile?.name } }.toSet()
         withContext(Dispatchers.IO) {
             journalDirectory.listFiles()?.forEach { file ->
+                if (isHeldStoreFile(file.name, held)) {
+                    MatronDebug.breadcrumb("freshLogin: kept ${file.name}, a live stack has it open")
+                    return@forEach
+                }
                 if (!file.deleteRecursively()) {
                     MatronDebug.breadcrumb("freshLogin: could not delete ${file.name}")
                 }
@@ -925,16 +1088,41 @@ class AppDependencies(
     /** Number of entries currently held by the timeline cache. */
     val timelineCacheCount: Int get() = timelineCache.count
 
-    /** Whether the timeline cache currently holds an entry for `(userID, roomID)`. */
-    fun timelineCacheContains(userID: String, roomID: String): Boolean =
-        timelineCache.contains(TimelineCacheKey(userID = userID, roomID = roomID))
+    /** Whether the timeline cache currently holds an entry for `(session, roomID)`. */
+    fun timelineCacheContains(session: UserSession, roomID: String): Boolean =
+        timelineCache.contains(TimelineCacheKey(signIn = session.signInKey, roomID = roomID))
+
+    /** Whether [session] has a live journal stack (never builds one). */
+    @Synchronized
+    fun hasLiveCore(session: UserSession): Boolean = cores.containsKey(session.signInKey)
+
+    /** The database file [session]'s stack has open, `null` in memory or without a stack. */
+    @Synchronized
+    fun openStoreFile(session: UserSession): File? = cores[session.signInKey]?.dbFile
+
+    /**
+     * Reports this session's handshake as refused, exactly as the sync
+     * engine does when the server rejects the device's token.
+     */
+    fun simulateConnectionAuthRejected(session: UserSession) {
+        core(session).revocation.handle(CredentialSignal.Rejected)
+    }
+
+    /** Reports a REST answer for this session, exactly as its API client does. */
+    fun simulateRESTResponse(status: Int, session: UserSession) {
+        core(session).revocation.noteResponse(status)
+    }
 
     companion object {
+        /**
+         * Whether [name] is one of the files of a database in [held]: the
+         * database itself or one of its side files (`-wal`, `-shm`,
+         * `-journal`).
+         */
+        internal fun isHeldStoreFile(name: String, held: Set<String>): Boolean =
+            name in held || LegacyStoreFileMove.sideSuffixes.any { name.endsWith(it) && name.removeSuffix(it) in held }
+
         /** How many distinct rooms the timeline cache holds before LRU eviction. */
         const val timelineCacheLimit = 16
     }
 }
-
-/** Keeps a user id usable as a filename (ids are opaque but may carry `/` `:`). */
-private fun String.sanitizedForFilename(): String =
-    map { if (it.isLetterOrDigit() || it == '-' || it == '_' || it == '.') it else '_' }.joinToString("")

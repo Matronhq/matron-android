@@ -116,6 +116,7 @@ import chat.matron.android.models.MatronDebug
 import chat.matron.android.sync.OutboxCatchUpWorker
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.UserSession
+import chat.matron.android.models.isSameSignIn
 import chat.matron.android.platform.AndroidBiometricAuthenticator
 import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.VoiceRecorderHandoff
@@ -242,11 +243,41 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
         Surface(modifier = Modifier.fillMaxSize()) {
             var bootstrapped by remember { mutableStateOf(false) }
             var session by remember { mutableStateOf<UserSession?>(null) }
+            // The sign-in the server revoked, while the sign-in screen it led
+            // to is up: that screen says why.
+            var revokedSession by remember { mutableStateOf<UserSession?>(null) }
+
+            // The server revoked this device's token (signed out from another
+            // device): the same sign-out as the Settings button, then the
+            // sign-in screen with the reason. Unlike the user's own sign-out
+            // this does not wait for the app lock: the session is already gone
+            // on the server, and what the wipe removes is exactly what the
+            // lock was guarding. A revoke for any other sign-in is ignored.
+            val onRevoked: (UserSession) -> Unit = remember {
+                { revoked ->
+                    if (revokeSignsOut(current = session, revoked = revoked)) {
+                        revokedSession = revoked
+                        OutboxCatchUpWorker.cancel(context)
+                        deps.signOut()
+                        appLock.resetForSignOut()
+                        session = null
+                    }
+                }
+            }
+            DisposableEffect(Unit) {
+                onDispose { if (deps.onCredentialsRevoked === onRevoked) deps.onCredentialsRevoked = null }
+            }
 
             LaunchedEffect(Unit) {
-                session = runCatching { deps.auth.restoreSession() }
+                // Before any session is published: a restored session whose
+                // device was signed out elsewhere is refused on its first
+                // connect.
+                deps.onCredentialsRevoked = onRevoked
+                val restored = runCatching { deps.auth.restoreSession() }
                     .onFailure { MatronDebug.breadcrumb("restoreSession threw — starting signed out: $it") }
                     .getOrNull()
+                // Never publish a sign-in a revoke has just signed out.
+                session = publishableRestoredSession(restored, revokedSession)
                 bootstrapped = true
             }
 
@@ -269,7 +300,13 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
             when {
                 !bootstrapped -> LoadingScreen()
                 session == null -> {
-                    val vm = remember { SignInViewModel(auth = deps.auth, deviceDisplayName = "Matron Android") }
+                    val vm = remember(revokedSession) {
+                        SignInViewModel(
+                            auth = deps.auth,
+                            deviceDisplayName = "Matron Android",
+                            signedOutRemotely = revokedSession,
+                        )
+                    }
                     val linkVm = remember {
                         LinkSignInViewModel(
                             auth = deps.auth,
@@ -301,6 +338,7 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                                 // Signing in interactively IS an authentication;
                                 // the new session must not open behind a shield.
                                 appLock.noteSignedIn()
+                                revokedSession = null
                                 session = s
                             }
                         },
@@ -341,6 +379,19 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
         }
     }
 }
+
+/// Whether a revoke found for [revoked] signs the app out, given the session
+/// on screen. The same sign-in, not just the same account: a late revoke for
+/// the sign-in before this one must not sign this one out. With no session
+/// published yet (a revoke found while the launch is still restoring) it
+/// does.
+fun revokeSignsOut(current: UserSession?, revoked: UserSession): Boolean =
+    current == null || current.isSameSignIn(revoked)
+
+/// The restored session to publish at launch: never one a revoke has just
+/// signed out.
+fun publishableRestoredSession(restored: UserSession?, revoked: UserSession?): UserSession? =
+    restored?.takeUnless { revoked != null && it.isSameSignIn(revoked) }
 
 /**
  * Builds the "open a spawned session's room" callback the agent-spawn card

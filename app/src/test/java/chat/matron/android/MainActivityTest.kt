@@ -24,6 +24,28 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainActivityTest {
 
+    private val alice = chat.matron.android.models.UserSession(
+        userID = "alice", deviceID = "1", homeserverURL = "https://journal.example.com/", accessToken = "t",
+    )
+
+    @Test
+    fun aRevoke_signsOutOnlyTheSameSignIn() {
+        assertTrue(revokeSignsOut(current = alice, revoked = alice))
+        assertTrue("a new token is the same sign-in", revokeSignsOut(current = alice.copy(accessToken = "t2"), revoked = alice))
+        assertFalse("the sign-in before this one", revokeSignsOut(current = alice.copy(deviceID = "2"), revoked = alice))
+        assertFalse(revokeSignsOut(current = alice.copy(userID = "bob"), revoked = alice))
+        assertTrue("nothing published yet", revokeSignsOut(current = null, revoked = alice))
+    }
+
+    @Test
+    fun aRestoredSession_isNotPublishedOnceRevoked() {
+        assertEquals(alice, publishableRestoredSession(alice, revoked = null))
+        assertEquals(null, publishableRestoredSession(alice, revoked = alice))
+        val next = alice.copy(deviceID = "2")
+        assertEquals(next, publishableRestoredSession(next, revoked = alice))
+        assertEquals(null, publishableRestoredSession(null, revoked = alice))
+    }
+
     @Test
     fun preparesTheConversationBeforeNavigating() = runTest {
         val calls = mutableListOf<String>()
