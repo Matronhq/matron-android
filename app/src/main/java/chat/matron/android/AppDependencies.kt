@@ -788,9 +788,20 @@ class AppDependencies(
     ): TimelineViewModel = TimelineViewModel(timeline = core(session).api, scope = scope, askCoordinator = askCoordinator)
 
     /** A project's page (or one of its sections): a fresh view model per screen. */
-    fun makeProjectPageViewModel(session: UserSession, projectID: String): ProjectPageViewModel {
-        val api = core(session).api
-        return ProjectPageViewModel(projectID = projectID, timeline = api, projects = api)
+    fun makeProjectPageViewModel(
+        session: UserSession,
+        projectID: String,
+        askCoordinator: (suspend (String) -> Unit)? = null,
+        projectChanged: () -> Unit = {},
+    ): ProjectPageViewModel {
+        val c = core(session)
+        return ProjectPageViewModel(
+            projectID = projectID, timeline = c.api, projects = c.api,
+            unfiledMissions = { c.store.missionsFlow(chat.matron.android.models.MissionState.OPEN).first().filter { it.projectID == null } },
+            askCoordinator = askCoordinator,
+            missionChanged = { id -> c.missionsSync.refreshMission(id) },
+            projectChanged = projectChanged,
+        )
     }
 
     /** A project's title, for the chip on a mission's page; null when it can't be read. */

@@ -57,6 +57,7 @@ import chat.matron.android.models.ProjectMilestone
 import chat.matron.android.viewmodels.ProjectPageState
 import chat.matron.android.viewmodels.ProjectPageViewModel
 import java.time.Instant
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -96,12 +97,19 @@ fun ProjectScreen(
     onOpenItem: (String) -> Unit,
     onOpenSection: (ProjectSection) -> Unit,
     sections: List<ProjectSection> = PROJECT_PAGE_SECTIONS,
-    titleActions: @Composable (ProjectPageState) -> Unit = {},
+    /// Shows the "⋯" menu beside the title (rename, merge, close, add a mission).
+    showsActions: Boolean = false,
+    /// Where the menu's writes run: a scope that outlives this screen, so a
+    /// write confirmed just before opening a section is never called off.
+    actionsScope: CoroutineScope? = null,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
-    LaunchedEffect(viewModel) { viewModel.refreshPage() }
+    LaunchedEffect(viewModel) {
+        viewModel.refreshPage()
+        if (showsActions) viewModel.loadActionTargets()
+    }
     val images = rememberTimelineImages(listOfNotNull(state.page?.media?.takeIf { !it.isVideo }?.blobID), media, serverURL, reload = state.pageLoads)
 
     ProjectScaffold(title = state.page?.let { "#${it.project.num}" } ?: "Project", onBack = onBack) {
@@ -114,11 +122,12 @@ fun ProjectScreen(
             when (ProjectScreenContent.of(state)) {
                 ProjectScreenContent.Page -> ProjectSummaryView(
                     page = page!!, image = page.media?.let { images[it.blobID] }, sections = sections,
-                    onOpenItem = onOpenItem, onOpenSection = onOpenSection, titleActions = { titleActions(state) },
+                    onOpenItem = onOpenItem, onOpenSection = onOpenSection, titleActions = { if (showsActions) ProjectActionsMenu(state, viewModel, actionsScope ?: scope) },
                 )
                 ProjectScreenContent.Missing -> ProjectPlaceholder(ProjectFormat.MISSING, ProjectFormat.MISSING_DETAIL)
                 ProjectScreenContent.Failed -> ProjectPlaceholder(TimelineFormat.FAILED, TimelineFormat.FAILED_DETAIL) {
-                    Button(onClick = { scope.launch { viewModel.refreshPage() } }) { Text(TimelineFormat.TRY_AGAIN) }
+                    // Everything the page read, the "⋯" lists included.
+                    Button(onClick = { scope.launch { viewModel.refresh() } }) { Text(TimelineFormat.TRY_AGAIN) }
                 }
                 ProjectScreenContent.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             }

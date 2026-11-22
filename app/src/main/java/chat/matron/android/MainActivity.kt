@@ -723,17 +723,22 @@ private fun SignedInApp(
     val missionsVM = remember(session.userID) { deps.makeMissionsListViewModel(session, sessionScope) }
     // The Projects timeline (the Missions tab's root): session-long, so the
     // picked week survives a tab switch. It reads when the tab first shows.
-    val timelineVM = remember(session.userID) {
-        deps.makeTimelineViewModel(session, sessionScope) { question ->
-            // "Ask the Coordinator" on a stalled project: a message in its room.
+    // "Ask the Coordinator" from the Projects pages: a message in its room.
+    val askCoordinator: suspend (String) -> Unit = remember(session.userID) {
+        { question ->
             val coordinator = deps.coordinatorSync(session).convoID.value ?: throw IllegalStateException("Choose a Coordinator in Settings first.")
             deps.timelineService(session, coordinator).sendText(question, null)
         }
     }
+    val timelineVM = remember(session.userID) { deps.makeTimelineViewModel(session, sessionScope, askCoordinator) }
     // One view model per project for the session: its page and its sections
     // share it, and coming back to a page shows what was loaded while it
     // re-reads, rather than starting over from a spinner.
     val projectVMs = remember(session.userID) { mutableMapOf<String, chat.matron.android.viewmodels.ProjectPageViewModel>() }
+    // A change made from a project's page reads the timeline's lists again.
+    val makeProjectVM: (String) -> chat.matron.android.viewmodels.ProjectPageViewModel = remember(session.userID) {
+        { id -> deps.makeProjectPageViewModel(session, id, askCoordinator) { sessionScope.launch { timelineVM.refresh() } } }
+    }
     // Settings → People; session-wide so an invite deep link can open its
     // accept card before the screen is up.
     val inviteLinks = remember(session.userID) { deps.revealedInviteLinks(session) }
@@ -1487,7 +1492,7 @@ private fun SignedInApp(
                         arguments = listOf(navArgument("projectID") { type = NavType.StringType }),
                     ) { entry ->
                         val projectID = entry.arguments?.getString("projectID") ?: return@composable
-                        val projectVM = remember(projectID) { projectVMs.getOrPut(projectID) { deps.makeProjectPageViewModel(session, projectID) } }
+                        val projectVM = remember(projectID) { projectVMs.getOrPut(projectID) { makeProjectVM(projectID) } }
                         // A project merged into another became that one: its
                         // sections (opened with the new id) share this view
                         // model, in place of any older one for that project.
@@ -1500,6 +1505,8 @@ private fun SignedInApp(
                             onBack = { nav.popBackStack() },
                             onOpenItem = { shell.pushMissionItem(it) },
                             onOpenSection = { shell.openProjectSection(projectVM.projectID, it.wire) },
+                            showsActions = true,
+                            actionsScope = sessionScope,
                         )
                     }
                     composable(
@@ -1511,7 +1518,7 @@ private fun SignedInApp(
                     ) { entry ->
                         val projectID = entry.arguments?.getString("projectID") ?: return@composable
                         val section = ProjectSection.fromWire(entry.arguments?.getString("section")) ?: return@composable
-                        val projectVM = remember(projectID) { projectVMs.getOrPut(projectID) { deps.makeProjectPageViewModel(session, projectID) } }
+                        val projectVM = remember(projectID) { projectVMs.getOrPut(projectID) { makeProjectVM(projectID) } }
                         ProjectSectionScreen(
                             viewModel = projectVM,
                             section = section,
