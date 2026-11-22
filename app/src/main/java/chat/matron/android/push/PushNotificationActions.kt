@@ -78,6 +78,26 @@ object PushTaps {
         PushTap.from(intent)?.let { pending.value = it }
     }
 
+    /// A tap not yet taken, into the activity's saved state.
+    fun save(outState: android.os.Bundle) {
+        val tap = pending.value ?: return
+        outState.putString(SAVED_CONVO, tap.convoID)
+        tap.itemID?.let { outState.putString(SAVED_ITEM, it) }
+        tap.seq?.let { outState.putLong(SAVED_SEQ, it) }
+    }
+
+    /// Back from the saved state after process death; a tap already waiting
+    /// in this process wins.
+    fun restore(savedState: android.os.Bundle) {
+        if (pending.value != null) return
+        val convo = savedState.getString(SAVED_CONVO)?.takeIf { it.isNotEmpty() } ?: return
+        pending.value = PushTap(convo, savedState.getString(SAVED_ITEM), savedState.getLong(SAVED_SEQ, 0L).takeIf { it > 0 })
+    }
+
+    private const val SAVED_CONVO = "matron.push.pending.convo"
+    private const val SAVED_ITEM = "matron.push.pending.item"
+    private const val SAVED_SEQ = "matron.push.pending.seq"
+
     /// Sign-out: a tap from the last account must not open in the next.
     fun clear() {
         pending.value = null

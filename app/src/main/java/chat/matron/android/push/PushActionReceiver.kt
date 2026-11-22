@@ -23,10 +23,14 @@ class PushActionReceiver : BroadcastReceiver() {
         val deps = (context.applicationContext as MatronApplication).dependencies
         val notifier = PushNotifier(context)
         val pending = goAsync()
+        val started = deps.pushGeneration
         scope.launch {
             try {
                 // A broadcast has about ten seconds before the system gives up on it.
                 val sent = withTimeoutOrNull(8_000) { deps.answerItem(answer) } == true
+                // Signed out meanwhile: that account's notifications are gone
+                // and must stay gone.
+                if (deps.pushGeneration != started) return@launch
                 notifier.cancel(tag)
                 if (!sent) notifier.showUnconfirmed(answer, tag, title, intent.getStringExtra(PushNotificationActions.Key.CONVO_ID))
             } finally {

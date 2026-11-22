@@ -116,6 +116,65 @@ class PushMessageHandlerTest {
     }
 
     @Test
+    fun aSignOutWhileAMessageIsHandledPostsNothing() {
+        var generation = 0L
+        val racing = PushMessageHandler(
+            PushNotifier(context),
+            // The sign-out lands between the session check and the post.
+            privateKey = { generation += 1; recipient },
+            signedIn = { true },
+            generation = { generation },
+        )
+        assertEquals(
+            PushMessageHandler.Outcome.NOT_SHOWN,
+            racing.handle(mapOf("type" to "alert", "convo_id" to "c-9", "kind" to "attention", "box" to itemBox)),
+        )
+        assertEquals(emptyList<Any>(), posted())
+    }
+
+    @Test
+    fun endingTheSessionClearsTheShadeAndBlocksLaterPosts() {
+        var generation = 0L
+        val notifier = PushNotifier(context)
+        val h = PushMessageHandler(notifier, privateKey = { recipient }, signedIn = { true }, generation = { generation })
+        h.handle(mapOf("type" to "alert", "convo_id" to "c1", "kind" to "done", "title" to "t", "body" to "b"))
+        notifier.endSession { generation += 1 }
+        assertEquals(emptyList<Any>(), posted())
+    }
+
+    @Test
+    fun eachNotificationAndButtonHasItsOwnIntent() {
+        handler.handle(mapOf("type" to "alert", "convo_id" to "c-9", "kind" to "attention", "item_id" to "it_77", "box" to itemBox))
+        handler.handle(mapOf("type" to "alert", "convo_id" to "c1", "kind" to "done", "title" to "t", "body" to "b"))
+        val intents = posted().flatMap { sbn ->
+            listOf(shadowOf(sbn.notification.contentIntent).savedIntent) +
+                sbn.notification.actions.orEmpty().map { shadowOf(it.actionIntent).savedIntent }
+        }
+        assertEquals(5, intents.map { it.data.toString() }.toSet().size)
+    }
+
+    @Test
+    fun aWaitingTapSurvivesProcessDeath() {
+        PushTaps.pending.value = PushTap("c-9", "it_77", 314)
+        val saved = android.os.Bundle().also(PushTaps::save)
+        PushTaps.clear()
+        PushTaps.restore(saved)
+        assertEquals(PushTap("c-9", "it_77", 314), PushTaps.pending.value)
+        PushTaps.clear()
+        PushTaps.restore(android.os.Bundle())
+        assertNull(PushTaps.pending.value)
+    }
+
+    @Test
+    @Config(sdk = [30])
+    fun noAnswerButtonsWhereAndroidCannotRequireAnUnlock() {
+        handler.handle(mapOf("type" to "alert", "convo_id" to "c-9", "kind" to "attention", "item_id" to "it_77", "box" to itemBox))
+        val n = posted().single().notification
+        assertEquals(0, n.actions?.size ?: 0)
+        assertEquals(PushTap("c-9", "it_77", 314), PushTap.from(shadowOf(n.contentIntent).savedIntent))
+    }
+
+    @Test
     fun anIntentThatIsNotAButtonIsNoAnswer() {
         assertNull(PushNotificationActions.answer(Intent("other")))
         val outOfRange = PushNotificationActions.fill(Intent(), "it_1", listOf("A"), 3, null, "item:it_1", "t", "c1")

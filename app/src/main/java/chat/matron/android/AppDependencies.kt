@@ -403,9 +403,30 @@ class AppDependencies(
         preferences.setString(PUSH_REGISTRATION_KEY, result.stored)
     }
 
+    /**
+     * Bumped at every sign-out. Push work that began before one (a token
+     * registration, an answer from a notification, a message being shown)
+     * checks it afterwards and leaves no trace for the signed-out account.
+     */
+    @Volatile
+    var pushGeneration: Long = 0L
+        private set
+
     /** Registers this phone for push with [session]'s journal (after sign-in, and at each launch). */
-    suspend fun registerPush(session: UserSession): PushRegistration =
-        pushService(session).register().also(::notePushRegistration)
+    suspend fun registerPush(session: UserSession): PushRegistration {
+        val started = pushGeneration
+        return pushService(session).register().also { finishRegistration(started, it) }
+    }
+
+    /// Records [result] unless a sign-out came in between, in which case a
+    /// key the registration made is removed again.
+    private fun finishRegistration(started: Long, result: PushRegistration) {
+        if (pushGeneration != started) {
+            pushKeyStore?.delete()
+            return
+        }
+        notePushRegistration(result)
+    }
 
     /**
      * A new FCM token from Firebase: the signed-in account's journal learns
@@ -413,9 +434,15 @@ class AppDependencies(
      * session and a plain API client, as [answerItem] does.
      */
     suspend fun registerPushToken(token: String) {
+        val started = pushGeneration
         val session = runCatching { auth.restoreSession() }.getOrNull() ?: return
         val api = JournalApi(session.homeserverURL, sharedClient, session.accessToken)
-        notePushRegistration(JournalPushService(api, pushKey = { pushKeyStore?.publicKeyForRegistration() }, token = { token }).register(token))
+        val result = JournalPushService(
+            api,
+            pushKey = { if (pushGeneration == started) pushKeyStore?.publicKeyForRegistration() else null },
+            token = { token },
+        ).register(token)
+        finishRegistration(started, result)
     }
 
     /** Turns FCM messages into notifications (MatronMessagingService). */
@@ -423,6 +450,7 @@ class AppDependencies(
         notifier = pushNotifier,
         privateKey = { pushKeyStore?.privateKey() },
         signedIn = { runCatching { runBlocking { auth.restoreSession() } }.getOrNull() != null },
+        generation = { pushGeneration },
     )
 
     /**
@@ -1467,8 +1495,9 @@ class AppDependencies(
         unsentReplies.wipeAll()
         // The key belongs to the session: the next one registers a new key,
         // and the last account's notifications leave the shade.
+        runCatching { pushNotifier.endSession { pushGeneration += 1 } }
+            .onFailure { pushGeneration += 1 }
         pushKeyStore?.delete()
-        runCatching { pushNotifier.cancelAll() }
         chat.matron.android.push.PushTaps.clear()
         pushRegistrationState.value = null
         preferences.remove(PUSH_REGISTRATION_KEY)

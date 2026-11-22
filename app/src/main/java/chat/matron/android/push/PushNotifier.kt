@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.core.app.NotificationCompat
@@ -94,10 +95,15 @@ class PushNotifier(private val context: Context) {
         }
     }
 
+    /// Held while a notification is posted and while sign-out clears the
+    /// shade, so nothing of a signed-out account posts after the clear.
+    private val lock = Any()
+
     /// Posts [display], replacing any notification with the same tag.
-    /// Returns false when the app may not post (permission off).
+    /// [stillValid] is checked under the same lock as [endSession], just
+    /// before posting. Returns false when nothing was posted.
     @SuppressLint("MissingPermission") // checked: areNotificationsEnabled
-    fun show(display: PushDisplay): Boolean {
+    fun show(display: PushDisplay, stillValid: () -> Boolean = { true }): Boolean {
         if (!manager.areNotificationsEnabled()) return false
         ensureChannels()
         val channel = Channel.forKind(display.kind)
@@ -115,10 +121,13 @@ class PushNotifier(private val context: Context) {
             .addExtras(Bundle().apply { putString(PushNotificationActions.Key.CONVO_ID, display.convoID) })
         display.badge?.let { builder.setNumber(it) }
         val itemID = display.itemID
-        if (itemID != null) {
+        // Buttons only where Android can insist on an unlock first (API 31+):
+        // nobody answers from someone else's lock screen. Below that, a tap
+        // on the notification opens the item to answer there.
+        if (itemID != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             display.actions.forEachIndexed { index, label ->
                 val intent = PushNotificationActions.fill(
-                    Intent(context, PushActionReceiver::class.java),
+                    Intent(context, PushActionReceiver::class.java).setData(intentUri(display.tag, index + 1)),
                     itemID = itemID, labels = display.actions, index = index,
                     replyTo = display.replyTo, tag = display.tag, title = display.title, convoID = display.convoID,
                 )
@@ -135,7 +144,17 @@ class PushNotifier(private val context: Context) {
                 )
             }
         }
-        return runCatching { manager.notify(display.tag, NOTIFICATION_ID, builder.build()) }.isSuccess
+        val notification = builder.build()
+        return synchronized(lock) {
+            stillValid() && runCatching { manager.notify(display.tag, NOTIFICATION_ID, notification) }.isSuccess
+        }
+    }
+
+    /// Sign-out: runs [end] (which makes every [show] check fail from then
+    /// on) and clears the shade, under the posting lock.
+    fun endSession(end: () -> Unit) = synchronized(lock) {
+        end()
+        cancelAll()
     }
 
     /// Takes a conversation's notifications off the shade: it was read on
@@ -188,6 +207,7 @@ class PushNotifier(private val context: Context) {
     private fun openIntent(display: PushDisplay): PendingIntent {
         val intent = Intent(context, MainActivity::class.java)
             .setAction(PushTap.ACTION_OPEN)
+            .setData(intentUri(display.tag, 0))
             // The app's task if it has one, its MainActivity handed the
             // intent rather than a second one stacked (see VoiceRecordingService).
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -203,8 +223,12 @@ class PushNotifier(private val context: Context) {
     }
 
     /// Distinct per notification and button, so one notification's intents
-    /// never overwrite another's.
+    /// never overwrite another's. The data URI carries the whole tag, so two
+    /// tags whose request codes collide still get intents of their own.
     private fun requestCode(tag: String, slot: Int): Int = tag.hashCode() * 31 + slot
+
+    private fun intentUri(tag: String, slot: Int): Uri =
+        Uri.Builder().scheme("matron-push").authority("notification").appendPath(tag).appendPath(slot.toString()).build()
 
     enum class Channel(val id: String, val title: String, val description: String, val importance: Int, val priority: Int) {
         ATTENTION("matron.attention", "Needs you", "Questions, permission prompts and items waiting for you.",

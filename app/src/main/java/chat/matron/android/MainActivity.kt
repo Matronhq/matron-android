@@ -209,7 +209,10 @@ class MainActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         // A tapped notification that started the activity. Not again on a
         // recreation, which hands the same intent back.
+        // After process death the tap still waiting comes back from the
+        // saved state instead.
         if (savedInstanceState == null) chat.matron.android.push.PushTaps.record(intent)
+        else chat.matron.android.push.PushTaps.restore(savedInstanceState)
         incomingLinks.value = launchLink(
             restored = savedInstanceState != null,
             saved = savedInstanceState?.getString(PENDING_LINK_KEY),
@@ -247,6 +250,7 @@ class MainActivity : FragmentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         incomingLinks.value?.let { outState.putString(PENDING_LINK_KEY, it) }
+        chat.matron.android.push.PushTaps.save(outState)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -1419,7 +1423,9 @@ private fun SignedInApp(
                         val registration by deps.pushRegistration.collectAsStateWithLifecycle()
                         // Read again whenever the screen resumes: the user may
                         // have just changed it in Android's settings and come back.
-                        var enabled by remember { mutableStateOf(true) }
+                        var enabled by remember {
+                            mutableStateOf(androidx.core.app.NotificationManagerCompat.from(deps.context).areNotificationsEnabled())
+                        }
                         androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
                             enabled = androidx.core.app.NotificationManagerCompat.from(deps.context).areNotificationsEnabled()
                             onPauseOrDispose { }

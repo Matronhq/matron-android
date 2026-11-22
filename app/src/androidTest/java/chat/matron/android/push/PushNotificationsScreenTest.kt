@@ -49,6 +49,9 @@ import org.junit.runner.RunWith
  * No Firebase project, server or account is involved.
  */
 @RunWith(AndroidJUnit4::class)
+// The prompt first: the shade test grants the permission, after which the
+// system would not ask again.
+@org.junit.FixMethodOrder(org.junit.runners.MethodSorters.NAME_ASCENDING)
 class PushNotificationsScreenTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val device = UiDevice.getInstance(instrumentation)
@@ -103,6 +106,8 @@ class PushNotificationsScreenTest {
     /// `pm clear-permission-flags … user-set user-fixed`).
     @Test
     fun permissionPrompt() {
+        // The runtime prompt exists from Android 13.
+        org.junit.Assume.assumeTrue(android.os.Build.VERSION.SDK_INT >= 33)
         show(MatronAppearance.Light) {
             val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
             LaunchedEffect(Unit) { launcher.launch(Manifest.permission.POST_NOTIFICATIONS) }
