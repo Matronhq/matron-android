@@ -40,8 +40,8 @@ data class ProjectPageState(
     /// The project's files and pictures, newest first, as far as they have
     /// been paged; null until read.
     val files: ProjectFilesPage? = null,
-    /// Bumped each time the files' first page lands: the grid's end asks
-    /// for the next page again even when the new list is as long as the old.
+    /// Bumped each time a page of the files lands: the grid's end asks for
+    /// the next page again even when the list kept its length.
     val filesVersion: Int = 0,
     /// The last next-page read of the files failed: the grid's end offers Retry.
     val filesPagingFailed: Boolean = false,
@@ -220,7 +220,7 @@ class ProjectPageViewModel(
         _state.update { it.copy(filesPagingFailed = false) }
         try {
             val page = projects.projectFiles(projectID, before = before)
-            if (generation == filesGeneration) _state.update { it.copy(files = shown.appending(page)) }
+            if (generation == filesGeneration) _state.update { it.copy(files = shown.appending(page), filesVersion = it.filesVersion + 1) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {

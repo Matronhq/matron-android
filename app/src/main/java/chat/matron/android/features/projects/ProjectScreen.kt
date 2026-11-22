@@ -57,6 +57,7 @@ import chat.matron.android.models.ProjectMilestone
 import chat.matron.android.viewmodels.ProjectPageState
 import chat.matron.android.viewmodels.ProjectPageViewModel
 import java.time.Instant
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import okhttp3.HttpUrl
 
@@ -159,6 +160,7 @@ fun ProjectSectionScreen(
     val title = ProjectFormat.sectionTitle(section)
     var gallery by remember { mutableStateOf<ImageGallery?>(null) }
     var sourceMessage by remember { mutableStateOf<String?>(null) }
+    var sourceJob by remember { mutableStateOf<Job?>(null) }
 
     ProjectScaffold(title = title, onBack = onBack) {
         PullToRefreshBox(
@@ -180,8 +182,16 @@ fun ProjectSectionScreen(
                     files = state.files!!.rows, images = images, now = Instant.now(), hasMore = state.files!!.hasMore,
                     onOpenFile = { file ->
                         when (projectFileOpening(file)) {
-                            ProjectFileOpening.PICTURE -> gallery = projectGallery(state.files!!.rows, file, images, serverURL, media)
-                            ProjectFileOpening.SOURCE -> scope.launch { sourceMessage = onOpenFileSource(file.source) }
+                            // The latest tap wins: an earlier one still resolving
+                            // its item never navigates or explains after it.
+                            ProjectFileOpening.PICTURE -> {
+                                sourceJob?.cancel()
+                                gallery = projectGallery(state.files!!.rows, file, images, serverURL, media)
+                            }
+                            ProjectFileOpening.SOURCE -> {
+                                sourceJob?.cancel()
+                                sourceJob = scope.launch { sourceMessage = onOpenFileSource(file.source) }
+                            }
                         }
                     },
                     onLoadMore = { scope.launch { viewModel.loadMoreFiles() } },
