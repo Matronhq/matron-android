@@ -209,4 +209,95 @@ class AskUserSheetViewModelTest {
         vm.awaitExpiry { didExpire = true }
         assertFalse(didExpire)
     }
+
+    // MARK: - editing a queued message
+
+    private val queuedCard = AskUserEvent(
+        "Queued: fix the build", AskUserEvent.InputKind.Choice(listOf(option("send", "Send now", "send")), false), null,
+        replyChannel = AskUserEvent.ReplyChannel.CHOICE_REPLY, queuedReleasePromptID = "pr_e",
+        queuedEdit = AskUserEvent.QueuedEdit("fix the build", 600),
+    )
+
+    @Test
+    fun editHoldsTheMessageThenOpensTheEditorWithItsText() = runBlocking {
+        val fake = FakeTimelineService()
+        val vm = makeVM(queuedCard, fake)
+        assertTrue(vm.offersEdit)
+        vm.beginEdit()
+        assertEquals(listOf(Triple("edit", null, "\$prompt-1")), fake.sentQueuedEdits)
+        assertTrue(vm.isEditing.value)
+        assertEquals("fix the build", vm.editText)
+    }
+
+    @Test
+    fun saveSendsTheEditedTextAndClosesTheCard() = runBlocking {
+        val fake = FakeTimelineService()
+        var closed = false
+        val vm = makeVM(queuedCard, fake) { closed = true }
+        vm.beginEdit()
+        vm.editText = "  fix the tests  "
+        vm.saveEdit()
+        assertEquals(Triple("edit_save", "fix the tests", "\$prompt-1"), fake.sentQueuedEdits.last())
+        assertTrue(closed)
+        assertFalse(vm.isEditing.value)
+    }
+
+    @Test
+    fun anUnchangedSaveJustReleasesTheHold() = runBlocking {
+        val fake = FakeTimelineService()
+        var closed = false
+        val vm = makeVM(queuedCard, fake) { closed = true }
+        vm.beginEdit()
+        vm.saveEdit()
+        assertEquals(listOf("edit", "edit_cancel"), fake.sentQueuedEdits.map { it.first })
+        assertFalse(closed)
+        assertFalse(vm.isEditing.value)
+    }
+
+    @Test
+    fun anEmptySaveSendsNothing() = runBlocking {
+        val fake = FakeTimelineService()
+        val vm = makeVM(queuedCard, fake)
+        vm.beginEdit()
+        vm.editText = "   "
+        assertFalse(vm.canSaveEdit)
+        vm.saveEdit()
+        assertEquals(listOf("edit"), fake.sentQueuedEdits.map { it.first })
+        assertTrue(vm.isEditing.value)
+    }
+
+    @Test
+    fun cancelEditReleasesTheHold() = runBlocking {
+        val fake = FakeTimelineService()
+        val vm = makeVM(queuedCard, fake)
+        vm.beginEdit()
+        vm.cancelEdit()
+        assertEquals(listOf("edit", "edit_cancel"), fake.sentQueuedEdits.map { it.first })
+        assertFalse(vm.isEditing.value)
+    }
+
+    @Test
+    fun aFailedHoldKeepsTheEditorClosedAndSaysSo() = runBlocking {
+        val fake = FakeTimelineService()
+        fake.nextSendError = IOException("offline")
+        val vm = makeVM(queuedCard, fake)
+        vm.beginEdit()
+        assertFalse(vm.isEditing.value)
+        assertNotNull(vm.editError.value)
+    }
+
+    @Test
+    fun sendNowIsRefusedWhileTheMessageIsHeld() = runBlocking {
+        val fake = FakeTimelineService()
+        val vm = makeVM(queuedCard, fake)
+        vm.beginEdit()
+        vm.selectedChoiceIDs = setOf("send")
+        vm.send()
+        assertTrue(fake.sentButtonResponses.isEmpty())
+    }
+
+    @Test
+    fun aCardWithoutAnEditOffersNone() {
+        assertFalse(makeVM(AskUserEvent("Which?", AskUserEvent.InputKind.Text, null)).offersEdit)
+    }
 }

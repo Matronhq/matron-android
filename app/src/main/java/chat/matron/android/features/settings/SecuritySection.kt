@@ -47,6 +47,7 @@ import chat.matron.android.features.onboarding.RecoveryCodesPanel
 import chat.matron.android.features.onboarding.SixDigitField
 import chat.matron.android.features.onboarding.TwoFactorSetupKey
 import chat.matron.android.viewmodels.AccountEmailViewModel
+import chat.matron.android.viewmodels.ApprovalKeysScreenModel
 import chat.matron.android.viewmodels.ChangePasswordViewModel
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel.ConfirmAction
@@ -68,17 +69,21 @@ internal fun SecuritySection(
     twoFactor: TwoFactorSettingViewModel?,
     changePassword: ChangePasswordViewModel?,
     accountEmail: AccountEmailViewModel?,
+    /// Settings ▸ Approval keys' row. Null hides it (hosts without a session).
+    approvalKeys: ApprovalKeysScreenModel? = null,
+    onApprovalKeys: () -> Unit = {},
 ) {
     if (twoFactor != null) LaunchedEffect(twoFactor) { twoFactor.load() }
     val twoFactorState = twoFactor?.state?.collectAsStateWithLifecycle()?.value
     val showTwoFactor = twoFactorState != null && twoFactorState != TwoFactorSettingViewModel.State.Loading &&
         twoFactorState != TwoFactorSettingViewModel.State.Unsupported
-    if (!showTwoFactor && changePassword == null && accountEmail == null) return
+    if (!showTwoFactor && changePassword == null && accountEmail == null && approvalKeys == null) return
 
     SettingsSection("Security") {
         if (accountEmail != null) AccountEmailRows(accountEmail)
         if (changePassword != null) ChangePasswordRows(changePassword)
         if (showTwoFactor && twoFactor != null) TwoFactorRows(twoFactor, twoFactorState!!)
+        if (approvalKeys != null) ApprovalKeysRow(approvalKeys, onApprovalKeys)
     }
 }
 

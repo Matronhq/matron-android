@@ -50,6 +50,16 @@ interface ConversationDao {
     )
     fun visibleTopLevelFlow(): Flow<List<ConversationEntity>>
 
+    /// Every visible top-level room whose participant conversations are
+    /// known (`participant_convos` set and not `[]`) — what a chat's
+    /// "Rooms" control picks its own rooms from. Port of matron-apple's
+    /// `missionRoomRows`.
+    @Query(
+        "SELECT * FROM conversation WHERE archived_at IS NULL AND parent_convo_id IS NULL " +
+            "AND participant_convos IS NOT NULL AND participant_convos != '[]'"
+    )
+    fun roomsFlow(): Flow<List<ConversationEntity>>
+
     /// EVERY conversation id — archived rows and subagent children included
     /// (their history is searchable, so the backfill sweep must cover them) —
     /// except one whose stored history the archive purge dropped: indexing it
@@ -215,6 +225,20 @@ interface EventDao {
     /// not the entire history (apple #171).
     @Query("SELECT * FROM event WHERE convo_id = :convoID AND seq >= :sinceSeq ORDER BY seq")
     fun forConversationSinceFlow(convoID: String, sinceSeq: Long): Flow<List<EventEntity>>
+
+    /// One conversation's rows of [types], oldest first, followed live: an
+    /// item's consent card reads its ask and outcome rows through this.
+    @Query("SELECT * FROM event WHERE convo_id = :convoID AND type IN (:types) ORDER BY seq")
+    fun ofTypesFlow(convoID: String, types: List<String>): Flow<List<EventEntity>>
+    /// One conversation's busy-queue cards and their releases (`prompt` and
+    /// `prompt_reply` rows whose payload is a `queued_release`), oldest first:
+    /// what an item's thread reads to tell which of its replies still wait
+    /// on the agent. The LIKE narrows the read; callers check the parsed kind.
+    @Query(
+        "SELECT * FROM event WHERE convo_id = :convoID AND type IN ('prompt', 'prompt_reply') " +
+            "AND payload LIKE '%queued_release%' ORDER BY seq",
+    )
+    fun queuedReleaseFlow(convoID: String): Flow<List<EventEntity>>
 
     /// The seq of the [offset]-th newest row (0-based), or null when the
     /// conversation holds fewer rows — the anchor a tail window starts at.

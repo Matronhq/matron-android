@@ -1,6 +1,7 @@
 package chat.matron.android
 
 import androidx.test.core.app.ApplicationProvider
+import chat.matron.android.chat.MediaDiskCache
 import chat.matron.android.journal.db.MatronDatabase
 import chat.matron.android.models.UserSession
 import chat.matron.android.search.SearchDatabase
@@ -108,13 +109,13 @@ class AppDependenciesTest {
 
         for (i in 0 until limit) deps.timelineService(session, "!room$i:s")
         assertEquals("cache must reach exactly the limit before evicting", limit, deps.timelineCacheCount)
-        assertTrue(deps.timelineCacheContains(session.userID, "!room0:s"))
+        assertTrue(deps.timelineCacheContains(session, "!room0:s"))
 
         deps.timelineService(session, "!room$limit:s")
 
         assertEquals("cache must stay bounded after over-fill", limit, deps.timelineCacheCount)
-        assertFalse("LRU entry must be evicted", deps.timelineCacheContains(session.userID, "!room0:s"))
-        assertTrue("newly-inserted entry must remain", deps.timelineCacheContains(session.userID, "!room$limit:s"))
+        assertFalse("LRU entry must be evicted", deps.timelineCacheContains(session, "!room0:s"))
+        assertTrue("newly-inserted entry must remain", deps.timelineCacheContains(session, "!room$limit:s"))
     }
 
     @Test
@@ -128,8 +129,8 @@ class AppDependenciesTest {
         deps.timelineService(session, "!room$limit:s") // trigger eviction
 
         assertFalse("FIFO eviction: oldest insert goes first regardless of re-access",
-            deps.timelineCacheContains(session.userID, "!room0:s"))
-        assertTrue(deps.timelineCacheContains(session.userID, "!room1:s"))
+            deps.timelineCacheContains(session, "!room0:s"))
+        assertTrue(deps.timelineCacheContains(session, "!room1:s"))
     }
 
     @Test
@@ -146,8 +147,10 @@ class AppDependenciesTest {
         deps.awaitPendingTeardown()
 
         assertEquals("timeline cache must be cleared on sign-out", 0, deps.timelineCacheCount)
-        // A fresh core builds cleanly against a new in-memory database.
-        assertNotNull(deps.timelineService(session, "!room:s"))
+        // A new sign-in (a new device id) gets a fresh live core.
+        val next = session.copy(deviceID = "D2", accessToken = "t2")
+        assertNotNull(deps.timelineService(next, "!room:s"))
+        assertTrue(deps.hasLiveCore(next))
         Unit
     }
 
@@ -210,7 +213,8 @@ class AppDependenciesTest {
             }
             scheduler.runCurrent() // awaiter is now suspended joining teardown A
 
-            deps.chatService(session) // core 2, built while the await is in flight
+            // core 2: the next sign-in, built while the await is in flight
+            deps.chatService(session.copy(deviceID = "D2", accessToken = "t2"))
             deps.signOut() // teardown B chains behind A
 
             // Pump until the awaiter resumes. advanceTimeBy fires the virtual
@@ -240,7 +244,7 @@ class AppDependenciesTest {
      * so it wipes any leftovers before the first core opens.
      */
     @Test
-    fun wipeLocalDataForFreshLogin_removesMirrorFilesAndSearchIndex() = runBlocking {
+    fun wipeLocalDataForFreshLogin_removesMirrorFilesSearchIndexAndCachedMedia() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val deps = deps()
 
@@ -248,6 +252,8 @@ class AppDependenciesTest {
         // and a still-populated search index.
         val journalDir = File(StoragePaths.appSupport(context), "journal-store").apply { mkdirs() }
         val stale = File(journalDir, "stale-user.sqlite").apply { writeText("stale") }
+        val staleMedia = File(MediaDiskCache.directory(MediaDiskCache.rootDirectory(context.cacheDir), "old"), "blob")
+            .apply { parentFile!!.mkdirs(); writeText("previous user's image") }
         deps.search!!.index(
             roomID = "!room:s",
             eventID = "42",
@@ -259,6 +265,7 @@ class AppDependenciesTest {
         deps.wipeLocalDataForFreshLogin()
 
         assertFalse("stale mirror file must be deleted on fresh login", stale.exists())
+        assertFalse("cached media must be deleted on fresh login", staleMedia.exists())
         assertTrue(
             "search index must be wiped on fresh login",
             deps.search!!.query("needle", limit = 10).isEmpty(),
