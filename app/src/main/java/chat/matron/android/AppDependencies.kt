@@ -643,7 +643,10 @@ class AppDependencies(
         monitor.whenCleared {
             // Not the outbox of a sign-in that is going.
             if (signingOut) return@whenCleared
-            cores.values.toList().forEach { core -> appScope.launch { core.itemsSync.drainOutbox() } }
+            // Read under the monitor every other use of `cores` takes: this
+            // runs on the socket's or OkHttp's thread.
+            synchronized(this@AppDependencies) { cores.values.toList() }
+                .forEach { core -> appScope.launch { core.itemsSync.drainOutbox() } }
         }
     }
 
@@ -668,7 +671,7 @@ class AppDependencies(
                 core.engine.replaceToken(token)
                 saved
             },
-            isCurrent = { cores.values.any { it === core } },
+            isCurrent = { synchronized(this) { cores.values.any { it === core } } },
             // No revocation sign-out while the unlock swaps the token: the old
             // token is refused from the moment the journal unlocks.
             attempt = AccountUnlockModel.Attempt(
