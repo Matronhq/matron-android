@@ -160,10 +160,13 @@ fun ProjectFilesGridView(
             items(files, key = { it.id }) { file ->
                 // A tile loads its picture while it is on screen and lets go of
                 // it when it scrolls away; the host's cache bounds what is kept.
-                // Keyed on the file alone: the host's loader is a new lambda
-                // on each recomposition, and a load must not restart with it.
+                // Not keyed on the loader: the host's is a new lambda on each
+                // recomposition, and a load must not restart with it.
                 val load by rememberUpdatedState(loadImage)
-                val image by produceState(images[file.blobID], file.blobID) {
+                // Also keyed on the list's version: a refresh (or a page that
+                // lands) asks again for a picture that failed; one that loaded
+                // comes straight back from the host's cache.
+                val image by produceState(images[file.blobID], file.blobID, version) {
                     if (value == null && file.isImage) load?.let { value = it(file.blobID) }
                 }
                 ProjectFileTile(file, image, now, onOpen = { onOpenFile(file, image) })
