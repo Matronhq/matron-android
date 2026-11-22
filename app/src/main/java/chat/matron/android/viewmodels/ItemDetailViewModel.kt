@@ -7,6 +7,7 @@ import chat.matron.android.journal.ItemsSyncing
 import chat.matron.android.journal.MatronJson
 import chat.matron.android.journal.SessionState
 import chat.matron.android.journal.db.ItemOutboxEntity
+import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemAuthor
 import chat.matron.android.models.ItemResolution
@@ -37,10 +38,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-
-/// One attachment about to be uploaded for a comment: raw bytes plus the
-/// name and MIME type the journal blob will carry.
-private class OutgoingAttachment(val data: ByteArray, val name: String, val mime: String)
 
 /// Backs the item detail screen: one item, its comments, and the local
 /// outbox of comments still in flight. Writes go through [ItemsSyncing],
@@ -259,30 +256,22 @@ class ItemDetailViewModel(
                 _comments.value.any { it.author == ItemAuthor.USER && it.kind == TrackerComment.Kind.COMMENT },
         )
 
-    /// Uploads [attachments] in order, reading each staged copy off the main
-    /// thread just before it goes — one at a time, so at most one
-    /// attachment's bytes are in memory however full the tray is. `null`
-    /// (with [error] set) when any of them fails.
+    /// Uploads [attachments] in order, each streamed from its staged copy on
+    /// disk, so no attachment is ever held in memory whole. `null` (with
+    /// [error] set) when any of them fails.
     @JvmName("uploadStaged")
     private suspend fun upload(attachments: List<StagedAttachment>): List<TrackerAttachment>? {
         val uploaded = mutableListOf<TrackerAttachment>()
         for (a in attachments) {
-            val data = try {
-                withContext(Dispatchers.IO) { a.file.readBytes() }
-            } catch (cancel: CancellationException) {
-                throw cancel
-            } catch (error: Throwable) {
-                _error.value = "Couldn't read an attachment: ${error.message ?: error}"
-                return null
-            }
-            uploaded += upload(OutgoingAttachment(data, a.filename, a.mimeType)) ?: return null
+            uploaded += upload(a.file, a.filename, a.mimeType) ?: return null
         }
         return uploaded
     }
 
-    private suspend fun upload(a: OutgoingAttachment): TrackerAttachment? = try {
-        val ref = api.uploadMedia(a.data, a.mime)
-        TrackerAttachment(blobRef = ref, mime = a.mime, name = a.name, size = a.data.size.toLong())
+    private suspend fun upload(file: File, name: String, mime: String): TrackerAttachment? = try {
+        val size = withContext(Dispatchers.IO) { file.length() }
+        val ref = api.uploadMedia(file, mime)
+        TrackerAttachment(blobRef = ref, mime = mime, name = name, size = size)
     } catch (cancel: CancellationException) {
         throw cancel
     } catch (error: Throwable) {
@@ -350,8 +339,14 @@ class ItemDetailViewModel(
 
     /// Stages each picked file into the tray rather than posting it. An
     /// unreadable file is reported via [error] and stages nothing.
+    /// A file over [AttachmentLimits.MAX_BYTES] is refused with
+    /// [AttachmentLimits.oversizeMessage] before anything is copied.
     suspend fun attachFiles(files: List<File>) {
         for (file in files) {
+            if (AttachmentLimits.isOversize(withContext(Dispatchers.IO) { file.length() })) {
+                _error.value = AttachmentLimits.oversizeMessage(file.name)
+                continue
+            }
             try {
                 val staged = withContext(Dispatchers.IO) { StagedAttachment.stage(file, stagingDirectory) }
                 _stagedAttachments.value = _stagedAttachments.value + staged
@@ -473,12 +468,11 @@ class ItemDetailViewModel(
     private suspend fun sendUnstagedVoiceNote(file: File) {
         _isBusy.value = true
         try {
-            val data = runCatching { withContext(Dispatchers.IO) { file.readBytes() } }.getOrNull()
-            if (data == null) {
+            if (!withContext(Dispatchers.IO) { file.canRead() }) {
                 _error.value = "Couldn't read the voice note."
                 return
             }
-            val uploaded = upload(OutgoingAttachment(data, VOICE_NOTE_NAME, VOICE_NOTE_MIME)) ?: return
+            val uploaded = upload(file, VOICE_NOTE_NAME, VOICE_NOTE_MIME) ?: return
             sync.enqueueComment(itemID, UUID.randomUUID().toString(), "", listOf(uploaded))
             file.delete()
         } finally {

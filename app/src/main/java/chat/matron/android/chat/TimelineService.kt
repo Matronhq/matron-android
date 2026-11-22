@@ -3,8 +3,11 @@ package chat.matron.android.chat
 import chat.matron.android.models.AttachmentBatchTag
 import chat.matron.android.models.SessionStatusUpdate
 import chat.matron.android.models.SyncConnectionState
+import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.withContext
 
 /// Per-room timeline access, one instance per open room. Ported from
 /// matron-apple's `TimelineService` protocol. `items()` is the read side (full
@@ -55,6 +58,20 @@ interface TimelineService {
         data: ByteArray, filename: String, mimeType: String, caption: String?,
         batch: AttachmentBatchTag?, progress: ((Double) -> Unit)?,
     ) = sendFile(data, filename, mimeType, caption, progress)
+
+    /// Sends a staged attachment straight from [file] — as an image when
+    /// [isImage], otherwise as a file. [JournalTimelineService] streams the
+    /// upload from disk so a large attachment is never held in memory whole;
+    /// the default reads the file and forwards to the byte sends, so fakes
+    /// compile unchanged.
+    suspend fun sendAttachment(
+        file: File, filename: String, mimeType: String, isImage: Boolean, caption: String?,
+        batch: AttachmentBatchTag?, progress: ((Double) -> Unit)?,
+    ) {
+        val data = withContext(Dispatchers.IO) { file.readBytes() }
+        if (isImage) sendImage(data, filename, mimeType, caption, batch, progress)
+        else sendFile(data, filename, mimeType, caption, batch, progress)
+    }
 
     /// Retries a pending/failed own-message (the timeline's tap-to-retry
     /// affordance). [itemID] is the timeline item's id. Implementations

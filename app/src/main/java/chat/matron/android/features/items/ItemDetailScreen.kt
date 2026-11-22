@@ -70,6 +70,7 @@ import chat.matron.android.designsystem.TrackerItemLinkOutcome
 import chat.matron.android.designsystem.rememberMessageLinkOpener
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.PendingCommentModel
+import chat.matron.android.features.chat.PickedCopy
 import chat.matron.android.features.chat.copyUriToTemp
 import chat.matron.android.designsystem.AttachmentPaste
 import chat.matron.android.features.chat.openAttachment
@@ -78,6 +79,7 @@ import chat.matron.android.designsystem.rememberAttachmentSaver
 import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.MatronJson
 import chat.matron.android.journal.MissionsStoreReading
+import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.ItemState
 import chat.matron.android.models.Mission
 import chat.matron.android.models.TrackerAttachment
@@ -254,15 +256,15 @@ fun ItemDetailScreen(
                 // was pasted.
                 if (pasted) copyUriToTemp(context, uri, AttachmentPaste::fallbackName) else copyUriToTemp(context, uri)
             }
-            if (picked == null) {
-                viewModel.reportError("Couldn't read that file.")
-                return@launch
-            }
-            try {
-                viewModel.attachFiles(listOf(picked))
-            } finally {
-                // The tray holds its own staged copy.
-                picked.parentFile?.deleteRecursively()
+            when (picked) {
+                PickedCopy.Unreadable -> viewModel.reportError("Couldn't read that file.")
+                is PickedCopy.TooLarge -> viewModel.reportError(AttachmentLimits.oversizeMessage(picked.filename))
+                is PickedCopy.Copied -> try {
+                    viewModel.attachFiles(listOf(picked.file))
+                } finally {
+                    // The tray holds its own staged copy.
+                    picked.file.parentFile?.deleteRecursively()
+                }
             }
         }
     }
