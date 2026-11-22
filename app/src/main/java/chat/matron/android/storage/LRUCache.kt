@@ -56,5 +56,6 @@ class LRUCache<K, V>(private val limit: Int) {
 
 /// Composite key for per-room timeline caching, shared by both app targets in
 /// the Apple original. `data class` gives the equality + hashing the cache's
-/// dictionary keying relies on.
-data class TimelineCacheKey(val userID: String, val roomID: String)
+/// dictionary keying relies on. [signIn] is the session's `signInKey`, so a
+/// new sign-in to the same account never reuses an old sign-in's timelines.
+data class TimelineCacheKey(val signIn: String, val roomID: String)

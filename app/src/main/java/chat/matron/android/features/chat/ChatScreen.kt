@@ -5,6 +5,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.platform.testTag
+import chat.matron.android.models.ConversationRoom
+import kotlinx.coroutines.flow.MutableStateFlow
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -21,10 +25,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.ui.platform.testTag
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.PushPin
 import chat.matron.android.features.pins.ChatPinMenu
+import chat.matron.android.viewmodels.NotifySettingsStore
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -76,6 +82,7 @@ import chat.matron.android.designsystem.JumpToBottomButton
 import chat.matron.android.designsystem.MatronTimelineBackground
 import chat.matron.android.designsystem.PaginatingHeader
 import chat.matron.android.designsystem.ChatTopTrailingControls
+import chat.matron.android.designsystem.RoomsChip
 import chat.matron.android.designsystem.chatTopTrailingShowsJump
 import chat.matron.android.designsystem.SubtaskLinkCard
 import chat.matron.android.designsystem.TimelineLoadingIndicator
@@ -157,6 +164,13 @@ fun ChatScreen(
     /// Pin… / Move pin… / Unpin in the "⋮" menu (journal pinned desk
     /// chats). `null` — a journal without pins, previews — offers none.
     pinMenu: ChatPinMenu? = null,
+    /// The agent-chat rooms this conversation is in: the header's
+    /// "Rooms · n" chip and the sheet it opens. `null` (previews/tests)
+    /// offers no chip.
+    conversationRooms: ConversationRoomsHost? = null,
+    /// The "⋮" menu's Notifications entry (this chat's own level and mute).
+    /// `null` (previews/tests) offers none.
+    notify: NotifySettingsStore? = null,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val chatSearch by chatVM.chatSearch.collectAsStateWithLifecycle()
@@ -168,9 +182,22 @@ fun ChatScreen(
     val sessionStatus by chatVM.sessionStatus.collectAsStateWithLifecycle()
 
     var showSessionStatus by remember { mutableStateOf(false) }
+    var showRoomsSheet by remember { mutableStateOf(false) }
+    val noRooms = remember { MutableStateFlow(emptyList<ConversationRoom>()) }
+    val conversationRoomList by (conversationRooms?.rooms ?: noRooms).collectAsStateWithLifecycle()
     var showMediaBrowser by remember { mutableStateOf(false) }
     var showSwitcher by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
+    var notifyMenuOpen by remember { mutableStateOf(false) }
+    // The Notifications submenu opens a frame after the overflow menu closes,
+    // so the closing popup's outside-tap or focus loss can't dismiss it.
+    var notifyMenuRequested by remember { mutableStateOf(false) }
+    LaunchedEffect(notifyMenuRequested) {
+        if (!notifyMenuRequested) return@LaunchedEffect
+        androidx.compose.runtime.withFrameNanos { }
+        notifyMenuOpen = true
+        notifyMenuRequested = false
+    }
     var previewModel by remember { mutableStateOf<Any?>(null) }
     val compactScope = rememberCoroutineScope()
     // The gallery a timeline tap opens: every image in the conversation,
@@ -268,18 +295,36 @@ fun ChatScreen(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.semantics { contentDescription = a11yTitle },
                         )
-                        chatContextLine(boxName, sessionStatus?.workdir)?.let { context ->
-                            Text(
-                                context,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                // The Apple original middle-truncates (the
-                                // tail of a path is the part worth keeping);
-                                // TextOverflow.MiddleEllipsis needs Compose
-                                // 1.8, so tail ellipsis until the BOM moves.
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                        val contextLine = chatContextLine(boxName, sessionStatus?.workdir)
+                        val roomCount = if (conversationRooms != null) conversationRoomList.size else 0
+                        if (contextLine != null || roomCount > 0) {
+                            // "box · ~/workdir", then the "Rooms · n" chip
+                            // for a conversation in an agent-chat room: the
+                            // path truncates first, the chip keeps its size.
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                contextLine?.let { context ->
+                                    Text(
+                                        context,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        // The Apple original middle-truncates (the
+                                        // tail of a path is the part worth keeping);
+                                        // TextOverflow.MiddleEllipsis needs Compose
+                                        // 1.8, so tail ellipsis until the BOM moves.
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false),
+                                    )
+                                }
+                                RoomsChip(
+                                    count = roomCount,
+                                    onClick = { showRoomsSheet = true },
+                                    modifier = Modifier.testTag("chat.roomsChip"),
+                                )
+                            }
                         }
                     }
                 },
@@ -352,6 +397,20 @@ fun ChatScreen(
                                 )
                             }
                         }
+                        if (notify != null) {
+                            val notifyView by notify.view.collectAsStateWithLifecycle()
+                            val notifyClock by notify.clock.collectAsStateWithLifecycle()
+                            val notifyState = notify.state(chatVM.roomID, notifyView, notifyClock)
+                            DropdownMenuItem(
+                                text = { Text("Notifications") },
+                                leadingIcon = { Icon(convoNotifyIcon(notifyState), contentDescription = null) },
+                                onClick = {
+                                    menuOpen = false
+                                    notifyMenuRequested = true
+                                },
+                                modifier = Modifier.testTag("chat-menu-notifications"),
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("Session Info") },
                             leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
@@ -359,6 +418,14 @@ fun ChatScreen(
                                 menuOpen = false
                                 showSessionStatus = true
                             },
+                        )
+                    }
+                    if (notify != null) {
+                        ConvoNotifyMenu(
+                            store = notify,
+                            convoID = chatVM.roomID,
+                            expanded = notifyMenuOpen,
+                            onDismiss = { notifyMenuOpen = false },
                         )
                     }
                 },
@@ -441,6 +508,22 @@ fun ChatScreen(
                 boxName = boxName,
                 subagents = children,
                 onOpenSubagent = onOpenChild,
+            )
+        }
+    }
+    if (showRoomsSheet && conversationRooms != null) {
+        // Full height straight away: a room's timeline wants the room.
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(onDismissRequest = { showRoomsSheet = false }, sheetState = sheetState) {
+            ConversationRoomsSheet(
+                rooms = conversationRoomList,
+                host = conversationRooms,
+                onDone = { showRoomsSheet = false },
+                // Close first, then open: the destination is under the sheet.
+                onOpenConversation = { id ->
+                    showRoomsSheet = false
+                    onOpenConversation(id)
+                },
             )
         }
     }
