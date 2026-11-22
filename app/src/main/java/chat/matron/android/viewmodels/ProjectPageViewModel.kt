@@ -206,12 +206,10 @@ class ProjectPageViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            // With files already on screen the reload's failure is a Retry
-            // at the grid's end (paging on from the list shown); before any,
-            // the screen offers Try again.
-            if (generation == filesGeneration) {
-                _state.update { if (it.files != null) it.copy(filesPagingFailed = true) else it.copy(error = error.message) }
-            }
+            // Said in an alert over the files on screen (before any, the
+            // screen offers Try again); the grid's end asks again from the
+            // list shown, so paging never stalls behind the failed reload.
+            if (generation == filesGeneration) _state.update { it.copy(error = error.message, filesVersion = it.filesVersion + 1) }
         } finally {
             if (generation == filesGeneration) isReloadingFiles = false
         }

@@ -186,7 +186,17 @@ fun ProjectSectionScreen(
                             // its item never navigates or explains after it.
                             ProjectFileOpening.PICTURE -> {
                                 sourceJob?.cancel()
-                                gallery = projectGallery(state.files!!.rows, file, images, serverURL, media)
+                                val rows = state.files!!.rows
+                                val loaded = images[file.blobID]
+                                if (loaded != null) {
+                                    gallery = projectGallery(rows, file, images, serverURL, media)
+                                } else {
+                                    // Its thumbnail hasn't landed: fetch it, then open on it.
+                                    sourceJob = scope.launch {
+                                        val bytes = try { media.image(projectMediaURL(serverURL, file.blobID)) } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (_: Throwable) { null }
+                                        gallery = projectGallery(rows, file, images + listOfNotNull(bytes?.let { file.blobID to it }), serverURL, media)
+                                    }
+                                }
                             }
                             ProjectFileOpening.SOURCE -> {
                                 sourceJob?.cancel()
@@ -225,11 +235,14 @@ fun sectionLoaded(state: ProjectPageState, section: ProjectSection): Boolean = w
     ProjectSection.FILES -> state.files != null
 }
 
+internal fun projectMediaURL(serverURL: HttpUrl, blobID: String): String =
+    serverURL.newBuilder().addPathSegment("media").addPathSegment(blobID).build().toString()
+
 /// The project's pictures in the grid's order, opened on [tapped].
 internal fun projectGallery(files: List<ProjectFile>, tapped: ProjectFile, images: Map<String, Any>, serverURL: HttpUrl, media: MediaService): ImageGallery {
     val blobIDs = projectPictureBlobIDs(files)
     val names = files.filter { it.isImage }.associate { it.blobID to it.name }
-    fun url(blobID: String) = serverURL.newBuilder().addPathSegment("media").addPathSegment(blobID).build().toString()
+    fun url(blobID: String) = projectMediaURL(serverURL, blobID)
     val byURL = blobIDs.associateBy(::url)
     return ImageGallery(
         entries = blobIDs.map { ImageGallery.Entry(id = it, url = url(it), expired = false, name = names[it]) },
