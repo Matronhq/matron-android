@@ -74,6 +74,8 @@ fun NewChatSheet(
     prepareConversation: suspend (String) -> Unit,
     onCreated: (String) -> Unit,
     onCancel: () -> Unit,
+    /// Skips the box list and opens on this box's folders (the Boxes screen's +).
+    startOn: DeviceDTO? = null,
 ) {
     val scope = rememberCoroutineScope()
     val viewModel = remember { NewChatViewModel(api, capacityCache) }
@@ -99,7 +101,7 @@ fun NewChatSheet(
 
     var navigated by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) { viewModel.load() }
+    LaunchedEffect(Unit) { if (startOn != null) viewModel.select(startOn) else viewModel.load() }
     // Live `box_status` frames repaint rows while the sheet is up; the effect
     // (and its subscription) ends when the sheet leaves the composition.
     LaunchedEffect(Unit) { viewModel.watchBoxStatus() }

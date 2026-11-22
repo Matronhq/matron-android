@@ -29,6 +29,7 @@ import chat.matron.android.journal.CoordinatorSync
 import chat.matron.android.journal.ArchiveSync
 import chat.matron.android.journal.PinsSync
 import chat.matron.android.journal.PinsSyncing
+import chat.matron.android.viewmodels.BoxesProviding
 import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
 import chat.matron.android.viewmodels.CoordinatorSetting
 import chat.matron.android.viewmodels.MemoriesListViewModel
@@ -715,7 +716,10 @@ class AppDependencies(
         JournalDeviceLinkService(core(session).api)
 
     /** New Chat surface: agent roster + recent-folders / start RPCs. */
-    fun agentRPCService(session: UserSession): AgentRPCProviding {
+    fun agentRPCService(session: UserSession): AgentRPCProviding = boxesService(session)
+
+    /** Boxes screen: New Chat's slice plus `GET /roster`. */
+    fun boxesService(session: UserSession): BoxesProviding {
         val core = core(session)
         return JournalAgentRPCService(api = core.api, engine = core.engine)
     }
