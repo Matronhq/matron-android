@@ -570,6 +570,19 @@ class JournalTimelineServiceTest {
         assertEquals(TimelineSendState.Failed("Not delivered"), overlay.sendState(failedRow))
     }
 
+    @Test fun aRebaseAfterAGapDropTrimsRowsBelowTheNewAnchor() {
+        // A stale observation can still deliver every row from the old
+        // anchor before the new one starts; the rebase must not keep them.
+        val overlay = JournalTimelineService.OverlayState(staleness = 30.seconds)
+        val first = overlay.rebaseForNewTailSubscription(1)
+        overlay.setTail((1L..100L).map { ev(it, payload = body("m$it")) }, first)
+        overlay.forgetOlder()
+        val second = overlay.rebaseForNewTailSubscription(90, trimBelowAnchor = true)
+        assertEquals((90L..100L).toList(), overlay.events.map { it.seq })
+        overlay.setTail((90L..101L).map { ev(it, payload = body("m$it")) }, second)
+        assertEquals((90L..101L).toList(), overlay.events.map { it.seq })
+    }
+
     @Test fun forgetOlderDropsRevealedRowsAndKeepsTheTail() {
         // A For you only fetch that could not reach the stored copy drops the
         // older rows from the store; the rows revealed beneath the window
