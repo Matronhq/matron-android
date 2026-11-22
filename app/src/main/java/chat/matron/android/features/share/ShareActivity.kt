@@ -15,6 +15,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
@@ -110,6 +111,7 @@ class ShareActivity : FragmentActivity() {
     @androidx.compose.runtime.Composable
     private fun ShareContent(deps: AppDependencies, model: ShareViewModel) {
         val scope = rememberCoroutineScope()
+        val focus = LocalFocusManager.current
         val isLocked by appLock.isLocked.collectAsStateWithLifecycle()
         val phase by model.phase.collectAsStateWithLifecycle()
         // Read so the screen redraws on each; the state is rebuilt below.
@@ -145,7 +147,12 @@ class ShareActivity : FragmentActivity() {
         ShareScreen(
             state = ShareScreenState.of(model, phase),
             onCancel = ::finish,
-            onSend = model::send,
+            // The message field gives up focus first: a sheet that opens
+            // while the keyboard is closing can be left hidden.
+            onSend = {
+                focus.clearFocus()
+                model.send()
+            },
             onMessageChange = model::setMessage,
             onQueryChange = model::setQuery,
             onSelect = model::select,
@@ -162,6 +169,13 @@ class ShareActivity : FragmentActivity() {
         val session = remember(phase) { model.signedInSession }
         if (choosingNew && session != null) {
             val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            // Brought up explicitly as well: its own opening animation can be
+            // cut short by the keyboard leaving, which leaves the chooser
+            // open but out of sight and Send doing nothing.
+            LaunchedEffect(sheetState) {
+                delay(300)
+                if (!sheetState.isVisible) runCatching { sheetState.show() }
+            }
             ModalBottomSheet(onDismissRequest = model::newConversationCancelled, sheetState = sheetState) {
                 NewChatSheet(
                     api = deps.agentRPCService(session),

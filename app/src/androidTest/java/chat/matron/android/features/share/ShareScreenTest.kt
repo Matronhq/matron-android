@@ -205,9 +205,9 @@ class ShareScreenTest {
             screenshot("staged-sending")
         }
         show(MatronAppearance.Light) {
-            screen(base.copy(errorMessage = "movie.mp4 is too large to send. The limit is 100.0 MB."))
+            screen(base.copy(errorMessage = "movie.mp4 is larger than 100 MB and wasn't attached."))
         }.use {
-            waitForText("too large")
+            waitForText("larger than 100 MB")
             screenshot("staged-too-large")
         }
     }

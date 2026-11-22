@@ -66,7 +66,7 @@ class ShareItemLoaderTest {
             ShareItemLoader.load(uri, Source(size = ShareItemLoader.MAX_BYTES + 1), work)
             fail("expected TooLarge")
         } catch (error: ShareLoadError.TooLarge) {
-            assertEquals("report.pdf is too large to send. The limit is 100.0 MB.", error.message)
+            assertEquals("report.pdf is larger than 100 MB and wasn't attached.", error.message)
         }
         assertTrue(work.listFiles()!!.isEmpty())
     }

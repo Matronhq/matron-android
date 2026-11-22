@@ -10,7 +10,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /// [ShareTransport] over the app's own journal stack: the session's sync
@@ -51,13 +50,11 @@ class LiveShareTransport(
         batch: AttachmentBatchTag?,
         progress: (Double) -> Unit,
     ) {
-        val data = withContext(Dispatchers.IO) { file.file.readBytes() }
-        val timeline = deps.timelineService(session, convoID)
-        if (file.isImage) {
-            timeline.sendImage(data, file.filename, file.mimeType, caption, batch, progress)
-        } else {
-            timeline.sendFile(data, file.filename, file.mimeType, caption, batch, progress)
-        }
+        // Streamed from our copy, never read into memory whole: a share can
+        // be up to the 100 MB upload limit.
+        deps.timelineService(session, convoID).sendAttachment(
+            file.file, file.filename, file.mimeType, file.isImage, caption, batch, progress,
+        )
     }
 
     override suspend fun finish() {

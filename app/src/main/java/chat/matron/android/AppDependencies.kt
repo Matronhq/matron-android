@@ -983,6 +983,9 @@ class AppDependencies(
         // old token (push deregistration), and a revoked token's 401s must not
         // ask for a second sign-out.
         for (core in oldCores) core.revocation.cancel()
+        // The next account must not be offered this one's conversations as
+        // direct-share targets in the system share sheet.
+        chat.matron.android.features.share.ShareShortcuts.clear(context)
         // These sign-ins are over: a late core() with one of them gets an
         // inert stack, never a live one on the old token.
         retiredSignIns += cores.keys

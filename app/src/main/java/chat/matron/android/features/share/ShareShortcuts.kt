@@ -55,8 +55,10 @@ object ShareShortcuts {
                 .setRank(rank)
                 .setLongLived(true)
                 .setCategories(setOf(CATEGORY))
-                // A share target only: not a launcher shortcut.
-                .setExcludedFromSurfaces(ShortcutInfoCompat.SURFACE_LAUNCHER)
+                // Not excluded from the launcher: a shortcut hidden there is
+                // not offered to the share sheet either. From the launcher's
+                // long-press menu it opens the share screen on that chat,
+                // ready for a message.
                 .setIntent(
                     Intent(context, ShareActivity::class.java)
                         .setAction(Intent.ACTION_SEND)
@@ -66,6 +68,7 @@ object ShareShortcuts {
                 .build()
         }
         runCatching { ShortcutManagerCompat.setDynamicShortcuts(context, shortcuts) }
+            .onSuccess { if (!it) MatronDebug.breadcrumb("share shortcuts publish refused (rate limit)") }
             .onFailure { MatronDebug.breadcrumb("share shortcuts publish failed: $it") }
     }
 

@@ -377,9 +377,6 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                         onSignOut = {
                             appLock.signOutIfUnlocked {
                                 OutboxCatchUpWorker.cancel(context)
-                                // The next account must not be offered this
-                                // one's conversations in the share sheet.
-                                ShareShortcuts.clear(context)
                                 deps.signOut()
                                 // Per-account state, cleared like the rest: the next
                                 // account starts opted out.

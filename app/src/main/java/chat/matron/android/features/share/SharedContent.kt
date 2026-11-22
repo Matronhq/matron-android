@@ -7,6 +7,7 @@ import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import androidx.core.content.IntentCompat
 import chat.matron.android.features.chat.pickedFilename
+import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.StagedAttachment
 import chat.matron.android.viewmodels.ChatViewModel
 import java.io.File
@@ -116,8 +117,7 @@ data class ShareIntentContent(
 }
 
 sealed class ShareLoadError(message: String) : Exception(message) {
-    class TooLarge(val name: String) :
-        ShareLoadError("$name is too large to send. The limit is ${SharedFile.formatBytes(ShareItemLoader.MAX_BYTES)}.")
+    class TooLarge(val name: String) : ShareLoadError(AttachmentLimits.oversizeMessage(name))
 
     object Unreadable : ShareLoadError("Couldn't read one of the shared items.")
 }
@@ -159,8 +159,8 @@ class ContentResolverItemSource(private val resolver: ContentResolver) : SharedI
 /// Bytes are streamed, never held in memory, and the copy stops at the
 /// upload limit rather than filling the disk with a file that can't be sent.
 object ShareItemLoader {
-    /// The server's upload limit.
-    const val MAX_BYTES: Long = 100_000_000
+    /// The server's upload limit, the composer's own.
+    const val MAX_BYTES: Long = AttachmentLimits.MAX_BYTES
 
     fun load(uri: Uri, source: SharedItemSource, workDirectory: File, limit: Long = MAX_BYTES): SharedFile {
         val declaredType = source.type(uri)?.lowercase(Locale.US)

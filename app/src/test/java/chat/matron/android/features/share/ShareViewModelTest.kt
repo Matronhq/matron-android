@@ -84,7 +84,7 @@ class ShareViewModelTest {
     fun anItemTooLargeIsReportedAndTheRestKept() = test(content(uris = listOf(photo, big))) { model ->
         waitUntil { model.phase.value == ShareViewModel.Phase.Ready }
         assertEquals(listOf("photo.png"), model.files.value.map { it.filename })
-        assertEquals("movie.mp4 is too large to send. The limit is 100.0 MB.", model.errorMessage.value)
+        assertEquals("movie.mp4 is larger than 100 MB and wasn't attached.", model.errorMessage.value)
         assertTrue(model.canSend)
     }
 
