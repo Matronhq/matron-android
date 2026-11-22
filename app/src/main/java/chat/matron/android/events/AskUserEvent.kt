@@ -32,7 +32,29 @@ data class AskUserEvent(
     /// what lets a "Send all" on one card retire the buttons on the rest —
     /// see `ChatViewModel.queuedReleaseAnswer` (port of apple #162).
     val queuedReleasePromptID: String? = null,
+    /// How a busy-queue card's message can be edited before the agent gets
+    /// it, `null` when it can't (or for any other prompt). See [QueuedEdit].
+    val queuedEdit: QueuedEdit? = null,
 ) {
+    /// A queued message the user can still edit. Tapping Edit answers the
+    /// card with [HOLD_CHOICE], which holds the message on the bridge's queue
+    /// so it isn't delivered half-edited when the agent's turn ends; saving
+    /// answers [SAVE_CHOICE] with the new text, which takes the message's
+    /// place in the queue; cancelling answers [CANCEL_CHOICE], which releases
+    /// the hold with the original text. The bridge releases a hold left open
+    /// after [holdSeconds] and sends the original.
+    data class QueuedEdit(
+        /// The queued message as the bridge holds it: the editor's start.
+        val text: String,
+        val holdSeconds: Int,
+    ) {
+        companion object {
+            const val HOLD_CHOICE = chat.matron.android.chat.JournalTimelineMapper.QUEUED_EDIT_HOLD_CHOICE
+            const val SAVE_CHOICE = "edit_save"
+            const val CANCEL_CHOICE = chat.matron.android.chat.JournalTimelineMapper.QUEUED_EDIT_CANCEL_CHOICE
+        }
+    }
+
     sealed interface InputKind {
         data object Text : InputKind
         data object Boolean : InputKind

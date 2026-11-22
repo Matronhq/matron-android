@@ -30,9 +30,15 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 /// [checkPasswordReset]). It opens [forgotPassword], a small form that asks
 /// for a link and then always says the same thing, so it never reveals
 /// whether an account exists. The link itself is finished in Matron Web.
+///
+/// [signedOutRemotely]: the session the app just signed itself out of because
+/// the server revoked it. The form then shows [SIGNED_OUT_REMOTELY_NOTICE] and
+/// fills in the server and username it was signed in with, so getting back in
+/// only takes the password.
 class SignInViewModel(
     private val auth: AuthService,
     private val deviceDisplayName: String,
+    signedOutRemotely: UserSession? = null,
 ) {
     sealed interface State {
         data object Idle : State
@@ -87,6 +93,10 @@ class SignInViewModel(
     var username: String = ""
     var password: String = ""
 
+    /// Why the app is on the sign-in screen, when it signed itself out; shown
+    /// above the form.
+    val notice: String? = signedOutRemotely?.let { SIGNED_OUT_REMOTELY_NOTICE }
+
     /// The two-factor code field (code step and setup).
     var code: String = ""
 
@@ -100,6 +110,14 @@ class SignInViewModel(
     private val _forgotPassword = MutableStateFlow<ForgotPassword?>(null)
     /// The open "Forgot password?" form, or null.
     val forgotPassword: StateFlow<ForgotPassword?> = _forgotPassword.asStateFlow()
+
+    // After every property the setters touch.
+    init {
+        signedOutRemotely?.let {
+            serverURL = it.homeserverURL
+            username = it.userID
+        }
+    }
 
     /// The sign-in a two-factor step is finishing.
     private data class Pending(val url: HttpUrl, val username: String, val ticket: String)
@@ -329,6 +347,11 @@ class SignInViewModel(
     }
 
     companion object {
+        /// The notice after this device's sign-in was revoked elsewhere and
+        /// the app signed itself out.
+        const val SIGNED_OUT_REMOTELY_NOTICE =
+            "This device was signed out from another device. Sign in again to continue."
+
         const val FORGOT_LINK = "Forgot password?"
         const val FORGOT_IDENTIFIER = "Username or email"
         const val FORGOT_SUBMIT = "Send reset link"

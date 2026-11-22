@@ -8,10 +8,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.PauseCircle
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.PaddingValues
@@ -61,6 +68,9 @@ fun AskUserCard(
     onSend: () -> Unit,
     modifier: Modifier = Modifier,
     error: String? = null,
+    /// Edit on a queued message ([AskUserEvent.queuedEdit]), `null` when the
+    /// card offers none.
+    edit: QueuedEditControls? = null,
     foldsReminder: Boolean = false,
     /// The line's time, when folded.
     timestamp: Instant? = null,
@@ -87,6 +97,25 @@ fun AskUserCard(
                 )
             }
         }
+    } else if (edit != null && edit.isEditing) {
+        QueuedMessageEditor(edit, cardModifier)
+    } else if (edit != null) {
+        Column(cardModifier) {
+            AskUserSheetBody(
+                event = event,
+                textInput = textInput,
+                onTextChange = onTextChange,
+                selectedChoiceIDs = selectedChoiceIDs,
+                onToggleChoice = onToggleChoice,
+                onPickChoice = onPickChoice,
+                onPickBoolean = onPickBoolean,
+                isSending = isSending,
+                isExpired = isExpired,
+                onSend = onSend,
+                error = error,
+            )
+            QueuedEditRow(edit, enabled = !isSending && !isExpired)
+        }
     } else {
         AskUserSheetBody(
             event = event,
@@ -102,6 +131,67 @@ fun AskUserCard(
             modifier = cardModifier,
             error = error,
         )
+    }
+}
+
+/// What the card needs to draw Edit and the editor it opens: plain values and
+/// lambdas, so the card stays free of view-model types.
+data class QueuedEditControls(
+    val text: String,
+    val onTextChange: (String) -> Unit,
+    val isEditing: Boolean,
+    val isBusy: Boolean,
+    val canSave: Boolean,
+    val error: String?,
+    val holdMinutes: Int,
+    val onEdit: () -> Unit,
+    val onSave: () -> Unit,
+    val onCancel: () -> Unit,
+)
+
+/// Edit, under the card's own Send now / Cancel.
+@Composable
+private fun QueuedEditRow(edit: QueuedEditControls, enabled: Boolean) {
+    Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(onClick = edit.onEdit, enabled = enabled && !edit.isBusy) {
+                Icon(Icons.Outlined.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                Text("Edit", modifier = Modifier.padding(start = 6.dp))
+            }
+            if (edit.isBusy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+        }
+        edit.error?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MatronRed) }
+    }
+}
+
+/// The open editor: the message is held until Save or Cancel edit.
+@Composable
+private fun QueuedMessageEditor(edit: QueuedEditControls, modifier: Modifier) {
+    Column(modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.Top) {
+            Icon(
+                Icons.Outlined.PauseCircle, contentDescription = null, modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "Held while you edit. It won't be sent until you save or cancel " +
+                    "(or after ${edit.holdMinutes} minutes, with the original text).",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        OutlinedTextField(
+            value = edit.text,
+            onValueChange = edit.onTextChange,
+            enabled = !edit.isBusy,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp, max = 220.dp),
+        )
+        edit.error?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MatronRed) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(onClick = edit.onCancel, enabled = !edit.isBusy) { Text("Cancel edit") }
+            Button(onClick = edit.onSave, enabled = !edit.isBusy && edit.canSave) { Text("Save") }
+            if (edit.isBusy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+        }
     }
 }
 
