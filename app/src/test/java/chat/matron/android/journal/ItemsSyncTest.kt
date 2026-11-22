@@ -142,7 +142,7 @@ private class FakeItems : ItemsProviding {
     val commentTaps: List<Pair<String?, String?>> get() = synchronized(lock) { _commentTaps.toList() }
 
     override suspend fun commentItem(
-        id: String, body: String, attachments: List<TrackerAttachment>, idempotencyKey: String?, action: String?, replyTo: String?,
+        id: String, body: String, attachments: List<TrackerAttachment>, idempotencyKey: String?, action: String?, replyTo: String?, replaces: String?,
     ): ItemCommentResult {
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
         synchronized(lock) { _commentTaps.add(action to replyTo) }
@@ -582,6 +582,28 @@ class ItemsSyncTest {
         rig.sync.enqueueComment("it_1", "L1", "hello", emptyList())
         assertEquals("The server refused it (HTTP 409).", rig.store.itemOutboxRows("it_1").single().rejectedReason)
         assertTrue(rig.store.itemOutboxPending().isEmpty())
+        rig.sync.stop()
+    }
+
+    /// A tap the journal will not take unsigned (it became step-up after it
+    /// was queued) is refused with the reason, never left pausing the whole
+    /// outbox: a later reply still goes.
+    @Test
+    fun anUnsignedStepUpTapIsRefusedAndTheQueueGoesOn() = runBlocking {
+        val api = FakeItems()
+        api.commentError("it_1", JournalApiError.ApprovalRequired)
+        val rig = make(api)
+        rig.sync.enqueueComment("it_1", "L1", "Go", emptyList(), action = "Go")
+        assertEquals(
+            "This answer needs a signature from your approval key. Tap the button again to approve it.",
+            rig.store.itemOutboxRows("it_1").single().rejectedReason,
+        )
+        rig.sync.enqueueComment("it_2", "L2", "hello", emptyList())
+        waitUntil { api.commentCalls.any { it.first == "it_2" } }
+        assertEquals(
+            "The approval signature was refused.",
+            ItemsSync.rejectionReason(JournalApiError.ApprovalInvalid("signature")),
+        )
         rig.sync.stop()
     }
 

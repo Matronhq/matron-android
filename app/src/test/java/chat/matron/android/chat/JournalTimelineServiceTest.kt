@@ -327,6 +327,37 @@ class JournalTimelineServiceTest {
         }
     }
 
+    @Test fun sendAttachmentUploadsFromTheFileAndSendsItsSize() = runBlocking {
+        val server = MockWebServer().apply { dispatcher = mediaDispatcher("blob-f"); start() }
+        try {
+            val store = makeStore()
+            val socket = FakeWebSocketConnection().also { it.serve(helloOK(0)) }
+            val api = JournalApi(server.url("/"))
+            val engine = makeEngine(store, FakeConnector(listOf(socket)), api)
+            val service = JournalTimelineService("c1", store, engine, api, makeSession())
+            engine.beginSync(); engine.waitUntilReady()
+            val file = java.io.File.createTempFile("clip-", ".mp4").apply { writeBytes(ByteArray(1234) { 7 }); deleteOnExit() }
+
+            service.sendAttachment(file, "clip.mp4", "video/mp4", isImage = false, caption = "look",
+                batch = null, progress = null)
+            waitUntil { socket.lastSentObject?.stringOrNull("op") == "send" }
+            val sent = socket.lastSentObject
+            assertEquals("file", sent?.stringOrNull("type"))
+            val payload = sent?.objectOrNull("payload")
+            assertEquals("blob-f", payload?.stringOrNull("blob_ref"))
+            assertEquals("clip.mp4", payload?.stringOrNull("name"))
+            assertEquals(1234L, payload?.longOrNull("size"))
+            assertEquals("look", payload?.stringOrNull("caption"))
+            val upload = generateSequence { server.takeRequest(1, java.util.concurrent.TimeUnit.SECONDS) }
+                .first { it.path == "/media" }
+            assertEquals(1234L, upload.bodySize)
+
+            engine.endSync()
+        } finally {
+            server.shutdown()
+        }
+    }
+
     @Test fun sendImageUploadsMediaAndSendsImageOp() = runBlocking {
         val server = MockWebServer().apply { dispatcher = mediaDispatcher("blob-img"); start() }
         try {
