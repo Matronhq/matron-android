@@ -178,6 +178,8 @@ class JournalSyncEngine(
     /// each other, so an event written while the `viewing` op was on its way
     /// could be in neither; the second read picks it up.
     private val conversationSettleDelay: Duration = 1500.milliseconds,
+    /// Per-day counts of sync work, shown in Settings. `null` counts nothing.
+    val stats: SyncStatsRecorder? = null,
     /// Wall clock (ms) for the chat list's refresh pacing; tests move it.
     private val clock: () -> Long = System::currentTimeMillis,
 ) : SyncService {
@@ -241,6 +243,8 @@ class JournalSyncEngine(
     private var viewingGeneration = 0
     private val _fetchingConversations = MutableStateFlow<Set<String>>(emptySet())
     private val historyResetListeners = mutableMapOf<UUID, Pair<String, () -> Unit>>()
+    /// When the current catch-up began (ms since boot), for [stats].
+    private var catchUpStartedAt: Long? = null
     /// Serialises viewing changes (the local owner, the departure mark and
     /// the socket op) and a fetched chat's late settle write against them.
     private val viewingMutex = Mutex()
@@ -857,6 +861,7 @@ class JournalSyncEngine(
                 listeners.forEach { it() }
             }
             indexFetched(fetched, dropped)
+            stats?.noteConversationFetch()
             synchronized(lock) {
                 val stillViewed = viewingConvoID == convoID
                 if (viewingGeneration != generation) {
@@ -1191,9 +1196,18 @@ class JournalSyncEngine(
     private fun setState(new: SyncConnectionState) {
         var caughtUpHandler: (() -> Unit)? = null
         var sweeper: JournalMaintenance? = null
+        var catchUpSeconds: Double? = null
         val toResume: List<CancellableContinuation<Unit>> = synchronized(lock) {
             if (_state.value == new) return
             _state.value = new
+            when (new) {
+                is SyncConnectionState.CatchingUp -> catchUpStartedAt = android.os.SystemClock.elapsedRealtime()
+                is SyncConnectionState.Running -> catchUpStartedAt?.let { started ->
+                    catchUpSeconds = (android.os.SystemClock.elapsedRealtime() - started) / 1000.0
+                }
+                else -> Unit
+            }
+            if (new !is SyncConnectionState.CatchingUp) catchUpStartedAt = null
             if (new is SyncConnectionState.Running) {
                 // First time the replay reaches the live cursor: take the
                 // handler so a later reconnect's Running transition does not
@@ -1207,6 +1221,7 @@ class JournalSyncEngine(
             }
         }
         toResume.forEach { it.resumeWith(Result.success(Unit)) }
+        catchUpSeconds?.let { stats?.noteCatchUp(it) }
         caughtUpHandler?.invoke()
         // Caught up with the live cursor: the disk is free again, so the
         // sweeper may run. `runIfDue` is watermark-gated, so the reconnects
@@ -1735,6 +1750,7 @@ class JournalSyncEngine(
         // this keeps the invariant local to the batch path too.
         synchronized(lock) { buffer.forEach { pendingAutoOpen.remove(it.convoID) } }
         buffer.clear()
+        stats?.noteEvents(applied.size)
         applied.forEach {
             indexForSearch(it); publishItemMarker(it); publishMissionMarker(it); publishMemoryMarker(it); publishRoutineMarker(it)
             publishCoordinatorEvent(it)
@@ -1774,6 +1790,7 @@ class JournalSyncEngine(
                 // the error escape routes to reconnect-from-cursor. `false`
                 // (duplicate, seq <= cursor) is a legitimate no-op.
                 if (store.applyJournal(event)) {
+                    stats?.noteEvents(1)
                     indexForSearch(event)
                     publishItemMarker(event)
                     publishMissionMarker(event)

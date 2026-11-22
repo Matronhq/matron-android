@@ -2,16 +2,22 @@ package chat.matron.android.features.settings
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import chat.matron.android.journal.SyncDayStats
 import chat.matron.android.journal.SyncScope
 import chat.matron.android.viewmodels.SyncScopeSettingModel
 
@@ -22,11 +28,24 @@ import chat.matron.android.viewmodels.SyncScopeSettingModel
 @Composable
 internal fun SyncScopeSection(model: SyncScopeSettingModel) {
     val selected by model.selected.collectAsStateWithLifecycle()
-    SyncScopeRows(selected = selected, onSelect = model::select)
+    val days by model.days.collectAsStateWithLifecycle()
+    // Read again each time the screen resumes: a background wake while the
+    // app was away must show when the user comes back to this screen.
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(model, lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) { model.refreshStats() }
+    }
+    SyncScopeRows(selected = selected, onSelect = model::select, days = days)
 }
 
+/// Below the choice, today's and yesterday's sync counts, so the two
+/// choices can be compared on a real device.
 @Composable
-internal fun SyncScopeRows(selected: SyncScope, onSelect: (SyncScope) -> Unit, extra: @Composable () -> Unit = {}) {
+internal fun SyncScopeRows(
+    selected: SyncScope,
+    onSelect: (SyncScope) -> Unit,
+    days: Pair<SyncDayStats, SyncDayStats?>? = null,
+) {
     SettingsSection(SYNC_SCOPE_SECTION_TITLE) {
         Text(
             "Keep up to date",
@@ -47,12 +66,31 @@ internal fun SyncScopeRows(selected: SyncScope, onSelect: (SyncScope) -> Unit, e
                 )
             }
         }
-        extra()
+        days?.let { (today, yesterday) ->
+            StatsRow("Today", today.summary())
+            yesterday?.let { StatsRow("Yesterday", it.summary()) }
+        }
         Text(
             selected.footer,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(bottom = 8.dp),
+        )
+    }
+}
+
+@Composable
+private fun StatsRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
         )
     }
 }

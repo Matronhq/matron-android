@@ -80,10 +80,12 @@ class SyncScopeTest {
         pages: ConversationPageSource? = FakePages(),
         scope: SyncScope = SyncScope.FOR_YOU,
         snapshot: SnapshotSource = FakeSnapshotSource(),
+        stats: SyncStatsRecorder? = null,
     ) = JournalSyncEngine(
         api = snapshot, store = store, connector = FakeConnector(sockets), token = "t",
         ownSender = "user:alice", backoffBaseSeconds = 0.01, pages = pages, syncScope = scope,
         conversationSettleDelay = 20.milliseconds,
+        stats = stats,
     )
 
     private suspend fun waitUntil(timeoutMs: Long = 3000, cond: suspend () -> Boolean) {
@@ -333,6 +335,25 @@ class SyncScopeTest {
         assertEquals("the switch point is the cursor before the replay", 0L, store.forYouSince())
         waitUntil { sentOps(socket, "ack").any { it.longOrNull("cursor") == 100L } }
         assertTrue(sentOps(socket, "ack").any { it.longOrNull("cursor") == 100L })
+        engine.endSync()
+    }
+
+    @Test
+    fun syncWorkIsCountedForSettings() = runBlocking {
+        val stats = SyncStatsRecorder(InMemoryKeyValueStore())
+        val pages = FakePages(listOf(event(5)))
+        val socket = FakeWebSocketConnection().apply {
+            serve(helloOK(9)); serve(journalLine(3, type = "convo_meta")); serve(cursorFrame(9))
+        }
+        val engine = makeEngine(seededStore(), listOf(socket), pages, stats = stats)
+        engine.beginSync()
+        engine.waitUntilReady()
+        engine.setViewing("c1")
+        waitUntil { stats.snapshot().first.conversationFetches == 1 }
+        val today = stats.snapshot().first
+        assertEquals(1L, today.events)
+        assertEquals(1, today.catchUps)
+        assertEquals(1, today.conversationFetches)
         engine.endSync()
     }
 
