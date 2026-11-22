@@ -89,6 +89,35 @@ class ProjectActionsTest {
     }
 
     @Test
+    fun aMergeLeavesNothingOfTheOldProjectAndUnlocksTheAsk() = runBlocking {
+        val (vm, _, _) = setup()
+        vm.refreshPage(); vm.loadActionTargets(); vm.ask()
+        assertTrue(vm.state.value.asked)
+        vm.merge("pj_promo")
+        assertFalse(vm.state.value.asked)
+        assertEquals("pj_promo", vm.state.value.page?.project?.id)
+        assertTrue(vm.state.value.actionsLoaded)
+    }
+
+    @Test
+    fun aFailedListsReadIsReadAgainOnRefresh() = runBlocking {
+        var failing = true
+        val pages = Pages().apply { pages["pj_docs"] = TimelineProjectPage(docs) }
+        val projects = object : FakeProjects() {
+            override suspend fun listProjects(openOnly: Boolean): List<Project> {
+                if (failing) throw JournalApiError.Transport("offline")
+                return listOf(Project(id = "pj_promo", num = 14, title = "Promo launch"))
+            }
+        }
+        val vm = ProjectPageViewModel("pj_docs", pages, projects)
+        vm.refreshPage(); vm.loadActionTargets()
+        assertFalse(vm.state.value.actionsLoaded)
+        failing = false
+        vm.refresh()
+        assertTrue(vm.state.value.actions.merge)
+    }
+
+    @Test
     fun refusalsAreSaidInWords() = runBlocking {
         val (vm, projects, _) = setup()
         vm.refreshPage(); vm.loadActionTargets()

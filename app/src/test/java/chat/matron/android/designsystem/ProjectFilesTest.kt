@@ -12,6 +12,7 @@ import java.time.Instant
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ProjectFilesTest {
@@ -57,5 +58,32 @@ class ProjectFilesTest {
         vm.loadMoreFiles()
         assertEquals(listOf("a", "b", "c"), vm.state.value.files?.rows?.map { it.blobID })
         assertFalse(vm.state.value.files!!.hasMore)
+    }
+
+    @Test
+    fun aFailedOlderPageOffersRetryAndAReloadPagesAgain() = runBlocking {
+        val first = file("a", type = "image/png")
+        var fail = true
+        val projects = object : FakeProjects() {
+            override suspend fun projectFiles(id: String, before: String?, limit: Int?): ProjectFilesPage {
+                if (before == null) return ProjectFilesPage(2, listOf(first), "c1")
+                if (fail) throw chat.matron.android.journal.JournalApiError.Transport("offline")
+                return ProjectFilesPage(2, listOf(file("b", "brief.pdf")), null)
+            }
+        }
+        val timeline = object : FakeTimelineBase() {
+            override suspend fun timelineProject(id: String) = TimelineProjectPage(TimelineProjectRef(id, 12, "Docs site launch"))
+        }
+        val vm = ProjectPageViewModel("pj_docs", timeline, projects)
+        vm.loadFiles()
+        val version = vm.state.value.filesVersion
+        vm.loadMoreFiles()
+        assertTrue(vm.state.value.filesPagingFailed)
+        vm.refresh()
+        assertFalse(vm.state.value.filesPagingFailed)
+        assertEquals(version + 1, vm.state.value.filesVersion)
+        fail = false
+        vm.loadMoreFiles()
+        assertEquals(listOf("a", "b"), vm.state.value.files?.rows?.map { it.blobID })
     }
 }
