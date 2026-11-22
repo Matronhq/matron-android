@@ -92,7 +92,7 @@ fun ProjectScreen(
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     LaunchedEffect(viewModel) { viewModel.refreshPage() }
-    val images = rememberTimelineImages(listOfNotNull(state.page?.media?.takeIf { !it.isVideo }?.blobID), media, serverURL)
+    val images = rememberTimelineImages(listOfNotNull(state.page?.media?.takeIf { !it.isVideo }?.blobID), media, serverURL, reload = state.pageLoads)
 
     ProjectScaffold(title = state.page?.let { "#${it.project.num}" } ?: "Project", onBack = onBack) {
         PullToRefreshBox(
@@ -143,7 +143,7 @@ fun ProjectSectionScreen(
         }
     }
     val pictures = state.history.mapNotNull { it.media }.filter { !it.isVideo }.map { it.blobID }
-    val images = rememberTimelineImages(pictures, media, serverURL)
+    val images = rememberTimelineImages(pictures, media, serverURL, reload = state.historyVersion)
     val title = ProjectFormat.sectionTitle(section)
 
     ProjectScaffold(title = title, onBack = onBack) {
