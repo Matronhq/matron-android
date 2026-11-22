@@ -781,8 +781,11 @@ class AppDependencies(
      * Projects tab's week page reads it, and it reads the journal only when
      * the tab first shows.
      */
-    fun makeTimelineViewModel(session: UserSession, scope: CoroutineScope): TimelineViewModel =
-        TimelineViewModel(timeline = core(session).api, scope = scope)
+    fun makeTimelineViewModel(
+        session: UserSession,
+        scope: CoroutineScope,
+        askCoordinator: (suspend (String) -> Unit)? = null,
+    ): TimelineViewModel = TimelineViewModel(timeline = core(session).api, scope = scope, askCoordinator = askCoordinator)
 
     /** A project's page (or one of its sections): a fresh view model per screen. */
     fun makeProjectPageViewModel(session: UserSession, projectID: String): ProjectPageViewModel {

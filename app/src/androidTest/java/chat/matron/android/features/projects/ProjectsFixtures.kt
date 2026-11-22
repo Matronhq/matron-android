@@ -22,6 +22,9 @@ import chat.matron.android.models.ProjectDetail
 import chat.matron.android.models.ProjectFilesPage
 import chat.matron.android.models.ProjectMilestone
 import chat.matron.android.models.TimelineHistoryWeek
+import chat.matron.android.models.FinishedProject
+import chat.matron.android.models.StalledProject
+import chat.matron.android.models.TimelineProjectRow
 import chat.matron.android.journal.TimelineWeeksPage
 import chat.matron.android.models.StalledList
 import chat.matron.android.models.TimelineItemRef
@@ -104,14 +107,37 @@ object ProjectsFixtures {
             else -> TimelineWeek(week, at(week), at(week).plusSeconds(7 * 86_400), true)
         }
         override suspend fun timelineWeekProjects(week: String, offset: Int, limit: Int?) = weekProjects
-        override suspend fun wentQuiet() = StalledList(0, emptyList())
-        override suspend fun openLong() = StalledList(0, emptyList())
-        override suspend fun finishedProjects(before: String?, limit: Int?) = TimelineFinishedPage(emptyList(), null)
-        override suspend fun timelineProjects(before: String?, limit: Int?) = TimelineProjectList(0, emptyList())
+        override suspend fun wentQuiet() = quiet
+        override suspend fun openLong() = long
+        override suspend fun finishedProjects(before: String?, limit: Int?) = TimelineFinishedPage(finished, null)
+        override suspend fun timelineProjects(before: String?, limit: Int?) = allProjects
         override suspend fun timelineProject(id: String): TimelineProjectPage =
             if (id == docs.id) docsPage else throw JournalApiError.NotFound
         override suspend fun timelineProjectHistory(id: String, before: String?, limit: Int?) = TimelineHistoryPage(docsHistory, null)
     }
+
+    private val today = Instant.now()
+    private fun daysAgo(days: Long) = today.minusSeconds(days * 86_400)
+
+    val quiet = StalledList(3, listOf(
+        StalledProject(pricing, lastMovedAt = daysAgo(19), weekly = listOf(2, 3, 4, 1, 0, 0, 0, 0), note = "Waiting on new plan names from alice."),
+        StalledProject(TimelineProjectRef("pj_blog", 21, "Blog relaunch"), lastMovedAt = daysAgo(24), weekly = listOf(0, 1, 2, 2, 0, 0, 0, 0),
+            note = "Two posts drafted; the theme is half done."),
+    ))
+    val long = StalledList(1, listOf(
+        StalledProject(support, lastMovedAt = daysAgo(2), createdAt = daysAgo(40), weekly = listOf(1, 1, 0, 1, 2, 0, 1, 1), note = "Archiving old articles a few at a time."),
+    ))
+    val finished = listOf(
+        FinishedProject(TimelineProjectRef("pj_status", 9, "Status page"), daysAgo(3)),
+        FinishedProject(TimelineProjectRef("pj_logo", 7, "Logo refresh"), daysAgo(11)),
+        FinishedProject(TimelineProjectRef("pj_faq", 5, "FAQ rewrite"), daysAgo(30)),
+    )
+    val allProjects = TimelineProjectList(7, listOf(
+        TimelineProjectRow(docs, today.minusSeconds(3 * 3600), 2), TimelineProjectRow(promo, daysAgo(1), 1),
+        TimelineProjectRow(app, daysAgo(2), 1), TimelineProjectRow(onboarding, daysAgo(4), 1),
+        TimelineProjectRow(support, daysAgo(2), 1), TimelineProjectRow(pricing, daysAgo(19), 1),
+        TimelineProjectRow(TimelineProjectRef("pj_blog", 21, "Blog relaunch"), daysAgo(24), 2),
+    ))
 
     val docsPage = TimelineProjectPage(
         project = docs, isLive = true, state = "open",
