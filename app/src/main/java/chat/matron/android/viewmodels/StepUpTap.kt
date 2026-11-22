@@ -211,6 +211,11 @@ object StepUpTap {
                 // The answer was lost: the tap may have landed. The next try
                 // carries the same idempotency key, so it is never applied twice.
                 return Outcome.Failed(MAY_HAVE_BEEN_SENT)
+            } catch (e: Throwable) {
+                // The journal answered, and refused: nothing landed, so the
+                // next try is a new tap with a key of its own.
+                answered(item.id, comment?.id, label)
+                throw e
             }
             answered(item.id, comment?.id, label)
             // The tap and the asking comment's choice land now; the refetch

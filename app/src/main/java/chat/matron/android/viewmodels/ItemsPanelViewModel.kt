@@ -441,11 +441,17 @@ class ItemsPanelViewModel(
             publishAwaitingYou()
             throw cancel
         }
+        if (outcome == StepUpTap.Outcome.Sent) {
+            // Answered: the row stays hidden until the list itself drops it
+            // (the answered item no longer waits on the user), so it never
+            // flashes back as waiting and cannot be tapped twice.
+            return true
+        }
         if (outcome != StepUpTap.Outcome.Unsigned) {
             answerPending = answerPending - item.id
             publishAwaitingYou()
             (outcome as? StepUpTap.Outcome.Failed)?.let { _error.value = it.message }
-            return outcome == StepUpTap.Outcome.Sent
+            return false
         }
         val inserted = sync.enqueueComment(item.id, localID, label, emptyList(), action = label, replyTo = null)
         if (!inserted) {
