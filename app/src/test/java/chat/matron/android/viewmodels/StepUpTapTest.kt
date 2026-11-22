@@ -254,12 +254,18 @@ class StepUpTapTest {
         // A later, new tap gets a new key.
         assertEquals(StepUpTap.Outcome.Sent, sendConfirming(api, null, "Deploy"))
         assertTrue(api.keys[2] != api.keys[0])
+        // A server error says nothing about whether it landed: the key stays.
+        api.tapError = JournalApiError.Http(503, "busy")
+        assertTrue(sendConfirming(api, null, "Deploy") is StepUpTap.Outcome.Failed)
+        api.tapError = null
+        assertEquals(StepUpTap.Outcome.Sent, sendConfirming(api, null, "Deploy"))
+        assertEquals(api.keys[3], api.keys[4])
         // A refused tap leaves no key behind: the next try is a new tap.
         api.tapError = JournalApiError.ApprovalInvalid("mismatch")
         assertTrue(sendConfirming(api, null, "Deploy") is StepUpTap.Outcome.Failed)
         api.tapError = null
         assertEquals(StepUpTap.Outcome.Sent, sendConfirming(api, null, "Deploy"))
-        assertTrue(api.keys[4] != api.keys[3])
+        assertTrue(api.keys[6] != api.keys[5])
     }
 
     @Test

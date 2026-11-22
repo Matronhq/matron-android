@@ -192,9 +192,15 @@ class ApprovalCenter(
         if (!state.enabled) { _status.value = Status.Disabled; return }
         val listed = stored?.let { state.key(it.keyID) }
         if (stored != null && listed != null) {
+            val availability = keys.availability
             _status.value = when {
                 !listed.isLive -> Status.Revoked
                 !usable(stored) -> Status.Invalidated
+                // The key is fine but nothing can unlock it now (the strong
+                // biometrics were removed): it cannot sign, so the screen
+                // offers what a device without a key gets.
+                availability is chat.matron.android.platform.ApprovalKeyAvailability.Unavailable ->
+                    Status.Unavailable(availability.advice)
                 listed.deviceID == deviceID && deviceID != null -> Status.Ready
                 else -> Status.NeedsAttach
             }

@@ -203,6 +203,8 @@ class MainActivity : FragmentActivity() {
             auth = AndroidBiometricAuthenticator(this),
             store = deps.preferences,
         )
+        // An approval key's biometric prompt is not the app going away.
+        chat.matron.android.platform.BiometricPromptHost.onPrompt = { showing -> appLock.noteSystemPrompt(showing) }
         setContent {
             // Read lazily by dispose handlers that must tell the lock shield's
             // teardown from the user's (see LocalAppLockActive).
@@ -402,49 +404,51 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                     // Unlock, replaces the app (as the app lock's shield
                     // does), so nothing under it, a sheet, a dialog or the
                     // keyboard, stays reachable.
-                    if (accountLock.canUnlock) {
-                        // A confirm sheet already up (a step-up tap) is
-                        // answered no: the account is locked, it would only
-                        // be refused, and it must not hide Unlock.
-                        val approvalsNow = remember(current.userID) { deps.approvalCenter(current) }
-                        LaunchedEffect(Unit) { approvalsNow.cancel() }
-                        val unlock = remember(current.userID) { deps.makeAccountUnlockModel(current) }
-                        val phase by unlock.phase.collectAsStateWithLifecycle()
-                        AccountLockedScreen(
-                            since = accountLock.lock?.since,
-                            method = remember(current.userID) { deps.approvalCenter(current) }.method ?: "fingerprint",
-                            isUnlocking = phase == AccountUnlockModel.Phase.Unlocking,
-                            error = (phase as? AccountUnlockModel.Phase.Failed)?.message,
-                            onUnlock = { scope.launch { unlock.unlock() } },
-                            onSignOut = signOut,
-                        )
-                    } else Column(modifier = Modifier.fillMaxSize()) {
-                        if (lockBanner) AccountLockedBanner()
-                        accountWarning?.let {
-                            AccountWarningBanner(it, onDismiss = deps.accountLock::dismissWarning, clearStatusBar = !lockBanner)
-                        }
-                        val topTaken = lockBanner || accountWarning != null
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .then(if (topTaken) Modifier.consumeWindowInsets(WindowInsets.statusBars) else Modifier),
-                        ) {
-                            SignedInApp(
-                                deps = deps,
-                                session = current,
-                                incomingLinks = incomingLinks,
-                                appearance = appearance,
-                                appLock = appLock,
-                                onAppearanceChange = { next ->
-                                    appearance = next
-                                    prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
-                                },
+                    // The approval confirm sheet, over every screen of the app,
+                    // the locked screen included (it signs the unlock).
+                    ApprovalConfirmHost(remember(current.userID) { deps.approvalCenter(current) }) {
+                        if (accountLock.canUnlock) {
+                            // A confirm sheet already up (a step-up tap) is
+                            // answered no: the account is locked, it would only
+                            // be refused, and it must not hide Unlock.
+                            val approvalsNow = remember(current.userID) { deps.approvalCenter(current) }
+                            LaunchedEffect(Unit) { approvalsNow.cancel() }
+                            val unlock = remember(current.userID) { deps.makeAccountUnlockModel(current) }
+                            val phase by unlock.phase.collectAsStateWithLifecycle()
+                            AccountLockedScreen(
+                                since = accountLock.lock?.since,
+                                method = remember(current.userID) { deps.approvalCenter(current) }.method ?: "fingerprint",
+                                isUnlocking = phase == AccountUnlockModel.Phase.Unlocking,
+                                error = (phase as? AccountUnlockModel.Phase.Failed)?.message,
+                                onUnlock = { scope.launch { unlock.unlock() } },
                                 onSignOut = signOut,
                             )
+                        } else Column(modifier = Modifier.fillMaxSize()) {
+                            if (lockBanner) AccountLockedBanner()
+                            accountWarning?.let {
+                                AccountWarningBanner(it, onDismiss = deps.accountLock::dismissWarning, clearStatusBar = !lockBanner)
+                            }
+                            val topTaken = lockBanner || accountWarning != null
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .then(if (topTaken) Modifier.consumeWindowInsets(WindowInsets.statusBars) else Modifier),
+                            ) {
+                                SignedInApp(
+                                    deps = deps,
+                                    session = current,
+                                    incomingLinks = incomingLinks,
+                                    appearance = appearance,
+                                    appLock = appLock,
+                                    onAppearanceChange = { next ->
+                                        appearance = next
+                                        prefs.edit().putString(MatronAppearance.STORAGE_KEY, next.rawValue).apply()
+                                    },
+                                    onSignOut = signOut,
+                                )
+                            }
                         }
                     }
-                    // The approval confirm sheet, over every screen of the app.
-                    ApprovalConfirmHost(remember(current.userID) { deps.approvalCenter(current) })
                 }
             }
         }
