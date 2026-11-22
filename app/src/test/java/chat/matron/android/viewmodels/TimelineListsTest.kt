@@ -148,6 +148,45 @@ class TimelineListsTest {
     }
 
     @Test
+    fun aReloadedFirstPageClearsTheRetry() = runBlocking {
+        val lists = object : FakeTimelineBase() {
+            override suspend fun finishedProjects(before: String?, limit: Int?): TimelineFinishedPage {
+                if (before == null) return TimelineFinishedPage(listOf(FinishedProject(TimelineFixtures.docs, now)), "c1")
+                throw JournalApiError.Transport("offline")
+            }
+        }
+        val vm = TimelineViewModel(lists, scope)
+        vm.loadList(TimelinePlace.Finished)
+        vm.loadMoreFinished()
+        assertEquals(setOf(TimelinePlace.Finished), vm.state.value.pagingFailed)
+        vm.refresh()
+        vm.loadList(TimelinePlace.Finished)
+        assertTrue(vm.state.value.pagingFailed.isEmpty())
+    }
+
+    @Test
+    fun aFinishedReadOvertakenByARefreshIsReadAgain() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var reads = 0
+        val lists = object : FakeTimelineBase() {
+            override suspend fun finishedProjects(before: String?, limit: Int?): TimelineFinishedPage {
+                reads += 1
+                val mine = reads
+                if (mine == 1) hold.await()
+                return TimelineFinishedPage(List(mine) { FinishedProject(TimelineFixtures.docs.copy(id = "pj_$it"), now) }, null)
+            }
+        }
+        val vm = TimelineViewModel(lists, scope)
+        val first = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined).launch { vm.loadList(TimelinePlace.Finished) }
+        vm.refresh()
+        hold.complete(Unit)
+        first.join()
+        vm.loadList(TimelinePlace.Finished)
+        assertEquals(2, reads)
+        assertEquals(2, vm.state.value.finished.size)
+    }
+
+    @Test
     fun askingTheCoordinatorNamesTheProjectAndMarksTheRow() = runBlocking {
         val sent = mutableListOf<String>()
         val vm = TimelineViewModel(Lists(), scope, askCoordinator = { sent += it }, now = { now })
