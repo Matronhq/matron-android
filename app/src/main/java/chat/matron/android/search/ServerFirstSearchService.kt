@@ -47,7 +47,9 @@ class ServerFirstSearchService(
                     )
                 }
             },
-            fallback = { it.queryGrouped(text, limit).filterNot { hit -> isSubagent(hit.roomID) } },
+            fallback = { index ->
+                index.queryGrouped(text, localLimit(limit)).filterNot { isSubagent(it.roomID) }.take(limit)
+            },
         )
     }
 
@@ -70,11 +72,16 @@ class ServerFirstSearchService(
                 if (convoID != null) {
                     index.query(text, convoID, limit)
                 } else {
-                    index.query(text, limit).filterNot { isSubagent(it.roomID) }
+                    index.query(text, localLimit(limit)).filterNot { isSubagent(it.roomID) }.take(limit)
                 }
             },
         )
     }
+
+    /// The local index holds subagent chats too and they are dropped after
+    /// the query, so it is asked for more than [limit] to leave room to fill
+    /// the page with the rest.
+    private fun localLimit(limit: Int): Int = (limit.toLong() * LOCAL_OVERFETCH).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 
     private suspend fun <T> serverOr(server: suspend () -> T, fallback: suspend (SearchService) -> T): T =
         try {
@@ -134,5 +141,8 @@ class ServerFirstSearchService(
     private companion object {
         /// The journal caps a `chats` page at 50.
         const val SERVER_LIMIT = 50
+
+        /// How many times [limit] the local fallback asks its index for.
+        const val LOCAL_OVERFETCH = 4
     }
 }

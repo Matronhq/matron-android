@@ -79,6 +79,18 @@ class ServerFirstSearchServiceTest {
         assertEquals(listOf("main"), groups.map { it.roomID })
     }
 
+    /// Subagent chats dropped from the fallback leave room for the rest: a
+    /// page of `limit` parent chats still comes back.
+    @Test
+    fun theFallbackStillFillsAPageAfterDroppingSubagentChats() = runTest {
+        val remote = ScriptedRemote().apply { down = IOException("offline") }
+        val hits = (1..6).map { i -> hit("$i", if (i <= 3) "p:sub:a$i" else "p$i", ts = 10L - i) }
+        val local = FakeSearchService(hits = hits)
+        val service = ServerFirstSearchService(remote, local)
+        assertEquals(listOf("p4", "p5"), service.queryGrouped("notes", limit = 2).map { it.roomID })
+        assertEquals(listOf("4", "5"), service.query("notes", limit = 2).map { it.id })
+    }
+
     @Test
     fun withoutALocalIndexAServerFailureIsThrown() = runTest {
         val down = IOException("offline")
