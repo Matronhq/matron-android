@@ -747,6 +747,18 @@ class VoiceRecorderTest {
     }
 
     @Test
+    fun start_micGoingLiveRightAfterTheLastPause_goesLiveNotNoAudio() = runBlocking {
+        // Sound arrives on the check that follows the last allowed pause,
+        // before the file has grown: the note is live, not a timeout.
+        val fake = FakeAudioRecorder(silentChecks = VoiceRecorder.MAX_LIVE_CHECKS)
+        var pauses = 0
+        val rec = makeRecorder(fake = fake, fileSize = { 100L }, pause = { pauses++ })
+        rec.start()
+        assertEquals(VoiceRecorder.MAX_LIVE_CHECKS, pauses)
+        assertTrue(rec.state.value is VoiceRecorder.State.Recording)
+    }
+
+    @Test
     fun start_whenNothingReachesTheFile_failsWithNoAudioAndCleansUp() = runBlocking {
         val dir = tempDir()
         val keepAwake = mutableListOf<Boolean>()

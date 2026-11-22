@@ -886,11 +886,44 @@ class MatronDatabaseMigrationTest {
         }
     }
 
-    /// MIGRATION_20_21: a mission keeps the project it is filed in. A row
+    /// MIGRATION_20_21: `item` gains `multi_select` and `chosen_actions_json`.
+    /// An item cached before the upgrade reads as one-tap with no list; one
+    /// written after it keeps its multi-select question and every label of
+    /// its answer across a reopen. Room checks the columns against the
+    /// entity at open, so a drift fails here.
+    @Test
+    fun migratesToV21AndKeepsMultiSelectQuestions() = runBlocking {
+        val file = File.createTempFile("migration-test-v8-v21", ".sqlite").also { it.delete() }
+        buildV8(file)
+        var database = MatronDatabase.open(context, file)
+        try {
+            var store = JournalStore(database, ownSender = "user:alice")
+            val cached = store.items(chat.matron.android.models.ItemsScope.All)
+            assertTrue("the fixture caches an item", cached.isNotEmpty())
+            assertTrue(cached.all { !it.multiSelect && it.chosenActions.isEmpty() })
+            val question = TrackerItem(
+                id = "it_m", num = 98, kind = ItemKind.QUESTION, title = "Which areas?", originConvoID = "c1",
+                actions = listOf("Docs", "Billing", "Search"), multiSelect = true,
+                chosenActions = listOf("Docs", "Search"), chosenAction = "Docs",
+            )
+            store.upsertItems(listOf(question))
+            database.close()
+            database = MatronDatabase.open(context, file)
+            store = JournalStore(database, ownSender = "user:alice")
+            val stored = store.item("it_m")!!
+            assertTrue(stored.multiSelect)
+            assertEquals(listOf("Docs", "Search"), stored.chosenActions)
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
+    /// MIGRATION_21_22: a mission keeps the project it is filed in. A row
     /// cached before the upgrade reads as unfiled until its next fetch.
     @Test
-    fun migratesToV21AndMissionsKeepTheirProject() = runBlocking {
-        val file = File.createTempFile("migration-test-v8-v21", ".sqlite").also { it.delete() }
+    fun migratesToV22AndMissionsKeepTheirProject() = runBlocking {
+        val file = File.createTempFile("migration-test-v8-v22", ".sqlite").also { it.delete() }
         buildV8(file)
         SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
             db.execSQL(
