@@ -4,8 +4,12 @@ import chat.matron.android.models.MatronDebug
 import java.io.File
 import java.time.Instant
 import java.util.UUID
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 import kotlin.time.toKotlinDuration
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -68,9 +72,30 @@ class VoiceRecorder(
     /// default leave it empty.
     private val describeInputRoute: () -> String = { "" },
     private val now: () -> Instant = Instant::now,
+    /// How [start] waits between checks that the microphone is live.
+    /// Injectable so tests drive the warm-up without real time passing.
+    private val pause: suspend () -> Unit = { delay(LIVE_CHECK_INTERVAL) },
+    /// Bytes on disk for a file, -1 when there is none. The warm-up's
+    /// fallback signal: a muted microphone still writes (silence) into the
+    /// file, one that never came up writes nothing.
+    private val fileSize: (File) -> Long = { if (it.exists()) it.length() else -1L },
+    /// The audio a finished file holds, `null` when it can't be read.
+    /// Measured from the file, not the clock: a note whose file holds under
+    /// [MIN_NOTE_DURATION] is never sent. The real one reads the container
+    /// with `MediaMetadataRetriever`; tests and the default leave it unknown.
+    private val measureDuration: (File) -> Duration? = { null },
 ) {
     sealed interface State {
         data object Idle : State
+
+        /// The recorder is running but the microphone has not delivered
+        /// sound yet. Input hardware can take a moment to come up (a
+        /// Bluetooth headset switching to its call profile, an input
+        /// waking), and `MediaRecorder.start()` returns long before that.
+        /// Anything said now is not in the file, so the UI must not say
+        /// "recording" yet: it shows "Starting microphone…" and Cancel,
+        /// with no send.
+        data object Starting : State
 
         /// A recording in progress; [start] is the instant recording began,
         /// which the composer UI ticks against to show elapsed time.
@@ -85,6 +110,29 @@ class VoiceRecorder(
         data object PermissionDenied : RecorderError()
         data object AlreadyRecording : RecorderError()
         data object RecordFailed : RecorderError()
+
+        /// The recorder started but no audio reached the file before the
+        /// warm-up ran out: the microphone never delivered anything.
+        data object NoAudio : RecorderError()
+
+        /// The stopped note's file holds no usable audio (under
+        /// [MIN_NOTE_DURATION], or the recorder captured no data at all).
+        data object NothingRecorded : RecorderError()
+
+        /// The recorder never confirmed it had finished the file, so it may
+        /// be incomplete; it is not sent.
+        data object SaveFailed : RecorderError()
+
+        /// What the composer shows for this error.
+        val userMessage: String
+            get() = when (this) {
+                PermissionDenied -> "Microphone access is needed to record a voice note."
+                AlreadyRecording -> "Already recording."
+                RecordFailed -> "Couldn't start recording."
+                NoAudio -> "Nothing was recorded: the microphone didn't send any sound. Try again."
+                NothingRecorded -> "Nothing was recorded. Try again."
+                SaveFailed -> "The recorder couldn't finish saving this voice note, so it wasn't sent."
+            }
     }
 
     /// A finished recording handed back by [stop].
@@ -124,10 +172,18 @@ class VoiceRecorder(
     private var pausedSince: Instant? = null
     private var pausedTotal: java.time.Duration = java.time.Duration.ZERO
 
+    /// An interruption during the warm-up ended without the resume hint
+    /// (another app kept the microphone): the start gives up.
+    private var warmUpRefused = false
+
     /// Requests microphone permission (once), then starts recording to a fresh
-    /// temp `.m4a`. Throws [RecorderError.AlreadyRecording] if a recording is in
-    /// progress, [RecorderError.PermissionDenied] if the user declines,
-    /// [RecorderError.RecordFailed] if the recorder won't start.
+    /// temp `.m4a`, and returns once the microphone is really delivering sound
+    /// ([State.Starting] until then, [State.Recording] after). Throws
+    /// [RecorderError.AlreadyRecording] if a recording is in progress,
+    /// [RecorderError.PermissionDenied] if the user declines,
+    /// [RecorderError.RecordFailed] if the recorder won't start, and
+    /// [RecorderError.NoAudio] if nothing reached the file by the end of the
+    /// warm-up.
     suspend fun start() {
         // Reject only an in-flight recording or start; a fresh start from Idle or
         // a prior Finished (a second voice note) is allowed.
@@ -156,16 +212,17 @@ class VoiceRecorder(
                 liveRecorder = newRecorder
                 recorder = newRecorder
                 fileURL = file
-                val started = now()
-                startedAt = started
-                _state.value = State.Recording(started)
+                _state.value = State.Starting
                 screenClaimed = true
                 setKeepScreenAwake(true)
                 sessionClaimed = true
                 holdRecordingSession(true)
                 isInterrupted = false
+                warmUpRefused = false
                 pausedSince = null
                 pausedTotal = java.time.Duration.ZERO
+                // Subscribed from the warm-up on: a call that lands before the
+                // mic is live pauses the recorder just the same.
                 unsubscribe = observeInterruptions { event -> handleInterruption(event) }
                 stopObservingInterruptions = unsubscribe
                 log("start: ${routeDescription()}")
@@ -193,17 +250,70 @@ class VoiceRecorder(
                 // user — no recording — and must not escape as a crash.
                 throw error as? RecorderError ?: RecorderError.RecordFailed
             }
+            warmUp(generation, file)
         } finally {
             isStarting = false
         }
     }
 
+    /// Waits for the microphone to deliver sound, then goes live. An
+    /// interruption holds the warm-up (its time doesn't count towards the
+    /// cap). At the cap a file that has grown means a muted input writing
+    /// silence: the note goes live on it, as the user can still see the clock
+    /// run and hear the result. A file that hasn't grown means nothing ever
+    /// arrived, and going live would show "Recording" over an empty file for
+    /// as long as the user talks, so the start fails instead.
+    private suspend fun warmUp(generation: Int, file: File) {
+        val requested = now()
+        val initialBytes = fileSize(file)
+        var checks = 0
+        try {
+            while (true) {
+                val active = recorder ?: return
+                if (generation != cancelGeneration) return
+                if (warmUpRefused) break
+                if (!isInterrupted && active.isCapturingAudio()) break
+                if (checks >= MAX_LIVE_CHECKS) break
+                pause()
+                // cancel() during the warm-up already tore everything down.
+                if (generation != cancelGeneration) return
+                if (!isInterrupted) checks += 1
+            }
+        } catch (cancelled: CancellationException) {
+            // The composer that started the note went away mid warm-up: there
+            // is nothing to keep, and no one left to show it.
+            if (generation == cancelGeneration) cancel()
+            throw cancelled
+        }
+        if (generation != cancelGeneration || _state.value != State.Starting) return
+        if (warmUpRefused) {
+            // Another app took the microphone before anything was captured:
+            // there is no note, so none is left looking live.
+            log("live: refused, interruption ended without resume during warm-up")
+            cancel()
+            throw RecorderError.RecordFailed
+        }
+        val timedOut = checks >= MAX_LIVE_CHECKS
+        if (timedOut && fileSize(file) <= initialBytes) {
+            log("live: no audio reached the file after the warm-up ${routeDescription()}")
+            cancel()
+            throw RecorderError.NoAudio
+        }
+        val started = now()
+        log("live: after=${java.time.Duration.between(requested, started).toMillis()}ms timedOut=$timedOut")
+        startedAt = started
+        _state.value = State.Recording(started)
+    }
+
     /// Stops recording and hands back the finished file plus its captured
     /// duration (wall time minus any interruption pauses). Returns `null` (a
-    /// no-op) when not currently recording, or when the recorder rejects the
-    /// stop (too-short a tap yields no captured data — [AudioRecording.stop]
-    /// returns `false` — in which case the unusable temp file is deleted
-    /// rather than handed on to be sent). A recording left paused by an
+    /// no-op) when not currently recording — including while the microphone
+    /// is still starting, when nothing has been captured. Throws
+    /// [RecorderError.NothingRecorded] when the file holds no usable audio
+    /// (the recorder captured no data, or under [MIN_NOTE_DURATION] measured
+    /// from the file) and [RecorderError.SaveFailed] when the recorder never
+    /// confirmed the file finished; either way the unusable temp file is
+    /// deleted rather than handed on to be sent. A recording left paused by an
     /// interruption still delivers what was captured up to the pause.
     fun stop(): VoiceNote? {
         if (_state.value !is State.Recording) return null
@@ -212,14 +322,17 @@ class VoiceRecorder(
         val started = startedAt ?: return null
         val peak = activeRecorder.peakAmplitude()
         val succeeded = activeRecorder.stop()
+        val timedOut = !succeeded && activeRecorder.finishTimedOut
         val stoppedAt = now()
         val stillPaused = pausedSince?.let { java.time.Duration.between(it, stoppedAt) } ?: java.time.Duration.ZERO
         val paused = pausedTotal.plus(stillPaused)
         val duration = java.time.Duration.between(started, stoppedAt).minus(paused).toKotlinDuration()
         val bytes = if (file.exists()) file.length() else -1L
+        val measured = if (succeeded) runCatching { measureDuration(file) }.getOrNull() else null
         log(
-            "stop: ok=$succeeded duration=${duration.inWholeMilliseconds}ms paused=${paused.toMillis()}ms " +
-                "bytes=$bytes peak=$peak ${routeDescription()}",
+            "stop: ok=$succeeded timedOut=$timedOut duration=${duration.inWholeMilliseconds}ms " +
+                "paused=${paused.toMillis()}ms bytes=$bytes measured=${measured?.inWholeMilliseconds}ms " +
+                "peak=$peak ${routeDescription()}",
         )
         recorder = null
         fileURL = null
@@ -228,9 +341,15 @@ class VoiceRecorder(
         setKeepScreenAwake(false)
         holdRecordingSession(false)
         unsubscribeInterruptions()
-        if (!succeeded) {
+        val problem = when {
+            timedOut -> RecorderError.SaveFailed
+            !succeeded -> RecorderError.NothingRecorded
+            measured != null && measured < MIN_NOTE_DURATION -> RecorderError.NothingRecorded
+            else -> null
+        }
+        if (problem != null) {
             file.delete()
-            return null
+            throw problem
         }
         return VoiceNote(file, duration)
     }
@@ -273,6 +392,10 @@ class VoiceRecorder(
     private fun handleInterruption(event: AudioInterruption) {
         val current = _state.value
         log("interruption: $event state=$current wasInterrupted=$isInterrupted")
+        if (current == State.Starting) {
+            handleWarmUpInterruption(event)
+            return
+        }
         if (current !is State.Recording) return
         val activeRecorder = recorder ?: return
         when (event) {
@@ -306,6 +429,26 @@ class VoiceRecorder(
         }
     }
 
+    /// An interruption before the microphone is live: capture pauses, and
+    /// the warm-up waits (see [warmUp]) until it ends. Nothing has been
+    /// captured yet, so no pause time is booked; an end without the resume
+    /// hint gives the start up.
+    private fun handleWarmUpInterruption(event: AudioInterruption) {
+        val activeRecorder = recorder ?: return
+        when (event) {
+            AudioInterruption.Began -> {
+                if (isInterrupted) return
+                isInterrupted = true
+                activeRecorder.pause()
+            }
+            is AudioInterruption.Ended -> {
+                if (!isInterrupted) return
+                isInterrupted = false
+                if (!event.shouldResume || !activeRecorder.resume()) warmUpRefused = true
+            }
+        }
+    }
+
     private fun unsubscribeInterruptions() {
         stopObservingInterruptions?.invoke()
         stopObservingInterruptions = null
@@ -326,6 +469,15 @@ class VoiceRecorder(
 
     companion object {
         const val LOG_PREFIX = "voice-recorder"
+
+        /// How often the warm-up checks that the microphone is live.
+        val LIVE_CHECK_INTERVAL = 20.milliseconds
+
+        /// About 4 s of warm-up before the start settles either way.
+        const val MAX_LIVE_CHECKS = 200
+
+        /// A note whose file holds less audio than this is never sent.
+        val MIN_NOTE_DURATION = 1.seconds
     }
 }
 
@@ -349,7 +501,16 @@ interface AudioRecording {
     /// valid recording and must not be sent.
     fun stop(): Boolean
 
+    /// True after a [stop] that returned `false` because the recorder never
+    /// confirmed it had finished the file in time (rather than because there
+    /// was nothing in it): the file may be incomplete.
+    val finishTimedOut: Boolean get() = false
+
     /// Peak input sample since the last call (0..32767), or -1 when unknown.
-    /// Diagnostics only.
     fun peakAmplitude(): Int
+
+    /// Whether the microphone is delivering sound into the file yet: any
+    /// real microphone's noise floor reads above zero, while an input still
+    /// coming up delivers exact zeros. Reads (and so resets) the peak.
+    fun isCapturingAudio(): Boolean = peakAmplitude() > 0
 }
