@@ -8,7 +8,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -78,19 +77,25 @@ class NewChatDefaultsStoreTest {
     @Test
     fun aPickShowsAtOnceAndAFailureGoesBackWithItsError() = runBlocking {
         val api = FakeDefaultsApi()
-        val store = NewChatDefaultsStore(api, { MutableSharedFlow() }, this)
+        val scope = child()
+        val store = NewChatDefaultsStore(api, { MutableSharedFlow() }, scope)
         store.refresh()
         store.set(NewChatDefaults.Key.EFFORT, "high")
         assertEquals(NewChatDefaults("opus", "high"), store.defaults.value)
+        waitUntil { api.stored.effort == "high" }
         api.putError = JournalApiError.Transport("offline")
         store.set(NewChatDefaults.Key.MODEL, "sonnet")
+        assertEquals("sonnet", store.defaults.value?.model)
+        waitUntil { store.errorMessage.value != null }
         assertEquals("opus", store.defaults.value?.model)
         assertTrue(store.errorMessage.value!!.startsWith("Couldn't save the default model"))
         // The error stays until that key's next pick.
         api.putError = null
         store.set(NewChatDefaults.Key.MODEL, null)
         assertNull(store.errorMessage.value)
+        waitUntil { api.stored.model == null }
         assertNull(store.defaults.value?.model)
+        scope.cancel()
     }
 
     @Test
@@ -101,16 +106,72 @@ class NewChatDefaultsStoreTest {
         store.refresh()
         val gate = CompletableDeferred<Unit>()
         api.gate = gate
-        scope.launch { store.set(NewChatDefaults.Key.MODEL, "sonnet") }
+        store.set(NewChatDefaults.Key.MODEL, "sonnet")
         waitUntil { api.puts.size == 1 }
         store.set(NewChatDefaults.Key.MODEL, "haiku")
         store.set(NewChatDefaults.Key.MODEL, "fable")
         assertEquals("fable", store.defaults.value?.model)
         api.gate = null
         gate.complete(Unit)
-        waitUntil { api.puts.size == 2 && store.defaults.value?.model == "fable" && api.stored.model == "fable" }
+        waitUntil { api.puts.size == 2 && api.stored.model == "fable" }
         assertEquals(listOf<String?>("sonnet", "fable"), api.puts.map { it.second })
         assertEquals("fable", store.defaults.value?.model)
+        scope.cancel()
+    }
+
+    @Test
+    fun aFrameForAKeyBeingSavedIsHeldBackAndTheAnswerWins() = runBlocking {
+        val api = FakeDefaultsApi()
+        val scope = child()
+        val store = NewChatDefaultsStore(api, { MutableSharedFlow() }, scope)
+        store.refresh()
+        val gate = CompletableDeferred<Unit>()
+        api.gate = gate
+        store.set(NewChatDefaults.Key.MODEL, "sonnet")
+        waitUntil { api.puts.size == 1 }
+        // An older frame lands mid-save: its model is held, its effort applies.
+        store.applyLive(NewChatDefaults("opus", "low"))
+        assertEquals(NewChatDefaults("sonnet", "low"), store.defaults.value)
+        gate.complete(Unit)
+        waitUntil { api.stored.model == "sonnet" }
+        waitUntil { store.defaults.value == NewChatDefaults("sonnet", "low") }
+        assertEquals(NewChatDefaults("sonnet", "low"), store.defaults.value)
+        scope.cancel()
+    }
+
+    @Test
+    fun aRefusedSaveFallsBackToTheHeldFrame() = runBlocking {
+        val api = FakeDefaultsApi()
+        val scope = child()
+        val store = NewChatDefaultsStore(api, { MutableSharedFlow() }, scope)
+        store.refresh()
+        val gate = CompletableDeferred<Unit>()
+        api.gate = gate
+        api.putError = JournalApiError.Transport("offline")
+        store.set(NewChatDefaults.Key.MODEL, "sonnet")
+        waitUntil { api.puts.size == 1 }
+        store.applyLive(NewChatDefaults("haiku", null))
+        gate.complete(Unit)
+        waitUntil { store.errorMessage.value != null }
+        assertEquals("haiku", store.defaults.value?.model)
+        scope.cancel()
+    }
+
+    @Test
+    fun stoppingDoesNotCancelASaveInFlight() = runBlocking {
+        val api = FakeDefaultsApi()
+        val scope = child()
+        val store = NewChatDefaultsStore(api, { MutableSharedFlow() }, scope)
+        store.start()
+        waitUntil { store.defaults.value != null }
+        val gate = CompletableDeferred<Unit>()
+        api.gate = gate
+        store.set(NewChatDefaults.Key.EFFORT, "max")
+        waitUntil { api.puts.size == 1 }
+        store.stop()
+        gate.complete(Unit)
+        waitUntil { api.stored.effort == "max" && store.defaults.value?.effort == "max" }
+        assertEquals("max", store.defaults.value?.effort)
         scope.cancel()
     }
 

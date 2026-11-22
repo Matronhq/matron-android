@@ -19,7 +19,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -28,7 +27,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import chat.matron.android.journal.NewChatDefaults
 import chat.matron.android.viewmodels.NewChatDefaultsStore
-import kotlinx.coroutines.launch
 
 /// Settings → New chats: the user's default model and effort, which every
 /// bridge applies to a chat started without a choice of its own (journal
@@ -45,7 +43,6 @@ internal fun NewChatDefaultsSection(store: NewChatDefaultsStore) {
     val defaults by store.defaults.collectAsStateWithLifecycle()
     val isSupported by store.isSupported.collectAsStateWithLifecycle()
     val error by store.errorMessage.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
 
     SettingsSection("New chats") {
         if (isSupported == false) {
@@ -56,7 +53,7 @@ internal fun NewChatDefaultsSection(store: NewChatDefaultsStore) {
                 modifier = Modifier.padding(vertical = 8.dp),
             )
         } else {
-            NewChatDefaultsRows(defaults, error, onPick = { key, value -> scope.launch { store.set(key, value) } })
+            NewChatDefaultsRows(defaults, error, onPick = { key, value -> store.set(key, value) })
         }
     }
 }

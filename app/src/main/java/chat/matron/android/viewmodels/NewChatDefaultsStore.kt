@@ -32,6 +32,14 @@ import kotlinx.coroutines.launch
 /// newer pick. A failed `PUT` drops its pick (the key goes back to the
 /// journal's value, with an error) and a newer pick waiting is still sent.
 ///
+/// While a key's `PUT` is in flight, a live frame's value for that key is
+/// held back: the answer to the request sent wins, and a refused one falls
+/// back to the latest held value (as Devices does for box defaults). The
+/// frame's other key applies at once.
+///
+/// Saves run on the store's own (session) scope, so leaving Settings while
+/// one is in flight does not cancel it.
+///
 /// A save error belongs to its key and stays until that key's next pick or
 /// successful save. A load error stays until the next successful read,
 /// frame or save.
@@ -64,8 +72,10 @@ class NewChatDefaultsStore(
     /// Bumped by every `GET` sent, pick, frame and `PUT` answer: a `GET`
     /// answer from before the latest of them is older news and is dropped.
     private var seq = 0
-    /// Bumped by [stop]: a `PUT` loop from before it ends.
-    private var generation = 0
+    /// The latest frame value per key that landed while that key's `PUT`
+    /// ran (see the class note). A present key with a `null` value is a
+    /// held "Box default".
+    private val heldFrame = mutableMapOf<NewChatDefaults.Key, String?>()
     private var jobs = listOf<Job>()
 
     val isStarted: Boolean get() = jobs.isNotEmpty()
@@ -78,20 +88,14 @@ class NewChatDefaultsStore(
             scope.launch { updates().collect { applyLive(it) } },
             scope.launch { refresh() },
         )
-        // Picks kept across a stop() are sent now.
-        for (key in NewChatDefaults.Key.entries) {
-            if (pending.containsKey(key) && key !in saving) scope.launch { drain(key) }
-        }
     }
 
-    /// Stops listening. Picks not saved yet are kept, still shown, and sent
-    /// on the next [start]; an answer to a `PUT` sent before this is dropped
-    /// (its pick stays waiting and is sent again).
+    /// Stops listening. A save in flight carries on; a `GET` in flight is
+    /// dropped.
     fun stop() {
         jobs.forEach { it.cancel() }
         jobs = emptyList()
         seq += 1
-        generation += 1
     }
 
     /// `GET /defaults`. A 404 means the journal predates per-user defaults;
@@ -123,15 +127,15 @@ class NewChatDefaultsStore(
     /// Picks [value] (`null` = Box default) for [key]: shown at once, then
     /// `PUT`. Nothing happens before the first read has answered. While the
     /// key already has a `PUT` in flight this only replaces the waiting
-    /// value and returns.
-    suspend fun set(key: NewChatDefaults.Key, value: String?) {
+    /// value. The `PUT` runs on the store's scope, not the caller's.
+    fun set(key: NewChatDefaults.Key, value: String?) {
         if (server == null || _defaults.value?.get(key) == value) return
         // A read already in flight predates this pick: drop its answer.
         seq += 1
         pending[key] = value
         saveErrors.remove(key)
         show()
-        drain(key)
+        if (key !in saving) scope.launch { drain(key) }
     }
 
     /// One key's `PUT` loop: sends the waiting pick, applies the answer, and
@@ -139,14 +143,15 @@ class NewChatDefaultsStore(
     private suspend fun drain(key: NewChatDefaults.Key) {
         if (key in saving) return
         saving += key
-        val loopGeneration = generation
         try {
-            while (generation == loopGeneration && pending.containsKey(key)) {
+            while (pending.containsKey(key)) {
                 val desired = pending[key]
                 try {
                     val stored = api.setNewChatDefault(key, desired)
-                    if (generation != loopGeneration) break
                     seq += 1
+                    // The answer to the request we sent wins over any frame
+                    // held back meanwhile.
+                    heldFrame.remove(key)
                     // The answer's own key, in the journal's spelling. Its
                     // other key is never newer than a frame already applied.
                     server = server?.with(key, stored[key]) ?: stored
@@ -157,18 +162,18 @@ class NewChatDefaultsStore(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    if (generation != loopGeneration) break
                     if (pending.containsKey(key) && pending[key] == desired) pending.remove(key)
+                    // Nothing was written: the latest frame held back is the
+                    // journal's word for this key.
+                    if (heldFrame.containsKey(key)) server = server?.with(key, heldFrame.remove(key))
                     saveErrors[key] = "Couldn't save the ${key.errorName}: ${e.message ?: e}"
                     show()
                 }
             }
         } finally {
             saving -= key
+            heldFrame.remove(key)
         }
-        // Left on a stale generation (a stop() while the PUT was in flight):
-        // a pick waiting now would otherwise never be sent.
-        if (generation != loopGeneration && pending.containsKey(key) && jobs.isNotEmpty()) drain(key)
     }
 
     /// A live `defaults` frame: the full new state from any device or agent,
@@ -176,7 +181,14 @@ class NewChatDefaultsStore(
     /// stay on top until their own `PUT` answers.
     fun applyLive(answer: NewChatDefaults) {
         seq += 1
-        server = answer
+        var next = answer
+        for (key in NewChatDefaults.Key.entries) {
+            if (key in saving) {
+                heldFrame[key] = answer[key]
+                next = next.with(key, server?.get(key))
+            }
+        }
+        server = next
         _isSupported.value = true
         loadError = null
         show()
