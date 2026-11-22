@@ -101,8 +101,13 @@ class VoiceRecorder(
         /// which the composer UI ticks against to show elapsed time.
         /// [isPaused] is true while an interruption holds the capture — the
         /// composer shows "Paused" rather than "Recording" then, so the UI
-        /// never claims to capture what it does not.
-        data class Recording(val start: Instant, val isPaused: Boolean = false) : State
+        /// never claims to capture what it does not. [pausedTotal] is the time
+        /// earlier interruptions held the capture, which the clock leaves out.
+        data class Recording(
+            val start: Instant,
+            val isPaused: Boolean = false,
+            val pausedTotal: java.time.Duration = java.time.Duration.ZERO,
+        ) : State
         data object Finished : State
     }
 
@@ -423,7 +428,7 @@ class VoiceRecorder(
                 }
                 pausedTotal = pausedTotal.plus(java.time.Duration.between(since, now()))
                 pausedSince = null
-                _state.value = current.copy(isPaused = false)
+                _state.value = current.copy(isPaused = false, pausedTotal = pausedTotal)
                 log("resume: ${routeDescription()}")
             }
         }
@@ -438,8 +443,13 @@ class VoiceRecorder(
         when (event) {
             AudioInterruption.Began -> {
                 if (isInterrupted) return
+                // A pause the recorder refused leaves capture running: there
+                // is nothing to resume, so the warm-up carries on as before.
+                if (!activeRecorder.pause()) {
+                    log("interruption: pause failed during warm-up, capture continues")
+                    return
+                }
                 isInterrupted = true
-                activeRecorder.pause()
             }
             is AudioInterruption.Ended -> {
                 if (!isInterrupted) return

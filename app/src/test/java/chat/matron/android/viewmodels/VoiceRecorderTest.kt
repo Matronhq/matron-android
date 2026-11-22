@@ -852,4 +852,32 @@ class VoiceRecorderTest {
         assertEquals(VoiceRecorder.State.Finished, rec.state.value)
         assertTrue(dir.listFiles()?.isEmpty() ?: true)
     }
+
+    @Test
+    fun resume_reportsThePausedSpanForTheClock() = runBlocking {
+        val t0 = Instant.ofEpochSecond(1_000)
+        var now = t0
+        val interruptions = FakeInterruptions()
+        val rec = makeRecorder(interruptions = interruptions, now = { now })
+        rec.start()
+        now = t0.plusSeconds(10)
+        interruptions.deliver(AudioInterruption.Began)
+        now = t0.plusSeconds(25)
+        interruptions.deliver(AudioInterruption.Ended(shouldResume = true))
+        assertEquals(java.time.Duration.ofSeconds(15), recordingState(rec).pausedTotal)
+    }
+
+    @Test
+    fun interruption_duringWarmUp_whosePauseFails_doesNotFailTheStart() = runBlocking {
+        val interruptions = FakeInterruptions()
+        val fake = FakeAudioRecorder(silentChecks = 3, pauseReturn = false, resumeReturn = false)
+        var pauses = 0
+        val rec = makeRecorder(fake = fake, interruptions = interruptions, pause = {
+            pauses++
+            if (pauses == 1) interruptions.deliver(AudioInterruption.Began)
+            if (pauses == 2) interruptions.deliver(AudioInterruption.Ended(shouldResume = true))
+        })
+        rec.start()
+        assertTrue(rec.state.value is VoiceRecorder.State.Recording)
+    }
 }

@@ -40,7 +40,13 @@ sealed interface VoiceNoteBarMode {
     data object Starting : VoiceNoteBarMode
 
     /// Capturing since [start]; [isPaused] while an interruption holds it.
-    data class Recording(val start: Instant, val isPaused: Boolean = false) : VoiceNoteBarMode
+    /// [pausedTotal] is time earlier interruptions held it, which the clock
+    /// leaves out so it shows what was captured.
+    data class Recording(
+        val start: Instant,
+        val isPaused: Boolean = false,
+        val pausedTotal: Duration = Duration.ZERO,
+    ) : VoiceNoteBarMode
 }
 
 /// The chat composer's voice-note strip. A grey dot and "Starting
@@ -82,7 +88,7 @@ fun VoiceNoteRecordingBar(
                 )
             } else {
                 VoiceNoteDot(live = true)
-                val elapsed = rememberElapsed(mode.start, now)
+                val elapsed = rememberElapsed(mode.start.plus(mode.pausedTotal), now)
                 Text(
                     voiceNoteBarLabel(mode, elapsed),
                     modifier = Modifier.weight(1f),

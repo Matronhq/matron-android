@@ -411,7 +411,7 @@ private fun ComposerErrorBanner(message: String, onDismiss: () -> Unit) {
 /// The voice-note bar for a recorder state; `null` when no note is under way.
 internal fun voiceNoteBarMode(state: VoiceRecorder.State): VoiceNoteBarMode? = when (state) {
     VoiceRecorder.State.Starting -> VoiceNoteBarMode.Starting
-    is VoiceRecorder.State.Recording -> VoiceNoteBarMode.Recording(state.start, state.isPaused)
+    is VoiceRecorder.State.Recording -> VoiceNoteBarMode.Recording(state.start, state.isPaused, state.pausedTotal)
     VoiceRecorder.State.Idle, VoiceRecorder.State.Finished -> null
 }
 
