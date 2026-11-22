@@ -20,6 +20,9 @@ data class ProjectPageState(
     val page: TimelineProjectPage? = null,
     /// The journal has no such project.
     val isMissing: Boolean = false,
+    /// Bumped each time the page lands: its picture is asked for again, so
+    /// one that failed gets another try on a refresh.
+    val pageLoads: Int = 0,
     /// The project the one asked for was merged into, once the journal says so.
     val redirectedTo: String? = null,
     /// The project's weeks newest first, as far as they have been paged.
@@ -81,7 +84,7 @@ class ProjectPageViewModel(
                 projectID = loaded.project.id
                 _state.update { it.copy(redirectedTo = loaded.project.id) }
             }
-            _state.update { it.copy(page = loaded, isMissing = false) }
+            _state.update { it.copy(page = loaded, isMissing = false, pageLoads = it.pageLoads + 1) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
