@@ -1043,6 +1043,9 @@ private fun SignedInApp(
                     ) { entry ->
                         val boxID = entry.arguments?.getLong("boxID")
                         val boxesState by boxesVM.state.collectAsStateWithLifecycle()
+                        // Restored here straight after a process death: the
+                        // Boxes screen that normally loads is not underneath.
+                        LaunchedEffect(Unit) { if (!boxesVM.state.value.hasLoaded) boxesVM.load() }
                         val row = boxesVM.rows(boxesState).firstOrNull { it.id == boxID }
                         BoxSessionsScreen(
                             name = row?.device?.name.orEmpty(),

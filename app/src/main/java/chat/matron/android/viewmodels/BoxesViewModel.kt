@@ -101,7 +101,11 @@ class BoxesViewModel(
 
     /// Runs the Wake button's loop, the same one New Chat's list uses.
     private val waker = NewChatViewModel(api, capacityCache)
-    val wakingRows: StateFlow<Set<Long>> get() = waker.wakingRows
+    private val _wakingRows = MutableStateFlow<Set<Long>>(emptySet())
+    /// Boxes with a wake under way, until the reload after it has landed:
+    /// the wake loop alone ends before the reload marks the box online, and
+    /// the row would offer Wake again in between.
+    val wakingRows: StateFlow<Set<Long>> = _wakingRows.asStateFlow()
     val rowWakeFailed: StateFlow<Set<Long>> get() = waker.rowWakeFailed
 
     suspend fun load() {
@@ -161,8 +165,14 @@ class BoxesViewModel(
     }
 
     suspend fun wake(device: DeviceDTO) {
-        waker.wake(device)
-        load()
+        if (device.id in _wakingRows.value) return
+        _wakingRows.update { it + device.id }
+        try {
+            waker.wake(device)
+            load()
+        } finally {
+            _wakingRows.update { it - device.id }
+        }
     }
 
     /// Online, then asleep, then offline, each A to Z: the rows stay put as

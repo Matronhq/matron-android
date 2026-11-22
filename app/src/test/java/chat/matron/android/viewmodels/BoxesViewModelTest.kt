@@ -6,6 +6,7 @@ import chat.matron.android.journal.RPCReply
 import chat.matron.android.journal.RosterSession
 import chat.matron.android.journal.RosterSnapshot
 import chat.matron.android.models.SyncConnectionState
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -29,16 +30,19 @@ class BoxesViewModelTest {
         var devicesResult: Result<List<DeviceDTO>> = Result.success(emptyList())
         var rosterResult: Result<RosterSnapshot> = Result.success(RosterSnapshot())
         var devicesCalls = 0
+        /// When set, `GET /devices` parks on it (a read still on the wire).
+        var devicesGate: CompletableDeferred<Unit>? = null
+        var wakeReply: RPCReply = RPCReply.Failure("unknown_method", null)
         val feed = Channel<Pair<Long, BoxStatus>>(Channel.UNLIMITED)
         val connection = MutableStateFlow<SyncConnectionState>(SyncConnectionState.Running)
 
         override suspend fun devices(): List<DeviceDTO> {
             devicesCalls += 1
+            devicesGate?.await()
             return devicesResult.getOrThrow()
         }
         override suspend fun roster(): RosterSnapshot = rosterResult.getOrThrow()
-        override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply =
-            RPCReply.Failure("unknown_method", null)
+        override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply = wakeReply
         override fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = feed.receiveAsFlow()
         override fun connectionState(): StateFlow<SyncConnectionState> = connection
     }
@@ -216,6 +220,29 @@ class BoxesViewModelTest {
             BoxesViewModel.shownSessions(sessions, liveCount = null, isOnline = true, nowMs = now).map { it.id },
         )
         assertEquals(emptyList<RosterSession>(), BoxesViewModel.shownSessions(sessions, 4, isOnline = false, nowMs = now))
+    }
+
+    @Test
+    fun wake_staysWakingUntilTheReloadAfterItLands() = runBlocking {
+        val fake = Fake()
+        val asleep = agent(1, "box-a", connected = false)
+        fake.devicesResult = Result.success(listOf(asleep))
+        fake.rosterResult = Result.success(RosterSnapshot(wakeableBoxes = setOf(1)))
+        val vm = makeVM(fake)
+        vm.load()
+        // The box answers at once (it is up); the reload is still out.
+        fake.wakeReply = RPCReply.Ok(kotlinx.serialization.json.JsonObject(emptyMap()))
+        val gate = CompletableDeferred<Unit>()
+        fake.devicesGate = gate
+        val job = launch { vm.wake(asleep) }
+        waitUntil { fake.devicesCalls == 2 }
+        assertEquals(NewChatViewModel.RowWake.Waking, vm.rows(nowMs = now).single().wake)
+        fake.devicesResult = Result.success(listOf(asleep.copy(connected = true)))
+        gate.complete(Unit)
+        job.join()
+        val row = vm.rows(nowMs = now).single()
+        assertNull(row.wake)
+        assertEquals(BoxConnectionState.Online, row.state)
     }
 
     @Test

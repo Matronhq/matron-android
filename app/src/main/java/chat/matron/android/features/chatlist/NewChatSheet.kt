@@ -143,8 +143,10 @@ fun NewChatSheet(
         }
 
         when (val current = phase) {
+            // Opened on a box: the folder step takes over within a frame, so
+            // the box list's loading copy would only flash.
             is NewChatViewModel.Phase.LoadingAgents ->
-                LoadingRow("Looking for your agents…")
+                if (startOn == null) LoadingRow("Looking for your agents…")
 
             is NewChatViewModel.Phase.Agents -> {
                 errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
