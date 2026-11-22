@@ -67,6 +67,8 @@ import chat.matron.android.chat.MediaFetchOutcome
 import chat.matron.android.designsystem.MarkdownPreviewTarget
 import chat.matron.android.designsystem.ChatSearchBar
 import chat.matron.android.designsystem.ImageGallery
+import chat.matron.android.designsystem.ChatMissionLine
+import chat.matron.android.designsystem.ChatMissionLineView
 import kotlinx.coroutines.CancellationException
 import chat.matron.android.designsystem.CompactContextBanner
 import chat.matron.android.designsystem.DateSeparator
@@ -157,6 +159,10 @@ fun ChatScreen(
     /// Pin… / Move pin… / Unpin in the "⋮" menu (journal pinned desk
     /// chats). `null` — a journal without pins, previews — offers none.
     pinMenu: ChatPinMenu? = null,
+    /// The mission (and its project) under the title; null draws no line.
+    missionLine: ChatMissionLine? = null,
+    /// Opens the project named on [missionLine].
+    onOpenProject: ((String) -> Unit)? = null,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val chatSearch by chatVM.chatSearch.collectAsStateWithLifecycle()
@@ -229,59 +235,11 @@ fun ChatScreen(
                 // summaries TOC sheet; with no mission the title is not a
                 // button — same content, just inert.
                 title = {
-                    val openMission = onOpenMission
-                    Column(
-                        modifier = if (missionID != null && openMission != null) {
-                            Modifier.clickable(onClickLabel = "Open this conversation's mission") { openMission(missionID) }
-                        } else {
-                            Modifier
-                        },
-                    ) {
-                        // `A:bc Title` (or `A↔B:bc Title` for a multi-agent
-                        // room) as one styled line — same composition and
-                        // fallbacks as ChatRow's titleLine (apple #152). The
-                        // visible header leads with the styled tag, so the
-                        // accessibility label spells the same information
-                        // out — box name(s) and session short ahead of the
-                        // clean title.
-                        val darkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
-                        val titleText = SessionTagText.titleLine(
-                            // The room marker drops only when a room tag
-                            // will actually render in its place.
-                            title = if (roomBoxNames.size >= 2) {
-                                SessionTag.titleBesideRoomTag(chatTitle)
-                            } else {
-                                chatTitle
-                            },
-                            boxLetter = boxShort,
-                            boxName = boxName,
-                            sessionShort = sessionShort,
-                            roomBoxNames = roomBoxNames,
-                            roomBoxShorts = roomBoxShorts,
-                            darkTheme = darkTheme,
-                            secondary = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        val a11yTitle = chatAccessibilityTitle(chatTitle, boxName, sessionShort, roomBoxNames)
-                        Text(
-                            titleText,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.semantics { contentDescription = a11yTitle },
-                        )
-                        chatContextLine(boxName, sessionStatus?.workdir)?.let { context ->
-                            Text(
-                                context,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                // The Apple original middle-truncates (the
-                                // tail of a path is the part worth keeping);
-                                // TextOverflow.MiddleEllipsis needs Compose
-                                // 1.8, so tail ellipsis until the BOM moves.
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
+                    ChatHeaderTitle(
+                        chatTitle = chatTitle, boxName = boxName, sessionShort = sessionShort, boxShort = boxShort,
+                        roomBoxNames = roomBoxNames, roomBoxShorts = roomBoxShorts, workdir = sessionStatus?.workdir,
+                        missionID = missionID, onOpenMission = onOpenMission, missionLine = missionLine, onOpenProject = onOpenProject,
+                    )
                 },
                 navigationIcon = {
                     if (showsBackButton) {
@@ -468,6 +426,80 @@ fun ChatScreen(
 fun chatContextLine(boxName: String?, workdir: String?): String? {
     val parts = listOfNotNull(boxName, workdir?.let(UsageMetersFormat::homeAbbreviated))
     return if (parts.isEmpty()) null else parts.joinToString(" · ")
+}
+
+/// The chat header's title: the tagged title, "box · ~/workdir" under it,
+/// then the mission and project line. The title is a button to this
+/// conversation's mission when it has one. Shared by [ChatScreen] and its
+/// screen test.
+@Composable
+fun ChatHeaderTitle(
+    chatTitle: String,
+    boxName: String?,
+    sessionShort: String?,
+    boxShort: String?,
+    roomBoxNames: List<String>,
+    roomBoxShorts: List<String>,
+    workdir: String?,
+    missionID: String?,
+    onOpenMission: ((String) -> Unit)?,
+    missionLine: ChatMissionLine?,
+    onOpenProject: ((String) -> Unit)?,
+) {
+    val openMission = onOpenMission
+    Column(
+        modifier = if (missionID != null && openMission != null) {
+            Modifier.clickable(onClickLabel = "Open this conversation's mission") { openMission(missionID) }
+        } else {
+            Modifier
+        },
+    ) {
+        // `A:bc Title` (or `A↔B:bc Title` for a multi-agent
+        // room) as one styled line — same composition and
+        // fallbacks as ChatRow's titleLine (apple #152). The
+        // visible header leads with the styled tag, so the
+        // accessibility label spells the same information
+        // out — box name(s) and session short ahead of the
+        // clean title.
+        val darkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+        val titleText = SessionTagText.titleLine(
+            // The room marker drops only when a room tag
+            // will actually render in its place.
+            title = if (roomBoxNames.size >= 2) {
+                SessionTag.titleBesideRoomTag(chatTitle)
+            } else {
+                chatTitle
+            },
+            boxLetter = boxShort,
+            boxName = boxName,
+            sessionShort = sessionShort,
+            roomBoxNames = roomBoxNames,
+            roomBoxShorts = roomBoxShorts,
+            darkTheme = darkTheme,
+            secondary = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        val a11yTitle = chatAccessibilityTitle(chatTitle, boxName, sessionShort, roomBoxNames)
+        Text(
+            titleText,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.semantics { contentDescription = a11yTitle },
+        )
+        chatContextLine(boxName, workdir)?.let { context ->
+            Text(
+                context,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                // The Apple original middle-truncates (the
+                // tail of a path is the part worth keeping);
+                // TextOverflow.MiddleEllipsis needs Compose
+                // 1.8, so tail ellipsis until the BOM moves.
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        missionLine?.let { line -> ChatMissionLineView(line, onOpenMission, onOpenProject) }
+    }
 }
 
 /// What TalkBack reads for the header title: the visible tag's meaning

@@ -41,6 +41,8 @@ import chat.matron.android.viewmodels.AccountEmailViewModel
 import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
 import chat.matron.android.viewmodels.MissionsListViewModel
 import chat.matron.android.viewmodels.TimelineViewModel
+import chat.matron.android.designsystem.ChatMissionLine
+import chat.matron.android.models.Project
 import chat.matron.android.viewmodels.ProjectPageViewModel
 import chat.matron.android.viewmodels.GoToNumberResolver
 import chat.matron.android.viewmodels.TrackerItemLinkResolver
@@ -559,6 +561,32 @@ class AppDependencies(
             missionChanged = { id -> c.missionsSync.refreshMission(id) },
             projectChanged = projectChanged,
         )
+    }
+
+    /**
+     * The mission and project line under a chat's title, read from the
+     * journal (`GET /conversations/:id/missions`, then the project's title);
+     * null when the conversation was never on a mission or the read failed.
+     */
+    suspend fun chatMissionLine(session: UserSession, convoID: String): ChatMissionLine? =
+        try {
+            val links = core(session).api.conversationMissions(convoID)
+            val line = ChatMissionLine.from(links)
+            line?.projectID?.let { id -> line.copy(projectTitle = projectTitle(session, id)) } ?: line
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            null
+        }
+
+    /** The open projects a mission can be moved to. */
+    suspend fun openProjects(session: UserSession): List<Project> = core(session).api.listProjects(openOnly = true)
+
+    /** Files [missionID] in [projectID], then refreshes the mission's cached row. */
+    suspend fun moveMission(session: UserSession, missionID: String, projectID: String) {
+        val c = core(session)
+        c.api.setMissionProject(missionID, projectID)
+        c.missionsSync.refreshMission(missionID)
     }
 
     /** A project's title, for the chip on a mission's page; null when it can't be read. */

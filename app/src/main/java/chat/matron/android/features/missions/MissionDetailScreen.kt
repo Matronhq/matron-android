@@ -29,6 +29,7 @@ import chat.matron.android.designsystem.MissionDetailModel
 import chat.matron.android.designsystem.MissionDetailView
 import chat.matron.android.designsystem.missionProjectChip
 import chat.matron.android.models.Milestone
+import chat.matron.android.models.Project
 import chat.matron.android.viewmodels.MissionDetailViewModel
 import kotlinx.coroutines.launch
 
@@ -50,6 +51,10 @@ fun MissionDetailScreen(
     projectTitle: suspend (String) -> String? = { null },
     /// Opens that project's page; null shows no chip.
     onOpenProject: ((String) -> Unit)? = null,
+    /// The open projects the mission can move to; null offers no move.
+    projectTargets: (suspend () -> List<Project>)? = null,
+    /// Files the mission in a project.
+    moveToProject: suspend (missionID: String, projectID: String) -> Unit = { _, _ -> },
 ) {
     val mission by viewModel.mission.collectAsStateWithLifecycle()
     val milestones by viewModel.milestones.collectAsStateWithLifecycle()
@@ -63,9 +68,17 @@ fun MissionDetailScreen(
     val coroutineScope = rememberCoroutineScope()
     var isRefreshing by remember { mutableStateOf(false) }
     val projectID = mission?.projectID
+    // The moved-to title is known at once; a re-read follows the cache.
+    var movedTitle by remember { mutableStateOf<Pair<String, String>?>(null) }
     val resolvedTitle by produceState<String?>(initialValue = null, projectID) {
-        value = projectID?.let { projectTitle(it) }
+        value = projectID?.let { id -> movedTitle?.takeIf { it.first == id }?.second ?: projectTitle(id) }
     }
+    // Read once per page (the lambda is rebuilt on every recomposition, so it is not the key).
+    val offersMove = projectTargets != null
+    val targets by produceState<List<Project>?>(initialValue = null, offersMove) {
+        value = projectTargets?.let { load -> try { load() } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (_: Throwable) { null } }
+    }
+    var moveError by remember { mutableStateOf<String?>(null) }
 
     DisposableEffect(viewModel) {
         viewModel.start()
@@ -105,10 +118,32 @@ fun MissionDetailScreen(
                 isRefreshing = isRefreshing,
                 projectChip = if (onOpenProject == null) null else mission?.let { missionProjectChip(it, resolvedTitle) },
                 onOpenProject = { id -> onOpenProject?.invoke(id) },
+                moveTargets = targets,
+                onMove = { target ->
+                    val id = mission?.id
+                    if (id != null) coroutineScope.launch {
+                        try {
+                            movedTitle = target to (targets?.firstOrNull { it.id == target }?.title ?: "")
+                            moveToProject(id, target)
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            moveError = e.message ?: "Couldn't move the mission."
+                        }
+                    }
+                },
             )
         }
     }
 
+    moveError?.let { message ->
+        AlertDialog(
+            onDismissRequest = { moveError = null },
+            title = { Text("Missions") },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { moveError = null }) { Text("OK") } },
+        )
+    }
     error?.let { message ->
         AlertDialog(
             onDismissRequest = { viewModel.dismissError() },

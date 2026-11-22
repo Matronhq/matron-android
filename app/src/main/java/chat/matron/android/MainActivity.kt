@@ -89,7 +89,9 @@ import chat.matron.android.designsystem.TimelineListCopy
 import chat.matron.android.features.projects.ProjectScreen
 import chat.matron.android.features.projects.ProjectSectionScreen
 import chat.matron.android.designsystem.ProjectSection
+import chat.matron.android.designsystem.ChatMissionLine
 import chat.matron.android.models.ProjectFileSource
+import chat.matron.android.models.Project
 import chat.matron.android.features.missions.missionOpenConversationOutcome
 import chat.matron.android.features.chat.ChatScreen
 import chat.matron.android.features.chat.ChatVMCache
@@ -875,6 +877,7 @@ private fun SignedInApp(
                 // on THIS tab's stack (idempotent for the page already on top).
                 onOpenMission = { shell.pushMission(it) },
                 pinMenu = chatPinMenu(pins, convoID, pinsController),
+                onOpenProject = { shell.openProject(it) },
             )
         }
 
@@ -906,6 +909,8 @@ private fun SignedInApp(
                 onOpenConversation = open,
                 projectTitle = { deps.projectTitle(session, it) },
                 onOpenProject = { shell.openProject(it) },
+                projectTargets = { deps.openProjects(session) },
+                moveToProject = { mission, project -> deps.moveMission(session, mission, project) },
             )
         }
 
@@ -1021,6 +1026,7 @@ private fun SignedInApp(
                                     onOpenItems = { nav.navigate("${AppTab.COORDINATOR.routePrefix}items/$convoID") },
                                     onOpenItem = { nav.pushItem(AppTab.COORDINATOR.routePrefix, it) },
                                     onOpenMission = { shell.pushMission(it) },
+                                    onOpenProject = { shell.openProject(it) },
                                 )
                             }
                         }
@@ -1330,6 +1336,8 @@ private fun SignedInApp(
                             onOpenConversation = onOpenConversationFromMissions,
                             projectTitle = { deps.projectTitle(session, it) },
                             onOpenProject = { shell.openProject(it) },
+                            projectTargets = { deps.openProjects(session) },
+                            moveToProject = { mission, project -> deps.moveMission(session, mission, project) },
                         )
                     }
                     composable(
@@ -1578,6 +1586,8 @@ private fun MissionDetailRoute(
     onOpenConversation: (String) -> Unit,
     projectTitle: suspend (String) -> String?,
     onOpenProject: (String) -> Unit,
+    projectTargets: (suspend () -> List<Project>)? = null,
+    moveToProject: suspend (String, String) -> Unit = { _, _ -> },
 ) {
     val viewModel = remember(missionID) { vmCache.missionDetailViewModel(missionID) }
     MissionDetailScreen(
@@ -1588,6 +1598,8 @@ private fun MissionDetailRoute(
         onOpenConversation = onOpenConversation,
         projectTitle = projectTitle,
         onOpenProject = onOpenProject,
+        projectTargets = projectTargets,
+        moveToProject = moveToProject,
     )
 }
 
@@ -1676,6 +1688,8 @@ private fun ChatRoute(
     roomBoxShorts: List<String> = emptyList(),
     /// The "⋮" menu's pin entries; null offers none (the Coordinator root).
     pinMenu: ChatPinMenu? = null,
+    /// Opens a project from the mission line under the title.
+    onOpenProject: ((String) -> Unit)? = null,
 ) {
     // `[#65](matron://item/65)` links in any message body (apple #208):
     // resolved through the session's store + sync, opened where an inline
@@ -1749,6 +1763,11 @@ private fun ChatRoute(
             val missionID by produceState<String?>(initialValue = null, convoID) {
                 deps.missionIDFlow(session, convoID).collect { value = it }
             }
+            // The mission and project under the title: read when the room opens
+            // and again whenever the cache says its mission changed.
+            val missionLine by produceState<ChatMissionLine?>(initialValue = null, convoID, missionID) {
+                value = deps.chatMissionLine(session, convoID)
+            }
             ChatScreen(
                 chatVM = chatVM,
                 composerVM = composerVM,
@@ -1772,6 +1791,8 @@ private fun ChatRoute(
                 missionID = missionID,
                 onOpenMission = onOpenMission,
                 pinMenu = pinMenu,
+                missionLine = missionLine,
+                onOpenProject = onOpenProject,
                 // Deferred: built when the browser sheet opens, on the sheet's own
                 // scope, over the same store the sync engine writes (apple #142).
                 mediaBrowser = { scope ->
