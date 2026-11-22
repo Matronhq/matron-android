@@ -27,6 +27,12 @@ data class ProjectPageState(
     val history: List<TimelineHistoryWeek> = emptyList(),
     val historyLoaded: Boolean = false,
     val hasMoreHistory: Boolean = false,
+    /// Bumped each time a page of the history lands: the view's end asks
+    /// for the next page again even when the list kept its length (a
+    /// reload, or a page of weeks already listed).
+    val historyVersion: Int = 0,
+    /// The last older-page read of the history failed: its end offers Retry.
+    val historyPagingFailed: Boolean = false,
     /// The project's missions, open ones by latest activity, finished ones
     /// by when they closed; null until read.
     val openMissions: List<Mission>? = null,
@@ -127,7 +133,12 @@ class ProjectPageViewModel(
             val loaded = timeline.timelineProjectHistory(projectID)
             if (generation != historyGeneration) return
             historyNextBefore = loaded.nextBefore
-            _state.update { it.copy(history = loaded.weeks, historyLoaded = true, hasMoreHistory = loaded.nextBefore != null) }
+            _state.update {
+                it.copy(
+                    history = loaded.weeks, historyLoaded = true, hasMoreHistory = loaded.nextBefore != null,
+                    historyVersion = it.historyVersion + 1, historyPagingFailed = false,
+                )
+            }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
@@ -142,17 +153,21 @@ class ProjectPageViewModel(
         if (isLoadingMoreHistory || isReloadingHistory) return
         isLoadingMoreHistory = true
         val generation = historyGeneration
+        _state.update { it.copy(historyPagingFailed = false) }
         try {
             val loaded = timeline.timelineProjectHistory(projectID, before = before)
             if (generation != historyGeneration) return
             historyNextBefore = loaded.nextBefore
             _state.update { s ->
-                s.copy(history = s.history + loaded.weeks.filter { w -> s.history.none { it.week == w.week } }, hasMoreHistory = loaded.nextBefore != null)
+                s.copy(
+                    history = s.history + loaded.weeks.filter { w -> s.history.none { it.week == w.week } },
+                    hasMoreHistory = loaded.nextBefore != null, historyVersion = s.historyVersion + 1,
+                )
             }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            if (generation == historyGeneration) _state.update { it.copy(error = error.message) }
+            if (generation == historyGeneration) _state.update { it.copy(error = error.message, historyPagingFailed = true) }
         } finally {
             isLoadingMoreHistory = false
         }
