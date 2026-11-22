@@ -5,6 +5,7 @@ import chat.matron.android.journal.ProjectsProviding
 import chat.matron.android.journal.TimelineProviding
 import chat.matron.android.models.Mission
 import chat.matron.android.models.MissionState
+import chat.matron.android.models.ProjectFilesPage
 import chat.matron.android.models.TimelineHistoryWeek
 import chat.matron.android.models.TimelineProjectPage
 import java.time.Instant
@@ -30,6 +31,9 @@ data class ProjectPageState(
     /// by when they closed; null until read.
     val openMissions: List<Mission>? = null,
     val closedMissions: List<Mission> = emptyList(),
+    /// The project's files and pictures, newest first, as far as they have
+    /// been paged; null until read.
+    val files: ProjectFilesPage? = null,
     val error: String? = null,
 )
 
@@ -61,6 +65,9 @@ class ProjectPageViewModel(
     /// again even when their first read failed.
     private var historyAsked = false
     private var missionsAsked = false
+    private var filesAsked = false
+    private var filesGeneration = 0
+    private var isLoadingMoreFiles = false
 
     /// Reads the page: on arrival, on coming back, and for "Try again".
     suspend fun refreshPage() {
@@ -92,6 +99,7 @@ class ProjectPageViewModel(
         if (_state.value.isMissing) return
         if (historyAsked) loadHistory()
         if (missionsAsked) loadMissions()
+        if (filesAsked) loadFiles()
     }
 
     /// Reads the history's first page unless it has loaded (or is being read).
@@ -152,6 +160,39 @@ class ProjectPageViewModel(
             throw cancel
         } catch (error: Throwable) {
             _state.update { it.copy(error = error.message) }
+        }
+    }
+
+    /// Reads the first page of the project's files, replacing what was loaded.
+    suspend fun loadFiles() {
+        filesAsked = true
+        val generation = ++filesGeneration
+        try {
+            val page = projects.projectFiles(projectID)
+            if (generation == filesGeneration) _state.update { it.copy(files = page) }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            if (generation == filesGeneration) _state.update { it.copy(error = error.message) }
+        }
+    }
+
+    /// Reads the next (older) page of files while there is one.
+    suspend fun loadMoreFiles() {
+        val shown = _state.value.files ?: return
+        val before = shown.nextBefore ?: return
+        if (isLoadingMoreFiles) return
+        isLoadingMoreFiles = true
+        val generation = filesGeneration
+        try {
+            val page = projects.projectFiles(projectID, before = before)
+            if (generation == filesGeneration) _state.update { it.copy(files = shown.appending(page)) }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            if (generation == filesGeneration) _state.update { it.copy(error = error.message) }
+        } finally {
+            isLoadingMoreFiles = false
         }
     }
 

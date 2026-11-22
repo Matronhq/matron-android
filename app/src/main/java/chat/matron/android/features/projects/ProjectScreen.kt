@@ -44,6 +44,14 @@ import chat.matron.android.designsystem.ProjectHistoryView
 import chat.matron.android.designsystem.ProjectMissionsListView
 import chat.matron.android.designsystem.ProjectSection
 import chat.matron.android.designsystem.ProjectSummaryView
+import chat.matron.android.designsystem.AttachmentFullscreenViewer
+import chat.matron.android.designsystem.ImageGallery
+import chat.matron.android.designsystem.ProjectFileOpening
+import chat.matron.android.designsystem.ProjectFilesGridView
+import chat.matron.android.designsystem.projectFileOpening
+import chat.matron.android.designsystem.projectPictureBlobIDs
+import chat.matron.android.models.ProjectFile
+import chat.matron.android.models.ProjectFileSource
 import chat.matron.android.designsystem.TimelineFormat
 import chat.matron.android.models.ProjectMilestone
 import chat.matron.android.viewmodels.ProjectPageState
@@ -53,7 +61,7 @@ import kotlinx.coroutines.launch
 import okhttp3.HttpUrl
 
 /// The sections a project's page lists, top to bottom.
-val PROJECT_PAGE_SECTIONS = listOf(ProjectSection.HISTORY, ProjectSection.MISSIONS)
+val PROJECT_PAGE_SECTIONS = listOf(ProjectSection.HISTORY, ProjectSection.MISSIONS, ProjectSection.FILES)
 
 /// What a project screen draws.
 sealed interface ProjectScreenContent {
@@ -129,7 +137,8 @@ fun ProjectSectionScreen(
     onBack: () -> Unit,
     onOpenMission: (String) -> Unit,
     onOpenMilestone: (ProjectMilestone) -> Unit,
-    files: @Composable (ProjectPageViewModel) -> Unit = {},
+    /// Opens a file where it was posted: its item, or its chat at that point.
+    onOpenFileSource: (ProjectFileSource) -> Unit = {},
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -139,12 +148,14 @@ fun ProjectSectionScreen(
         when (section) {
             ProjectSection.HISTORY -> viewModel.loadHistoryIfNeeded()
             ProjectSection.MISSIONS -> viewModel.loadMissions()
-            ProjectSection.FILES -> Unit
+            ProjectSection.FILES -> viewModel.loadFiles()
         }
     }
-    val pictures = state.history.mapNotNull { it.media }.filter { !it.isVideo }.map { it.blobID }
+    val pictures = state.history.mapNotNull { it.media }.filter { !it.isVideo }.map { it.blobID } +
+        (state.files?.rows ?: emptyList()).filter { it.isImage }.map { it.blobID }.distinct()
     val images = rememberTimelineImages(pictures, media, serverURL)
     val title = ProjectFormat.sectionTitle(section)
+    var gallery by remember { mutableStateOf<ImageGallery?>(null) }
 
     ProjectScaffold(title = title, onBack = onBack) {
         PullToRefreshBox(
@@ -161,7 +172,16 @@ fun ProjectSectionScreen(
                 section == ProjectSection.MISSIONS && state.openMissions != null -> ProjectMissionsListView(
                     open = state.openMissions!!, closed = state.closedMissions, now = Instant.now(), onOpenMission = onOpenMission,
                 )
-                section == ProjectSection.FILES -> files(viewModel)
+                section == ProjectSection.FILES && state.files != null -> ProjectFilesGridView(
+                    files = state.files!!.rows, images = images, now = Instant.now(), hasMore = state.files!!.hasMore,
+                    onOpenFile = { file ->
+                        when (projectFileOpening(file)) {
+                            ProjectFileOpening.PICTURE -> gallery = projectGallery(state.files!!.rows, file, images, serverURL, media)
+                            ProjectFileOpening.SOURCE -> onOpenFileSource(file.source)
+                        }
+                    },
+                    onLoadMore = { scope.launch { viewModel.loadMoreFiles() } },
+                )
                 state.error != null -> ProjectPlaceholder(TimelineFormat.FAILED, TimelineFormat.FAILED_DETAIL) {
                     Button(onClick = { scope.launch { viewModel.refresh() } }) { Text(TimelineFormat.TRY_AGAIN) }
                 }
@@ -169,7 +189,21 @@ fun ProjectSectionScreen(
             }
         }
     }
+    gallery?.let { AttachmentFullscreenViewer(gallery = it, onDismiss = { gallery = null }) }
     ProjectErrorAlert(state, viewModel)
+}
+
+/// The project's pictures in the grid's order, opened on [tapped].
+internal fun projectGallery(files: List<ProjectFile>, tapped: ProjectFile, images: Map<String, Any>, serverURL: HttpUrl, media: MediaService): ImageGallery {
+    val blobIDs = projectPictureBlobIDs(files)
+    val names = files.filter { it.isImage }.associate { it.blobID to it.name }
+    fun url(blobID: String) = serverURL.newBuilder().addPathSegment("media").addPathSegment(blobID).build().toString()
+    return ImageGallery(
+        entries = blobIDs.map { ImageGallery.Entry(id = it, url = url(it), expired = false, name = names[it]) },
+        startIndex = blobIDs.indexOf(tapped.blobID).coerceAtLeast(0),
+        initial = images[tapped.blobID],
+        load = { u -> media.image(u) },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

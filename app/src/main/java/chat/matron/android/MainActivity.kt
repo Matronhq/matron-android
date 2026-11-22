@@ -89,6 +89,7 @@ import chat.matron.android.designsystem.TimelineListCopy
 import chat.matron.android.features.projects.ProjectScreen
 import chat.matron.android.features.projects.ProjectSectionScreen
 import chat.matron.android.designsystem.ProjectSection
+import chat.matron.android.models.ProjectFileSource
 import chat.matron.android.features.missions.missionOpenConversationOutcome
 import chat.matron.android.features.chat.ChatScreen
 import chat.matron.android.features.chat.ChatVMCache
@@ -1251,6 +1252,14 @@ private fun SignedInApp(
                             onBack = { nav.popBackStack() },
                             onOpenMission = { shell.pushMission(it) },
                             onOpenMilestone = { onOpenConversationFromMissions(it.milestone.convoID); jumpToMilestone(it.milestone.convoID, it.milestone.seq) },
+                            onOpenFileSource = { source ->
+                                when (source) {
+                                    is ProjectFileSource.Chat -> { onOpenConversationFromMissions(source.convoID); jumpToMilestone(source.convoID, source.seq) }
+                                    is ProjectFileSource.Item -> sessionScope.launch {
+                                        (deps.trackerItemLinkOutcome(source.num, session) as? TrackerItemLinkOutcome.Open)?.let { shell.pushMissionItem(it.itemID) }
+                                    }
+                                }
+                            },
                         )
                     }
                     // The lists below the weeks, pushed from the week page.
