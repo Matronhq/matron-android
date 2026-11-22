@@ -184,6 +184,7 @@ fun ProjectSectionScreen(
                 section == ProjectSection.FILES && state.files != null -> ProjectFilesGridView(
                     files = state.files!!.rows, images = emptyMap(), now = Instant.now(), hasMore = state.files!!.hasMore,
                     loadImage = { blobID -> thumbnails.load(blobID) },
+                    reloads = state.filesReloads,
                     onOpenFile = { file, shown ->
                         when (projectFileOpening(file)) {
                             // The latest tap wins: an earlier one still resolving

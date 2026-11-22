@@ -142,6 +142,8 @@ fun ProjectFilesGridView(
     /// Loads a picture's bytes while its tile is on screen; null shows only
     /// what [images] holds.
     loadImage: (suspend (String) -> Any?)? = null,
+    /// Bumped by each refresh of the first page.
+    reloads: Int = 0,
 ) {
     BoxWithConstraints(modifier.fillMaxSize()) {
         val columns = if (maxWidth >= 700.dp) 3 else 2
@@ -163,10 +165,10 @@ fun ProjectFilesGridView(
                 // Not keyed on the loader: the host's is a new lambda on each
                 // recomposition, and a load must not restart with it.
                 val load by rememberUpdatedState(loadImage)
-                // Also keyed on the list's version: a refresh (or a page that
-                // lands) asks again for a picture that failed; one that loaded
-                // comes straight back from the host's cache.
-                val image by produceState(images[file.blobID], file.blobID, version) {
+                // Also keyed on [reloads]: a refresh asks again for a picture
+                // that failed (one that loaded comes straight back from the
+                // host's cache), while an older page landing cancels nothing.
+                val image by produceState(images[file.blobID], file.blobID, reloads) {
                     if (value == null && file.isImage) load?.let { value = it(file.blobID) }
                 }
                 ProjectFileTile(file, image, now, onOpen = { onOpenFile(file, image) })
