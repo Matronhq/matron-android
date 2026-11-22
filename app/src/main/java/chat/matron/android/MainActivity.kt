@@ -39,6 +39,8 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
@@ -244,8 +246,12 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
             var bootstrapped by remember { mutableStateOf(false) }
             var session by remember { mutableStateOf<UserSession?>(null) }
             // The sign-in the server revoked, while the sign-in screen it led
-            // to is up: that screen says why.
-            var revokedSession by remember { mutableStateOf<UserSession?>(null) }
+            // to is up: that screen says why. Saved with the activity, as the
+            // saved session is already gone: a recreated activity must still
+            // say why and keep the account filled in.
+            var revokedSession by rememberSaveable(stateSaver = RevokedSessionSaver) {
+                mutableStateOf<UserSession?>(null)
+            }
 
             // The server revoked this device's token (signed out from another
             // device): the same sign-out as the Settings button, then the
@@ -387,6 +393,18 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
 /// does.
 fun revokeSignsOut(current: UserSession?, revoked: UserSession): Boolean =
     current == null || current.isSameSignIn(revoked)
+
+/// Keeps the revoked sign-in across activity recreation, without its token:
+/// the screen needs only the account, journal and device.
+val RevokedSessionSaver: Saver<UserSession?, Any> = Saver(
+    save = { session -> session?.let { arrayListOf(it.userID, it.deviceID, it.homeserverURL) } ?: arrayListOf<String>() },
+    restore = { saved ->
+        @Suppress("UNCHECKED_CAST")
+        (saved as? List<String>)?.takeIf { it.size == 3 }?.let {
+            UserSession(userID = it[0], deviceID = it[1], homeserverURL = it[2], accessToken = "")
+        }
+    },
+)
 
 /// The restored session to publish at launch: never one a revoke has just
 /// signed out.

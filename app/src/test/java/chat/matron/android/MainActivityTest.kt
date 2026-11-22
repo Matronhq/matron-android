@@ -1,5 +1,6 @@
 package chat.matron.android
 
+import chat.matron.android.models.isSameSignIn
 import java.io.File
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -36,6 +37,20 @@ class MainActivityTest {
         assertFalse(revokeSignsOut(current = alice.copy(userID = "bob"), revoked = alice))
         assertTrue("nothing published yet", revokeSignsOut(current = null, revoked = alice))
     }
+
+    @Test
+    fun theRevokedSignIn_survivesRecreation_withoutItsToken() {
+        val scope = androidx.compose.runtime.saveable.SaverScope { true }
+        val saved = with(RevokedSessionSaver) { scope.save(alice) }!!
+        val restored = RevokedSessionSaver.restore(saved)!!
+        assertTrue(restored.isSameSignInAs(alice))
+        assertEquals("", restored.accessToken)
+        val none = with(RevokedSessionSaver) { scope.save(null) }!!
+        assertEquals(null, RevokedSessionSaver.restore(none))
+    }
+
+    private fun chat.matron.android.models.UserSession.isSameSignInAs(other: chat.matron.android.models.UserSession) =
+        isSameSignIn(other)
 
     @Test
     fun aRestoredSession_isNotPublishedOnceRevoked() {
