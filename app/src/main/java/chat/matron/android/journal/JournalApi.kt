@@ -401,8 +401,13 @@ class JournalApi(
     private var token: String? = token
 
     fun setToken(token: String?) {
-        this.token = token
+        synchronized(tokenLock) { this.token = token }
     }
+
+    /// Held while a token is swapped and while an answer's lock report is
+    /// checked against the token in use, so a report for the old token is
+    /// either told before the swap or never.
+    private val tokenLock = Any()
 
     /// Told what every answered, authenticated request says about the
     /// account lock (HTTP 423). Null in hosts that do not watch for it.
@@ -1484,10 +1489,14 @@ class JournalApi(
         val answer = execute(client.newCall(builder.build()))
         // Only an answer to the token in use now says anything about this
         // sign-in: one sent with a token since replaced is ignored.
-        if (sentToken != null && sentToken == token) {
+        if (sentToken != null) {
             val (status, bytes) = answer
-            accountLock?.let { listener ->
-                AccountLock.fromHttp(status, bytes)?.let(listener::noteLock) ?: listener.noteStatus(status)
+            synchronized(tokenLock) {
+                if (sentToken == token) {
+                    accountLock?.let { listener ->
+                        AccountLock.fromHttp(status, bytes)?.let(listener::noteLock) ?: listener.noteStatus(status)
+                    }
+                }
             }
         }
         return answer

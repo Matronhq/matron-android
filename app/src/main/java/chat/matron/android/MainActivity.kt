@@ -352,6 +352,11 @@ private fun MatronApp(deps: AppDependencies, appLock: AppLockController, incomin
                     // does), so nothing under it, a sheet, a dialog or the
                     // keyboard, stays reachable.
                     if (accountLock.canUnlock) {
+                        // A confirm sheet already up (a step-up tap) is
+                        // answered no: the account is locked, it would only
+                        // be refused, and it must not hide Unlock.
+                        val approvalsNow = remember(current.userID) { deps.approvalCenter(current) }
+                        LaunchedEffect(Unit) { approvalsNow.cancel() }
                         val unlock = remember(current.userID) { deps.makeAccountUnlockModel(current) }
                         val phase by unlock.phase.collectAsStateWithLifecycle()
                         AccountLockedScreen(

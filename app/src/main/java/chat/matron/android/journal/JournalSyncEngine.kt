@@ -1184,6 +1184,10 @@ class JournalSyncEngine(
                         true
                     } else {
                         liveConnection = null; runJob = null; stoppedForAuth = true
+                        // Said here, not after: once this lock is let go a
+                        // token swap may restart the loop, and a late
+                        // "signed out" must not overwrite its state.
+                        _state.value = SyncConnectionState.Offline("Signed out by server")
                         false
                     }
                 }
@@ -1195,7 +1199,6 @@ class JournalSyncEngine(
                     continue
                 }
                 MatronDebug.breadcrumb("server rejected auth — stopping sync (signed out by server)")
-                setState(SyncConnectionState.Offline("Signed out by server"))
                 failReadyWaiters(JournalSyncError.AuthRevoked)
                 failAllRPC(RPCRequestError.Offline)
                 return
