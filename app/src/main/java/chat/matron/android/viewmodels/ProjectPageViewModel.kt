@@ -63,7 +63,7 @@ data class ProjectPageState(
     /// Which of the "⋯" entries can be chosen.
     val actions: ProjectActionsAvailability
         get() = ProjectActionsAvailability.of(
-            isOpen = page?.isOpen == true && !isBusy, isLoaded = actionsLoaded,
+            isOpen = page?.isOpen == true && !isBusy && !isAsking, isLoaded = actionsLoaded,
             hasUnfiled = unfiled.isNotEmpty(), hasMergeTargets = mergeTargets.isNotEmpty(),
         )
 }
@@ -381,11 +381,14 @@ class ProjectPageViewModel(
         val title = _state.value.page?.project?.title ?: return
         // One question: the entry is dimmed while it is on its way, and a
         // second tap meanwhile sends nothing.
-        if (_state.value.asked || _state.value.isAsking) return
+        if (_state.value.asked || _state.value.isAsking || _state.value.isBusy) return
+        val forProject = projectID
         _state.update { it.copy(isAsking = true) }
         try {
             send(ProjectActionsFormat.askMessage(title))
-            _state.update { it.copy(asked = true) }
+            // A merge moved the page meanwhile: the question was about the
+            // closed project, so the new one can still be asked about.
+            if (forProject == projectID) _state.update { it.copy(asked = true) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
@@ -398,7 +401,7 @@ class ProjectPageViewModel(
     /// Runs one write: busy while it runs, the journal's refusal said in
     /// words, then the page (and every section opened) read again.
     private suspend fun write(reload: Boolean = true, body: suspend () -> Unit): Boolean {
-        if (_state.value.isBusy) return false
+        if (_state.value.isBusy || _state.value.isAsking) return false
         _state.update { it.copy(isBusy = true, error = null) }
         try {
             body()
