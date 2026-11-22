@@ -205,7 +205,8 @@ class NotifySettingsStore(
             val answer = api.updateNotify(change)
             val superseded = synchronized(lock) {
                 val taken = acceptLocked(answer, ticket)
-                writeTicket = maxOf(writeTicket, ticket)
+                // Only an answer that is now shown stands in for older writes.
+                if (taken) writeTicket = maxOf(writeTicket, ticket)
                 savesDone++
                 _isSupported.value = true
                 _error.value = null

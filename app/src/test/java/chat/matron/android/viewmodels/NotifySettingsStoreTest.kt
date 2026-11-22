@@ -316,3 +316,46 @@ class NotifySettingsStoreReadDuringSaveTest {
         assertEquals(NotifySettings.Mode.ALL, store.view.value!!.settings.mode)
     }
 }
+
+class NotifySettingsStoreSupersededSaveTest {
+    @Test
+    fun aSupersededSaveDoesNotHideOlderPendingWrites() = runBlocking {
+        val base = NotifyView(
+            NotifySettings(NotifySettings.Mode.COORDINATOR, NotifySettings.preset(NotifySettings.Mode.COORDINATOR)!!, true, emptyList()),
+            NotifyDeviceLevel.ALL,
+        )
+        val gets = mutableListOf<CompletableDeferred<NotifyView>>()
+        val puts = mutableListOf<CompletableDeferred<NotifyView>>()
+        val frames = MutableSharedFlow<NotifySettings>()
+        val api = object : NotifySettingsProviding {
+            override suspend fun notifySettings() = CompletableDeferred<NotifyView>().also { gets += it }.await()
+            override suspend fun updateNotify(change: NotifyChange) = CompletableDeferred<NotifyView>().also { puts += it }.await()
+        }
+        val store = NotifySettingsStore(api, { frames }, { emptyFlow<SyncConnectionState>() }, now = { 1_000L }, dispatcher = Dispatchers.Unconfined)
+        store.start()
+        val first = launch { store.refresh() }
+        waitUntil { gets.size == 1 }
+        gets[0].complete(base); first.join()
+
+        val older = launch { store.setDeviceLevel(NotifyDeviceLevel.OFF) }
+        waitUntil { puts.size == 1 }
+        val newer = launch { store.setMode(NotifySettings.Mode.ALL) }
+        waitUntil { puts.size == 2 }
+        // A live frame lands first, so the newer save's answer is not taken.
+        frames.emit(base.settings.copy(mode = NotifySettings.Mode.ALL))
+        puts[1].complete(NotifyChange.SetMode(NotifySettings.Mode.ALL).appliedTo(base))
+        waitUntil { gets.size == 2 }
+        assertEquals("the older write still shows", NotifyDeviceLevel.OFF, store.view.value!!.deviceLevel)
+        puts[0].complete(NotifyChange.SetDeviceLevel(NotifyDeviceLevel.OFF).appliedTo(base))
+        // The journal now holds both; every follow-up read says so.
+        val both = NotifyChange.SetMode(NotifySettings.Mode.ALL).appliedTo(base).copy(deviceLevel = NotifyDeviceLevel.OFF)
+        waitUntil {
+            gets.forEach { if (!it.isCompleted) it.complete(both) }
+            older.isCompleted && newer.isCompleted
+        }
+        assertTrue(older.isCompleted && newer.isCompleted)
+        assertEquals(NotifyDeviceLevel.OFF, store.view.value!!.deviceLevel)
+        assertEquals(NotifySettings.Mode.ALL, store.view.value!!.settings.mode)
+        store.stop()
+    }
+}
