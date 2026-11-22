@@ -97,6 +97,8 @@ fun ChatListScreen(
     /// Opens Archived (the overflow menu's item and the row at the foot of
     /// the list); `null` hides both.
     onOpenArchived: (() -> Unit)? = null,
+    /// Opens the Boxes screen from the overflow menu; `null` hides the item.
+    onOpenBoxes: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
@@ -140,6 +142,12 @@ fun ChatListScreen(
                             DropdownMenuItem(
                                 text = { Text("Archived") },
                                 onClick = { overflowOpen = false; onOpenArchived() },
+                            )
+                        }
+                        if (onOpenBoxes != null) {
+                            DropdownMenuItem(
+                                text = { Text("Boxes") },
+                                onClick = { overflowOpen = false; onOpenBoxes() },
                             )
                         }
                         DropdownMenuItem(

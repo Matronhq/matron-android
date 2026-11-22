@@ -7,6 +7,7 @@ import chat.matron.android.models.SessionStatusUpdate
 import chat.matron.android.events.ItemMarkerEvent
 import chat.matron.android.events.MilestoneMarkerEvent
 import chat.matron.android.events.MemoryMarkerEvent
+import chat.matron.android.events.RoutineMarkerEvent
 import chat.matron.android.events.MissionMarker
 import chat.matron.android.events.MissionMarkerEvent
 import chat.matron.android.models.SyncConnectionState
@@ -183,6 +184,8 @@ class JournalSyncEngine(
     /// The user's journal-held settings as `hello_ok` and `settings` frames
     /// carry them — the settings screen's live feed.
     private val settingsListeners = mutableMapOf<UUID, (UserSettings) -> Unit>()
+    private val defaultsListeners = mutableMapOf<UUID, (NewChatDefaults) -> Unit>()
+    private val notifyListeners = mutableMapOf<UUID, (NotifySettings) -> Unit>()
     /// Live `box_status` frames as `(deviceID, report)` — New Chat's feed.
     private val boxStatusListeners = mutableMapOf<UUID, (Pair<Long, BoxStatus>) -> Unit>()
     private val boxDefaultsListeners = mutableMapOf<UUID, (BoxDefaultsUpdate) -> Unit>()
@@ -192,6 +195,16 @@ class JournalSyncEngine(
     /// Memory markers (`memory` events) — the invalidation feed for
     /// `MemoriesSync`. Keyed like the other listener maps.
     private val memoryMarkerListeners = mutableMapOf<UUID, (Pair<String, MemoryMarkerEvent>) -> Unit>()
+    private val routineMarkerListeners = mutableMapOf<UUID, (RoutineMarkerEvent) -> Unit>()
+    /// Routine markers (`routine` events: a create, edit, delete or fire)
+    /// as they are applied, live AND from a reconnect replay. The Routines
+    /// screen refetches its list on each. Mirrors [memoryMarkers].
+    fun routineMarkers(): Flow<RoutineMarkerEvent> = callbackFlow {
+        val id = UUID.randomUUID()
+        synchronized(lock) { routineMarkerListeners[id] = { m -> trySend(m) } }
+        awaitClose { synchronized(lock) { routineMarkerListeners.remove(id) } }
+    }
+
     /// The Coordinator setting's live feed — `CoordinatorSync` subscribes.
     private val coordinatorListeners = mutableMapOf<UUID, (CoordinatorUpdate) -> Unit>()
     /// The latest journal answer about the Coordinator, replayed to a new
@@ -730,6 +743,15 @@ class JournalSyncEngine(
         awaitClose { synchronized(lock) { boxDefaultsListeners.remove(id) } }
     }
 
+    /// The user's default model and effort for new chats, as live `defaults`
+    /// frames bring them (any device's or agent's change, this device's own
+    /// echo included). No replay: a subscriber reads `GET /defaults` first.
+    fun defaultsUpdates(): Flow<NewChatDefaults> = callbackFlow {
+        val id = UUID.randomUUID()
+        synchronized(lock) { defaultsListeners[id] = { d -> trySend(d) } }
+        awaitClose { synchronized(lock) { defaultsListeners.remove(id) } }
+    }
+
     /// The user's journal-held settings as each connect's `hello_ok` and
     /// each live `settings` control frame carry them. No replay: a
     /// subscriber seeds from `GET /settings` and this only carries what
@@ -742,6 +764,16 @@ class JournalSyncEngine(
 
     private fun fanOutSettings(settings: UserSettings) = synchronized(lock) {
         settingsListeners.values.forEach { it(settings) }
+    }
+
+    /// Live `notify` frames (journal notification settings): the synced part
+    /// of the user's notification settings after any device changed them.
+    /// No replay: a subscriber seeds from `GET /notify`. Mirrors
+    /// [settingsUpdates].
+    fun notifyUpdates(): Flow<NotifySettings> = callbackFlow {
+        val id = UUID.randomUUID()
+        synchronized(lock) { notifyListeners[id] = { u -> trySend(u) } }
+        awaitClose { synchronized(lock) { notifyListeners.remove(id) } }
     }
 
     /// Mission markers (`mission` and `milestone` events) as they are
@@ -898,6 +930,12 @@ class JournalSyncEngine(
         if (event.type != JournalEventType.MEMORY) return
         val marker = MemoryMarkerEvent.parse(event.payload) ?: return
         synchronized(lock) { memoryMarkerListeners.values.forEach { it(event.convoID to marker) } }
+    }
+
+    private fun publishRoutineMarker(event: JournalEvent) {
+        if (event.type != JournalEventType.ROUTINE) return
+        val marker = RoutineMarkerEvent.parse(event.payload) ?: return
+        synchronized(lock) { routineMarkerListeners.values.forEach { it(marker) } }
     }
 
     /// A new socket's `hello_ok`: it is the journal's current answer about
@@ -1282,7 +1320,7 @@ class JournalSyncEngine(
         synchronized(lock) { buffer.forEach { pendingAutoOpen.remove(it.convoID) } }
         buffer.clear()
         applied.forEach {
-            indexForSearch(it); publishItemMarker(it); publishMissionMarker(it); publishMemoryMarker(it)
+            indexForSearch(it); publishItemMarker(it); publishMissionMarker(it); publishMemoryMarker(it); publishRoutineMarker(it)
             publishCoordinatorEvent(it)
         }
         var count = appliedSinceAck + applied.size
@@ -1324,6 +1362,7 @@ class JournalSyncEngine(
                     publishItemMarker(event)
                     publishMissionMarker(event)
                     publishMemoryMarker(event)
+                    publishRoutineMarker(event)
                     publishCoordinatorEvent(event)
                     applied += 1
                     if (applied >= 50) {
@@ -1412,6 +1451,12 @@ class JournalSyncEngine(
                 publishPinsLocked(frame.pins)
             }
             is ServerFrame.SettingsFrame -> fanOutSettings(frame.settings)
+            is ServerFrame.DefaultsFrame -> synchronized(lock) {
+                defaultsListeners.values.forEach { it(frame.defaults) }
+            }
+            is ServerFrame.NotifyFrame -> synchronized(lock) {
+                notifyListeners.values.forEach { it(frame.settings) }
+            }
             is ServerFrame.ArchiveFrame -> archive?.apply(frame.delta)
             is ServerFrame.Panic -> if (frame.on) accountLock?.noteLockedBySocket(AccountLock(frame.since, frame.unlock))
             is ServerFrame.HelloOK, is ServerFrame.UnknownControl -> Unit // post-hello control frames are advisory

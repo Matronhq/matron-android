@@ -20,6 +20,7 @@ class VoiceRecorderHandoffTest {
         override fun resume() = true
         override fun stop(): Boolean { stopCalls++; return true }
         override fun peakAmplitude() = 0
+        override fun isCapturingAudio() = true
     }
 
     private fun host(fake: FakeAudioRecorder = FakeAudioRecorder()): VoiceRecorderHost {

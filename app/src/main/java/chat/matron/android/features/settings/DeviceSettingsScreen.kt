@@ -45,6 +45,7 @@ import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.AppLockTimeout
 import chat.matron.android.viewmodels.DevicesProviding
 import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
+import chat.matron.android.viewmodels.NewChatDefaultsStore
 import chat.matron.android.viewmodels.NoticesSettingViewModel
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
 import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
@@ -87,6 +88,8 @@ fun DeviceSettingsScreen(
     onPinnedChats: (() -> Unit)? = null,
     /// Settings → People (contacts and invite links). `null` hides it.
     onPeople: (() -> Unit)? = null,
+    /// Settings → Notifications. `null` hides the row (previews).
+    onNotifications: (() -> Unit)? = null,
     /// Settings → For you's journal-held "notices" switch. `null` in hosts
     /// without a session (previews); the section also stays hidden until the
     /// journal answers, and for good on a journal without `/settings`.
@@ -106,6 +109,9 @@ fun DeviceSettingsScreen(
     /// Settings ▸ Security ▸ Approval keys. `null` hides the row.
     approvalKeys: ApprovalKeysScreenModel? = null,
     onApprovalKeys: () -> Unit = {},
+    /// Settings → New chats: the user's default model and effort. `null`
+    /// in hosts without a session (previews); says so on an older journal.
+    newChatDefaults: NewChatDefaultsStore? = null,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -177,7 +183,11 @@ fun DeviceSettingsScreen(
 
             if (coordinator != null) CoordinatorSection(coordinator)
 
+            if (newChatDefaults != null) NewChatDefaultsSection(newChatDefaults)
+
             if (onPinnedChats != null) PinnedChatsSection(onPinnedChats)
+
+            if (onNotifications != null) NotificationsSection(onNotifications)
 
             if (notices != null) NoticesSection(notices)
 
@@ -422,6 +432,8 @@ data class CoordinatorSettingRowModel(
     /// The journal's consent-approval switch, under the picker. Null in
     /// hosts without one.
     val consent: CoordinatorConsentSettingViewModel? = null,
+    /// Opens Settings → Coordinator → Routines. Null in hosts without it.
+    val onRoutines: (() -> Unit)? = null,
 )
 
 @Composable
@@ -446,6 +458,19 @@ internal fun CoordinatorSection(model: CoordinatorSettingRowModel) {
             TextButton(onClick = model.onChoose) { Text("Choose…") }
         }
         model.consent?.let { CoordinatorConsentSwitch(it) }
+        model.onRoutines?.let { open ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = open)
+                    .padding(vertical = 12.dp)
+                    .testTag("settings.routines"),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Routines", modifier = Modifier.weight(1f))
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+            }
+        }
     }
 }
 
@@ -509,6 +534,22 @@ private fun PeopleSection(onOpen: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("People", modifier = Modifier.weight(1f))
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+        }
+    }
+}
+
+@Composable
+private fun NotificationsSection(onOpen: () -> Unit) {
+    SettingsSection("Notifications") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onOpen)
+                .padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Notifications", modifier = Modifier.weight(1f))
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
         }
     }

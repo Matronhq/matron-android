@@ -78,6 +78,20 @@ fun JsonObject.objectOrNull(key: String): JsonObject? =
 fun JsonObject.arrayOrNull(key: String): JsonArray? =
     (this[key] as? JsonArray)
 
+/// An array of JSON strings, or `null` when the key is absent, not an
+/// array, or ANY element isn't a string — all-or-nothing like
+/// [longArrayOrNull].
+fun JsonObject.stringArrayOrNull(key: String): List<String>? {
+    val array = arrayOrNull(key) ?: return null
+    val strings = ArrayList<String>(array.size)
+    for (element in array) {
+        val p = (element as? JsonPrimitive)?.takeUnless { it is JsonNull } ?: return null
+        if (!p.isString) return null
+        strings.add(p.content)
+    }
+    return strings
+}
+
 /// An array of JSON numbers read as longs, or `null` when the key is absent,
 /// not an array, or ANY element isn't numeric — mirroring the Swift originals'
 /// all-or-nothing `as? [NSNumber]` cast (a partially-numeric array must not
