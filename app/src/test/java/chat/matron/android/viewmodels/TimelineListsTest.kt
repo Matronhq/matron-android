@@ -236,6 +236,17 @@ class TimelineListsTest {
     }
 
     @Test
+    fun anAskThatFailsAfterTheListWasLeftSaysNothing() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val vm = TimelineViewModel(Lists(), scope, askCoordinator = { hold.await(); throw JournalApiError.Transport("offline") }, now = { now })
+        val asking = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined).launch { vm.ask(StalledProject(TimelineFixtures.promo)) }
+        vm.leaveList()
+        hold.complete(Unit)
+        asking.join()
+        assertNull(vm.state.value.listError)
+    }
+
+    @Test
     fun aListsErrorNeverReachesTheWeekPage() = runBlocking {
         val lists = object : FakeTimelineBase() {
             override suspend fun openLong(): StalledList = throw JournalApiError.Transport("offline")

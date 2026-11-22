@@ -74,6 +74,9 @@ data class TimelineState(
     /// 404 (it has no timeline: the tab keeps the missions list).
     val isSupported: Boolean? = null,
     val isRefreshing: Boolean = false,
+    /// Bumped each time a week lands: its pictures are asked for again, so
+    /// one that failed to load gets another try on a refresh.
+    val weekLoads: Int = 0,
     val error: String? = null,
     /// The went-quiet and open-a-long-time lists; null until read.
     val quiet: StalledList? = null,
@@ -205,6 +208,10 @@ class TimelineViewModel(
     private var loadingFinishedGeneration: Int? = null
     private var loadingProjectsGeneration: Int? = null
     private val askingProjectIDs = mutableSetOf<String>()
+    /// Bumped when a list screen goes away: a read or an Ask it started
+    /// never raises an error after it.
+    private var listVisit = 0
+    private var refreshesRunning = 0
     private var showJob: Job? = null
 
     /// The tab came on screen: the first time loads the weeks and the newest
@@ -239,13 +246,19 @@ class TimelineViewModel(
     suspend fun refresh() {
         refreshEpoch += 1
         fresh.clear()
+        // A refresh overtakes what a list was still waiting on.
+        listVisit += 1
+        // Refreshes can overlap (a pull while the tab's own re-read runs):
+        // the indicator stays until the last of them ends.
+        refreshesRunning += 1
         _state.update { it.copy(isRefreshing = true) }
         try {
             start()
             // The counts on the week page's rows are read again too.
             if (_state.value.isSupported == true) loadCounts()
         } finally {
-            _state.update { it.copy(isRefreshing = false) }
+            refreshesRunning -= 1
+            if (refreshesRunning == 0) _state.update { it.copy(isRefreshing = false) }
         }
     }
 
@@ -410,7 +423,7 @@ class TimelineViewModel(
         }
         weekProjectsNextOffset = if (status == TimelineWeekExtras.Status.MORE) 0 else null
         _state.update {
-            it.copy(week = week, weekProjectsKey = week.week, weekProjects = emptyList(), weekProjectsStatus = status)
+            it.copy(week = week, weekProjectsKey = week.week, weekProjects = emptyList(), weekProjectsStatus = status, weekLoads = it.weekLoads + 1)
         }
     }
 
@@ -447,9 +460,12 @@ class TimelineViewModel(
 
     /// A list came on screen: read it unless it was read since the last refresh.
     suspend fun loadList(place: TimelinePlace) {
-        if (place is TimelinePlace.Week || place in fresh) return
+        // A visit starts without an earlier visit's error, even when the
+        // list is already read.
         _state.update { it.copy(listError = null) }
+        if (place is TimelinePlace.Week || place in fresh) return
         val epoch = refreshEpoch
+        val visit = listVisit
         try {
             when (place) {
                 // An answer a refresh has overtaken is dropped, and the list
@@ -473,7 +489,7 @@ class TimelineViewModel(
                     val page = try {
                         timeline.timelineProjects()
                     } catch (error: JournalApiError.NotFound) {
-                        _state.update { it.copy(projectsSupported = false) }
+                        if (epoch == refreshEpoch) _state.update { it.copy(projectsSupported = false) }
                         throw error
                     }
                     if (generation != projectsGeneration || epoch != refreshEpoch) return
@@ -485,7 +501,9 @@ class TimelineViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            _state.update { it.copy(listError = error.message) }
+            // Said only on the visit that asked, and only if no refresh
+            // overtook it.
+            if (epoch == refreshEpoch && visit == listVisit) _state.update { it.copy(listError = error.message) }
         }
     }
 
@@ -554,6 +572,7 @@ class TimelineViewModel(
         // One question per project: a second tap while the first is on its
         // way, or after it went, sends nothing.
         if (id in _state.value.askedProjectIDs || !askingProjectIDs.add(id)) return
+        val visit = listVisit
         val moved = stalled.lastMovedAt?.let { "It last moved ${TimelineListFormat.daysAgo(it, now())}." } ?: "It hasn't moved yet."
         try {
             send("What should we do with the project “${stalled.project.title}”? $moved")
@@ -561,7 +580,7 @@ class TimelineViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            _state.update { it.copy(listError = error.message) }
+            if (visit == listVisit) _state.update { it.copy(listError = error.message) }
         } finally {
             askingProjectIDs.remove(id)
         }
@@ -569,6 +588,13 @@ class TimelineViewModel(
 
     fun dismissListError() {
         _state.update { it.copy(listError = null) }
+    }
+
+    /// A list screen went away: what it was still waiting on says nothing
+    /// on whichever page shows next.
+    fun leaveList() {
+        listVisit += 1
+        dismissListError()
     }
 
     fun askInBackground(stalled: StalledProject) {
