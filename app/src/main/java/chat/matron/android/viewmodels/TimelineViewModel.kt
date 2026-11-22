@@ -353,7 +353,12 @@ class TimelineViewModel(
             // A hole that could not be filled: start over from the new weeks.
             if (kept.isNotEmpty() && !weeksAdjoin(fresh.lastOrNull()?.week, kept.first().week)) kept = emptyList()
             if (kept.isEmpty()) weeksNextBefore = cursor
-            _state.update { it.copy(weeks = fresh + kept, hasEarlierWeeks = weeksNextBefore != null, isSupported = true) }
+            val weeks = fresh + kept
+            _state.update { s ->
+                // A pick no longer in the list falls back to the newest week.
+                val selected = s.selectedWeek?.takeIf { key -> weeks.any { it.week == key } } ?: weeks.firstOrNull()?.week?.takeIf { s.selectedWeek != null }
+                s.copy(weeks = weeks, hasEarlierWeeks = weeksNextBefore != null, isSupported = true, selectedWeek = selected)
+            }
             return true
         } catch (cancel: CancellationException) {
             throw cancel
