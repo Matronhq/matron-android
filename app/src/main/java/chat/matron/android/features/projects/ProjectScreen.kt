@@ -117,7 +117,7 @@ fun ProjectScreen(
             when (ProjectScreenContent.of(state)) {
                 ProjectScreenContent.Page -> ProjectSummaryView(
                     page = page!!, image = page.media?.let { images[it.blobID] }, sections = sections,
-                    onOpenItem = onOpenItem, onOpenSection = onOpenSection, titleActions = { if (showsActions) ProjectActionsMenu(state, viewModel) },
+                    onOpenItem = onOpenItem, onOpenSection = onOpenSection, titleActions = { if (showsActions) ProjectActionsMenu(state, viewModel, scope) },
                 )
                 ProjectScreenContent.Missing -> ProjectPlaceholder(ProjectFormat.MISSING, ProjectFormat.MISSING_DETAIL)
                 ProjectScreenContent.Failed -> ProjectPlaceholder(TimelineFormat.FAILED, TimelineFormat.FAILED_DETAIL) {

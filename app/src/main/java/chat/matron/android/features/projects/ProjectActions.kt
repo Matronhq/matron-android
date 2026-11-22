@@ -24,7 +24,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -34,6 +33,7 @@ import chat.matron.android.designsystem.MatronRed
 import chat.matron.android.viewmodels.ProjectActionsFormat
 import chat.matron.android.viewmodels.ProjectPageState
 import chat.matron.android.viewmodels.ProjectPageViewModel
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 /// Which dialog the "⋯" menu has open.
@@ -52,8 +52,16 @@ sealed interface ProjectActionDialog {
 /// merge and a close are confirmed first. Ported from matron-apple's
 /// `ProjectActionsMenu`.
 @Composable
-fun ProjectActionsMenu(state: ProjectPageState, viewModel: ProjectPageViewModel, initialDialog: ProjectActionDialog? = null, initiallyOpen: Boolean = false) {
-    val scope = rememberCoroutineScope()
+fun ProjectActionsMenu(
+    state: ProjectPageState,
+    viewModel: ProjectPageViewModel,
+    /// The screen's scope, not the menu's own: a merge takes the menu off
+    /// screen while its page reloads, and that reload must not be called
+    /// off with it.
+    scope: CoroutineScope,
+    initialDialog: ProjectActionDialog? = null,
+    initiallyOpen: Boolean = false,
+) {
     var open by remember { mutableStateOf(initiallyOpen) }
     var dialog by remember { mutableStateOf(initialDialog) }
     val available = state.actions
