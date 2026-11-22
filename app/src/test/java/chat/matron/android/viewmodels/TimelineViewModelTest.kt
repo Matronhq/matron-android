@@ -153,6 +153,19 @@ class TimelineViewModelTest {
     }
 
     @Test
+    fun aRefreshKeepsAnEarlierWeekThatWasPicked() = runBlocking {
+        val timeline = fake().apply { weeks["2026-11-02"] = TimelineFixtures.week("2026-11-02", final = true) }
+        val vm = TimelineViewModel(timeline, scope)
+        vm.start()
+        vm.loadEarlierWeeks()
+        vm.select("2026-11-02")
+        vm.refresh()
+        assertEquals(listOf("2026-11-16", "2026-11-09", "2026-11-02"), vm.state.value.weeks.map { it.week })
+        assertEquals("2026-11-02", vm.state.value.shownWeek?.week)
+        assertFalse(vm.state.value.hasEarlierWeeks)
+    }
+
+    @Test
     fun theWeeksOtherProjectsPageInOnceEach() = runBlocking {
         val timeline = fake().apply {
             weeks["2026-11-16"] = TimelineFixtures.week("2026-11-16", also = listOf(TimelineFixtures.promo, TimelineFixtures.app, TimelineFixtures.pricing))
