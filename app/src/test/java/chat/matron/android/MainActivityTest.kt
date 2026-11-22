@@ -1,5 +1,6 @@
 package chat.matron.android
 
+import chat.matron.android.models.isSameSignIn
 import java.io.File
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -23,6 +24,42 @@ import org.junit.Test
 /// the placeholder row it depends on.
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainActivityTest {
+
+    private val alice = chat.matron.android.models.UserSession(
+        userID = "alice", deviceID = "1", homeserverURL = "https://journal.example.com/", accessToken = "t",
+    )
+
+    @Test
+    fun aRevoke_signsOutOnlyTheSameSignIn() {
+        assertTrue(revokeSignsOut(current = alice, revoked = alice))
+        assertTrue("a new token is the same sign-in", revokeSignsOut(current = alice.copy(accessToken = "t2"), revoked = alice))
+        assertFalse("the sign-in before this one", revokeSignsOut(current = alice.copy(deviceID = "2"), revoked = alice))
+        assertFalse(revokeSignsOut(current = alice.copy(userID = "bob"), revoked = alice))
+        assertTrue("nothing published yet", revokeSignsOut(current = null, revoked = alice))
+    }
+
+    @Test
+    fun theRevokedSignIn_survivesRecreation_withoutItsToken() {
+        val scope = androidx.compose.runtime.saveable.SaverScope { true }
+        val saved = with(RevokedSessionSaver) { scope.save(alice) }!!
+        val restored = RevokedSessionSaver.restore(saved)!!
+        assertTrue(restored.isSameSignInAs(alice))
+        assertEquals("", restored.accessToken)
+        val none = with(RevokedSessionSaver) { scope.save(null) }!!
+        assertEquals(null, RevokedSessionSaver.restore(none))
+    }
+
+    private fun chat.matron.android.models.UserSession.isSameSignInAs(other: chat.matron.android.models.UserSession) =
+        isSameSignIn(other)
+
+    @Test
+    fun aRestoredSession_isNotPublishedOnceRevoked() {
+        assertEquals(alice, publishableRestoredSession(alice, revoked = null))
+        assertEquals(null, publishableRestoredSession(alice, revoked = alice))
+        val next = alice.copy(deviceID = "2")
+        assertEquals(next, publishableRestoredSession(next, revoked = alice))
+        assertEquals(null, publishableRestoredSession(null, revoked = alice))
+    }
 
     @Test
     fun preparesTheConversationBeforeNavigating() = runTest {

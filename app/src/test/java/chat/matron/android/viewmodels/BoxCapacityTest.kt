@@ -142,3 +142,61 @@ class BoxCapacityTest {
         assertEquals(emptyList<LimitLine>(), s?.capacity?.limitLines)
     }
 }
+
+class BoxCapacityBoxesBlocksTest {
+    private fun parse(json: String) = BoxCapacity.parse(Json.parseToJsonElement(json))
+
+    @Test
+    fun parse_readsDiskAsOfAndDefaults() {
+        val c = parse(
+            """{"limits":{"as_of":1754900000000,"lines":[]},
+                "disk":{"free_bytes":50465865728,"total_bytes":155692564480},
+                "defaults":{"agent":"claude","model":"opus","effort":"high"}}""",
+        )
+        assertEquals(BoxDisk(50_465_865_728, 155_692_564_480), c.disk)
+        assertEquals(1_754_900_000_000L, c.limitsAsOfMs)
+        assertEquals(BoxResolvedDefaults("claude", "opus", "high"), c.defaults)
+    }
+
+    @Test
+    fun parse_dropsMalformedBlocks() {
+        val c = parse(
+            """{"limits":{"as_of":"yesterday","lines":[]},
+                "disk":{"free_bytes":200,"total_bytes":100},
+                "defaults":{"agent":""}}""",
+        )
+        assertNull(c.disk)
+        assertNull(c.limitsAsOfMs)
+        assertNull(c.defaults)
+        assertNull(parse("""{"disk":{"free_bytes":1.5,"total_bytes":100}}""").disk)
+        assertNull(parse("""{"disk":{"free_bytes":true,"total_bytes":100}}""").disk)
+        assertNull(parse("""{}""").disk)
+    }
+
+    @Test
+    fun sizeText() {
+        val gib = 1024L * 1024 * 1024
+        assertEquals("0B", BoxDisk.sizeText(0))
+        assertEquals("512B", BoxDisk.sizeText(512))
+        assertEquals("7.4G", BoxDisk.sizeText((7.4 * gib).toLong()))
+        assertEquals("233G", BoxDisk.sizeText(233 * gib))
+        assertEquals("1.8T", BoxDisk.sizeText((1.8 * 1024 * gib).toLong()))
+        // Carries to the next unit rather than reading "1024G".
+        assertEquals("1.0T", BoxDisk.sizeText((1023.9 * gib).toLong()))
+    }
+
+    @Test
+    fun resetCountdownAndCaption() {
+        val now = 1_754_900_000_000L
+        val hour = 3_600_000L
+        assertNull(BoxCapacity.resetCountdown(null, now))
+        assertNull(BoxCapacity.resetCountdown(now + 5 * hour, now))
+        assertEquals("in 30h", BoxCapacity.resetCountdown(now + 30 * hour, now))
+        assertEquals("in 3d 4h", BoxCapacity.resetCountdown(now + 76 * hour, now))
+        assertEquals("in 3d", BoxCapacity.resetCountdown(now + 72 * hour, now))
+        val utc = ZoneId.of("UTC")
+        assertEquals("resets Aug 14 · in 3d 4h", BoxCapacity.resetCaption(now + 76 * hour, now, utc))
+        assertEquals("reset", BoxCapacity.resetCaption(now - hour, now, utc))
+        assertNull(BoxCapacity.resetCaption(null, now, utc))
+    }
+}
