@@ -37,6 +37,7 @@ import chat.matron.android.viewmodels.UnsentReplyStore
 import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
 import chat.matron.android.viewmodels.CoordinatorSetting
 import chat.matron.android.viewmodels.MemoriesListViewModel
+import chat.matron.android.viewmodels.RoutinesViewModel
 import chat.matron.android.viewmodels.MemoryEditorViewModel
 import chat.matron.android.viewmodels.MissionDetailViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
@@ -661,6 +662,12 @@ class AppDependencies(
     /** The Memories list VM, per screen showing (spec 2026-09-27 memories). */
     fun makeMemoriesListViewModel(session: UserSession, scope: CoroutineScope): MemoriesListViewModel =
         MemoriesListViewModel(sync = core(session).memoriesSync, scope = scope)
+
+    /** Settings → Coordinator → Routines: one VM shared by the list and its editor. */
+    fun makeRoutinesViewModel(session: UserSession, scope: CoroutineScope): RoutinesViewModel {
+        val c = core(session)
+        return RoutinesViewModel(api = c.api, markers = { c.engine.routineMarkers() }, scope = scope)
+    }
 
     /** The editor VM for one memory by name, or a new one when [name] is null. */
     fun makeMemoryEditorViewModel(session: UserSession, name: String?, scope: CoroutineScope): MemoryEditorViewModel =

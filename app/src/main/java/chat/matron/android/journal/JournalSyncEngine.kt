@@ -7,6 +7,7 @@ import chat.matron.android.models.SessionStatusUpdate
 import chat.matron.android.events.ItemMarkerEvent
 import chat.matron.android.events.MilestoneMarkerEvent
 import chat.matron.android.events.MemoryMarkerEvent
+import chat.matron.android.events.RoutineMarkerEvent
 import chat.matron.android.events.MissionMarker
 import chat.matron.android.events.MissionMarkerEvent
 import chat.matron.android.models.SyncConnectionState
@@ -192,6 +193,16 @@ class JournalSyncEngine(
     /// Memory markers (`memory` events) — the invalidation feed for
     /// `MemoriesSync`. Keyed like the other listener maps.
     private val memoryMarkerListeners = mutableMapOf<UUID, (Pair<String, MemoryMarkerEvent>) -> Unit>()
+    private val routineMarkerListeners = mutableMapOf<UUID, (RoutineMarkerEvent) -> Unit>()
+    /// Routine markers (`routine` events: a create, edit, delete or fire)
+    /// as they are applied, live AND from a reconnect replay. The Routines
+    /// screen refetches its list on each. Mirrors [memoryMarkers].
+    fun routineMarkers(): Flow<RoutineMarkerEvent> = callbackFlow {
+        val id = UUID.randomUUID()
+        synchronized(lock) { routineMarkerListeners[id] = { m -> trySend(m) } }
+        awaitClose { synchronized(lock) { routineMarkerListeners.remove(id) } }
+    }
+
     /// The Coordinator setting's live feed — `CoordinatorSync` subscribes.
     private val coordinatorListeners = mutableMapOf<UUID, (CoordinatorUpdate) -> Unit>()
     /// The latest journal answer about the Coordinator, replayed to a new
@@ -869,6 +880,12 @@ class JournalSyncEngine(
         synchronized(lock) { memoryMarkerListeners.values.forEach { it(event.convoID to marker) } }
     }
 
+    private fun publishRoutineMarker(event: JournalEvent) {
+        if (event.type != JournalEventType.ROUTINE) return
+        val marker = RoutineMarkerEvent.parse(event.payload) ?: return
+        synchronized(lock) { routineMarkerListeners.values.forEach { it(marker) } }
+    }
+
     /// A new socket's `hello_ok`: it is the journal's current answer about
     /// pins and the Coordinator.
     private fun publishHello(hello: ServerFrame.HelloOK) = synchronized(lock) {
@@ -1204,7 +1221,7 @@ class JournalSyncEngine(
         synchronized(lock) { buffer.forEach { pendingAutoOpen.remove(it.convoID) } }
         buffer.clear()
         applied.forEach {
-            indexForSearch(it); publishItemMarker(it); publishMissionMarker(it); publishMemoryMarker(it)
+            indexForSearch(it); publishItemMarker(it); publishMissionMarker(it); publishMemoryMarker(it); publishRoutineMarker(it)
             publishCoordinatorEvent(it)
         }
         var count = appliedSinceAck + applied.size
@@ -1246,6 +1263,7 @@ class JournalSyncEngine(
                     publishItemMarker(event)
                     publishMissionMarker(event)
                     publishMemoryMarker(event)
+                    publishRoutineMarker(event)
                     publishCoordinatorEvent(event)
                     applied += 1
                     if (applied >= 50) {
