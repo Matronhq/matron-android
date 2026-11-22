@@ -185,10 +185,15 @@ class JournalStore(
                 )
                 conversationDao.upsert(convo)
             }
-            val newestMessage = sorted.lastOrNull { it.type in JournalEventType.MESSAGE_TYPES }
-            if (convo != null && newest > convo.lastSeq) {
-                var updated = convo.copy(lastSeq = newest)
-                if (newestMessage != null && newestMessage.seq > convo.lastSeq) {
+            // The preview follows the newest stored message: when that is
+            // one this fetch brought, the row's preview predates it. (Not
+            // decided from `last_seq`, which a live bookkeeping frame can
+            // move without touching the preview.)
+            if (convo != null) {
+                var updated = convo.copy(lastSeq = max(convo.lastSeq, newest))
+                val newestMessage = eventDao.newestMessageEvent(convoID, JournalEventType.MESSAGE_TYPES)
+                    ?.seq?.let { seq -> sorted.lastOrNull { it.seq == seq } }
+                if (newestMessage != null) {
                     val stored = tombstonedForStorage(newestMessage, now)
                     updated = updated.copy(
                         snippet = snippet(newestMessage),
@@ -197,7 +202,7 @@ class JournalStore(
                         lastActivityTS = max(convo.lastActivityTS ?: 0, newestMessage.ts.toEpochMilli()),
                     )
                 }
-                conversationDao.upsert(updated)
+                if (updated != convo) conversationDao.upsert(updated)
             }
             dropped
         }
@@ -215,13 +220,33 @@ class JournalStore(
     /// [adoptUnread]: take the journal's unread counts. A device on the
     /// [SyncScope.FOR_YOU] scope never sees most messages arrive, so its own
     /// count would stay at zero for every conversation it has not opened.
-    suspend fun refreshSummaries(convos: List<ConvoSummaryDTO>, adoptUnread: Boolean = false) {
+    ///
+    /// [readMarksAtRequest]: each conversation's read marker when the
+    /// snapshot was asked for ([readMarks]). A conversation read since then
+    /// keeps its own count: the snapshot's predates the read. [keepUnread]
+    /// names conversations whose count is never taken (the chat on screen).
+    suspend fun refreshSummaries(
+        convos: List<ConvoSummaryDTO>,
+        adoptUnread: Boolean = false,
+        readMarksAtRequest: Map<String, Long>? = null,
+        keepUnread: Set<String> = emptySet(),
+    ) {
         db.withTransaction {
-            for (c in convos) upsertSummary(c, resetLocalState = false, adoptUnread = adoptUnread)
+            for (c in convos) {
+                upsertSummary(
+                    c, resetLocalState = false, adoptUnread = adoptUnread && c.id !in keepUnread,
+                    readMarkAtRequest = readMarksAtRequest?.let { it[c.id] ?: NO_READ_MARK },
+                )
+            }
         }
     }
 
-    private suspend fun upsertSummary(c: ConvoSummaryDTO, resetLocalState: Boolean, adoptUnread: Boolean = false) {
+    private suspend fun upsertSummary(
+        c: ConvoSummaryDTO,
+        resetLocalState: Boolean,
+        adoptUnread: Boolean = false,
+        readMarkAtRequest: Long? = null,
+    ) {
         val existing = conversationDao.byId(c.id)
         if (existing != null) {
             var updated = existing.copy(title = c.title, sessionState = c.sessionState)
@@ -278,7 +303,9 @@ class JournalStore(
                 updated = updated.copy(lastActivityTS = ts)
             }
             val unread = c.unreadCount
-            if (adoptUnread && unread != null) updated = updated.copy(unreadCount = unread)
+            val readSinceRequest = readMarkAtRequest != null && readMarkAtRequest != NO_READ_MARK &&
+                readMarkAtRequest != existing.readUpToSeq
+            if (adoptUnread && unread != null && !readSinceRequest) updated = updated.copy(unreadCount = unread)
             conversationDao.upsert(updated)
         } else {
             conversationDao.upsert(
@@ -470,10 +497,34 @@ class JournalStore(
 
     /// `now` (epoch ms) is the clock the insert-time tombstone rules run
     /// against — injectable for tests only.
+    /// [insertHistory] for a page read below [expectedOldest] (scrolling
+    /// back), in one transaction with the check that the conversation's
+    /// oldest stored event is still that one. `false` when it moved (an
+    /// opened chat's For you only fetch dropped the older rows meanwhile, so
+    /// the page would land below a gap): nothing is written.
+    suspend fun insertHistoryIfOldestIs(
+        convoID: String,
+        expectedOldest: Long?,
+        events: List<JournalEvent>,
+        now: Long = System.currentTimeMillis(),
+    ): Boolean = db.withTransaction {
+        if (eventDao.minSeq(convoID) != expectedOldest) return@withTransaction false
+        insertHistory(events, now)
+        true
+    }
+
+    /// Each conversation's read marker (see [refreshSummaries]).
+    suspend fun readMarks(): Map<String, Long> = eventDao.readMarks().associate { it.id to it.readUpToSeq }
+
     suspend fun insertHistory(events: List<JournalEvent>, now: Long = System.currentTimeMillis()) {
         db.withTransaction {
+            // Only events stored by this call confirm a send below: one
+            // already stored did so when it landed, and fetching it again (a
+            // For you only chat opened twice) must not take a different,
+            // still-failed send with the same text.
+            val inserted = mutableListOf<JournalEvent>()
             for (e in events) {
-                eventDao.insertIgnore(EventEntity.from(tombstonedForStorage(e, now)))
+                if (eventDao.insertIgnoreReturningRow(EventEntity.from(tombstonedForStorage(e, now))) != -1L) inserted += e
                 SummaryEntryEntity.from(e)?.let { summaryEntryDao.insertIgnore(it) }
             }
             // A post-snapshot refill can contain the frames that confirm
@@ -483,7 +534,7 @@ class JournalStore(
             // forever (bugbot "Post-snapshot outbox never confirms"). Run the
             // same confirmation-delete here, timestamp-guarded so genuinely
             // old history can't eat a fresh queued send.
-            for (e in events) {
+            for (e in inserted) {
                 if (e.sender != ownSender || e.type != JournalEventType.TEXT || e.isItemFallbackText()) continue
                 e.body()?.let { deleteFirstMatchingInTransaction(e.convoID, it, journaledAtMs = e.ts.toEpochMilli()) }
             }
@@ -1683,6 +1734,9 @@ class JournalStore(
         /// `meta` key of the cursor when this device switched to
         /// [SyncScope.FOR_YOU].
         internal const val FOR_YOU_SINCE_KEY = "for_you_since"
+
+        /// A conversation with no row when a snapshot was asked for.
+        private const val NO_READ_MARK = -1L
 
         /// `meta` key of how far a fetched conversation is complete.
         internal fun syncedSeqKey(convoID: String) = "synced_seq:$convoID"

@@ -6,6 +6,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /// Settings › Sync on this device: which [SyncScope] this device keeps. The
 /// choice is saved on the device (never synced: one phone can follow For
@@ -16,6 +18,7 @@ class SyncScopeSettingModel(
     private val apply: suspend (SyncScope) -> Unit,
     private val scope: CoroutineScope,
 ) {
+    private val applying = Mutex()
     private val _selected = MutableStateFlow(SyncScope.stored(preferences))
     val selected: StateFlow<SyncScope> = _selected.asStateFlow()
 
@@ -23,6 +26,10 @@ class SyncScopeSettingModel(
         if (choice == _selected.value) return
         _selected.value = choice
         SyncScope.store(choice, preferences)
-        scope.launch { apply(choice) }
+        scope.launch {
+            // Applies the newest choice, one change at a time: a quick
+            // second tap cannot be overtaken by the first's late apply.
+            applying.withLock { apply(_selected.value) }
+        }
     }
 }
