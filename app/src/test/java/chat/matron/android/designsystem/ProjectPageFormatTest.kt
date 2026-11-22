@@ -73,6 +73,14 @@ class ProjectPageFormatTest {
     }
 
     @Test
+    fun aSectionThatFailedBeforeLoadingOffersTheRetryNotAnAlert() {
+        val failed = ProjectPageState(page = TimelineProjectPage(docs), error = "offline")
+        assertFalse(chat.matron.android.features.projects.sectionLoaded(failed, ProjectSection.HISTORY))
+        assertTrue(chat.matron.android.features.projects.sectionLoaded(failed.copy(historyLoaded = true), ProjectSection.HISTORY))
+        assertTrue(chat.matron.android.features.projects.sectionLoaded(failed.copy(openMissions = emptyList()), ProjectSection.MISSIONS))
+    }
+
+    @Test
     fun theMissionChipNamesItsProject() {
         val mission = Mission(id = "ms_1", num = 20, title = "Docs search", originConvoID = "c1", projectID = "pj_docs", projectNum = 12)
         assertEquals(MissionProjectChip("pj_docs", "Docs site launch"), missionProjectChip(mission, "Docs site launch"))

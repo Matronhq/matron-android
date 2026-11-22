@@ -2,7 +2,9 @@ package chat.matron.android.features.projects
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
@@ -79,4 +81,19 @@ fun TimelineListScreen(
             }
         }
     }
+    // A failed Ask, or a failed later page, over a list already on screen.
+    val error = state.error
+    if (error != null && listShowsError(state.listContent(place))) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissError() },
+            confirmButton = { TextButton(onClick = { viewModel.dismissError() }) { Text("OK") } },
+            title = { Text(TimelineListCopy.title(place)) },
+            text = { Text(error) },
+        )
+    }
 }
+
+/// Whether a list screen says an error in an alert: only over a list on
+/// screen (before that, the screen itself offers Try again).
+fun listShowsError(content: TimelineListContent): Boolean =
+    content !is TimelineListContent.Failed && content !is TimelineListContent.Loading

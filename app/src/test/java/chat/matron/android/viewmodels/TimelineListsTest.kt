@@ -12,6 +12,7 @@ import chat.matron.android.models.TimelineProjectRow
 import java.time.Instant
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -53,6 +54,47 @@ class TimelineListsTest {
         vm.refresh()
         vm.loadList(TimelinePlace.Quiet)
         assertEquals(2, lists.quietReads)
+    }
+
+    @Test
+    fun aRefreshReadsTheCountsAgain() = runBlocking {
+        val lists = Lists()
+        val vm = TimelineViewModel(lists, scope)
+        vm.start()
+        vm.loadCounts()
+        vm.refresh()
+        assertEquals(2, lists.quietReads)
+    }
+
+    @Test
+    fun aStalledReadOvertakenByARefreshNeverLandsOverIt() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val lists = object : FakeTimelineBase() {
+            var reads = 0
+            override suspend fun wentQuiet(): StalledList {
+                reads += 1
+                if (reads == 1) hold.await()
+                return StalledList(reads, emptyList())
+            }
+        }
+        val vm = TimelineViewModel(lists, scope)
+        val first = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined).launch { vm.loadList(TimelinePlace.Quiet) }
+        vm.refresh()
+        // The refresh read the list itself (its counts); the older read's
+        // answer, landing after it, is dropped.
+        assertEquals(2, vm.state.value.quiet?.total)
+        hold.complete(Unit)
+        first.join()
+        assertEquals(2, vm.state.value.quiet?.total)
+        vm.loadList(TimelinePlace.Quiet)
+        assertEquals(2, lists.reads)
+    }
+
+    @Test
+    fun aListOnScreenSaysItsErrorsInAnAlert() {
+        assertTrue(chat.matron.android.features.projects.listShowsError(TimelineListContent.Finished(emptyList())))
+        assertFalse(chat.matron.android.features.projects.listShowsError(TimelineListContent.Failed))
+        assertFalse(chat.matron.android.features.projects.listShowsError(TimelineListContent.Loading))
     }
 
     @Test
