@@ -10,6 +10,15 @@ name: Release AAB
 #   MATRON_UPLOAD_KEY_ALIAS        key alias (matron-upload)
 #   MATRON_UPLOAD_KEY_PASSWORD     key password
 #
+# Optional repository secrets for push notifications (Firebase Cloud
+# Messaging). All four, from the Android app registered in the Firebase
+# project (Project settings -> General -> Your apps). Unset: the bundle has
+# push notifications switched off.
+#   MATRON_FCM_PROJECT_ID          Firebase project id
+#   MATRON_FCM_APP_ID              the Android app's id (1:<number>:android:<hex>)
+#   MATRON_FCM_API_KEY             the Android app's web API key
+#   MATRON_FCM_SENDER_ID           project number (sender id)
+#
 # Optional repository variable (Settings -> Secrets and variables -> Actions
 # -> Variables):
 #   MATRON_APP_LINK_HOST           journal host whose https://<host>/u/... tracker
@@ -54,9 +63,16 @@ jobs:
           MATRON_UPLOAD_KEY_ALIAS: ${{ secrets.MATRON_UPLOAD_KEY_ALIAS }}
           MATRON_UPLOAD_KEY_PASSWORD: ${{ secrets.MATRON_UPLOAD_KEY_PASSWORD }}
           MATRON_APP_LINK_HOST: ${{ vars.MATRON_APP_LINK_HOST }}
+          MATRON_FCM_PROJECT_ID: ${{ secrets.MATRON_FCM_PROJECT_ID }}
+          MATRON_FCM_APP_ID: ${{ secrets.MATRON_FCM_APP_ID }}
+          MATRON_FCM_API_KEY: ${{ secrets.MATRON_FCM_API_KEY }}
+          MATRON_FCM_SENDER_ID: ${{ secrets.MATRON_FCM_SENDER_ID }}
         run: |
           if [ -z "$MATRON_APP_LINK_HOST" ]; then
             echo "::warning::MATRON_APP_LINK_HOST is not set; this bundle claims no tracker links."
+          fi
+          if [ -z "$MATRON_FCM_PROJECT_ID$MATRON_FCM_APP_ID$MATRON_FCM_API_KEY$MATRON_FCM_SENDER_ID" ]; then
+            echo "::warning::MATRON_FCM_* secrets are not set; this bundle has no push notifications."
           fi
           ./gradlew :app:bundleRelease
 

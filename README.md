@@ -12,7 +12,7 @@ Matron is a chat system for talking to [Claude Code](https://claude.com/claude-c
 
 Available on [Google Play](https://play.google.com/store/apps/details?id=chat.matron.android). You can also build it from source with the steps below.
 
-Push notifications aren't wired up on Android yet (no Firebase project) — the app live-updates while open.
+Push notifications use Firebase Cloud Messaging, in builds that name a Firebase project (see [Push notifications](#push-notifications)); other builds live-update while open.
 
 ## Part of the Matron ecosystem
 
@@ -46,6 +46,32 @@ Enter your journal's server URL, username, and password. If you already have a s
 ./gradlew :app:assembleDebug
 ./gradlew :app:testDebugUnitTest
 ```
+
+## Push notifications
+
+Push goes through Firebase Cloud Messaging, but the repo holds no Firebase
+file: `FirebaseApp` is set up at launch from four build values, read from
+`local.properties` or the environment like the signing values. A build that
+names none of them (every PR build, and a plain local build) has push off and
+works as before.
+
+| Property | Where to find it in the Firebase console |
+| --- | --- |
+| `MATRON_FCM_PROJECT_ID` | Project settings → General → Project ID |
+| `MATRON_FCM_APP_ID` | Project settings → General → Your apps → the Android app's App ID |
+| `MATRON_FCM_API_KEY` | the Android app's `google-services.json`: `client[0].api_key[0].current_key` |
+| `MATRON_FCM_SENDER_ID` | Project settings → Cloud Messaging → Sender ID (the project number) |
+
+Set all four or none; a partial set warns and builds without push. The
+release workflow reads them from repository secrets of the same names. The
+journal needs the same project's service-account key
+(`MATRON_FCM_SERVICE_ACCOUNT_FILE`, see matron-journal's README).
+
+What a notification says is sealed by the journal to a key that never leaves
+the phone (the same scheme as the iOS app), so Firebase carries only
+ciphertext and routing fields. The app asks for the notification permission
+after sign-in; Settings → Notifications says whether this phone receives
+push.
 
 ## Integration tests (real server)
 

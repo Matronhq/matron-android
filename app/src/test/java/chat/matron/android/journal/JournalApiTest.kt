@@ -200,23 +200,40 @@ class JournalApiTest {
     }
 
     @Test
-    fun registerPushPostsTokenAndEnvironment() = runBlocking {
+    fun registerFcmPushPostsTokenAndKey() = runBlocking {
         server.enqueue(json(200, """{"ok":true}"""))
-        api(token = "t").registerPush("aabbcc", JournalApi.PushEnvironment.SANDBOX)
+        api(token = "t").registerFcmPush("fcm-token-0001", "uLHqgzncBWWOwTpUixAlfi0qAZ_p0tSU6vRJv7LCvi4")
         val req = server.takeRequest()
-        assertEquals("/push/register", req.path)
+        assertEquals("/push/fcm/register", req.path)
         assertEquals("POST", req.method)
         val obj = parseJsonObjectOrNull(req.body.readUtf8())!!
-        assertEquals("aabbcc", obj.stringOrNull("apns_token"))
-        assertEquals("sandbox", obj.stringOrNull("environment"))
+        assertEquals("fcm-token-0001", obj.stringOrNull("token"))
+        assertEquals("uLHqgzncBWWOwTpUixAlfi0qAZ_p0tSU6vRJv7LCvi4", obj.stringOrNull("push_key"))
+    }
+
+    @Test
+    fun registerFcmPushWithoutKeyOmitsIt() = runBlocking {
+        server.enqueue(json(200, """{"ok":true}"""))
+        api(token = "t").registerFcmPush("fcm-token-0001", null)
+        val obj = parseJsonObjectOrNull(server.takeRequest().body.readUtf8())!!
+        assertTrue("push_key" !in obj)
+    }
+
+    @Test
+    fun registerFcmPushOnAJournalWithPushOffIsNotFound() = runBlocking {
+        server.enqueue(json(404, """{"error":"fcm_disabled"}"""))
+        val error = runCatching { api(token = "t").registerFcmPush("fcm-token-0001", null) }.exceptionOrNull()
+        assertEquals(JournalApiError.NotFound, error)
     }
 
     @Test
     fun unregisterPushSendsNullToken() = runBlocking {
         server.enqueue(json(200, """{"ok":true}"""))
         api(token = "t").unregisterPush()
-        val obj = parseJsonObjectOrNull(server.takeRequest().body.readUtf8())!!
-        assertTrue(obj["apns_token"] is kotlinx.serialization.json.JsonNull)
+        val req = server.takeRequest()
+        assertEquals("/push/fcm/register", req.path)
+        val obj = parseJsonObjectOrNull(req.body.readUtf8())!!
+        assertTrue(obj["token"] is kotlinx.serialization.json.JsonNull)
     }
 
     @Test
