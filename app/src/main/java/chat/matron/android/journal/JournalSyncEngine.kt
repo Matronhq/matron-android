@@ -948,6 +948,11 @@ class JournalSyncEngine(
             settle(source, convoID, connection, generation)
         } finally {
             synchronized(lock) { if (settlingViewed[convoID] == generation) settlingViewed.remove(convoID) }
+            // Reopened while this waited (possibly before its fetch had even
+            // let go of the in-flight slot, so the reopen could not start
+            // one): fetch for the new viewing now. A no-op when the chat is
+            // closed, caught up, or already being fetched.
+            startConversationCatchUp(convoID)
         }
     }
 
