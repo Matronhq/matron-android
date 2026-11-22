@@ -4,6 +4,7 @@ import chat.matron.android.AppDependencies
 import chat.matron.android.models.AttachmentBatchTag
 import chat.matron.android.models.SyncConnectionState
 import chat.matron.android.models.UserSession
+import chat.matron.android.sync.MainAppVisibility
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -25,6 +26,9 @@ class LiveShareTransport(
     private val deps: AppDependencies,
     private val session: UserSession,
     private val connectTimeoutMillis: Long = 20_000,
+    /// Whether the main app is on screen: its engine is then its own, and
+    /// the share must not stop it.
+    private val isAppVisible: () -> Boolean = { MainAppVisibility.isStarted },
 ) : ShareTransport {
     private var startedHere = false
 
@@ -73,6 +77,11 @@ class LiveShareTransport(
         // the last frame leave the socket; the close itself is graceful.
         background.launch {
             delay(1_000)
+            // The app may have come to the front meanwhile ("Open Matron",
+            // or the user switched to it): its own foreground start is a
+            // no-op on a running engine, so stopping it now would leave the
+            // visible app offline.
+            if (isAppVisible()) return@launch
             val sync = deps.syncService(session)
             if (sync.isRunning()) sync.stop()
         }

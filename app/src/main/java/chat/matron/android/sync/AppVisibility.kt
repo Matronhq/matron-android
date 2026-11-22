@@ -18,3 +18,15 @@ fun isAppProcessInForeground(context: Context): Boolean {
         it.pid == myPid && it.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
     } ?: false
 }
+
+/**
+ * Whether the main app's window is started (between [MainActivity]'s
+ * `onStart` and `onStop`). The share screen runs in the same process, so
+ * [isAppProcessInForeground] can't tell the two apart; a share that started
+ * the sync engine reads this before stopping it, so it never takes the
+ * visible app offline.
+ */
+object MainAppVisibility {
+    @Volatile
+    var isStarted: Boolean = false
+}
