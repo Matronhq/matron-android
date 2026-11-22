@@ -139,7 +139,7 @@ fun UsageHistoryContent(
                         )
                     }
                 }
-                items(table.rows, key = { it.id }) { row -> AccountCard(row, table.columns.firstOrNull()) }
+                items(table.rows, key = { it.id }) { row -> AccountCard(row, table.columns) }
                 if (table.rows.isEmpty() && errorMessage == null) {
                     item(key = "empty") {
                         Box(Modifier.fillMaxWidth().heightIn(min = 200.dp), contentAlignment = Alignment.Center) {
@@ -171,14 +171,22 @@ fun UsageHistoryContent(
 }
 
 @Composable
-private fun AccountCard(row: UsageHistoryTable.Row, firstColumnMs: Long?) {
+private fun AccountCard(row: UsageHistoryTable.Row, columns: List<Long>) {
+    val firstColumnMs = columns.firstOrNull()
     val secondary = MaterialTheme.colorScheme.onSurfaceVariant
     val latest = row.latest
+    // "last week" only when the newest reading is last week's; otherwise the
+    // week it is from.
+    val latestWeek = when {
+        latest == null -> null
+        row.latestIsLastWeek -> "last week"
+        else -> row.latestColumn?.let(columns::getOrNull)?.let { "week of ${UsageHistoryStyle.columnText(it)}" } ?: "last week"
+    }
     // Only weeks with a reading are in the average.
     val weeks = row.cells.count { it != null }
     val spoken = buildString {
         append("${row.title}, ${row.subtitle}. ")
-        append(latest?.let { "${it.unused} percent unused last week" } ?: "No finished week")
+        append(latest?.let { "${it.unused} percent unused $latestWeek" } ?: "No finished week")
         row.averageUnused?.let { append(", $weeks-week average $it percent unused") }
         row.current?.let { append(", ${it.unused} percent left so far this week") }
     }
@@ -203,7 +211,7 @@ private fun AccountCard(row: UsageHistoryTable.Row, firstColumnMs: Long?) {
                         fontWeight = FontWeight.Bold,
                     )
                     Text(
-                        if (latest == null) "no finished week" else "unused last week",
+                        if (latest == null) "no finished week" else "unused $latestWeek",
                         style = MaterialTheme.typography.labelSmall,
                         color = secondary,
                     )

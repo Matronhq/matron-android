@@ -3,7 +3,9 @@ package chat.matron.android.models
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
 
@@ -74,9 +76,21 @@ class UsageHistoryTest {
         assertEquals(listOf(null, 100, 40, 25), alice.cells.map { it?.unused })
         assertEquals(55, alice.averageUnused)
         assertEquals(25, alice.latest?.unused)
+        assertTrue(alice.latestIsLastWeek)
+        assertEquals(3, alice.latestColumn)
         val codex = table.rows[1]
         assertEquals(listOf(null, null, null, 60), codex.cells.map { it?.unused })
         assertEquals(listOf(null, 100, 40, 43), table.columnAverages)
+    }
+
+    @Test
+    fun latest_afterAWeekWithNoReadingIsNotLastWeek() {
+        val now = ms("2026-11-21T12:00:00Z")
+        val alice = UsageHistoryTable.build(parse(reply)!!, UsageMeterChoice.primary, weeks = 4, nowMs = now).rows[0]
+        val gap = alice.copy(cells = alice.cells.dropLast(1) + null)
+        assertEquals(40, gap.latest?.unused)
+        assertFalse(gap.latestIsLastWeek)
+        assertEquals(2, gap.latestColumn)
     }
 
     @Test

@@ -158,6 +158,12 @@ data class UsageHistoryTable(
     ) {
         /// The newest finished week on show.
         val latest: UsageWeek? get() = cells.lastOrNull { it != null }
+
+        /// The column [latest] sits in; null when there is none. Only the
+        /// last column is "last week": after a week with no reading, the
+        /// newest reading is older.
+        val latestColumn: Int? get() = cells.indexOfLast { it != null }.takeIf { it >= 0 }
+        val latestIsLastWeek: Boolean get() = cells.isNotEmpty() && cells.last() != null
     }
 
     companion object {
