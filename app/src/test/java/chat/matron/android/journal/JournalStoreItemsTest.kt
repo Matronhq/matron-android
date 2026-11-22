@@ -159,6 +159,51 @@ class JournalStoreItemsTest {
     }
 
     @Test
+    fun multiSelectQuestionsAndAnswersRoundTrip() = runBlocking {
+        val store = makeStore()
+        val own = item("it_1", 1).copy(
+            kind = ItemKind.QUESTION, actions = listOf("Docs", "Billing", "Search"), multiSelect = true,
+            chosenActions = listOf("Docs", "Search"), chosenAction = "Docs",
+        )
+        store.upsertItems(listOf(own))
+        assertEquals(own, store.item("it_1"))
+        val oneTap = item("it_2", 2).copy(actions = listOf("Go"), chosenAction = "Go")
+        store.upsertItems(listOf(oneTap))
+        assertEquals("a one-tap item is stored as before", oneTap, store.item("it_2"))
+        val asking = TrackerComment(
+            "q1", "it_1", ItemAuthor.AGENT, body = "Which areas?", createdAt = Instant.ofEpochMilli(5),
+            actions = listOf("Docs", "Billing"), multiSelect = true, chosenActions = listOf("Billing"), chosenAction = "Billing",
+        )
+        val answer = TrackerComment(
+            "a1", "it_1", ItemAuthor.USER, body = "Billing", createdAt = Instant.ofEpochMilli(6),
+            action = "Billing", replyTo = "q1", selected = listOf("Billing"),
+        )
+        store.replaceComments("it_1", listOf(asking, answer))
+        assertEquals(listOf(asking, answer), store.comments("it_1"))
+    }
+
+    @Test
+    fun aLandedMultiSelectAnswerMarksEveryLabelOnTheAskingComment() = runBlocking {
+        val store = makeStore()
+        val asking = TrackerComment(
+            "q1", "it_1", ItemAuthor.AGENT, body = "Which areas?", createdAt = Instant.ofEpochMilli(5),
+            actions = listOf("Docs", "Billing", "Search"), multiSelect = true,
+        )
+        store.replaceComments("it_1", listOf(asking))
+        val answer = TrackerComment(
+            "a1", "it_1", ItemAuthor.USER, body = "Docs, Search", createdAt = Instant.ofEpochMilli(6),
+            action = "Docs", replyTo = "q1", selected = listOf("Docs", "Search"),
+        )
+        store.commitOutboxResult(item("it_1", 1), answer, deletingLocalID = "L1")
+        val back = store.comments("it_1").first { it.id == "q1" }
+        assertEquals(listOf("Docs", "Search"), back.chosenActions)
+        assertEquals("Docs", back.chosenAction)
+        // A label the question does not offer changes nothing.
+        store.commitOutboxResult(item("it_1", 1), answer.copy(id = "a2", selected = listOf("Docs", "Gone")), deletingLocalID = "L2")
+        assertEquals(listOf("Docs", "Search"), store.comments("it_1").first { it.id == "q1" }.chosenActions)
+    }
+
+    @Test
     fun aLandedTapMarksTheAskingCommentInTheSameWrite() = runBlocking {
         val store = makeStore()
         val asking = TrackerComment("q1", "it_1", ItemAuthor.AGENT, body = "Merge it?", createdAt = Instant.ofEpochMilli(5), actions = listOf("Merge", "Wait"))
