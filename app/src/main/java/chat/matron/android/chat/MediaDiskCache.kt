@@ -103,7 +103,8 @@ class MediaDiskCache(
         val cutoff = now() - maxAgeMs
         var total = 0L
         for (entry in entries()) {
-            if (entry.lastModified() < cutoff) entry.delete() else total += entry.length()
+            // An expired entry that won't delete still takes up space.
+            if (entry.lastModified() >= cutoff || !entry.delete()) total += entry.length()
         }
         return total
     }
