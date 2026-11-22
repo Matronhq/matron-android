@@ -159,16 +159,28 @@ data class UsageHistoryTable(
         /// The newest finished week on show.
         val latest: UsageWeek? get() = cells.lastOrNull { it != null }
 
-        /// The column [latest] sits in; null when there is none. Only the
-        /// last column is "last week": after a week with no reading, the
-        /// newest reading is older.
+        /// The column [latest] sits in; null when there is none.
         val latestColumn: Int? get() = cells.indexOfLast { it != null }.takeIf { it >= 0 }
-        val latestIsLastWeek: Boolean get() = cells.isNotEmpty() && cells.last() != null
+
+        /// Whether [latest] is the week that ended when the current one began.
+        /// Columns are calendar weeks and a week sits in the one it reset in,
+        /// so before this calendar week's reset the newest finished week is in
+        /// the previous column; only a week older than that, after one with
+        /// no reading, is not "last week". With no week in progress to go by,
+        /// either of the last two columns counts.
+        val latestIsLastWeek: Boolean
+            get() {
+                val week = latest ?: return false
+                current?.let { return week.resetsAt >= it.resetsAt - WEEK_MS - DAY_MS }
+                val column = latestColumn ?: return false
+                return column >= cells.size - 2
+            }
     }
 
     companion object {
         const val DEFAULT_WEEKS = 12
         private const val WEEK_MS = 7 * 86_400_000L
+        private const val DAY_MS = 86_400_000L
 
         /// The headline meter first, then each model meter any account has.
         fun choices(history: UsageHistory): List<UsageMeterChoice> {

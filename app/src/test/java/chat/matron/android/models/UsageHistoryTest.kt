@@ -87,10 +87,22 @@ class UsageHistoryTest {
     fun latest_afterAWeekWithNoReadingIsNotLastWeek() {
         val now = ms("2026-11-21T12:00:00Z")
         val alice = UsageHistoryTable.build(parse(reply)!!, UsageMeterChoice.primary, weeks = 4, nowMs = now).rows[0]
+        // The week that reset on 19 Nov has no reading: 12 Nov's is older.
         val gap = alice.copy(cells = alice.cells.dropLast(1) + null)
         assertEquals(40, gap.latest?.unused)
         assertFalse(gap.latestIsLastWeek)
         assertEquals(2, gap.latestColumn)
+    }
+
+    @Test
+    fun latest_beforeThisCalendarWeeksResetIsStillLastWeek() {
+        // Monday 23 Nov: the week that reset on Thursday 19 Nov is in the
+        // previous column, and this column has no reset yet.
+        val now = ms("2026-11-23T08:00:00Z")
+        val alice = UsageHistoryTable.build(parse(reply)!!, UsageMeterChoice.primary, weeks = 4, nowMs = now).rows[0]
+        assertNull(alice.cells.last())
+        assertEquals(25, alice.latest?.unused)
+        assertTrue(alice.latestIsLastWeek)
     }
 
     @Test
