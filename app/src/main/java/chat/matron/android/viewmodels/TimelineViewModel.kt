@@ -33,6 +33,9 @@ data class TimelineState(
     /// 404 (it has no timeline: the tab keeps the missions list).
     val isSupported: Boolean? = null,
     val isRefreshing: Boolean = false,
+    /// Bumped each time a week lands: its pictures are asked for again, so
+    /// one that failed to load gets another try on a refresh.
+    val weekLoads: Int = 0,
     val error: String? = null,
 ) {
     /// The loaded week when it is the one picked: a pick of another week
@@ -102,6 +105,7 @@ class TimelineViewModel(
     /// Once the journal has 404'd the week-projects read, nothing asks again.
     private var weekProjectsSupported: Boolean? = null
     private var started = false
+    private var refreshesRunning = 0
     private var showJob: Job? = null
 
     /// The tab came on screen: the first time loads the weeks and the newest
@@ -126,11 +130,15 @@ class TimelineViewModel(
 
     /// Pull to refresh: re-reads the weeks and the week on screen.
     suspend fun refresh() {
+        // Refreshes can overlap (a pull while the tab's own re-read runs):
+        // the indicator stays until the last of them ends.
+        refreshesRunning += 1
         _state.update { it.copy(isRefreshing = true) }
         try {
             start()
         } finally {
-            _state.update { it.copy(isRefreshing = false) }
+            refreshesRunning -= 1
+            if (refreshesRunning == 0) _state.update { it.copy(isRefreshing = false) }
         }
     }
 
@@ -295,7 +303,7 @@ class TimelineViewModel(
         }
         weekProjectsNextOffset = if (status == TimelineWeekExtras.Status.MORE) 0 else null
         _state.update {
-            it.copy(week = week, weekProjectsKey = week.week, weekProjects = emptyList(), weekProjectsStatus = status)
+            it.copy(week = week, weekProjectsKey = week.week, weekProjects = emptyList(), weekProjectsStatus = status, weekLoads = it.weekLoads + 1)
         }
     }
 
