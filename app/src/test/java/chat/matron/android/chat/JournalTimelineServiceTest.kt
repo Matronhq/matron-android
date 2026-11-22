@@ -135,6 +135,41 @@ class JournalTimelineServiceTest {
         engine.endSync()
     }
 
+    /// A For you only open that cannot reach the stored copy drops the older
+    /// rows; the timeline then observes a window anchored on the new tail,
+    /// not the stale one, so it stays bounded.
+    @Test fun aGapDropRebasesTheTailWindow() = runBlocking {
+        val store = makeStore()
+        store.applyJournal(ev(1, payload = body("old one")))
+        store.applyJournal(ev(2, payload = body("old two")))
+        store.markForYouStart()
+        val far = (1000L until 1700L).map { ev(it, payload = body("new $it")) }
+        val pages = chat.matron.android.journal.ConversationPageSource { convo, before, limit ->
+            far.filter { it.convoID == convo && (before == null || it.seq < before) }.takeLast(limit)
+        }
+        val socket = FakeWebSocketConnection().also {
+            it.serve("""{"kind":"control","op":"hello_ok","seq":2000,"sync":"for_you"}""")
+            it.serve("""{"kind":"control","op":"cursor","seq":2000}""")
+        }
+        val api = JournalApi("https://x")
+        val engine = JournalSyncEngine(
+            api, store, FakeConnector(listOf(socket)), token = "t", ownSender = "user:alice", search = null,
+            backoffBaseSeconds = 0.01, pages = pages, syncScope = chat.matron.android.journal.SyncScope.FOR_YOU,
+            conversationSettleDelay = 10.milliseconds,
+        )
+        val service = JournalTimelineService("c1", store, engine, api, makeSession(), fetchWindow = 50)
+        engine.beginSync()
+        engine.waitUntilReady()
+        val (collector, task) = collectItems(service.items())
+        waitUntil(5000) { collector.last()?.lastOrNull()?.id == "1699" }
+        waitUntil(5000) { collector.last()?.size == 50 }
+        val items = collector.last()!!
+        assertEquals("the window is anchored on the new tail", 50, items.size)
+        assertFalse(items.any { it.id == "1" || it.id == "2" })
+        task.cancel()
+        engine.endSync()
+    }
+
     // MARK: (b) ephemeral overlay inserts + finalize removes it
 
     @Test fun ephemeralOverlayInsertsAndFinalizeRemoves() = runBlocking {

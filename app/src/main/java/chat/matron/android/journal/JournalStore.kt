@@ -168,7 +168,23 @@ class JournalStore(
             raiseSyncedSeq(convoID, newest)
             // The chat list row learns what the fetch found: most of these
             // events never came down the socket, so nothing else moved it.
-            val convo = conversationDao.byId(convoID)
+            // Its session state and read marker come from the newest stored
+            // ones (a live frame newer than the fetch wins), and unread is
+            // counted again against that marker.
+            var convo = conversationDao.byId(convoID)
+            if (convo != null) {
+                val status = eventDao.newestMessageEvent(convoID, listOf(JournalEventType.SESSION_STATUS))
+                    ?.toJournalEvent()?.payload?.stringOrNull("state")
+                val marker = eventDao.newestMessageEvent(convoID, listOf(JournalEventType.READ_MARKER))
+                    ?.toJournalEvent()?.payload?.longOrNull("up_to_seq") ?: 0
+                val read = max(convo.readUpToSeq, marker)
+                convo = convo.copy(
+                    sessionState = status ?: convo.sessionState,
+                    readUpToSeq = read,
+                    unreadCount = recountUnread(convoID, read),
+                )
+                conversationDao.upsert(convo)
+            }
             val newestMessage = sorted.lastOrNull { it.type in JournalEventType.MESSAGE_TYPES }
             if (convo != null && newest > convo.lastSeq) {
                 var updated = convo.copy(lastSeq = newest)

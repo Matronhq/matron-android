@@ -182,6 +182,27 @@ class SyncScopeTest {
     }
 
     @Test
+    fun aFetchedTailBringsTheChatsStateAndReadMarker() = runBlocking {
+        val store = seededStore()
+        fun raw(seq: Long, type: String, payload: String) = JournalEvent.fromFrame(parseJsonObjectOrNull(
+            """{"kind":"journal","seq":$seq,"convo_id":"c1","ts":${seq * 1000},"sender":"agent:a","type":"$type","payload":$payload}""",
+        )!!)!!
+        store.insertConversationTail(
+            listOf(
+                event(3), event(4),
+                raw(5, "session_status", """{"state":"running"}"""),
+                raw(6, "read_marker", """{"up_to_seq":3}"""),
+                event(7),
+            ),
+            "c1", reachesSyncedSeq = true,
+        )
+        val row = store.conversations().single { it.id == "c1" }
+        assertEquals("running", row.sessionState)
+        assertEquals(3L, row.readUpToSeq)
+        assertEquals("4 and 7 are unread", 2, row.unreadCount)
+    }
+
+    @Test
     fun tailBelowAGapDropsTheStrandedOlderEvents() = runBlocking {
         val store = seededStore()
         store.insertHistory(listOf(event(1), event(2), event(3, convo = "c2")))
