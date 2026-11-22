@@ -1124,7 +1124,8 @@ private fun SignedInApp(
                     composable("notifications") {
                         NotificationSettingsScreen(
                             store = deps.notifySettings(session),
-                            title = { id -> allChats.firstOrNull { it.id == id }?.title ?: "Conversation" },
+                            // Archived chats too: an override can outlive the chat's place in the list.
+                            title = { id -> summaryFor(id)?.title?.takeIf { it.isNotBlank() } ?: id },
                             onBack = { nav.popBackStack() },
                         )
                     }

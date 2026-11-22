@@ -40,10 +40,14 @@ data class ConvoNotifyState(
 /// `notify` frames as they land. Writes are optimistic: the change shows at
 /// once and a failed `PUT` takes back exactly that change.
 ///
-/// Shown state is the journal's last answer (`confirmed`) with the writes
-/// still in flight replayed on top, so overlapping writes never roll each
-/// other back and a frame or `GET` landing mid-write keeps the user's
-/// pending change on screen. Port of matron-apple's `NotifySettingsStore`.
+/// Shown state is the journal's newest answer with the writes still in
+/// flight replayed on top, so overlapping writes never roll each other back
+/// and a frame or `GET` landing mid-write keeps the user's pending change on
+/// screen. "Newest" is by when the request went out (or the frame arrived),
+/// not by when its answer lands: each request and frame takes a ticket, and
+/// an answer older than what is shown is dropped. The synced settings and
+/// this device's level are kept apart, since a live frame carries only the
+/// former. Port of matron-apple's `NotifySettingsStore`.
 class NotifySettingsStore(
     private val api: NotifySettingsProviding,
     private val updates: () -> Flow<NotifySettings>,
@@ -74,12 +78,15 @@ class NotifySettingsStore(
     val clock: StateFlow<Long> = _clock.asStateFlow()
 
     // Guarded by `lock`.
-    private var confirmed: NotifyView? = null
+    private var confirmedSettings: NotifySettings? = null
+    private var confirmedLevel: NotifyDeviceLevel = NotifyDeviceLevel.ALL
+    /// The tickets of the answers [confirmedSettings] and [confirmedLevel]
+    /// came from; `0` = none yet.
+    private var settingsTicket = 0L
+    private var levelTicket = 0L
+    private var nextTicket = 1L
     private val pending = mutableListOf<Pair<Int, NotifyChange>>()
     private var nextWriteID = 0
-    /// Bumped whenever `confirmed` takes a newer answer (a live frame or a
-    /// `PUT` reply). A `GET` that started before is older news and is dropped.
-    private var confirmedEpoch = 0
     private var jobs = listOf<Job>()
     private var expiryJob: Job? = null
 
@@ -101,8 +108,9 @@ class NotifySettingsStore(
             jobs = emptyList()
             expiryJob?.cancel()
             expiryJob = null
-            // A `GET` still in flight must not land after this.
-            confirmedEpoch++
+            // Nothing still in flight may land after this.
+            settingsTicket = Long.MAX_VALUE
+            levelTicket = Long.MAX_VALUE
         }
     }
 
@@ -118,14 +126,12 @@ class NotifySettingsStore(
 
     /// `GET /notify`. A transport failure keeps what is shown.
     suspend fun refresh() {
-        val startEpoch = synchronized(lock) { confirmedEpoch }
+        val ticket = synchronized(lock) { nextTicket++ }
         try {
             val answer = api.notifySettings()
             synchronized(lock) {
                 _isSupported.value = true
-                if (confirmedEpoch != startEpoch) return
-                confirmed = answer
-                _error.value = null
+                acceptLocked(answer, ticket)
                 recomputeLocked()
             }
         } catch (cancel: CancellationException) {
@@ -167,18 +173,17 @@ class NotifySettingsStore(
     /// Shows [change] at once, then `PUT`s it. The answer becomes the new
     /// confirmed state; a failure drops just this change.
     suspend fun apply(change: NotifyChange) {
-        val id = synchronized(lock) {
+        val (id, ticket) = synchronized(lock) {
             val id = nextWriteID++
             pending += id to change
             recomputeLocked()
-            id
+            id to nextTicket++
         }
         try {
             val answer = api.updateNotify(change)
             synchronized(lock) {
                 pending.removeAll { it.first == id }
-                confirmed = answer
-                confirmedEpoch++
+                acceptLocked(answer, ticket)
                 _isSupported.value = true
                 _error.value = null
                 recomputeLocked()
@@ -198,16 +203,31 @@ class NotifySettingsStore(
     /// A `notify` frame: the synced part only. This device's level stays as
     /// its own `GET`/`PUT` last left it.
     private fun applyLive(settings: NotifySettings) = synchronized(lock) {
-        confirmed = NotifyView(settings, confirmed?.deviceLevel ?: NotifyDeviceLevel.ALL)
-        confirmedEpoch++
+        settingsTicket = maxOf(settingsTicket, nextTicket++)
+        confirmedSettings = settings
         _isSupported.value = true
         recomputeLocked()
+    }
+
+    /// Takes each part of a `GET`/`PUT` answer unless something newer
+    /// already set it. A `PUT` answer older than a live frame loses nothing:
+    /// the journal sends a frame for every change, this one's included.
+    private fun acceptLocked(answer: NotifyView, ticket: Long) {
+        if (ticket > settingsTicket) {
+            settingsTicket = ticket
+            confirmedSettings = answer.settings
+            _error.value = null
+        }
+        if (ticket > levelTicket) {
+            levelTicket = ticket
+            confirmedLevel = answer.deviceLevel
+        }
     }
 
     private fun recomputeLocked() {
         val t = now()
         _clock.value = t
-        val shown = confirmed?.let { base -> pending.fold(base) { acc, (_, change) -> change.appliedTo(acc) } }
+        val shown = confirmedSettings?.let { NotifyView(it, confirmedLevel) }?.let { base -> pending.fold(base) { acc, (_, change) -> change.appliedTo(acc) } }
         _view.value = shown
         scheduleExpiryLocked(shown, t)
     }

@@ -181,3 +181,64 @@ class NotifySettingsStoreTest {
         assertTrue(muted[4] is ConvoNotifyMenuRow.Unmute)
     }
 }
+
+class NotifySettingsStoreOrderingTest {
+    private val base = NotifyView(
+        NotifySettings(NotifySettings.Mode.COORDINATOR, NotifySettings.preset(NotifySettings.Mode.COORDINATOR)!!, true, emptyList()),
+        NotifyDeviceLevel.OFF,
+    )
+
+    /// Answers each call only when its own gate opens, so tests choose the order.
+    private class GatedApi(val base: NotifyView) : NotifySettingsProviding {
+        val gets = mutableListOf<CompletableDeferred<NotifyView>>()
+        val puts = mutableListOf<CompletableDeferred<NotifyView>>()
+        override suspend fun notifySettings(): NotifyView = CompletableDeferred<NotifyView>().also { gets += it }.await()
+        override suspend fun updateNotify(change: NotifyChange): NotifyView =
+            CompletableDeferred<NotifyView>().also { puts += it }.await()
+    }
+
+    private fun store(api: GatedApi, frames: MutableSharedFlow<NotifySettings>) =
+        NotifySettingsStore(api, { frames }, { emptyFlow<SyncConnectionState>() }, now = { 1_000L }, dispatcher = Dispatchers.Unconfined)
+
+    @Test
+    fun anOlderPutAnswerDoesNotOverwriteANewerOne() = runBlocking {
+        val api = GatedApi(base); val store = store(api, MutableSharedFlow())
+        val get = launch { store.refresh() }
+        waitUntil { api.gets.size == 1 }
+        api.gets[0].complete(base); get.join()
+        val first = launch { store.setMode(NotifySettings.Mode.ALL) }
+        waitUntil { api.puts.size == 1 }
+        val second = launch { store.setMode(NotifySettings.Mode.CUSTOM) }
+        waitUntil { api.puts.size == 2 }
+        val afterAll = NotifyChange.SetMode(NotifySettings.Mode.ALL).appliedTo(base)
+        api.puts[1].complete(NotifyChange.SetMode(NotifySettings.Mode.CUSTOM).appliedTo(afterAll)); second.join()
+        api.puts[0].complete(afterAll); first.join()
+        assertEquals(NotifySettings.Mode.CUSTOM, store.view.value!!.settings.mode)
+    }
+
+    @Test
+    fun aFrameBeforeTheFirstGetKeepsTheGetsDeviceLevel() = runBlocking {
+        val api = GatedApi(base); val frames = MutableSharedFlow<NotifySettings>()
+        val store = store(api, frames)
+        store.start()
+        val get = launch { store.refresh() }
+        waitUntil { api.gets.size == 1 }
+        frames.emit(base.settings.copy(mode = NotifySettings.Mode.ALL))
+        api.gets[0].complete(base); get.join()
+        assertEquals("the frame is newer", NotifySettings.Mode.ALL, store.view.value!!.settings.mode)
+        assertEquals("the level only the GET knows", NotifyDeviceLevel.OFF, store.view.value!!.deviceLevel)
+        store.stop()
+    }
+
+    @Test
+    fun anOlderGetAnswerIsDropped() = runBlocking {
+        val api = GatedApi(base); val store = store(api, MutableSharedFlow())
+        val older = launch { store.refresh() }
+        waitUntil { api.gets.size == 1 }
+        val newer = launch { store.refresh() }
+        waitUntil { api.gets.size == 2 }
+        api.gets[1].complete(base.copy(settings = base.settings.copy(mode = NotifySettings.Mode.ALL))); newer.join()
+        api.gets[0].complete(base); older.join()
+        assertEquals(NotifySettings.Mode.ALL, store.view.value!!.settings.mode)
+    }
+}

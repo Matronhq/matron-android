@@ -63,6 +63,9 @@ fun ConvoNotifyMenu(
     val view by store.view.collectAsStateWithLifecycle()
     val now by store.clock.collectAsStateWithLifecycle()
     val state = store.state(convoID, view, now)
+    // Until the first answer the level is unknown, not Default: nothing to
+    // pick from yet.
+    val loaded = view != null
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss, modifier = Modifier.testTag("convo-notify-menu")) {
         var lastWasLevel = true
         ConvoNotifyMenuRow.rows(state, now).forEach { row ->
@@ -73,7 +76,8 @@ fun ConvoNotifyMenu(
             when (row) {
                 is ConvoNotifyMenuRow.Level -> DropdownMenuItem(
                     text = { Text(row.title) },
-                    leadingIcon = { if (row.selected) Icon(Icons.Filled.Check, contentDescription = "Selected") },
+                    leadingIcon = { if (loaded && row.selected) Icon(Icons.Filled.Check, contentDescription = "Selected") },
+                    enabled = loaded,
                     onClick = {
                         onDismiss()
                         if (!row.selected) store.post(NotifyChange.ConvoLevel(convoID, row.level))
@@ -86,6 +90,7 @@ fun ConvoNotifyMenu(
                 )
                 is ConvoNotifyMenuRow.Mute -> DropdownMenuItem(
                     text = { Text(row.title) },
+                    enabled = loaded,
                     onClick = { onDismiss(); store.post(store.muteChange(convoID, row.duration)) },
                 )
             }
