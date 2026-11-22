@@ -31,6 +31,7 @@ import java.time.Instant
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import java.util.UUID
 import kotlinx.serialization.json.buildJsonObject
@@ -329,6 +330,11 @@ data class ItemEntity(
     @ColumnInfo(name = "handover_json") val handoverJson: String? = null,
     /// The contributor who filed the item (v17); null on everything else.
     @ColumnInfo(name = "contributor_json") val contributorJson: String? = null,
+    /// Approval keys (v20): the step-up mark and its subject as JSON. Rows
+    /// cached before v20 read "not step-up" until their next refetch; a tap
+    /// that needs a signature reads the item afresh before signing anyway.
+    @ColumnInfo(name = "step_up") val stepUp: Boolean? = null,
+    @ColumnInfo(name = "subject_json") val subjectJson: String? = null,
 ) {
     fun toItem(): TrackerItem = TrackerItem(
         id = id, num = num, kind = ItemKind.fromWire(kind) ?: ItemKind.TASK,
@@ -350,6 +356,8 @@ data class ItemEntity(
         working = workingJson?.let(::storedItemWorking),
         handover = ItemHandover.fromJson(handoverJson?.let(::parseJsonObjectOrNull)),
         contributor = Contributor.fromJson(contributorJson?.let(::parseJsonObjectOrNull)),
+        stepUp = stepUp ?: false,
+        subject = subjectJson?.let { TrackerItem.stringMapOrNull(parseJsonObjectOrNull(it)) },
     )
 
     companion object {
@@ -372,6 +380,8 @@ data class ItemEntity(
             lastUserInputAt = i.lastUserInputAt?.toEpochMilli(),
             handoverJson = i.handover?.toJson()?.toString(),
             contributorJson = i.contributor?.toJson()?.toString(),
+            stepUp = if (i.stepUp) true else null,
+            subjectJson = i.subject?.let { MatronJson.encodeToString(MapSerializer(String.serializer(), String.serializer()), it) },
         )
     }
 }
@@ -415,6 +425,8 @@ data class ItemCommentEntity(
         @SerialName("contributor_via") val contributorVia: String? = null,
         val attribution: String? = null,
         val replaces: String? = null,
+        @SerialName("step_up") val stepUp: Boolean? = null,
+        val subject: Map<String, String>? = null,
     )
 
     fun toComment(): TrackerComment {
@@ -438,6 +450,8 @@ data class ItemCommentEntity(
             },
             attribution = meta?.attribution,
             replaces = meta?.replaces,
+            stepUp = meta?.stepUp ?: false,
+            subject = meta?.subject,
         )
     }
 
@@ -448,7 +462,9 @@ data class ItemCommentEntity(
             val hasButtons = c.actions.isNotEmpty() || c.chosenAction != null || c.action != null || c.replyTo != null
             val hasAuthor = c.deviceName != null || c.convoID != null || c.convoTitle != null ||
                 c.contributor != null || c.attribution != null
-            val meta = if (c.statusFrom != null || c.statusTo != null || hasButtons || hasAuthor || c.replaces != null) {
+            val meta = if (c.statusFrom != null || c.statusTo != null || hasButtons || hasAuthor || c.replaces != null ||
+                c.stepUp || c.subject != null
+            ) {
                 MatronJson.encodeToString(
                     Meta.serializer(),
                     Meta(
@@ -459,6 +475,8 @@ data class ItemCommentEntity(
                         contributorName = c.contributor?.name, contributorVia = c.contributor?.via?.wire,
                         attribution = c.attribution,
                         replaces = c.replaces,
+                        stepUp = if (c.stepUp) true else null,
+                        subject = c.subject,
                     ),
                 )
             } else {

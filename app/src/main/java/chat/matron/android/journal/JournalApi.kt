@@ -1210,6 +1210,30 @@ class JournalApi(
         )
     }
 
+    override suspend fun tapItem(
+        id: String,
+        action: String,
+        replyTo: String?,
+        approval: SignedApproval,
+        idempotencyKey: String,
+    ): ItemTapResult {
+        val json = buildJsonObject {
+            put("body", action)
+            put("action", action)
+            replyTo?.let { put("reply_to", it) }
+            put("approval", approval.toJson())
+        }
+        val obj = request(
+            path = "/items/${pathSegment(id)}/comments", method = "POST", jsonBody = json,
+            accept = setOf(200, 201), headers = idempotencyHeaders(idempotencyKey),
+        )
+        return ItemTapResult(
+            decodeItem(obj), obj.objectOrNull("comment")?.let(TrackerComment::fromJson),
+            link = InviteLinks.shareableOf(obj),
+            askId = obj.objectOrNull("ask")?.stringOrNull("id")?.takeIf { it.isNotEmpty() },
+        )
+    }
+
     override suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem =
         decodeItem(
             request(

@@ -126,6 +126,7 @@ class ChatVMCache(
             sync = deps.itemsSync(session),
             scope = scope,
             stagingDirectory = deps.stagingDirectory,
+            approvals = deps.approvalCenter(session),
             agentSpawn = deps.agentSpawnService(session),
             unsentReplies = deps.unsentReplies,
             queuedRelease = deps.queuedReplySender(session),
