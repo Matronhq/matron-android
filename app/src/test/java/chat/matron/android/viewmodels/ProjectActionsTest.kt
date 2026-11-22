@@ -146,6 +146,46 @@ class ProjectActionsTest {
     }
 
     @Test
+    fun aSecondAskWhileTheFirstIsOnItsWaySendsNothing() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val sent = mutableListOf<String>()
+        val pages = Pages().apply { pages["pj_docs"] = TimelineProjectPage(docs) }
+        val vm = ProjectPageViewModel("pj_docs", pages, FakeProjects(), askCoordinator = { hold.await(); sent += it })
+        vm.refreshPage()
+        val first = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined).launch { vm.ask() }
+        assertTrue(vm.state.value.isAsking)
+        vm.ask()
+        hold.complete(Unit)
+        first.join()
+        assertEquals(1, sent.size)
+        assertFalse(vm.state.value.isAsking)
+    }
+
+    @Test
+    fun aListsFailureFromBeforeAMergeIsNotSaidAfterIt() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var reads = 0
+        val pages = Pages().apply {
+            pages["pj_docs"] = TimelineProjectPage(docs)
+            pages["pj_promo"] = TimelineProjectPage(promo)
+        }
+        val projects = object : FakeProjects() {
+            override suspend fun listProjects(openOnly: Boolean): List<Project> {
+                reads += 1
+                if (reads == 2) { hold.await(); throw JournalApiError.Transport("offline") }
+                return listOf(Project(id = "pj_promo", num = 14, title = "Promo launch"))
+            }
+        }
+        val vm = ProjectPageViewModel("pj_docs", pages, projects)
+        vm.refreshPage(); vm.loadActionTargets()
+        val stale = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined).launch { vm.loadActionTargets() }
+        vm.merge("pj_promo")
+        hold.complete(Unit)
+        stale.join()
+        kotlin.test.assertNull(vm.state.value.error)
+    }
+
+    @Test
     fun refusalsAreSaidInWords() = runBlocking {
         val (vm, projects, _) = setup()
         vm.refreshPage(); vm.loadActionTargets()

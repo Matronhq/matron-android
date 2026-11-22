@@ -54,6 +54,8 @@ data class ProjectPageState(
     val actionsLoaded: Boolean = false,
     /// "Ask the Coordinator about this" was sent from this page.
     val asked: Boolean = false,
+    /// That question is on its way.
+    val isAsking: Boolean = false,
     /// A write is in flight: the menu's writes wait for it.
     val isBusy: Boolean = false,
     val error: String? = null,
@@ -344,6 +346,9 @@ class ProjectPageViewModel(
         val from = projectID
         val ok = write(reload = false) { projects.mergeProject(from, into) }
         if (ok) {
+            // Any read of the lists still in flight was for the old project:
+            // neither its answer nor its failure lands.
+            actionsGeneration += 1
             projectID = into
             // Nothing of the closed project stays on screen: until the
             // surviving project's page lands, the page shows its progress
@@ -374,6 +379,10 @@ class ProjectPageViewModel(
     suspend fun ask() {
         val send = askCoordinator ?: return
         val title = _state.value.page?.project?.title ?: return
+        // One question: the entry is dimmed while it is on its way, and a
+        // second tap meanwhile sends nothing.
+        if (_state.value.asked || _state.value.isAsking) return
+        _state.update { it.copy(isAsking = true) }
         try {
             send(ProjectActionsFormat.askMessage(title))
             _state.update { it.copy(asked = true) }
@@ -381,6 +390,8 @@ class ProjectPageViewModel(
             throw cancel
         } catch (error: Throwable) {
             _state.update { it.copy(error = error.message) }
+        } finally {
+            _state.update { it.copy(isAsking = false) }
         }
     }
 
