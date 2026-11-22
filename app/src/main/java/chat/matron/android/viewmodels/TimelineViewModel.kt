@@ -324,11 +324,11 @@ class TimelineViewModel(
         try {
             val page = timeline.timelineWeeks()
             if (generation != weeksGeneration) return false
-            // Earlier weeks paged in before keep their place after the first
-            // page, so a week picked from them stays in the menu and the
+            // Weeks known before keep their place after the first page (one
+            // that slid off it when a new week began, and earlier weeks paged
+            // in), so a week picked from them stays in the menu and the
             // title across a refresh; paging then goes on from the oldest.
-            val old = _state.value.weeks
-            val kept = old.filter { w -> page.weeks.none { it.week == w.week } && old.indexOf(w) >= page.weeks.size }
+            val kept = _state.value.weeks.filter { w -> page.weeks.none { it.week == w.week } }
             if (kept.isEmpty()) weeksNextBefore = page.nextBefore
             _state.update { it.copy(weeks = page.weeks + kept, hasEarlierWeeks = weeksNextBefore != null, isSupported = true) }
             return true
