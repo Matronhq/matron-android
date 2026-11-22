@@ -196,6 +196,21 @@ class TimelineViewModelTest {
     }
 
     @Test
+    fun aPickedWeekThatCannotBeKeptFallsBackToTheNewest() = runBlocking {
+        val timeline = fake()
+        val vm = TimelineViewModel(timeline, scope)
+        vm.start()
+        vm.select("2026-11-09")
+        // Far more weeks began than a refresh reads on for: the gap can't close.
+        timeline.weeksPages[null] = TimelineWeeksPage(listOf(TimelineFixtures.summary("2027-03-01")), "2027-03-01")
+        timeline.weeks["2027-03-01"] = TimelineFixtures.week("2027-03-01")
+        vm.refresh()
+        assertEquals(listOf("2027-03-01"), vm.state.value.weeks.map { it.week })
+        assertEquals("2027-03-01", vm.state.value.selectedWeek)
+        assertEquals("2027-03-01", vm.state.value.shownWeek?.week)
+    }
+
+    @Test
     fun theWeeksOtherProjectsPageInOnceEach() = runBlocking {
         val timeline = fake().apply {
             weeks["2026-11-16"] = TimelineFixtures.week("2026-11-16", also = listOf(TimelineFixtures.promo, TimelineFixtures.app, TimelineFixtures.pricing))
