@@ -5,6 +5,7 @@ import chat.matron.android.journal.JournalApi
 import chat.matron.android.journal.JournalSyncEngine
 import chat.matron.android.journal.RPCReply
 import chat.matron.android.journal.RPCRequestError
+import chat.matron.android.journal.RosterSnapshot
 import chat.matron.android.journal.arrayOrNull
 import chat.matron.android.journal.longOrNull
 import chat.matron.android.journal.objects
@@ -48,8 +49,9 @@ interface AgentRPCProviding {
 class JournalAgentRPCService(
     private val api: JournalApi,
     private val engine: JournalSyncEngine,
-) : AgentRPCProviding {
+) : BoxesProviding {
     override suspend fun devices(): List<DeviceDTO> = api.devices()
+    override suspend fun roster(): RosterSnapshot = api.roster()
     override suspend fun agentRequest(agentDeviceID: Long, method: String, paramsJson: String): RPCReply =
         engine.agentRequest(agentDeviceID, method, paramsJson)
     override fun boxStatusUpdates(): Flow<Pair<Long, BoxStatus>> = engine.boxStatusUpdates()

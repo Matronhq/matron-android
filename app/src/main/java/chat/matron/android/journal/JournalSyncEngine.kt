@@ -139,6 +139,10 @@ class JournalSyncEngine(
     /// (`hello_ok.archive`, `archive` frames, `POST /archive`). `null` in
     /// hosts that do not sync the archive: the hello then never asks.
     val archive: ArchiveSync? = null,
+    /// Told what each handshake says about this device's token: accepted
+    /// (`hello_ok`) or refused (`auth`). Feeds the app's
+    /// [CredentialRevocationMonitor].
+    private val credentialSignals: ((CredentialSignal) -> Unit)? = null,
 ) : SyncService {
     private val scope = CoroutineScope(dispatcher + SupervisorJob())
     private val lock = Any()
@@ -1049,6 +1053,7 @@ class JournalSyncEngine(
                 )
                 val headSeq = hello.headSeq
                 synchronized(lock) { liveConnection = connection; attempt = 0 }
+                credentialSignals?.invoke(CredentialSignal.Accepted)
                 // Before the replay: a message the replay brings back is then
                 // judged against the archive as the journal has it.
                 archive?.applyHello(hello.archive)
@@ -1165,6 +1170,9 @@ class JournalSyncEngine(
                 setState(SyncConnectionState.Offline("Signed out by server"))
                 failReadyWaiters(JournalSyncError.AuthRevoked)
                 failAllRPC(RPCRequestError.Offline)
+                // Last: the app's sign-out may run from here, and it ends
+                // this engine.
+                credentialSignals?.invoke(CredentialSignal.Rejected)
                 return
             } catch (e: Throwable) {
                 // Fall through to backoff — but never silently.
