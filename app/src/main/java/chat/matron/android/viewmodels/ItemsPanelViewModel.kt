@@ -42,6 +42,9 @@ class ItemsPanelViewModel(
     private val api: ItemsProviding,
     private val sync: ItemsSyncing,
     private val scope: CoroutineScope,
+    /// Approval keys: signs Approve on a request that needs it. `null` in
+    /// hosts without one.
+    private val approvals: ApprovalCenter? = null,
 ) {
     data class Sections(
         val needsYou: List<TrackerItem> = emptyList(),
@@ -423,6 +426,31 @@ class ItemsPanelViewModel(
             val theirs = queued.last { !it.isRejected && ItemDetailViewModel.pendingItemTap(listOf(it)) != null }
             answerPending = answerPending + (item.id to theirs.localID)
             publishAwaitingYou()
+            return false
+        }
+        // A tap that needs a signature is confirmed and sent at once; the row
+        // stays hidden behind the confirm sheet until the journal has it.
+        val outcome = try {
+            StepUpTap.send(
+                item, null, label, api, sync,
+                signer = approvals?.signer, accountHasKey = approvals?.accountHasKey ?: false,
+            )
+        } catch (cancel: CancellationException) {
+            // The list went away mid-approval: the row must not stay hidden.
+            answerPending = answerPending - item.id
+            publishAwaitingYou()
+            throw cancel
+        }
+        if (outcome == StepUpTap.Outcome.Sent) {
+            // Answered: the row stays hidden until the list itself drops it
+            // (the answered item no longer waits on the user), so it never
+            // flashes back as waiting and cannot be tapped twice.
+            return true
+        }
+        if (outcome != StepUpTap.Outcome.Unsigned) {
+            answerPending = answerPending - item.id
+            publishAwaitingYou()
+            (outcome as? StepUpTap.Outcome.Failed)?.let { _error.value = it.message }
             return false
         }
         val inserted = sync.enqueueComment(item.id, localID, label, emptyList(), action = label, replyTo = null)

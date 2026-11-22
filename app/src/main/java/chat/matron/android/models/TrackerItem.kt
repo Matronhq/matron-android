@@ -160,6 +160,16 @@ data class TrackerLink(val url: String, val title: String? = null) {
             return path.length > 1 && path.startsWith("/")
         }
 
+    /// The request id of a `matron://consent/spawn/<request_id>` link, or
+    /// null for any other link. Exactly two non-empty path segments.
+    val spawnConsentRequestID: String?
+        get() {
+            if (!isConsentLink) return null
+            val segments = URI(url).rawPath.removePrefix("/").split("/")
+            if (segments.size != 2 || segments[0] != "spawn" || segments[1].isEmpty()) return null
+            return segments[1]
+        }
+
     companion object {
         fun fromJson(json: JsonObject): TrackerLink? {
             val url = json.stringOrNull("url") ?: return null
@@ -336,6 +346,17 @@ data class TrackerItem(
     /// The contact who filed this item into a mission they contribute to;
     /// null on everything else (the journal leaves the key out).
     val contributor: Contributor? = null,
+    /// Approval keys: a tap on any of this item's buttons (a follow-up
+    /// question's included) must be signed by the user's approval key, once
+    /// the account has one (protocol "Approval keys (step-up)").
+    val stepUp: Boolean = false,
+    /// What such a tap signs, shown line by line on the confirm sheet;
+    /// `null` when none was given (the subject signed is then `{}`).
+    val subject: Map<String, String>? = null,
+    /// The journal's own mark on a consent request's item (`consent`:
+    /// "spawn", "chat", "transfer", …), which only the journal sets. Read
+    /// from a fresh fetch; not kept in the local cache.
+    val consentKind: String? = null,
 ) {
     /// "by bob" / "by bob's agent" for a contributor's item, else null.
     val attributionText: String? get() = attributionLine(contributor, null)
@@ -364,6 +385,13 @@ data class TrackerItem(
     /// been answered or has expired, and reopening cannot undo that.
     val isConsentAsk: Boolean
         get() = links.any { it.isConsentLink }
+
+    /// The spawn request this item mirrors, from its
+    /// `matron://consent/spawn/<request_id>` link: the key
+    /// `POST /agent-spawn/answer` takes and the `spawn_outcome` names. Null on
+    /// every other item.
+    val spawnConsentRequestID: String?
+        get() = links.firstNotNullOfOrNull { it.spawnConsentRequestID }
 
     /// `awaiting='user'` on an open item is the "Needs you" set across all kinds.
     val needsUser: Boolean get() = state == ItemState.OPEN && awaiting == ItemAwaiting.USER
@@ -449,7 +477,23 @@ data class TrackerItem(
                 working = ItemWorking.fromJson(json.objectOrNull("working")),
                 handover = ItemHandover.fromJson(json.objectOrNull("handover")),
                 contributor = Contributor.on(json),
+                stepUp = json.boolOrNull("step_up") ?: false,
+                subject = stringMapOrNull(json.objectOrNull("subject")),
+                consentKind = json.stringOrNull("consent")?.takeIf { it.isNotEmpty() },
             )
+        }
+
+        /// A flat object of strings (an approval subject), or null when it
+        /// is absent or holds anything else.
+        fun stringMapOrNull(obj: JsonObject?): Map<String, String>? {
+            if (obj == null) return null
+            val out = LinkedHashMap<String, String>()
+            for ((key, value) in obj) {
+                val primitive = value as? JsonPrimitive ?: return null
+                if (!primitive.isString) return null
+                out[key] = primitive.content
+            }
+            return out
         }
     }
 }
@@ -493,6 +537,11 @@ data class TrackerComment(
     /// in its place, so the thread shows this reply alone. Null on every
     /// other comment.
     val replaces: String? = null,
+    /// Approval keys: a tap on this follow-up question's buttons must be
+    /// signed (the item's own mark covers them too).
+    val stepUp: Boolean = false,
+    /// What a tap on this comment's buttons signs, when it is step-up.
+    val subject: Map<String, String>? = null,
 ) {
     /// "by bob" / "by bob's agent" when someone other than this user's own
     /// side wrote it; null otherwise.
@@ -548,6 +597,8 @@ data class TrackerComment(
                 contributor = Contributor.on(json),
                 attribution = json.stringOrNull("attribution")?.takeIf { it.isNotBlank() },
                 replaces = json.stringOrNull("replaces")?.takeIf { it.isNotEmpty() },
+                stepUp = json.boolOrNull("step_up") ?: false,
+                subject = TrackerItem.stringMapOrNull(json.objectOrNull("subject")),
             )
         }
 
@@ -556,8 +607,10 @@ data class TrackerComment(
         /// edited one in its place, so the thread shows the edit alone. Only
         /// the user's own plain replies are ever left out, whatever a
         /// `replaces` names.
-        fun hidingReplaced(comments: List<TrackerComment>): List<TrackerComment> {
-            val replaced = comments.mapNotNullTo(HashSet()) { it.replaces }
+        /// [alsoReplaced] adds the replies an edit not yet on the journal (still
+        /// in the outbox) stands in for.
+        fun hidingReplaced(comments: List<TrackerComment>, alsoReplaced: Set<String> = emptySet()): List<TrackerComment> {
+            val replaced = comments.mapNotNullTo(HashSet()) { it.replaces } + alsoReplaced
             if (replaced.isEmpty()) return comments
             // Another person's reply (a contributor's, or one copied in by a
             // hand-over) also carries the user as author: never left out.

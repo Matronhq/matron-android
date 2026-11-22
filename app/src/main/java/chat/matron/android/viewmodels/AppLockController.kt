@@ -164,6 +164,15 @@ class AppLockController(
         store.setInt(TIMEOUT_KEY, value.seconds.toInt())
     }
 
+    /// Call when another system prompt this app raised (an approval key's
+    /// biometric check) goes up ([showing] true) and comes down. It does not
+    /// hold the lock off: that strong-biometric prompt is drawn inside the
+    /// activity, so a stop while it is up is a real leave, which must lock.
+    /// Its end is stamped like the lock's own prompt's. Main thread only.
+    fun noteSystemPrompt(showing: Boolean) {
+        if (!showing) lastAuthEndedAt = now()
+    }
+
     /// Call when the app leaves the foreground (`ON_STOP`).
     fun noteBackgrounded() {
         if (!_isEnabled.value || _isLocked.value || _isAuthenticating.value) return

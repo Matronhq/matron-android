@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Recent conversations offered as direct-share targets in the system share
+     sheet (published by ShareShortcuts). The category ties each published
+     shortcut to the share screen; the data types match its intent filters. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <share-target android:targetClass="chat.matron.android.features.share.ShareActivity">
+        <data android:mimeType="text/*" />
+        <data android:mimeType="image/*" />
+        <data android:mimeType="video/*" />
+        <data android:mimeType="application/*" />
+        <data android:mimeType="audio/*" />
+        <category android:name="chat.matron.android.category.SHARE_TARGET" />
+    </share-target>
+</shortcuts>
