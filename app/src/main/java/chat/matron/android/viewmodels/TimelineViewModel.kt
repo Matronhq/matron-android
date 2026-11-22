@@ -93,6 +93,8 @@ data class TimelineState(
     val askedProjectIDs: Set<String> = emptySet(),
     /// Whether a stalled project's row can ask the Coordinator about it.
     val canAsk: Boolean = false,
+    /// The paged lists whose last next-page read failed: their end offers Retry.
+    val pagingFailed: Set<TimelinePlace> = emptySet(),
 ) {
     /// Whether "All projects" is offered: until the journal says it has no such list.
     val showsAllProjects: Boolean get() = projectsSupported != false
@@ -334,9 +336,24 @@ class TimelineViewModel(
             // that slid off it when a new week began, and earlier weeks paged
             // in), so a week picked from them stays in the menu and the
             // title across a refresh; paging then goes on from the oldest.
-            val kept = _state.value.weeks.filter { w -> page.weeks.none { it.week == w.week } }
-            if (kept.isEmpty()) weeksNextBefore = page.nextBefore
-            _state.update { it.copy(weeks = page.weeks + kept, hasEarlierWeeks = weeksNextBefore != null, isSupported = true) }
+            var fresh = page.weeks
+            var cursor = page.nextBefore
+            var kept = _state.value.weeks.filter { w -> fresh.none { it.week == w.week } }
+            // More weeks began than one page holds: read on until the new
+            // weeks reach the kept ones, so the menu has no hole in it.
+            var reads = 0
+            while (kept.isNotEmpty() && cursor != null && !weeksAdjoin(fresh.lastOrNull()?.week, kept.first().week) && reads < MAX_GAP_READS) {
+                val next = timeline.timelineWeeks(before = cursor)
+                if (generation != weeksGeneration) return false
+                fresh = fresh + next.weeks.filter { w -> fresh.none { it.week == w.week } }
+                cursor = next.nextBefore
+                kept = kept.filter { w -> fresh.none { it.week == w.week } }
+                reads += 1
+            }
+            // A hole that could not be filled: start over from the new weeks.
+            if (kept.isNotEmpty() && !weeksAdjoin(fresh.lastOrNull()?.week, kept.first().week)) kept = emptyList()
+            if (kept.isEmpty()) weeksNextBefore = cursor
+            _state.update { it.copy(weeks = fresh + kept, hasEarlierWeeks = weeksNextBefore != null, isSupported = true) }
             return true
         } catch (cancel: CancellationException) {
             throw cancel
@@ -465,6 +482,7 @@ class TimelineViewModel(
         if (isLoadingFinished) return
         isLoadingFinished = true
         val generation = finishedGeneration
+        _state.update { it.copy(pagingFailed = it.pagingFailed - TimelinePlace.Finished) }
         try {
             val page = timeline.finishedProjects(before = before)
             if (generation != finishedGeneration) return
@@ -476,7 +494,7 @@ class TimelineViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            if (generation == finishedGeneration) _state.update { it.copy(error = error.message) }
+            if (generation == finishedGeneration) _state.update { it.copy(error = error.message, pagingFailed = it.pagingFailed + TimelinePlace.Finished) }
         } finally {
             isLoadingFinished = false
         }
@@ -488,6 +506,7 @@ class TimelineViewModel(
         if (isLoadingProjects) return
         isLoadingProjects = true
         val generation = projectsGeneration
+        _state.update { it.copy(pagingFailed = it.pagingFailed - TimelinePlace.Projects) }
         try {
             val page = timeline.timelineProjects(before = before)
             if (generation != projectsGeneration) return
@@ -496,7 +515,7 @@ class TimelineViewModel(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            if (generation == projectsGeneration) _state.update { it.copy(error = error.message) }
+            if (generation == projectsGeneration) _state.update { it.copy(error = error.message, pagingFailed = it.pagingFailed + TimelinePlace.Projects) }
         } finally {
             isLoadingProjects = false
         }
@@ -539,6 +558,20 @@ class TimelineViewModel(
     }
 
     companion object {
+        /// Extra week pages a refresh reads to close a hole before the weeks it kept.
+        private const val MAX_GAP_READS = 4
+
+        /// Whether [older] is the week right before [newer] (week keys are
+        /// Mondays, `YYYY-MM-DD`). Keys that are not dates count as adjoining.
+        fun weeksAdjoin(newer: String?, older: String): Boolean {
+            newer ?: return true
+            return try {
+                java.time.LocalDate.parse(newer).minusDays(7) == java.time.LocalDate.parse(older)
+            } catch (_: java.time.format.DateTimeParseException) {
+                true
+            }
+        }
+
         /// Projects per week-projects read.
         const val WEEK_PROJECTS_PAGE_SIZE = 24
     }

@@ -28,6 +28,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
@@ -65,6 +66,7 @@ object TimelineListCopy {
     const val ASK_ACTION = "Ask the Coordinator what to do with it"
     const val ASKED_ACTION = "Asked the Coordinator"
     const val CHART_CAPTION = "last 7 weeks"
+    const val MORE_FAILED = "Couldn't load the rest."
 
     fun title(place: TimelinePlace): String = when (place) {
         TimelinePlace.Projects -> ALL_PROJECTS
@@ -152,9 +154,19 @@ private fun ListLede(text: String) {
     Text(text, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(bottom = 14.dp))
 }
 
-/// "Load the next page" at the end of a paged list: composing it asks.
-private fun LazyListScope.pageEnd(rowCount: Int, onLoadMore: (() -> Unit)?) {
+/// The end of a paged list: composing it asks for the next page; after a
+/// failed read it offers Retry instead, which asks again.
+private fun LazyListScope.pageEnd(rowCount: Int, onLoadMore: (() -> Unit)?, failed: Boolean) {
     if (onLoadMore == null) return
+    if (failed) {
+        item(key = "retry:$rowCount") {
+            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                Text(TimelineListCopy.MORE_FAILED, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                TextButton(onClick = onLoadMore, modifier = Modifier.testTag("timeline.list.retry")) { Text(TimelineFormat.RETRY) }
+            }
+        }
+        return
+    }
     item(key = "end:$rowCount") {
         LaunchedEffect(rowCount) { onLoadMore() }
         Spacer(Modifier.height(1.dp))
@@ -182,26 +194,26 @@ private fun ProjectListRow(title: String, meta: String?, testTag: String, onClic
 /// when it last moved. Reaching the end loads the next page ([onLoadMore]
 /// null when there is none).
 @Composable
-fun AllProjectsListView(list: TimelineProjectList, now: Instant, onOpenProject: (String) -> Unit, onLoadMore: (() -> Unit)?, modifier: Modifier = Modifier) {
+fun AllProjectsListView(list: TimelineProjectList, now: Instant, onOpenProject: (String) -> Unit, onLoadMore: (() -> Unit)?, modifier: Modifier = Modifier, pagingFailed: Boolean = false) {
     LazyColumn(modifier.fillMaxSize().testTag("timeline.projects"), contentPadding = PaddingValues(16.dp)) {
         if (list.rows.isEmpty()) item(key = "empty") { ListLede(TimelineListCopy.NO_PROJECTS) }
         items(list.rows, key = { it.project.id }) { row ->
             ProjectListRow(row.project.title, TimelineListFormat.moved(row.lastMovedAt, now), "timeline.projects.${row.project.num}") { onOpenProject(row.project.id) }
         }
-        pageEnd(list.rows.size, onLoadMore)
+        pageEnd(list.rows.size, onLoadMore, pagingFailed)
     }
 }
 
 /// "Finished": projects with nothing left open, newest first, each with when
 /// it finished. Reaching the end loads the next page.
 @Composable
-fun FinishedListView(rows: List<FinishedProject>, now: Instant, onOpenProject: (String) -> Unit, onLoadMore: (() -> Unit)?, modifier: Modifier = Modifier) {
+fun FinishedListView(rows: List<FinishedProject>, now: Instant, onOpenProject: (String) -> Unit, onLoadMore: (() -> Unit)?, modifier: Modifier = Modifier, pagingFailed: Boolean = false) {
     LazyColumn(modifier.fillMaxSize().testTag("timeline.finished"), contentPadding = PaddingValues(16.dp)) {
         if (rows.isEmpty()) item(key = "empty") { ListLede(TimelineListCopy.NOTHING_FINISHED) }
         items(rows, key = { it.project.id }) { row ->
             ProjectListRow(row.project.title, TimelineListFormat.daysAgo(row.finishedAt, now), "timeline.finished.${row.project.num}") { onOpenProject(row.project.id) }
         }
-        pageEnd(rows.size, onLoadMore)
+        pageEnd(rows.size, onLoadMore, pagingFailed)
     }
 }
 

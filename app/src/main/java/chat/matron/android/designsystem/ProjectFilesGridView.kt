@@ -138,7 +138,7 @@ fun ProjectFilesGridView(
                 }
             }
             items(files, key = { it.id }) { file ->
-                ProjectFileTile(file, images[file.blobID], now, Modifier.clickable { onOpenFile(file) })
+                ProjectFileTile(file, images[file.blobID], now, onOpen = { onOpenFile(file) })
             }
             if (hasMore) {
                 item(key = "more:${files.size}", span = { GridItemSpan(maxLineSpan) }) {
@@ -154,10 +154,13 @@ fun ProjectFilesGridView(
 /// placeholder until loaded), a video's dark play panel, or a document tile
 /// naming the extension; then the name and "#41 · 1d" / "chat · 5d".
 @Composable
-fun ProjectFileTile(file: ProjectFile, image: Any?, now: Instant, modifier: Modifier = Modifier) {
+fun ProjectFileTile(file: ProjectFile, image: Any?, now: Instant, modifier: Modifier = Modifier, onOpen: (() -> Unit)? = null) {
     val shape = RoundedCornerShape(8.dp)
     Column(
-        modifier.fillMaxWidth().testTag("projects.files.${file.id}").clearAndSetSemantics { contentDescription = ProjectFileFormat.label(file, now) },
+        modifier.fillMaxWidth()
+            .then(if (onOpen != null) Modifier.clickable(onClick = onOpen) else Modifier)
+            .testTag("projects.files.${file.id}")
+            .clearAndSetSemantics { openable(ProjectFileFormat.label(file, now), onOpen, actionLabel = "Open") },
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Box(
