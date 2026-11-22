@@ -1,5 +1,6 @@
 package chat.matron.android.journal
 
+import java.io.File
 import java.io.IOException
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -33,6 +34,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okio.buffer
@@ -723,9 +725,19 @@ class JournalApi(
     /// uplink, where a multi-MB screenshot otherwise looks frozen. The write/
     /// read timeouts are raised well past the client default for the same
     /// reason: a legitimate slow upload must not die mid-body.
-    override suspend fun uploadMedia(data: ByteArray, contentType: String, progress: ((Double) -> Unit)?): String {
-        val body = data.toRequestBody((contentType.ifEmpty { "application/octet-stream" }).toMediaTypeOrNull())
-        val counted = if (progress != null) ProgressRequestBody(body, data.size.toLong(), progress) else body
+    override suspend fun uploadMedia(data: ByteArray, contentType: String, progress: ((Double) -> Unit)?): String =
+        postMedia(data.toRequestBody(mediaType(contentType)), data.size.toLong(), progress)
+
+    /// The streamed upload: OkHttp reads [file] in segments as it writes the
+    /// request, so memory stays flat however large the attachment is. The
+    /// length is taken once, up front, as the declared Content-Length.
+    override suspend fun uploadMedia(file: File, contentType: String, progress: ((Double) -> Unit)?): String =
+        postMedia(file.asRequestBody(mediaType(contentType)), file.length(), progress)
+
+    private fun mediaType(contentType: String) = contentType.ifEmpty { "application/octet-stream" }.toMediaTypeOrNull()
+
+    private suspend fun postMedia(body: okhttp3.RequestBody, length: Long, progress: ((Double) -> Unit)?): String {
+        val counted = if (progress != null) ProgressRequestBody(body, length, progress) else body
         val builder = Request.Builder().url(buildUrl("/media", emptyList()))
         val sentToken = token
         sentToken?.let { builder.header("Authorization", "Bearer $it") }
@@ -1149,11 +1161,13 @@ class JournalApi(
         idempotencyKey: String?,
         action: String?,
         replyTo: String?,
+        replaces: String?,
     ): ItemCommentResult {
         val json = buildJsonObject {
             put("body", body)
             action?.let { put("action", it) }
             replyTo?.let { put("reply_to", it) }
+            replaces?.let { put("replaces", it) }
             if (attachments.isNotEmpty()) {
                 put("attachments", kotlinx.serialization.json.buildJsonArray { attachments.forEach { add(it.outgoingJson()) } })
             }
