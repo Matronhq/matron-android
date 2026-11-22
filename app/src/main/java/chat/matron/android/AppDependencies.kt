@@ -30,13 +30,20 @@ import chat.matron.android.journal.CoordinatorSync
 import chat.matron.android.journal.ArchiveSync
 import chat.matron.android.journal.PinsSync
 import chat.matron.android.journal.PinsSyncing
+import chat.matron.android.viewmodels.BoxesProviding
+import chat.matron.android.viewmodels.JournalUsageHistoryService
+import chat.matron.android.viewmodels.UsageHistoryProviding
 import chat.matron.android.viewmodels.UnsentReplyStore
 import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
 import chat.matron.android.viewmodels.CoordinatorSetting
 import chat.matron.android.viewmodels.MemoriesListViewModel
+import chat.matron.android.viewmodels.NewChatDefaultsStore
+import chat.matron.android.viewmodels.RoutinesViewModel
 import chat.matron.android.viewmodels.MemoryEditorViewModel
 import chat.matron.android.viewmodels.MissionDetailViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
+import chat.matron.android.viewmodels.ConversationRoomsViewModel
+import chat.matron.android.viewmodels.NotifySettingsStore
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
 import chat.matron.android.viewmodels.ApprovalCenter
 import chat.matron.android.viewmodels.ApprovalKeysScreenModel
@@ -251,6 +258,8 @@ class AppDependencies(
         val pinsSync: PinsSync,
         /** The journal-held Coordinator, mirrored into [CoordinatorSetting]. */
         val coordinatorSync: CoordinatorSync,
+        /** Settings → Notifications and each chat's Notifications menu. */
+        val notifySettings: NotifySettingsStore,
         /**
          * Background search-history backfill sweep for this session (see
          * [SearchBackfillCoordinator]). Cancelled on sign-out, and joined by
@@ -468,10 +477,15 @@ class AppDependencies(
             setting = CoordinatorSetting(session.userID, preferences),
             updates = { engine.coordinatorUpdates() },
         )
+        val notifySettings = NotifySettingsStore(
+            api = api,
+            updates = { engine.notifyUpdates() },
+            connectionStates = { engine.stateStream },
+        )
         val core = JournalCore(
             api, db, dbFile, store, engine, maintenance, itemsSync, missionsSync, memoriesSync,
-            pinsSync = pinsSync, coordinatorSync = coordinatorSync, revocation = revocation,
-            userID = session.userID,
+            pinsSync = pinsSync, coordinatorSync = coordinatorSync, notifySettings = notifySettings,
+            revocation = revocation, userID = session.userID,
         )
         core.approvals = ApprovalCenter(
             api = api,
@@ -521,6 +535,7 @@ class AppDependencies(
         memoriesSync.start()
         pinsSync.start()
         coordinatorSync.start()
+        notifySettings.start()
         core.backfillJob = startBackfill(search = search, api = api, store = store)
         return core
     }
@@ -682,6 +697,9 @@ class AppDependencies(
     /** The session's journal-held Coordinator (Coordinator redesign §3a). */
     fun coordinatorSync(session: UserSession): CoordinatorSync = core(session).coordinatorSync
 
+    /** The session's notification settings (`GET`/`PUT /notify`), shared by every surface. */
+    fun notifySettings(session: UserSession): NotifySettingsStore = core(session).notifySettings
+
     /** Agent box id → name, live — the pin successor hint names the box. */
     fun agentNamesFlow(session: UserSession): kotlinx.coroutines.flow.Flow<Map<Long, String>> =
         core(session).store.agentNamesFlow()
@@ -700,6 +718,12 @@ class AppDependencies(
     /** The Memories list VM, per screen showing (spec 2026-09-27 memories). */
     fun makeMemoriesListViewModel(session: UserSession, scope: CoroutineScope): MemoriesListViewModel =
         MemoriesListViewModel(sync = core(session).memoriesSync, scope = scope)
+
+    /** Settings → Coordinator → Routines: one VM shared by the list and its editor. */
+    fun makeRoutinesViewModel(session: UserSession, scope: CoroutineScope): RoutinesViewModel {
+        val c = core(session)
+        return RoutinesViewModel(api = c.api, markers = { c.engine.routineMarkers() }, scope = scope)
+    }
 
     /** The editor VM for one memory by name, or a new one when [name] is null. */
     fun makeMemoryEditorViewModel(session: UserSession, name: String?, scope: CoroutineScope): MemoryEditorViewModel =
@@ -734,6 +758,15 @@ class AppDependencies(
     }
 
     /**
+     * A chat header's "Rooms · n": the agent-chat rooms [convoID] takes part
+     * in, live off the session store's rooms stream. One per chat showing.
+     */
+    fun makeConversationRoomsViewModel(session: UserSession, convoID: String, scope: CoroutineScope): ConversationRoomsViewModel {
+        val store = core(session).store
+        return ConversationRoomsViewModel(convoID = convoID, source = { store.roomsFlow() }, scope = scope)
+    }
+
+    /**
      * The one Decisions instance per signed-in session (app shell, spec §1):
      * no home conversation, starts in `All`, feeds the Decisions list and the
      * tab badge. Created and started by the shell, stopped when the shell
@@ -747,6 +780,12 @@ class AppDependencies(
      * session's API client, live-updated from the engine's settings frames.
      * One per settings screen showing.
      */
+    /** Settings → New chats: the user's default model and effort (`GET`/`PUT /defaults`). */
+    fun makeNewChatDefaultsStore(session: UserSession, scope: CoroutineScope): NewChatDefaultsStore {
+        val c = core(session)
+        return NewChatDefaultsStore(api = c.api, updates = { c.engine.defaultsUpdates() }, scope = scope)
+    }
+
     fun makeNoticesSettingViewModel(session: UserSession, scope: CoroutineScope): NoticesSettingViewModel {
         val c = core(session)
         return NoticesSettingViewModel(api = c.api, updates = { c.engine.settingsUpdates() }, scope = scope)
@@ -899,7 +938,14 @@ class AppDependencies(
         JournalDeviceLinkService(core(session).api)
 
     /** New Chat surface: agent roster + recent-folders / start RPCs. */
-    fun agentRPCService(session: UserSession): AgentRPCProviding {
+    fun agentRPCService(session: UserSession): AgentRPCProviding = boxesService(session)
+
+    /** Boxes → Usage history: `GET /usage/history`. */
+    fun usageHistoryService(session: UserSession): UsageHistoryProviding =
+        JournalUsageHistoryService(core(session).api)
+
+    /** Boxes screen: New Chat's slice plus `GET /roster`. */
+    fun boxesService(session: UserSession): BoxesProviding {
         val core = core(session)
         return JournalAgentRPCService(api = core.api, engine = core.engine)
     }
@@ -1082,6 +1128,8 @@ class AppDependencies(
                     .onFailure { MatronDebug.breadcrumb("signOut: archive.stop failed: $it") }
                 runCatching { core.coordinatorSync.stop() }
                     .onFailure { MatronDebug.breadcrumb("signOut: coordinatorSync.stop failed: $it") }
+                runCatching { core.notifySettings.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: notifySettings.stop failed: $it") }
                 core.engine.endSync()
                 runCatching { core.store.wipe() }
                     .onFailure { MatronDebug.breadcrumb("signOut: store.wipe failed: $it") }
