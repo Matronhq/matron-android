@@ -1,10 +1,18 @@
 package chat.matron.android.viewmodels
 
+import chat.matron.android.events.AgentSpawnCardState
+import chat.matron.android.events.AgentSpawnRequest
+import chat.matron.android.events.ItemSpawnConsent
+import chat.matron.android.events.SpawnOutcome
+import chat.matron.android.journal.AgentSpawnAnswering
+import chat.matron.android.journal.AgentSpawnDecision
 import chat.matron.android.journal.ItemsProviding
+import chat.matron.android.journal.JournalApiError
+import chat.matron.android.journal.JournalEvent
+import chat.matron.android.journal.JournalEventType
 import chat.matron.android.journal.ItemsStoreReading
 import chat.matron.android.journal.ItemsSync
 import chat.matron.android.journal.ItemsSyncing
-import chat.matron.android.journal.JournalEvent
 import chat.matron.android.journal.MatronJson
 import chat.matron.android.journal.SessionState
 import chat.matron.android.journal.db.ItemOutboxEntity
@@ -60,6 +68,10 @@ class ItemDetailViewModel(
     private val scope: CoroutineScope,
     private val stagingDirectory: File,
     private val now: () -> Instant = Instant::now,
+    /// Answers a spawn consent item's card (`POST /agent-spawn/answer`, as the
+    /// chat card does). `null` draws the card read-only: buttons wired to
+    /// nothing would look like they acted.
+    private val agentSpawn: AgentSpawnAnswering? = null,
     /// Where the unsent reply (draft and tray) is kept on disk, so it
     /// survives leaving the item, eviction and a restart. `null` keeps it in
     /// memory only.
@@ -206,6 +218,8 @@ class ItemDetailViewModel(
             store.itemFlow(id).collect {
                 _item.value = it
                 subscribeOwnerSession(it?.originConvoID)
+                subscribeConsentRows()
+                refreshSpawnConsent()
                 subscribeQueuedRows(it?.originConvoID)
                 scheduleWorkingLapse(it?.working?.until)
                 updateWorkingIndicator()
@@ -247,6 +261,7 @@ class ItemDetailViewModel(
         ownerSessionJob?.cancel(); ownerSessionJob = null
         ownerConvoID = null; ownerSessionState = null
         workingLapseJob?.cancel(); workingLapseJob = null; workingLapseAt = null
+        consentJob?.cancel(); consentJob = null; consentConvoID = null
         queuedJob?.cancel(); queuedJob = null; queuedConvoID = null
     }
 
@@ -599,6 +614,44 @@ class ItemDetailViewModel(
         }
     }
 
+    // MARK: Spawn consent
+
+    /// The spawn consent ask this item mirrors, `null` unless the item carries
+    /// a `matron://consent/spawn/<id>` link. Re-derived whenever the item or
+    /// the origin conversation's consent rows change: the card itself may sync
+    /// after the item was opened, and the journal closes the item when the
+    /// ask is answered.
+    private val _spawnConsent = MutableStateFlow<ItemSpawnConsent?>(null)
+    val spawnConsent: StateFlow<ItemSpawnConsent?> = _spawnConsent.asStateFlow()
+
+    private var consentRows: List<JournalEvent> = emptyList()
+    private var consentConvoID: String? = null
+    private var consentJob: Job? = null
+
+    /// This device's answer in flight, failed, or settled before the journal's
+    /// outcome row lands. In memory only: an interrupted send must come back
+    /// answerable, and the real resolution comes from the store.
+    private var spawnTransient: AgentSpawnCardState? = null
+
+    /// Follows the origin conversation's consent rows for as long as the item
+    /// is a spawn consent ask. Keyed on the conversation: an item update that
+    /// leaves the origin alone keeps the subscription.
+    private fun subscribeConsentRows() {
+        val current = _item.value
+        val convoID = if (current?.spawnConsentRequestID == null) null else current.originConvoID.takeIf { it.isNotEmpty() }
+        if (convoID == consentConvoID && (convoID == null || consentJob != null)) return
+        consentJob?.cancel(); consentJob = null
+        consentConvoID = convoID
+        consentRows = emptyList()
+        if (convoID == null) return
+        consentJob = scope.launch {
+            store.consentEventsFlow(convoID).collect { rows ->
+                consentRows = rows
+                refreshSpawnConsent()
+            }
+        }
+    }
+
     // MARK: Queued replies
 
     /// The user's replies the agent hasn't got yet, by comment id: parked on
@@ -669,6 +722,78 @@ class ItemDetailViewModel(
                 queuedRows = rows
                 refreshQueuedReplies()
             }
+        }
+    }
+
+    /// Rebuilds [spawnConsent] from the item and the consent rows. The card's
+    /// facts come from the ask's own `permission_request` payload; the
+    /// resolved state from its `spawn_outcome`, the last one winning.
+    private fun refreshSpawnConsent() {
+        val current = _item.value
+        val requestID = current?.spawnConsentRequestID
+        if (requestID == null) {
+            _spawnConsent.value = null
+            return
+        }
+        var request: AgentSpawnRequest? = null
+        var outcome: SpawnOutcome? = null
+        for (row in consentRows) {
+            when (row.type) {
+                JournalEventType.PERMISSION_REQUEST -> if (request == null) {
+                    AgentSpawnRequest.parse(row.payload)?.takeIf { it.requestId == requestID }?.let { request = it }
+                }
+                JournalEventType.SPAWN_OUTCOME ->
+                    SpawnOutcome.parse(row.payload)?.takeIf { it.requestId == requestID }?.let { outcome = it }
+            }
+        }
+        _spawnConsent.value = ItemSpawnConsent(
+            requestID, request,
+            spawnState(outcome, itemIsOpen = current.state == ItemState.OPEN, transient = spawnTransient, canAnswer = agentSpawn != null),
+        )
+    }
+
+    /// Answers the spawn ask, exactly as the chat card answers it. Only against
+    /// the card's own payload: no card, no answer. An accepted answer settles
+    /// the card with what the user just did until the journal's outcome row
+    /// lands; a 409 (answered elsewhere, or expired) settles it as no longer
+    /// waiting and refetches the item; any other error leaves it answerable.
+    /// Runs on the view model's scope, so leaving the page mid-answer doesn't
+    /// strand the card on "sending".
+    suspend fun answerSpawn(approve: Boolean) = runSend {
+        val answerer = agentSpawn ?: return@runSend
+        val consent = _spawnConsent.value ?: return@runSend
+        val request = consent.request ?: return@runSend
+        when (consent.state) {
+            AgentSpawnCardState.Idle, is AgentSpawnCardState.Failed -> Unit
+            else -> return@runSend
+        }
+        spawnTransient = AgentSpawnCardState.Sending
+        refreshSpawnConsent()
+        try {
+            answerer.answerAgentSpawn(request.requestId, if (approve) AgentSpawnDecision.APPROVE else AgentSpawnDecision.DENY)
+            spawnTransient = if (approve) {
+                // Approved: the session starts once its box is up, and the
+                // journal's outcome row says when. Drawn as the card's
+                // "waiting for the session to start" until then.
+                AgentSpawnCardState.AnsweredByCoordinator(approved = true)
+            } else {
+                // A decline is final at the answer; the journal's own
+                // `declined` outcome follows.
+                AgentSpawnCardState.Resolved(SpawnOutcome(request.requestId, "declined"))
+            }
+            refreshSpawnConsent()
+            sync.refreshItem(itemID)
+        } catch (cancel: CancellationException) {
+            spawnTransient = null
+            refreshSpawnConsent()
+            throw cancel
+        } catch (_: JournalApiError.Conflict) {
+            spawnTransient = AgentSpawnCardState.Unavailable
+            refreshSpawnConsent()
+            sync.refreshItem(itemID)
+        } catch (error: Throwable) {
+            spawnTransient = AgentSpawnCardState.Failed(ChatViewModel.describeAgentSpawnError(error))
+            refreshSpawnConsent()
         }
     }
 
@@ -967,6 +1092,29 @@ class ItemDetailViewModel(
     }
 
     companion object {
+        /// Where a spawn ask is, in order of authority: the journal's
+        /// `spawn_outcome` row; then, on a closed item with no outcome yet,
+        /// this device's own settled answer or else "no longer waiting" (the
+        /// journal closes the item the moment the ask is answered, before the
+        /// session has started); then the answer in flight; then answerable
+        /// when an answerer is wired, read-only otherwise.
+        fun spawnState(
+            outcome: SpawnOutcome?,
+            itemIsOpen: Boolean,
+            transient: AgentSpawnCardState?,
+            canAnswer: Boolean,
+        ): AgentSpawnCardState {
+            if (outcome != null) return AgentSpawnCardState.Resolved(outcome)
+            if (!itemIsOpen) {
+                return when (transient) {
+                    is AgentSpawnCardState.Resolved, is AgentSpawnCardState.AnsweredByCoordinator -> transient
+                    else -> AgentSpawnCardState.Unavailable
+                }
+            }
+            if (transient != null) return transient
+            return if (canAnswer) AgentSpawnCardState.Idle else AgentSpawnCardState.Unavailable
+        }
+
         private const val VOICE_NOTE_NAME = "voice-note.m4a"
         private const val VOICE_NOTE_MIME = "audio/mp4"
 

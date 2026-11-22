@@ -160,6 +160,16 @@ data class TrackerLink(val url: String, val title: String? = null) {
             return path.length > 1 && path.startsWith("/")
         }
 
+    /// The request id of a `matron://consent/spawn/<request_id>` link, or
+    /// null for any other link. Exactly two non-empty path segments.
+    val spawnConsentRequestID: String?
+        get() {
+            if (!isConsentLink) return null
+            val segments = URI(url).rawPath.removePrefix("/").split("/")
+            if (segments.size != 2 || segments[0] != "spawn" || segments[1].isEmpty()) return null
+            return segments[1]
+        }
+
     companion object {
         fun fromJson(json: JsonObject): TrackerLink? {
             val url = json.stringOrNull("url") ?: return null
@@ -364,6 +374,13 @@ data class TrackerItem(
     /// been answered or has expired, and reopening cannot undo that.
     val isConsentAsk: Boolean
         get() = links.any { it.isConsentLink }
+
+    /// The spawn request this item mirrors, from its
+    /// `matron://consent/spawn/<request_id>` link: the key
+    /// `POST /agent-spawn/answer` takes and the `spawn_outcome` names. Null on
+    /// every other item.
+    val spawnConsentRequestID: String?
+        get() = links.firstNotNullOfOrNull { it.spawnConsentRequestID }
 
     /// `awaiting='user'` on an open item is the "Needs you" set across all kinds.
     val needsUser: Boolean get() = state == ItemState.OPEN && awaiting == ItemAwaiting.USER

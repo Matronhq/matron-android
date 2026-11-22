@@ -78,6 +78,8 @@ import chat.matron.android.designsystem.tabRootSwipe
 import chat.matron.android.features.coordinator.CoordinatorChooserSheet
 import chat.matron.android.features.coordinator.CoordinatorRoot
 import chat.matron.android.features.coordinator.CoordinatorSetupView
+import chat.matron.android.features.coordinator.RoutineEditorScreen
+import chat.matron.android.features.coordinator.RoutinesScreen
 import chat.matron.android.features.coordinator.coordinatorRoot
 import chat.matron.android.features.decisions.DecisionsScreen
 import chat.matron.android.features.missions.MissionDetailScreen
@@ -89,10 +91,14 @@ import chat.matron.android.features.missions.missionOpenConversationOutcome
 import chat.matron.android.features.chat.ChatScreen
 import chat.matron.android.features.chat.ChatVMCache
 import chat.matron.android.features.chat.SubChatView
+import chat.matron.android.features.boxes.BoxSessionsScreen
+import chat.matron.android.features.boxes.BoxesScreen
+import chat.matron.android.features.boxes.UsageHistoryScreen
 import chat.matron.android.features.chatlist.ChatListScreen
 import chat.matron.android.features.chatlist.NewChatSheet
 import chat.matron.android.features.chatlist.currentSummary
 import chat.matron.android.features.items.ItemDetailScreen
+import chat.matron.android.features.share.ShareShortcuts
 import chat.matron.android.features.items.ItemsScreen
 import chat.matron.android.viewmodels.ItemReadMemory
 import chat.matron.android.features.onboarding.SignInScreen
@@ -102,7 +108,9 @@ import chat.matron.android.features.settings.CoordinatorSettingRowModel
 import chat.matron.android.features.settings.DeviceSettingsScreen
 import chat.matron.android.features.settings.AgentChatScreen
 import chat.matron.android.features.settings.DevicesScreen
+import chat.matron.android.features.settings.NotificationSettingsScreen
 import chat.matron.android.features.settings.PinnedChatsScreen
+import chat.matron.android.features.chat.ConversationRoomsHost
 import chat.matron.android.features.chatlist.ArchivedChatsScreen
 import chat.matron.android.chat.ChatSummary
 import chat.matron.android.features.pins.ChatPinMenu
@@ -122,6 +130,9 @@ import chat.matron.android.models.isSameSignIn
 import chat.matron.android.platform.AndroidBiometricAuthenticator
 import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.VoiceRecorderHandoff
+import chat.matron.android.journal.DeviceDTO
+import chat.matron.android.viewmodels.BoxesViewModel
+import chat.matron.android.viewmodels.UsageHistoryViewModel
 import chat.matron.android.viewmodels.KeyValueBoxCapacityCache
 import chat.matron.android.viewmodels.ChatListViewModel
 import chat.matron.android.viewmodels.GoToNumberResolver
@@ -222,11 +233,13 @@ class MainActivity : FragmentActivity() {
 
     override fun onStart() {
         super.onStart()
+        chat.matron.android.sync.MainAppVisibility.noteStarted()
         appLock.noteForegrounded()
     }
 
     override fun onStop() {
         super.onStop()
+        chat.matron.android.sync.MainAppVisibility.noteStopped()
         appLock.noteBackgrounded()
     }
 }
@@ -637,6 +650,9 @@ private fun SignedInApp(
     var coordinatorError by remember { mutableStateOf<String?>(null) }
     // Pinned desk chats (journal "Pinned desk chats"): the Pinned section,
     // the pin menus and Settings → Pinned chats share one controller.
+    // Session-level so a save started in Settings outlives the screen.
+    val newChatDefaults = remember(session.userID) { deps.makeNewChatDefaultsStore(session, sessionScope) }
+    val routinesVM = remember(session.userID) { deps.makeRoutinesViewModel(session, sessionScope) }
     val pinsController = remember(session.userID) { PinsController(deps.pinsSync(session), sessionScope) }
     val pins by pinsController.sync.pins.collectAsStateWithLifecycle()
     val boxNames by remember(session.userID) { deps.agentNamesFlow(session) }.collectAsStateWithLifecycle(emptyMap())
@@ -644,6 +660,11 @@ private fun SignedInApp(
     var connectionState by remember { mutableStateOf<SyncBannerState>(SyncBannerState.Connecting) }
     var hasEverConnected by remember { mutableStateOf(false) }
     var newChatTarget by remember { mutableStateOf<NewChatTarget?>(null) }
+    /// The box the Boxes screen's + opened New Chat on; null = the box list.
+    var newChatStartOn by remember { mutableStateOf<DeviceDTO?>(null) }
+    val boxesVM = remember(session.userID) {
+        BoxesViewModel(deps.boxesService(session), KeyValueBoxCapacityCache(session.userID, deps.preferences))
+    }
     var showCoordinatorChooser by remember { mutableStateOf(false) }
     // The tab whose "Go to number" button opened the dialog: the target is
     // pushed on THAT tab's stack where the tab can host it.
@@ -721,6 +742,14 @@ private fun SignedInApp(
 
     val groups by chatListVM.groups.collectAsStateWithLifecycle()
     val allChats = remember(groups) { groups.flatMap { it.summaries } }
+    // The most recent conversations as direct-share targets in the system
+    // share sheet. Republished only when which ones (or their names) change,
+    // and after a pause, so a busy list doesn't churn the system's ranking.
+    val shareTargets = remember(allChats, coordinatorConvoID) { ShareShortcuts.targets(allChats, coordinatorConvoID) }
+    LaunchedEffect(shareTargets.map { it.id to it.title }) {
+        kotlinx.coroutines.delay(2_000)
+        ShareShortcuts.publish(deps.context, shareTargets)
+    }
     // Archived conversations are not in the list's groups; a chat opened
     // from Archived (or search) takes its header from here instead.
     val archivedFlow = remember(session.userID) { deps.chatService(session).archivedChatSummaries() }
@@ -1090,6 +1119,61 @@ private fun SignedInApp(
                             boxNames = boxNames,
                             pinActions = pinsController,
                             onOpenArchived = { nav.navigate("archived") },
+                            onOpenBoxes = { nav.navigate("boxes") },
+                        )
+                    }
+
+                    composable("boxes") {
+                        BoxesScreen(
+                            viewModel = boxesVM,
+                            onStartSession = { device ->
+                                newChatStartOn = device
+                                newChatTarget = NewChatTarget.CONVERSATIONS
+                            },
+                            onOpenSessions = { id -> nav.navigate("boxes/$id") },
+                            onBack = { nav.popBackStack() },
+                            onOpenUsageHistory = { nav.navigate("usage-history") },
+                        )
+                    }
+
+                    composable("usage-history") {
+                        val usageHistoryVM = remember(session.userID) {
+                            UsageHistoryViewModel(deps.usageHistoryService(session))
+                        }
+                        UsageHistoryScreen(viewModel = usageHistoryVM, onBack = { nav.popBackStack() })
+                    }
+
+                    composable(
+                        route = "boxes/{boxID}",
+                        arguments = listOf(navArgument("boxID") { type = NavType.LongType }),
+                    ) { entry ->
+                        val boxID = entry.arguments?.getLong("boxID")
+                        val boxesState by boxesVM.state.collectAsStateWithLifecycle()
+                        // Restored here straight after a process death: the
+                        // Boxes screen that normally loads is not underneath.
+                        // Reloaded on every appear, as the Boxes screen is:
+                        // after a process death nothing else has loaded, and
+                        // back from a chat the sessions may have changed.
+                        LaunchedEffect(Unit) { boxesVM.load() }
+                        // The Boxes screen's watch stops when it leaves the
+                        // stack's top, so this list keeps itself current.
+                        LaunchedEffect(Unit) { boxesVM.watch() }
+                        val row = boxesVM.rows(boxesState).firstOrNull { it.id == boxID }
+                        BoxSessionsScreen(
+                            name = row?.device?.name.orEmpty(),
+                            sessions = row?.sessions.orEmpty(),
+                            // Pushed, as Archived does, so Back returns here
+                            // and then to Boxes. The Coordinator has its own
+                            // tab, so it goes through the shell.
+                            onOpenChat = { id ->
+                                if (id == shell.coordinatorConvoID) {
+                                    shell.openChat(id)
+                                } else {
+                                    nav.navigate("${AppTab.CONVERSATIONS.routePrefix}chat/$id")
+                                }
+                            },
+                            onBack = { nav.popBackStack() },
+                            hasLoaded = boxesState.hasLoaded,
                         )
                     }
 
@@ -1176,20 +1260,53 @@ private fun SignedInApp(
                                 onChoose = { showCoordinatorChooser = true },
                                 onClear = { shell.assignCoordinator(null, persistCoordinator) },
                                 consent = coordinatorConsent,
+                                onRoutines = { nav.navigate("routines") },
                             ),
                             onPinnedChats = if (pins != null) ({ nav.navigate("pinned-chats") }) else null,
                             onPeople = { nav.navigate("people") },
+                            onNotifications = { nav.navigate("notifications") },
                             notices = noticesSetting,
                             autoArchive = autoArchiveSetting,
                             twoFactor = twoFactorSetting,
                             changePassword = changePassword,
                             accountEmail = accountEmail,
+                            newChatDefaults = newChatDefaults,
                             onBack = { nav.popBackStack() },
                         )
                     }
 
                     composable("people") {
                         PeopleScreen(viewModel = peopleVM, onBack = { nav.popBackStack() })
+                    }
+
+                    composable("notifications") {
+                        NotificationSettingsScreen(
+                            store = deps.notifySettings(session),
+                            // Archived chats too: an override can outlive the chat's place in the list.
+                            title = { id -> summaryFor(id)?.title?.takeIf { it.isNotBlank() } ?: id },
+                            onBack = { nav.popBackStack() },
+                        )
+                    }
+
+                    composable("routines") {
+                        RoutinesScreen(
+                            viewModel = routinesVM,
+                            onSelect = { id -> nav.navigate("routine/$id") },
+                            onNew = { nav.navigate("routine-new") },
+                            onBack = { nav.popBackStack() },
+                        )
+                    }
+
+                    composable("routine-new") {
+                        RoutineEditorScreen(viewModel = routinesVM, routineID = null, onBack = { nav.popBackStack() })
+                    }
+
+                    composable("routine/{id}") { entry ->
+                        RoutineEditorScreen(
+                            viewModel = routinesVM,
+                            routineID = entry.arguments?.getString("id"),
+                            onBack = { nav.popBackStack() },
+                        )
                     }
 
                     composable("pinned-chats") {
@@ -1395,18 +1512,20 @@ private fun SignedInApp(
     val target = newChatTarget
     if (target != null) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(onDismissRequest = { newChatTarget = null }, sheetState = sheetState) {
+        ModalBottomSheet(onDismissRequest = { newChatTarget = null; newChatStartOn = null }, sheetState = sheetState) {
             NewChatSheet(
+                startOn = newChatStartOn,
                 api = deps.agentRPCService(session),
                 capacityCache = KeyValueBoxCapacityCache(session.userID, deps.preferences),
                 prepareConversation = { id -> deps.prepareConversation(session, id) },
                 onCreated = { convoID ->
                     newChatTarget = null
+                    newChatStartOn = null
                     // "New coordinator chat…" assigns the new id first (and
                     // synchronously), so the open lands on the Coordinator tab.
                     if (target == NewChatTarget.COORDINATOR) shell.chooseCoordinator(convoID, persistCoordinator) else shell.openChat(convoID)
                 },
-                onCancel = { newChatTarget = null },
+                onCancel = { newChatTarget = null; newChatStartOn = null },
             )
         }
     }
@@ -1689,6 +1808,22 @@ private fun ChatRoute(
             val missionID by produceState<String?>(initialValue = null, convoID) {
                 deps.missionIDFlow(session, convoID).collect { value = it }
             }
+            // The header's "Rooms · n": the agent-chat rooms this
+            // conversation is in, live off the store while the chat shows.
+            val roomsScope = rememberCoroutineScope()
+            val roomsVM = remember(convoID) { deps.makeConversationRoomsViewModel(session, convoID, roomsScope) }
+            DisposableEffect(roomsVM) {
+                roomsVM.start()
+                val generation = roomsVM.observationGeneration
+                onDispose { roomsVM.stop(generation) }
+            }
+            val conversationRooms = remember(roomsVM) {
+                ConversationRoomsHost(
+                    rooms = roomsVM.rooms,
+                    room = { roomID -> vmCache.viewModels(roomID).first to vmCache.stripViewModel(roomID) },
+                    subagent = { childID, roomID -> vmCache.subChatViewModels(childID, roomID) },
+                )
+            }
             ChatScreen(
                 chatVM = chatVM,
                 composerVM = composerVM,
@@ -1712,6 +1847,8 @@ private fun ChatRoute(
                 missionID = missionID,
                 onOpenMission = onOpenMission,
                 pinMenu = pinMenu,
+                conversationRooms = conversationRooms,
+                notify = remember(session.userID) { deps.notifySettings(session) },
                 // Deferred: built when the browser sheet opens, on the sheet's own
                 // scope, over the same store the sync engine writes (apple #142).
                 mediaBrowser = { scope ->

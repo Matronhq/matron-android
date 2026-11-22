@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.view.WindowManager
@@ -28,8 +29,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -62,11 +61,16 @@ import chat.matron.android.designsystem.AttachmentPaste
 import chat.matron.android.designsystem.AttachmentPasteTarget
 import chat.matron.android.designsystem.AttachmentTray
 import chat.matron.android.designsystem.LocalAppLockActive
+import chat.matron.android.designsystem.MicrophoneMenu
 import chat.matron.android.designsystem.UploadProgressBar
+import chat.matron.android.designsystem.VoiceNoteBarMode
+import chat.matron.android.designsystem.VoiceNoteRecordingBar
 import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.BotCommand
 import chat.matron.android.platform.AudioFocusInterruptions
 import chat.matron.android.platform.AudioInputDiagnostics
+import chat.matron.android.platform.MicrophoneCatalog
+import chat.matron.android.platform.SharedPreferencesMicrophonePreference
 import chat.matron.android.platform.VoiceRecordingService
 import chat.matron.android.viewmodels.ChatViewModel
 import chat.matron.android.viewmodels.ComposerDraftMemory
@@ -176,6 +180,8 @@ fun ComposerView(viewModel: ComposerViewModel) {
         }
     }
     val recorderState by recorder.state.collectAsStateWithLifecycle()
+    val microphone by recorder.microphone.collectAsStateWithLifecycle()
+    val preferredMicrophoneID by recorder.preferredMicrophoneID.collectAsStateWithLifecycle()
     // Peak-level breadcrumbs every few seconds while capture is live, so a
     // note that comes back silent can be told from one that was never heard
     // (port of apple #181). Keyed on the state so a pause stops the ticker.
@@ -231,12 +237,18 @@ fun ComposerView(viewModel: ComposerViewModel) {
             UploadProgressBar(label = upload.label, fraction = upload.fraction)
         }
 
-        (recorderState as? VoiceRecorder.State.Recording)?.let { recording ->
-            RecordingBar(
-                isPaused = recording.isPaused,
+        voiceNoteBarMode(recorderState)?.let { mode ->
+            VoiceNoteRecordingBar(
+                mode = mode,
                 onCancel = { recorder.cancel() },
                 onSend = {
-                    recorder.stop()?.let { note ->
+                    val note = try {
+                        recorder.stop()
+                    } catch (error: VoiceRecorder.RecorderError) {
+                        viewModel.reportAttachmentError(error.userMessage)
+                        null
+                    }
+                    note?.let { note ->
                         // The note takes the typed text and the tray with it.
                         // Undispatched, the view model clears the draft before
                         // the upload's first suspension, so the field can show
@@ -249,6 +261,15 @@ fun ComposerView(viewModel: ComposerViewModel) {
                         syncFromVm()
                     }
                 },
+            )
+            // Which microphone is recording, and a way to pick another; the
+            // pick moves this note at once and is kept for the next ones.
+            MicrophoneMenu(
+                current = microphone,
+                preferredID = preferredMicrophoneID,
+                available = recorder::availableMicrophones,
+                onSelect = recorder::selectMicrophone,
+                modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
             )
         } ?: run {
             AttachmentTray(attachments = staged, onRemove = { id -> viewModel.removeAttachment(id) })
@@ -316,7 +337,7 @@ fun ComposerView(viewModel: ComposerViewModel) {
                                 try {
                                     recorder.start()
                                 } catch (error: VoiceRecorder.RecorderError) {
-                                    viewModel.reportAttachmentError(voiceRecorderErrorMessage(error))
+                                    viewModel.reportAttachmentError(error.userMessage)
                                 }
                             }
                         },
@@ -363,9 +384,11 @@ private val LEVEL_SAMPLE_INTERVAL = 5.seconds
 /// [VoiceRecorderBindings] and are rebound by whichever composer holds it.
 private fun makeVoiceRecorderHost(context: Context): VoiceRecorderHost {
     val bindings = VoiceRecorderBindings()
+    val microphones = MicrophoneCatalog(context)
     val recorder = VoiceRecorder(
         requestPermission = { bindings.requestPermission() },
-        makeRecorder = { file -> MediaRecorderAudioRecording(file) },
+        makeRecorder = { file -> MediaRecorderAudioRecording(file, microphones, context.getSystemService(AudioManager::class.java)) },
+        measureDuration = MediaRecorderAudioRecording::measuredDuration,
         tempDirectory = File(context.cacheDir, "voice").apply { mkdirs() },
         setKeepScreenAwake = { bindings.setKeepScreenAwake(it) },
         // Switching apps mid-note used to kill the capture: a microphone
@@ -379,35 +402,10 @@ private fun makeVoiceRecorderHost(context: Context): VoiceRecorderHost {
         // changes pause and resume the recorder (port of apple #180).
         observeInterruptions = AudioFocusInterruptions(context)::observe,
         describeInputRoute = AudioInputDiagnostics(context)::describe,
+        listMicrophones = microphones::list,
+        preferences = SharedPreferencesMicrophonePreference(context),
     )
     return VoiceRecorderHost(bindings, recorder)
-}
-
-/// The live-recording strip. While an interruption holds the capture
-/// ([isPaused]) it says so: the spinner and "Recording…" would claim to be
-/// capturing a call that the recorder is not hearing. Send still delivers
-/// what was captured up to the pause.
-@Composable
-private fun RecordingBar(isPaused: Boolean, onCancel: () -> Unit, onSend: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        if (isPaused) {
-            Icon(Icons.Default.Pause, contentDescription = "Recording paused", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(recordingBarLabel(isPaused = true), modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
-        } else {
-            CircularProgressIndicator(modifier = Modifier.padding(2.dp), strokeWidth = 2.dp)
-            Text(recordingBarLabel(isPaused = false), modifier = Modifier.weight(1f))
-        }
-        TextButton(onClick = onCancel) { Text("Cancel") }
-        IconButton(onClick = onSend) {
-            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send voice note", tint = MaterialTheme.colorScheme.primary)
-        }
-    }
 }
 
 /**
@@ -431,16 +429,11 @@ private fun ComposerErrorBanner(message: String, onDismiss: () -> Unit) {
     }
 }
 
-/// Copy for the recording strip: truthful about a capture an interruption
-/// has paused (a call, another app on the mic) versus one that is live.
-internal fun recordingBarLabel(isPaused: Boolean): String =
-    if (isPaused) "Recording paused" else "Recording…"
-
-/** User-facing copy for a [VoiceRecorder.RecorderError] thrown by [VoiceRecorder.start]. */
-private fun voiceRecorderErrorMessage(error: VoiceRecorder.RecorderError): String = when (error) {
-    VoiceRecorder.RecorderError.PermissionDenied -> "Microphone access is needed to record a voice note."
-    VoiceRecorder.RecorderError.RecordFailed -> "Couldn't start recording."
-    VoiceRecorder.RecorderError.AlreadyRecording -> "Already recording."
+/// The voice-note bar for a recorder state; `null` when no note is under way.
+internal fun voiceNoteBarMode(state: VoiceRecorder.State): VoiceNoteBarMode? = when (state) {
+    VoiceRecorder.State.Starting -> VoiceNoteBarMode.Starting
+    is VoiceRecorder.State.Recording -> VoiceNoteBarMode.Recording(state.start, state.isPaused, state.pausedTotal)
+    VoiceRecorder.State.Idle, VoiceRecorder.State.Finished -> null
 }
 
 /**

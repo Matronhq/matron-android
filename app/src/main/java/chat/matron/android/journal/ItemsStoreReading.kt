@@ -45,6 +45,11 @@ interface ItemsStoreReading {
     /// its owner conversation's state changes here. Defaulted to a store
     /// that never reports one, so fakes that don't care skip it.
     fun itemOwnerSessionStateFlow(convoID: String): Flow<String?> = emptyFlow()
+    /// The conversation's consent rows (`permission_request` and
+    /// `spawn_outcome`), oldest first, followed live: a spawn consent item
+    /// draws its ask's card from them. Defaulted to none, so fakes that
+    /// don't care skip it.
+    fun consentEventsFlow(convoID: String): Flow<List<JournalEvent>> = flowOf(emptyList())
     /// The conversation's busy-queue cards and their releases
     /// (`queued_release` prompts and replies), oldest first, followed live:
     /// `ItemQueuedReplies` reads which of an item's replies still wait on the
