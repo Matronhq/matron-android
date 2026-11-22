@@ -21,10 +21,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.ui.platform.testTag
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.PushPin
 import chat.matron.android.features.pins.ChatPinMenu
+import chat.matron.android.viewmodels.NotifySettingsStore
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -157,6 +159,9 @@ fun ChatScreen(
     /// Pin… / Move pin… / Unpin in the "⋮" menu (journal pinned desk
     /// chats). `null` — a journal without pins, previews — offers none.
     pinMenu: ChatPinMenu? = null,
+    /// The "⋮" menu's Notifications entry (this chat's own level and mute).
+    /// `null` (previews/tests) offers none.
+    notify: NotifySettingsStore? = null,
 ) {
     val error by chatVM.error.collectAsStateWithLifecycle()
     val chatSearch by chatVM.chatSearch.collectAsStateWithLifecycle()
@@ -171,6 +176,16 @@ fun ChatScreen(
     var showMediaBrowser by remember { mutableStateOf(false) }
     var showSwitcher by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
+    var notifyMenuOpen by remember { mutableStateOf(false) }
+    // The Notifications submenu opens a frame after the overflow menu closes,
+    // so the closing popup's outside-tap or focus loss can't dismiss it.
+    var notifyMenuRequested by remember { mutableStateOf(false) }
+    LaunchedEffect(notifyMenuRequested) {
+        if (!notifyMenuRequested) return@LaunchedEffect
+        androidx.compose.runtime.withFrameNanos { }
+        notifyMenuOpen = true
+        notifyMenuRequested = false
+    }
     var previewModel by remember { mutableStateOf<Any?>(null) }
     val compactScope = rememberCoroutineScope()
     // The gallery a timeline tap opens: every image in the conversation,
@@ -352,6 +367,20 @@ fun ChatScreen(
                                 )
                             }
                         }
+                        if (notify != null) {
+                            val notifyView by notify.view.collectAsStateWithLifecycle()
+                            val notifyClock by notify.clock.collectAsStateWithLifecycle()
+                            val notifyState = notify.state(chatVM.roomID, notifyView, notifyClock)
+                            DropdownMenuItem(
+                                text = { Text("Notifications") },
+                                leadingIcon = { Icon(convoNotifyIcon(notifyState), contentDescription = null) },
+                                onClick = {
+                                    menuOpen = false
+                                    notifyMenuRequested = true
+                                },
+                                modifier = Modifier.testTag("chat-menu-notifications"),
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("Session Info") },
                             leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
@@ -359,6 +388,14 @@ fun ChatScreen(
                                 menuOpen = false
                                 showSessionStatus = true
                             },
+                        )
+                    }
+                    if (notify != null) {
+                        ConvoNotifyMenu(
+                            store = notify,
+                            convoID = chatVM.roomID,
+                            expanded = notifyMenuOpen,
+                            onDismiss = { notifyMenuOpen = false },
                         )
                     }
                 },

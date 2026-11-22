@@ -378,7 +378,7 @@ class JournalApi(
     /// transport failures, or answers to a token since replaced.
     private val authResponses: ((Int) -> Unit)? = null,
 ) : SnapshotSource, AgentSpawnAnswering, GrantAnswering, ItemsProviding, MissionsProviding, MemoriesProviding, RoutinesProviding,
-    PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NumberLookupProviding,
+    PinsProviding, CoordinatorProviding, CoordinatorConsentProviding, UserSettingsProviding, NotifySettingsProviding, NumberLookupProviding,
     TrackerSearching, JournalSearching,
     ArchiveWriting, TwoFactorProviding, PasswordChanging, AccountEmailProviding, ContactsProviding,
     InviteAskAnswering {
@@ -1162,6 +1162,19 @@ class JournalApi(
         UserSettingsDecoding.settings(
             request(path = "/settings", method = "PATCH", jsonBody = buildJsonObject { put("auto_archive_days", days) }),
         ) ?: throw JournalApiError.Transport("malformed settings response")
+
+    // MARK: Notifications
+    //
+    // Journal notification settings: what may push, synced per user, plus
+    // this device's own level. A journal predating the route 404s the GET.
+
+    override suspend fun notifySettings(): NotifyView =
+        NotifyView.decode(request(path = "/notify"))
+            ?: throw JournalApiError.Transport("malformed /notify response")
+
+    override suspend fun updateNotify(change: NotifyChange): NotifyView =
+        NotifyView.decode(request(path = "/notify", method = "PUT", jsonBody = change.body()))
+            ?: throw JournalApiError.Transport("malformed /notify response")
 
     // MARK: Archive
 

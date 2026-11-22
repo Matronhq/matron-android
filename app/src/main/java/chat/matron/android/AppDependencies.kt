@@ -41,6 +41,7 @@ import chat.matron.android.viewmodels.RoutinesViewModel
 import chat.matron.android.viewmodels.MemoryEditorViewModel
 import chat.matron.android.viewmodels.MissionDetailViewModel
 import chat.matron.android.viewmodels.NoticesSettingViewModel
+import chat.matron.android.viewmodels.NotifySettingsStore
 import chat.matron.android.viewmodels.TwoFactorSettingViewModel
 import chat.matron.android.viewmodels.ChangePasswordViewModel
 import chat.matron.android.viewmodels.AccountEmailViewModel
@@ -251,6 +252,8 @@ class AppDependencies(
         val pinsSync: PinsSync,
         /** The journal-held Coordinator, mirrored into [CoordinatorSetting]. */
         val coordinatorSync: CoordinatorSync,
+        /** Settings → Notifications and each chat's Notifications menu. */
+        val notifySettings: NotifySettingsStore,
         /**
          * Background search-history backfill sweep for this session (see
          * [SearchBackfillCoordinator]). Cancelled on sign-out, and joined by
@@ -462,10 +465,15 @@ class AppDependencies(
             setting = CoordinatorSetting(session.userID, preferences),
             updates = { engine.coordinatorUpdates() },
         )
+        val notifySettings = NotifySettingsStore(
+            api = api,
+            updates = { engine.notifyUpdates() },
+            connectionStates = { engine.stateStream },
+        )
         val core = JournalCore(
             api, db, dbFile, store, engine, maintenance, itemsSync, missionsSync, memoriesSync,
-            pinsSync = pinsSync, coordinatorSync = coordinatorSync, revocation = revocation,
-            userID = session.userID,
+            pinsSync = pinsSync, coordinatorSync = coordinatorSync, notifySettings = notifySettings,
+            revocation = revocation, userID = session.userID,
         )
         if (!live) return core
         core.itemsSync.onInviteLink = { link, askId ->
@@ -499,6 +507,7 @@ class AppDependencies(
         memoriesSync.start()
         pinsSync.start()
         coordinatorSync.start()
+        notifySettings.start()
         core.backfillJob = startBackfill(search = search, api = api, store = store)
         return core
     }
@@ -643,6 +652,9 @@ class AppDependencies(
 
     /** The session's journal-held Coordinator (Coordinator redesign §3a). */
     fun coordinatorSync(session: UserSession): CoordinatorSync = core(session).coordinatorSync
+
+    /** The session's notification settings (`GET`/`PUT /notify`), shared by every surface. */
+    fun notifySettings(session: UserSession): NotifySettingsStore = core(session).notifySettings
 
     /** Agent box id → name, live — the pin successor hint names the box. */
     fun agentNamesFlow(session: UserSession): kotlinx.coroutines.flow.Flow<Map<Long, String>> =
@@ -1057,6 +1069,8 @@ class AppDependencies(
                     .onFailure { MatronDebug.breadcrumb("signOut: archive.stop failed: $it") }
                 runCatching { core.coordinatorSync.stop() }
                     .onFailure { MatronDebug.breadcrumb("signOut: coordinatorSync.stop failed: $it") }
+                runCatching { core.notifySettings.stop() }
+                    .onFailure { MatronDebug.breadcrumb("signOut: notifySettings.stop failed: $it") }
                 core.engine.endSync()
                 runCatching { core.store.wipe() }
                     .onFailure { MatronDebug.breadcrumb("signOut: store.wipe failed: $it") }
