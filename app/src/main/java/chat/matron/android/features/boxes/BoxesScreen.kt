@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -76,6 +77,8 @@ fun BoxesScreen(
     onStartSession: (DeviceDTO) -> Unit,
     onOpenSessions: (Long) -> Unit,
     onBack: () -> Unit,
+    /// Opens Usage history; null hides the row.
+    onOpenUsageHistory: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -107,6 +110,7 @@ fun BoxesScreen(
         onStartSession = onStartSession,
         onOpenSessions = onOpenSessions,
         onBack = onBack,
+        onOpenUsageHistory = onOpenUsageHistory,
     )
 }
 
@@ -126,6 +130,8 @@ fun BoxesContent(
     onBack: () -> Unit,
     /// Frozen clock (epoch ms) for screenshots; null = now.
     fixedNowMs: Long? = null,
+    /// Opens Usage history; null hides the row.
+    onOpenUsageHistory: (() -> Unit)? = null,
 ) {
     Scaffold(
         topBar = {
@@ -169,6 +175,9 @@ fun BoxesContent(
                 summary.spare?.let { spare ->
                     item(key = "spare") { SpareCard(spare, summary, fixedNowMs) }
                 }
+                if (rows.isNotEmpty() && onOpenUsageHistory != null) {
+                    item(key = "history") { UsageHistoryLink(onOpenUsageHistory) }
+                }
                 items(rows, key = { it.id }) { row ->
                     BoxCard(row, onWake, onStartSession, onOpenSessions, fixedNowMs)
                 }
@@ -199,6 +208,32 @@ internal fun BoxesCard(modifier: Modifier = Modifier, content: @Composable () ->
             .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surface),
     ) { content() }
+}
+
+@Composable
+private fun UsageHistoryLink(onOpen: () -> Unit) {
+    BoxesCard(Modifier.clickable(onClick = onOpen)) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Usage history", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "How much of each week's allowance went unused",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.outline,
+            )
+        }
+    }
 }
 
 @Composable

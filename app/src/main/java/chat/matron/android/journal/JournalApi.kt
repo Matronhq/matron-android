@@ -1,5 +1,6 @@
 package chat.matron.android.journal
 
+import chat.matron.android.models.UsageHistory
 import java.io.File
 import java.io.IOException
 import kotlin.coroutines.resumeWithException
@@ -724,6 +725,14 @@ class JournalApi(
     suspend fun roster(): RosterSnapshot =
         RosterSnapshot.decode(request(path = "/roster"))
             ?: throw JournalApiError.Transport("malformed roster response")
+
+    /// `GET /usage/history?weeks=N`: each account's weekly meters over the
+    /// last [weeks] weeks. A journal that predates the route answers 404
+    /// ([JournalApiError.NotFound]).
+    suspend fun usageHistory(weeks: Int): UsageHistory =
+        UsageHistory.parse(
+            request(path = "/usage/history", query = listOf("weeks" to weeks.toString())),
+        ) ?: throw JournalApiError.Transport("malformed usage history response")
 
     /// `PUT /devices/:id/defaults` — sets (or, with a null value, clears)
     /// any subset of an agent box's defaults for new sessions, returning the

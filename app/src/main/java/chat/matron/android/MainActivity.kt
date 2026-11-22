@@ -91,6 +91,7 @@ import chat.matron.android.features.chat.ChatVMCache
 import chat.matron.android.features.chat.SubChatView
 import chat.matron.android.features.boxes.BoxSessionsScreen
 import chat.matron.android.features.boxes.BoxesScreen
+import chat.matron.android.features.boxes.UsageHistoryScreen
 import chat.matron.android.features.chatlist.ChatListScreen
 import chat.matron.android.features.chatlist.NewChatSheet
 import chat.matron.android.features.chatlist.currentSummary
@@ -126,6 +127,7 @@ import chat.matron.android.viewmodels.AppLockController
 import chat.matron.android.viewmodels.VoiceRecorderHandoff
 import chat.matron.android.journal.DeviceDTO
 import chat.matron.android.viewmodels.BoxesViewModel
+import chat.matron.android.viewmodels.UsageHistoryViewModel
 import chat.matron.android.viewmodels.KeyValueBoxCapacityCache
 import chat.matron.android.viewmodels.ChatListViewModel
 import chat.matron.android.viewmodels.GoToNumberResolver
@@ -1112,7 +1114,15 @@ private fun SignedInApp(
                             },
                             onOpenSessions = { id -> nav.navigate("boxes/$id") },
                             onBack = { nav.popBackStack() },
+                            onOpenUsageHistory = { nav.navigate("usage-history") },
                         )
+                    }
+
+                    composable("usage-history") {
+                        val usageHistoryVM = remember(session.userID) {
+                            UsageHistoryViewModel(deps.usageHistoryService(session))
+                        }
+                        UsageHistoryScreen(viewModel = usageHistoryVM, onBack = { nav.popBackStack() })
                     }
 
                     composable(

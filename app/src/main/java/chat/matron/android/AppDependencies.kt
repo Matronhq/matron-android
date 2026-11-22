@@ -31,6 +31,8 @@ import chat.matron.android.journal.ArchiveSync
 import chat.matron.android.journal.PinsSync
 import chat.matron.android.journal.PinsSyncing
 import chat.matron.android.viewmodels.BoxesProviding
+import chat.matron.android.viewmodels.JournalUsageHistoryService
+import chat.matron.android.viewmodels.UsageHistoryProviding
 import chat.matron.android.viewmodels.UnsentReplyStore
 import chat.matron.android.viewmodels.CoordinatorConsentSettingViewModel
 import chat.matron.android.viewmodels.CoordinatorSetting
@@ -859,6 +861,10 @@ class AppDependencies(
 
     /** New Chat surface: agent roster + recent-folders / start RPCs. */
     fun agentRPCService(session: UserSession): AgentRPCProviding = boxesService(session)
+
+    /** Boxes → Usage history: `GET /usage/history`. */
+    fun usageHistoryService(session: UserSession): UsageHistoryProviding =
+        JournalUsageHistoryService(core(session).api)
 
     /** Boxes screen: New Chat's slice plus `GET /roster`. */
     fun boxesService(session: UserSession): BoxesProviding {
