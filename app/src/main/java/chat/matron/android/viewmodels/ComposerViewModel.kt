@@ -2,6 +2,7 @@ package chat.matron.android.viewmodels
 
 import chat.matron.android.chat.TimelineService
 import chat.matron.android.models.AttachmentBatchTag
+import chat.matron.android.models.AttachmentLimits
 import chat.matron.android.models.ArgSuggestion
 import chat.matron.android.models.BotCommand
 import chat.matron.android.models.BotCommandCatalog
@@ -48,9 +49,25 @@ class ComposerViewModel(
     /// "no status", which is what a composer with no chat half (tests, any
     /// future non-conversation surface) should offer: nothing (apple #163).
     private val sessionStatus: () -> SessionStatus? = { null },
+    /// Where the unsent text and tray are kept on disk, so they survive the
+    /// view model being evicted and the app restarting. `null` (tests, any
+    /// surface with nothing to keep) keeps them in memory only.
+    private val unsentReplies: UnsentReplyStore? = null,
 ) {
-    /// User-editable input text.
+    private val unsentPlace = UnsentReplyStore.Place.Conversation(roomID)
+    /// The store's epoch when this view model was made: a write after
+    /// sign-out carries a stale one and is dropped.
+    private val unsentEpoch = unsentReplies?.epoch ?: 0
+    private var restoringUnsent = false
+
+    /// User-editable input text. Every change is saved as the unsent draft,
+    /// except a sent line recalled with Up/Down, which leaves the saved draft
+    /// as it was.
     var input: String = ""
+        set(value) {
+            field = value
+            persistUnsent()
+        }
 
     /// Mac slash palette is also openable via a shortcut; typing `/`/`!` opens it.
     var palettePinnedOpen: Boolean = false
@@ -87,6 +104,14 @@ class ComposerViewModel(
     private val _stagedAttachments = MutableStateFlow<List<StagedAttachment>>(emptyList())
     val stagedAttachments: StateFlow<List<StagedAttachment>> = _stagedAttachments.asStateFlow()
 
+    /// The tray, saved as part of the unsent reply on every change.
+    private var tray: List<StagedAttachment>
+        get() = _stagedAttachments.value
+        set(value) {
+            _stagedAttachments.value = value
+            persistUnsent()
+        }
+
     /// True while the user is walking sent-message history via Up/Down.
     private val _isNavigatingHistory = MutableStateFlow(false)
     val isNavigatingHistory: StateFlow<Boolean> = _isNavigatingHistory.asStateFlow()
@@ -106,6 +131,24 @@ class ComposerViewModel(
     /// Input string for which folder suggestions are suppressed (set by
     /// [selectFolder] so the palette closes on pick).
     private var folderSuggestionsSuppressedFor: String? = null
+
+    init {
+        unsentReplies?.reply(unsentPlace)?.let { saved ->
+            restoringUnsent = true
+            input = saved.text
+            tray = saved.attachments
+            restoringUnsent = false
+        }
+    }
+
+    private fun persistUnsent() {
+        val store = unsentReplies ?: return
+        if (restoringUnsent) return
+        // A recalled sent line isn't a draft: while a walk shows one, the
+        // stashed draft is what is saved, with the tray as it is now.
+        val text = history.stashed ?: input
+        store.save(unsentPlace, UnsentReply(text, _stagedAttachments.value), unsentEpoch)
+    }
 
     /// Whether [send] would do anything — an attachment alone is a valid message.
     val canSend: Boolean
@@ -282,7 +325,7 @@ class ComposerViewModel(
             // back over it (the message sent, but the text stayed in the field).
             val pending = input
             input = ""
-            _stagedAttachments.value = emptyList()
+            tray = emptyList()
             lastRecalledValue = null
             _isNavigatingHistory.value = false
             folderSuggestionsSuppressedFor = null
@@ -302,14 +345,14 @@ class ComposerViewModel(
                 // cancelled): what didn't go out — a voice note included — goes
                 // back in the tray, with the text unless it already went, so
                 // nothing the user made is lost. Still a cancellation.
-                _stagedAttachments.value = cancelled.unsent + _stagedAttachments.value
+                tray = cancelled.unsent + _stagedAttachments.value
                 if (!cancelled.captionDelivered) restoreInput(pending)
                 throw cancelled
             } catch (failure: AttachmentSendFailure) {
                 _sendError.value = failure.underlying.message ?: failure.underlying.toString()
                 // Whatever didn't go out goes back in the tray, ahead of anything
                 // attached while the send was in flight.
-                _stagedAttachments.value = failure.unsent + _stagedAttachments.value
+                tray = failure.unsent + _stagedAttachments.value
                 // If the caption's attachment made it, the text HAS been
                 // delivered — restoring it would show already-sent words.
                 if (failure.captionDelivered) return
@@ -414,19 +457,12 @@ class ComposerViewModel(
                         ?: _uploadProgress.value
                 }
                 try {
-                    // Off-main file read: a multi-MB staged screenshot loaded
-                    // synchronously on the main dispatcher froze the composer
-                    // for visible fractions of a second.
-                    val data = withContext(Dispatchers.IO) { attachment.file.readBytes() }
-                    if (attachment.isImage) {
-                        timeline.sendImage(
-                            data, attachment.filename, attachment.mimeType, itemCaption, batch, onProgress,
-                        )
-                    } else {
-                        timeline.sendFile(
-                            data, attachment.filename, attachment.mimeType, itemCaption, batch, onProgress,
-                        )
-                    }
+                    // Straight from the staged file: the upload streams it
+                    // from disk, so a 100 MB video is never held in memory.
+                    timeline.sendAttachment(
+                        attachment.file, attachment.filename, attachment.mimeType, attachment.isImage,
+                        itemCaption, batch, onProgress,
+                    )
                 } catch (cancel: CancellationException) {
                     throw AttachmentSendCancelled(
                         unsent = planned.subList(index, planned.size).toList(),
@@ -526,10 +562,20 @@ class ComposerViewModel(
 
     /// Stages each file into the tray rather than sending it. Unreadable files
     /// are reported via [sendError] and staged nothing.
+    /// A file over [AttachmentLimits.MAX_BYTES] is refused with
+    /// [AttachmentLimits.oversizeMessage] before anything is copied.
     suspend fun attachFiles(files: List<File>) {
         for (file in files) {
+            if (AttachmentLimits.isOversize(withContext(Dispatchers.IO) { file.length() })) {
+                _sendError.value = AttachmentLimits.oversizeMessage(file.name)
+                continue
+            }
             try {
-                _stagedAttachments.value = _stagedAttachments.value + StagedAttachment.stage(file, stagingDirectory)
+                // Off the caller's (main) thread: staging copies the whole
+                // file, up to 100 MB. Appended after the copy so anything
+                // added meanwhile is kept.
+                val staged = withContext(Dispatchers.IO) { StagedAttachment.stage(file, stagingDirectory) }
+                tray = _stagedAttachments.value + staged
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (error: Throwable) {
@@ -541,14 +587,14 @@ class ComposerViewModel(
     /// Drops one attachment from the tray (the tray's per-item ✕).
     fun removeAttachment(id: String) {
         val attachment = _stagedAttachments.value.firstOrNull { it.id == id } ?: return
-        _stagedAttachments.value = _stagedAttachments.value.filterNot { it.id == id }
+        tray = _stagedAttachments.value.filterNot { it.id == id }
         attachment.deleteStagedCopy()
     }
 
     /// Drops every staged attachment and deletes their copies.
     fun discardAttachments() {
         _stagedAttachments.value.forEach { it.deleteStagedCopy() }
-        _stagedAttachments.value = emptyList()
+        tray = emptyList()
     }
 
     /// Sends a recorded voice note (a temp `.m4a`) as a `file` attachment with an
@@ -580,7 +626,8 @@ class ComposerViewModel(
     /// data loss with nothing to show for it.
     private suspend fun sendUnstagedVoiceNote(file: File) {
         try {
-            timeline.sendFile(file.readBytes(), "voice-note.m4a", "audio/mp4", null)
+            timeline.sendAttachment(file, "voice-note.m4a", "audio/mp4", isImage = false, caption = null,
+                batch = null, progress = null)
             _sendError.value = null
             runCatching { file.delete() }
         } catch (cancel: CancellationException) {
