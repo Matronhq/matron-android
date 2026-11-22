@@ -223,6 +223,26 @@ class BoxesViewModelTest {
     }
 
     @Test
+    fun anOlderLoadLandingLastDoesNotRewindANewerOne() = runBlocking {
+        val fake = Fake()
+        val asleep = agent(1, "box-a", connected = false)
+        val gate = CompletableDeferred<Unit>()
+        fake.devicesGate = gate
+        val vm = makeVM(fake)
+        val first = launch { vm.load() }
+        waitUntil { fake.devicesCalls == 1 }
+        // A newer load starts and lands while the first is still out.
+        fake.devicesGate = null
+        fake.devicesResult = Result.success(listOf(asleep.copy(connected = true)))
+        vm.load()
+        // The first answers last, with what was true when it was asked.
+        fake.devicesResult = Result.success(listOf(asleep))
+        gate.complete(Unit)
+        first.join()
+        assertEquals(BoxConnectionState.Online, vm.rows(nowMs = now).single().state)
+    }
+
+    @Test
     fun wake_staysWakingUntilTheReloadAfterItLands() = runBlocking {
         val fake = Fake()
         val asleep = agent(1, "box-a", connected = false)

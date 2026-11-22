@@ -372,6 +372,9 @@ fun BoxSessionsScreen(
     sessions: List<RosterSession>,
     onOpenChat: (String) -> Unit,
     onBack: () -> Unit,
+    /// False until the boxes have loaded (straight after a process death):
+    /// the list shows a spinner, not an empty box.
+    hasLoaded: Boolean = true,
 ) {
     Scaffold(
         topBar = {
@@ -381,6 +384,12 @@ fun BoxSessionsScreen(
             )
         },
     ) { padding ->
+        if (!hasLoaded) {
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+            return@Scaffold
+        }
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
             items(sessions, key = { it.id }) { session ->
                 Row(

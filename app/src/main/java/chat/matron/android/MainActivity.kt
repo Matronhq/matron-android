@@ -1124,12 +1124,25 @@ private fun SignedInApp(
                         // Restored here straight after a process death: the
                         // Boxes screen that normally loads is not underneath.
                         LaunchedEffect(Unit) { if (!boxesVM.state.value.hasLoaded) boxesVM.load() }
+                        // The Boxes screen's watch stops when it leaves the
+                        // stack's top, so this list keeps itself current.
+                        LaunchedEffect(Unit) { boxesVM.watch() }
                         val row = boxesVM.rows(boxesState).firstOrNull { it.id == boxID }
                         BoxSessionsScreen(
                             name = row?.device?.name.orEmpty(),
                             sessions = row?.sessions.orEmpty(),
-                            onOpenChat = { shell.openChat(it) },
+                            // Pushed, as Archived does, so Back returns here
+                            // and then to Boxes. The Coordinator has its own
+                            // tab, so it goes through the shell.
+                            onOpenChat = { id ->
+                                if (id == shell.coordinatorConvoID) {
+                                    shell.openChat(id)
+                                } else {
+                                    nav.navigate("${AppTab.CONVERSATIONS.routePrefix}chat/$id")
+                                }
+                            },
                             onBack = { nav.popBackStack() },
+                            hasLoaded = boxesState.hasLoaded,
                         )
                     }
 
