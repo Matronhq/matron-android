@@ -156,6 +156,7 @@ class ProjectPageViewModelTest {
         assertEquals(1, vm.state.value.historyVersion)
         vm.loadMoreHistory()
         assertTrue(vm.state.value.historyPagingFailed)
+        assertNull("the Retry says it, not an alert", vm.state.value.error)
         fail = false
         vm.loadMoreHistory()
         assertFalse(vm.state.value.historyPagingFailed)
@@ -163,6 +164,29 @@ class ProjectPageViewModelTest {
         assertEquals(2, vm.state.value.historyVersion)
         vm.loadHistory()
         assertEquals(3, vm.state.value.historyVersion)
+    }
+
+    @Test
+    fun aReloadDuringAnOlderPageReadCanPageAgain() = runBlocking {
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val asks = mutableListOf<String?>()
+        val timeline = object : FakeTimelineBase() {
+            override suspend fun timelineProjectHistory(id: String, before: String?, limit: Int?): TimelineHistoryPage {
+                asks += before
+                if (before == null) return TimelineHistoryPage(listOf(history("2026-11-16")), "2026-11-16")
+                if (asks.count { it != null } == 1) hold.await()
+                return TimelineHistoryPage(listOf(history("2026-11-09")), null)
+            }
+        }
+        val vm = ProjectPageViewModel("pj_docs", timeline, FakeProjects())
+        vm.loadHistory()
+        val stale = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined).launch { vm.loadMoreHistory() }
+        vm.loadHistory()
+        vm.loadMoreHistory()
+        assertEquals(listOf("2026-11-16", "2026-11-09"), vm.state.value.history.map { it.week })
+        hold.complete(Unit)
+        stale.join()
+        assertEquals(listOf("2026-11-16", "2026-11-09"), vm.state.value.history.map { it.week })
     }
 
     @Test
