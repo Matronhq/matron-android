@@ -1488,6 +1488,11 @@ private fun SignedInApp(
                     ) { entry ->
                         val projectID = entry.arguments?.getString("projectID") ?: return@composable
                         val projectVM = remember(projectID) { projectVMs.getOrPut(projectID) { deps.makeProjectPageViewModel(session, projectID) } }
+                        // A project merged into another became that one: its
+                        // sections (opened with the new id) share this view
+                        // model, in place of any older one for that project.
+                        val redirectedTo = projectVM.state.collectAsStateWithLifecycle().value.redirectedTo
+                        LaunchedEffect(redirectedTo) { if (redirectedTo != null) projectVMs[redirectedTo] = projectVM }
                         ProjectScreen(
                             viewModel = projectVM,
                             media = deps.mediaService(session),
