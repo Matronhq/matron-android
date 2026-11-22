@@ -221,7 +221,8 @@ fun ProjectSummaryView(
                     waiting.rows.forEach { item ->
                         val title = ProjectFormat.oneLine(item.title)
                         ProjectPageRow(
-                            Modifier.testTag("projects.summary.waiting.${item.num}").clearAndSetSemantics { contentDescription = "Waiting for you: $title" },
+                            Modifier.testTag("projects.summary.waiting.${item.num}")
+                                .clearAndSetSemantics { openable("Waiting for you: $title", { onOpenItem(item.id) }, actionLabel = "Open item") },
                             onClick = { onOpenItem(item.id) },
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
