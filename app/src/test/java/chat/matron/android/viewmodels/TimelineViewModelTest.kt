@@ -166,6 +166,20 @@ class TimelineViewModelTest {
     }
 
     @Test
+    fun aWeekThatSlidesOffTheFirstPageStaysInTheMenu() = runBlocking {
+        val timeline = fake()
+        val vm = TimelineViewModel(timeline, scope)
+        vm.start()
+        // A new week begins: the first page now starts a week later.
+        timeline.weeksPages[null] = TimelineWeeksPage(listOf(TimelineFixtures.summary("2026-11-23"), TimelineFixtures.summary("2026-11-16")), "2026-11-16")
+        vm.refresh()
+        assertEquals(listOf("2026-11-23", "2026-11-16", "2026-11-09"), vm.state.value.weeks.map { it.week })
+        // Paging goes on from the oldest week known.
+        vm.loadEarlierWeeks()
+        assertEquals(listOf("2026-11-23", "2026-11-16", "2026-11-09", "2026-11-02"), vm.state.value.weeks.map { it.week })
+    }
+
+    @Test
     fun theWeeksOtherProjectsPageInOnceEach() = runBlocking {
         val timeline = fake().apply {
             weeks["2026-11-16"] = TimelineFixtures.week("2026-11-16", also = listOf(TimelineFixtures.promo, TimelineFixtures.app, TimelineFixtures.pricing))
