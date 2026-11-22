@@ -234,9 +234,15 @@ object StepUpTap {
             answered(item.id, comment?.id, label)
             // The tap and the asking comment's choice land now; the refetch
             // below can fail.
-            sync.applyTapResult(result.item, result.comment)
+            sync.applyTapResult(result.item, result.comment, result.link, result.askId)
             landed = true
-            sync.refreshItem(item.id)
+            try {
+                sync.refreshItem(item.id)
+            } catch (_: CancellationException) {
+                // The tap landed: the caller must hear so (a For you row it
+                // put back could be tapped again), whatever became of the
+                // refetch after it.
+            }
             return Outcome.Sent
         } catch (e: CancellationException) {
             throw e
