@@ -438,11 +438,35 @@ class SyncScopeTest {
         engine.waitUntilReady()
         engine.setViewing("c1")
         waitUntil { engine.fetchingConversations.value.isEmpty() && store.events("c1").isNotEmpty() }
+        waitUntil { pages.calls.size >= 2 } // the settle read
+        delay(50)
         socket.serve(journalLine(7))
         waitUntil { store.cursor() == 7L }
         engine.setViewing("c2")
         waitUntil { store.syncedSeq("c1") == 7L }
         assertEquals(7L, store.syncedSeq("c1"))
+        engine.endSync()
+    }
+
+    @Test
+    fun leavingBeforeTheSettleReadKeepsTheMarkTheFetchProved() = runBlocking {
+        val pages = FakePages(listOf(event(5)))
+        val socket = FakeWebSocketConnection().apply { serve(helloOK(6)); serve(cursorFrame(6)) }
+        val store = seededStore()
+        val engine = JournalSyncEngine(
+            api = FakeSnapshotSource(), store = store, connector = FakeConnector(listOf(socket)), token = "t",
+            ownSender = "user:alice", backoffBaseSeconds = 0.01, pages = pages, syncScope = SyncScope.FOR_YOU,
+            conversationSettleDelay = 300.milliseconds,
+        )
+        engine.beginSync()
+        engine.waitUntilReady()
+        engine.setViewing("c1")
+        waitUntil { store.events("c1").isNotEmpty() }
+        socket.serve(journalLine(7, convo = "c9", type = "convo_meta"))
+        waitUntil { store.cursor() == 7L }
+        engine.setViewing("c2") // before the settle read
+        delay(400)
+        assertEquals("not moved to the cursor: the handover was never read", 5L, store.syncedSeq("c1"))
         engine.endSync()
     }
 

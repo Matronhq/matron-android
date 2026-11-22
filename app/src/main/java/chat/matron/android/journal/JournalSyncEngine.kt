@@ -228,6 +228,8 @@ class JournalSyncEngine(
     /// Conversations on screen fetched since the live socket came up: only
     /// these are known to be complete up to the cursor.
     private val caughtUpViewed = mutableSetOf<String>()
+    /// Fetched on this socket, waiting for their settle read: not fetched again.
+    private val settlingViewed = mutableSetOf<String>()
     /// Conversation → the socket its running fetch belongs to. A fetch from
     /// a socket since replaced must not hold back the new socket's.
     private val catchUpsInFlight = mutableMapOf<String, JournalConnection>()
@@ -421,6 +423,7 @@ class JournalSyncEngine(
             lastSessionStatus.clear()
             pendingAutoOpen.clear()
             caughtUpViewed.clear()
+            settlingViewed.clear()
             catchUpsInFlight.clear()
             scopedReplayDone = false
             waiters = readyWaiters.toList(); readyWaiters.clear()
@@ -799,7 +802,7 @@ class JournalSyncEngine(
         val (connection, generation) = synchronized(lock) {
             val connection = liveConnection ?: return
             if (_syncScope.value != SyncScope.FOR_YOU || !scopedReplayDone || liveHelloSync != SyncScope.FOR_YOU) return
-            if (viewingConvoID != convoID || convoID in caughtUpViewed) return
+            if (viewingConvoID != convoID || convoID in caughtUpViewed || convoID in settlingViewed) return
             if (catchUpsInFlight[convoID] === connection) return
             catchUpsInFlight[convoID] = connection
             _fetchingConversations.value = _fetchingConversations.value + convoID
@@ -860,8 +863,10 @@ class JournalSyncEngine(
                     // again once this one is out of the way.
                     refetch = stillViewed
                 } else if (stillViewed) {
-                    caughtUpViewed += convoID
+                    // Complete up to the cursor only once the settle read
+                    // has covered the handover (see settleConversation).
                     settle = true
+                    settlingViewed += convoID
                 }
             }
         } catch (e: CancellationException) {
@@ -901,6 +906,14 @@ class JournalSyncEngine(
         connection: JournalConnection,
         generation: Int,
     ) {
+        try {
+            settle(source, convoID, connection, generation)
+        } finally {
+            synchronized(lock) { settlingViewed -= convoID }
+        }
+    }
+
+    private suspend fun settle(source: ConversationPageSource, convoID: String, connection: JournalConnection, generation: Int) {
         delay(conversationSettleDelay)
         fun sameSession() = synchronized(lock) {
             liveConnection === connection && viewingGeneration == generation && viewingConvoID == convoID
@@ -915,7 +928,13 @@ class JournalSyncEngine(
         viewingMutex.withLock {
             if (!sameSession()) return@withLock
             runCatching { store.insertConversationTail(page, convoID, reachesSyncedSeq = true) }
-                .onSuccess { indexFetched(page, emptyList()) }
+                .onSuccess {
+                    indexFetched(page, emptyList())
+                    // Only now is everything the socket carried for it, up to
+                    // the cursor, known to be stored: leaving records that. A
+                    // chat closed before this keeps the mark its fetch proved.
+                    synchronized(lock) { caughtUpViewed += convoID }
+                }
         }
     }
 
@@ -1466,6 +1485,7 @@ class JournalSyncEngine(
                         liveHelloSync = hello.sync
                         scopedReplayDone = false
                         caughtUpViewed.clear()
+                        settlingViewed.clear()
                     }
                     moved
                 }
@@ -1855,6 +1875,7 @@ class JournalSyncEngine(
             // convo arrives via the cold snapshot, not as a live birth.
             pendingAutoOpen.clear()
             caughtUpViewed.clear()
+            settlingViewed.clear()
         }
         runCatching { store.wipe() }
             .onFailure { MatronDebug.breadcrumb("mirror reset: store.wipe failed: $it") }
