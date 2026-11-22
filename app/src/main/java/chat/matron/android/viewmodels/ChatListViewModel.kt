@@ -84,6 +84,8 @@ class ChatListViewModel(
     /// The list came on screen (see [ChatService.listDidAppear]).
     fun listDidAppear() = chat.listDidAppear()
 
+    fun listDidDisappear() = chat.listDidDisappear()
+
     /// Cancels the in-flight observation. Call from the host's teardown.
     fun cancel() {
         observationTask?.cancel()

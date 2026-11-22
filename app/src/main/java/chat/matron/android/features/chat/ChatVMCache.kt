@@ -130,6 +130,7 @@ class ChatVMCache(
             agentSpawn = deps.agentSpawnService(session),
             unsentReplies = deps.unsentReplies,
             queuedRelease = deps.queuedReplySender(session),
+            sessionLiveness = deps.sessionLiveness(session),
         )
         itemDetailEntries[itemID] = vm
         if (itemDetailEntries.size > limit) {

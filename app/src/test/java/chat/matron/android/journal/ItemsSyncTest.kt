@@ -359,6 +359,51 @@ class ItemsSyncTest {
         rig.sync.stop()
     }
 
+    /// Markers a reconnect replays for one item share one refetch, and a
+    /// refetch of another item does not wait behind them.
+    @Test
+    fun replayedMarkersForOneItemShareARefetch() = runBlocking {
+        val api = FakeItems()
+        api.detail("it_1", item("it_1", 1, 5_000), emptyList())
+        api.detail("it_2", item("it_2", 2, 5_000), emptyList())
+        val rig = make(api)
+        api.blockNextItem = true
+        rig.sync.start()
+        waitUntil { rig.markers.subscriptionCount.value > 0 }
+        fun marker(id: String) = "c1" to ItemMarkerEvent(id, 1, ItemKind.TASK, "T", ItemMarkerEvent.Action.COMMENTED, ItemAuthor.USER)
+        rig.markers.emit(marker("it_1"))
+        waitUntil { api.isItemGated }
+        repeat(5) { rig.markers.emit(marker("it_1")) }
+        rig.markers.emit(marker("it_2"))
+        // it_2 is fetched while it_1's first refetch is still held.
+        waitUntil { rig.store.item("it_2") != null }
+        api.releaseItemGate()
+        waitUntil { rig.store.item("it_1") != null }
+        delay(150)
+        assertTrue("six it_1 markers, at most two it_1 reads, plus one for it_2: ${api.itemCalls}", api.itemCalls <= 3)
+        rig.sync.stop()
+    }
+
+    /// The tracker list is read as the socket starts its catch-up, ahead of
+    /// the replay, and again when the app comes to the front.
+    @Test
+    fun theListIsReadAheadOfTheCatchUpAndOnForeground() = runBlocking {
+        val api = FakeItems()
+        val rig = make(api)
+        rig.sync.start()
+        waitUntil { rig.states.subscriptionCount.value > 0 }
+        rig.states.value = SyncConnectionState.CatchingUp
+        waitUntil { api.listQueries.isNotEmpty() }
+        val afterCatchUp = api.listQueries.size
+        rig.sync.refreshOnForeground()
+        waitUntil { api.listQueries.size > afterCatchUp }
+        rig.sync.stop()
+        val stopped = api.listQueries.size
+        rig.sync.refreshOnForeground()
+        delay(100)
+        assertEquals("a stopped sync reads nothing", stopped, api.listQueries.size)
+    }
+
     /// A `refreshItem` that lands while another refetch of the same id is in
     /// flight must not return until the store holds the server's thread — it
     /// waits for the in-flight run, which then runs once more.

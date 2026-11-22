@@ -88,6 +88,15 @@ class ItemDetailViewModel(
     /// before its restart, say) gets no release, and "Sending now…" must not
     /// spin forever.
     private val sendNowConfirmTimeoutMillis: Long = 20_000,
+    /// Whether this device's stored session state for a conversation is kept
+    /// current. On the For you only sync scope only the Coordinator's is; any
+    /// other conversation's is whatever the chat list last read, often
+    /// "waiting" long after a turn started, and must not hide the item's
+    /// `working` copy. `null` treats every state as live.
+    private val sessionLiveness: ((String) -> Boolean)? = null,
+    /// How often an open item is read again while its working indicator
+    /// rests on the item's own copy (the owner's state is not live).
+    private val workingRereadMillis: Long = 30_000,
 ) {
     private val unsentPlace = UnsentReplyStore.Place.Item(itemID)
     private val unsentEpoch = unsentReplies?.epoch ?: 0
@@ -210,6 +219,7 @@ class ItemDetailViewModel(
     private var ownerSessionJob: Job? = null
     private var workingLapseJob: Job? = null
     private var workingLapseAt: Instant? = null
+    private var workingRereadJob: Job? = null
 
     private val jobs = mutableListOf<Job>()
     private var commentsJob: Job? = null
@@ -265,6 +275,7 @@ class ItemDetailViewModel(
         ownerSessionJob?.cancel(); ownerSessionJob = null
         ownerConvoID = null; ownerSessionState = null
         workingLapseJob?.cancel(); workingLapseJob = null; workingLapseAt = null
+        workingRereadJob?.cancel(); workingRereadJob = null
         consentJob?.cancel(); consentJob = null; consentConvoID = null
         queuedJob?.cancel(); queuedJob = null; queuedConvoID = null
     }
@@ -273,7 +284,10 @@ class ItemDetailViewModel(
         // Another person's item has no owner conversation here, and never
         // says whether its agent is busy.
         val working = _item.value?.takeIf { it.originConvoID.isNotEmpty() }?.working?.takeIf { it.isCurrent(now()) }
-        val known = ownerSessionState
+        // Checked on every pass: the scope or the Coordinator can change
+        // while the page is open.
+        val live = ownerConvoID?.let { id -> sessionLiveness?.invoke(id) } ?: true
+        val known = ownerSessionState.takeIf { live }
         // The stored copy is as old as its last fetch. A device that has the
         // owner conversation sets it against what it knows itself: once it
         // has seen the turn end, the copy is stale, and the refetch that
@@ -292,6 +306,27 @@ class ItemDetailViewModel(
                 !midTurn -> null
                 _queuedReplies.value.values.any { it.isWaiting } -> ItemWorkingIndicator.BUSY_ELSEWHERE
                 else -> ItemWorkingIndicator.WORKING
+            }
+        }
+        scheduleWorkingReread(rereading = !live && _workingIndicator.value != null)
+    }
+
+    /// While the indicator rests on the item's own `working` copy (the
+    /// owner's state is not followed live), nothing on this device sees the
+    /// turn end: read the item again every [workingRereadMillis] until the
+    /// copy says so.
+    private fun scheduleWorkingReread(rereading: Boolean) {
+        if (!rereading) {
+            workingRereadJob?.cancel(); workingRereadJob = null
+            return
+        }
+        if (workingRereadJob?.isActive == true) return
+        val id = itemID
+        workingRereadJob = scope.launch {
+            while (true) {
+                delay(workingRereadMillis)
+                sync.refreshItem(id)
+                updateWorkingIndicator()
             }
         }
     }

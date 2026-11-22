@@ -182,6 +182,68 @@ class ItemWorkingIndicatorTest {
         vm.stop()
     }
 
+    /// On "For you only" the owner's stored state is whatever the chat list
+    /// last read, often "waiting" long after a turn started: it must not hide
+    /// the item's own copy.
+    @Test
+    fun aStaleStateThatIsNotLiveDoesNotHideTheCopy() = runBlocking {
+        val store = FakeItemsStore()
+        val vm = ItemDetailViewModel(
+            "it_1", store, FakeItemsApi(), FakeItemsSync(), this, staging, sessionLiveness = { false },
+        )
+        vm.start()
+        store.ownerSession.emit("waiting")
+        store.item.emit(item(ItemWorking(ItemWorking.State.QUEUED, Instant.now(), behindTurn = true)))
+        waitUntil { vm.workingIndicator.value == ItemWorkingIndicator.BUSY_ELSEWHERE }
+        store.item.emit(item(running()))
+        waitUntil { vm.workingIndicator.value == ItemWorkingIndicator.WORKING }
+        vm.stop()
+    }
+
+    /// A live state (the Coordinator's, or any on "Everything") still
+    /// overrides a stale copy.
+    @Test
+    fun aLiveStateStillOverridesTheCopy() = runBlocking {
+        val store = FakeItemsStore()
+        val vm = ItemDetailViewModel(
+            "it_1", store, FakeItemsApi(), FakeItemsSync(), this, staging, sessionLiveness = { it == "c-origin" },
+        )
+        vm.start()
+        store.ownerSession.emit("waiting")
+        store.item.emit(item(running()))
+        delay(150)
+        assertNull(vm.workingIndicator.value)
+        vm.stop()
+    }
+
+    /// Resting on the copy, the item is read again until it says the turn
+    /// is over.
+    @Test
+    fun aCopyThatIsNotCheckedLiveIsReadAgainUntilTheTurnEnds() = runBlocking {
+        val store = FakeItemsStore()
+        var reads = 0
+        val sync = object : FakeItemsSync() {
+            override suspend fun refreshItem(id: String) {
+                reads += 1
+                super.refreshItem(id)
+                if (reads >= 2) store.item.emit(item(null))
+            }
+        }
+        val vm = ItemDetailViewModel(
+            "it_1", store, FakeItemsApi(), sync, this, staging,
+            sessionLiveness = { false }, workingRereadMillis = 50,
+        )
+        vm.start()
+        store.ownerSession.emit("waiting")
+        store.item.emit(item(running()))
+        waitUntil { vm.workingIndicator.value == ItemWorkingIndicator.WORKING }
+        waitUntil { vm.workingIndicator.value == null }
+        val settled = reads
+        delay(200)
+        assertEquals("no more reads once the indicator is down", settled, reads)
+        vm.stop()
+    }
+
     /// A behind-turn copy is as old as its fetch, like a running one: once
     /// this device has seen the owner's turn end, it is not shown.
     @Test
