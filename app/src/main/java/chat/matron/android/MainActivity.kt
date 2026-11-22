@@ -1767,9 +1767,12 @@ private fun ChatRoute(
             // and again whenever the cache says its mission changed.
             // Held per room: a reused route never shows the previous room's
             // line while this one's is read; a mission change in the same
-            // room keeps the old line until the new one lands.
+            // room, or a failed read, keeps the old line until a new one lands.
             val missionLineState = remember(convoID) { mutableStateOf<ChatMissionLine?>(null) }
-            LaunchedEffect(convoID, missionID) { missionLineState.value = deps.chatMissionLine(session, convoID) }
+            LaunchedEffect(convoID, missionID) {
+                // A failed read keeps the line already shown.
+                deps.chatMissionLine(session, convoID).onSuccess { missionLineState.value = it }
+            }
             val missionLine = missionLineState.value
             ChatScreen(
                 chatVM = chatVM,

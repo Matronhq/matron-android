@@ -42,6 +42,7 @@ import chat.matron.android.viewmodels.AutoArchiveSettingViewModel
 import chat.matron.android.viewmodels.MissionsListViewModel
 import chat.matron.android.viewmodels.TimelineViewModel
 import chat.matron.android.designsystem.ChatMissionLine
+import chat.matron.android.journal.MissionsRefreshOutcome
 import chat.matron.android.models.Project
 import chat.matron.android.viewmodels.ProjectPageViewModel
 import chat.matron.android.viewmodels.GoToNumberResolver
@@ -565,18 +566,19 @@ class AppDependencies(
 
     /**
      * The mission and project line under a chat's title, read from the
-     * journal (`GET /conversations/:id/missions`, then the project's title);
-     * null when the conversation was never on a mission or the read failed.
+     * journal (`GET /conversations/:id/missions`, then the project's title):
+     * null when the conversation was never on a mission, a failure when the
+     * read failed (the header then keeps what it showed).
      */
-    suspend fun chatMissionLine(session: UserSession, convoID: String): ChatMissionLine? =
+    suspend fun chatMissionLine(session: UserSession, convoID: String): Result<ChatMissionLine?> =
         try {
             val links = core(session).api.conversationMissions(convoID)
             val line = ChatMissionLine.from(links)
-            line?.projectID?.let { id -> line.copy(projectTitle = projectTitle(session, id)) } ?: line
+            Result.success(line?.projectID?.let { id -> line.copy(projectTitle = projectTitle(session, id)) } ?: line)
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
-        } catch (_: Throwable) {
-            null
+        } catch (error: Throwable) {
+            Result.failure(error)
         }
 
     /** The open projects a mission can be moved to. */
@@ -586,7 +588,12 @@ class AppDependencies(
     suspend fun moveMission(session: UserSession, missionID: String, projectID: String) {
         val c = core(session)
         c.api.setMissionProject(missionID, projectID)
-        c.missionsSync.refreshMission(missionID)
+        // The page reads the cached row: a refetch that failed would leave it
+        // on the old project with nothing said, so say so.
+        val outcome = c.missionsSync.refreshMission(missionID)
+        if (outcome is MissionsRefreshOutcome.Failed) {
+            throw IllegalStateException("The mission moved, but this page couldn't refresh: ${outcome.message}")
+        }
     }
 
     /** A project's title, for the chip on a mission's page; null when it can't be read. */
