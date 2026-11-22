@@ -216,6 +216,10 @@ interface EventDao {
     @Query("SELECT * FROM event WHERE convo_id = :convoID AND seq >= :sinceSeq ORDER BY seq")
     fun forConversationSinceFlow(convoID: String, sinceSeq: Long): Flow<List<EventEntity>>
 
+    /// One conversation's rows of [types], oldest first, followed live: an
+    /// item's consent card reads its ask and outcome rows through this.
+    @Query("SELECT * FROM event WHERE convo_id = :convoID AND type IN (:types) ORDER BY seq")
+    fun ofTypesFlow(convoID: String, types: List<String>): Flow<List<EventEntity>>
     /// One conversation's busy-queue cards and their releases (`prompt` and
     /// `prompt_reply` rows whose payload is a `queued_release`), oldest first:
     /// what an item's thread reads to tell which of its replies still wait

@@ -189,6 +189,7 @@ fun ItemDetailScreen(
     val error by viewModel.error.collectAsStateWithLifecycle()
     val loadedCount by viewModel.loadedCommentCount.collectAsStateWithLifecycle()
     val working by viewModel.workingIndicator.collectAsStateWithLifecycle()
+    val spawnConsent by viewModel.spawnConsent.collectAsStateWithLifecycle()
     var draft by remember(viewModel.itemID) { mutableStateOf(viewModel.draft) }
     // A send that fails restores the draft on the view model, possibly after
     // this screen was left and reopened: follow it. Typing writes the same
@@ -449,12 +450,14 @@ fun ItemDetailScreen(
                                     pendingTaps = ItemDetailViewModel.pendingTaps(pending),
                                     pendingItemTap = ItemDetailViewModel.pendingItemTap(pending),
                                     working = working,
+                                    spawnConsent = spawnConsent,
                                     queuedReplies = queuedReplies,
                                     editableQueuedReplies = editableQueuedReplies,
                                     editingQueuedReplyID = editingQueuedReplyID,
                                     editHoldPending = editHoldPending,
                                     replacingCommentID = replacingCommentID,
                                 ),
+                                onAnswerSpawn = { approve -> scope.launch { viewModel.answerSpawn(approve) } },
                                 replyDelivery = if (viewModel.answersQueuedReplies) {
                                     ItemReplyDeliveryActions(
                                         sendNow = { id -> scope.launch { viewModel.sendQueuedReplyNow(id) } },

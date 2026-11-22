@@ -64,6 +64,9 @@ internal class FakeItemsStore : ItemsStoreReading {
     /// The owner conversation's session state, as the item detail follows it.
     val ownerSession = MutableSharedFlow<String?>(replay = 1)
     override fun itemOwnerSessionStateFlow(convoID: String): Flow<String?> = ownerSession
+    /// The origin conversation's consent rows.
+    val consentRows = kotlinx.coroutines.flow.MutableStateFlow<List<chat.matron.android.journal.JournalEvent>>(emptyList())
+    override fun consentEventsFlow(convoID: String): Flow<List<chat.matron.android.journal.JournalEvent>> = consentRows
     /// The owner conversation's queue cards and releases.
     val queuedRows = kotlinx.coroutines.flow.MutableStateFlow<List<chat.matron.android.journal.JournalEvent>>(emptyList())
     override fun queuedReleaseEventsFlow(convoID: String): Flow<List<chat.matron.android.journal.JournalEvent>> = queuedRows
