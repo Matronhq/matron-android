@@ -824,12 +824,41 @@ class MatronDatabaseMigrationTest {
         }
     }
 
-    /// MIGRATION_18_19: approval keys' step-up mark. A row cached before
+    /// MIGRATION_18_19: `conversation.participant_convos`. A cached room
+    /// survives with no participant list (no rooms listed), and the new
+    /// column takes the next snapshot's list.
+    @Test
+    fun migratesToV19AndRoomsLearnTheirParticipantConversations() = runBlocking {
+        val file = File.createTempFile("migration-test-v8-v19", ".sqlite").also { it.delete() }
+        buildV8(file)
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL(
+                "INSERT INTO conversation (id, title, session_state, last_seq, snippet, created_at, " +
+                    "last_activity_ts, muted, hidden, read_up_to_seq, unread_count, parent_convo_id) " +
+                    "VALUES ('room-19', '🔗 box-a ↔ box-b', 'waiting', 1, '', 1000, 1000, 0, 0, 0, 0, NULL)"
+            )
+        }
+        val database = MatronDatabase.open(context, file)
+        try {
+            val store = JournalStore(database, ownSender = "user:alice")
+            assertEquals(emptyList<String>(), store.conversation("room-19")?.participantConvoIDs)
+            assertTrue(store.roomsFlow().first().none { it.id == "room-19" })
+            store.refreshSummaries(
+                listOf(ConvoSummaryDTO("room-19", "🔗 box-a ↔ box-b", "waiting", 2, "", 1000, participantConvos = listOf("c-a", "c-b"))),
+            )
+            assertTrue(store.roomsFlow().first().any { it.id == "room-19" && it.participantConvoIDs == listOf("c-a", "c-b") })
+        } finally {
+            database.close()
+            file.delete()
+        }
+    }
+
+    /// MIGRATION_19_20: approval keys' step-up mark. A row cached before
     /// reads "not step-up"; the mark and subject round-trip after it, and a
     /// follow-up question's ride in the comment's meta.
     @Test
-    fun migratesToV19AndKeepsTheStepUpMark() = runBlocking {
-        val file = File.createTempFile("migration-test-v8-v19", ".sqlite").also { it.delete() }
+    fun migratesToV20AndKeepsTheStepUpMark() = runBlocking {
+        val file = File.createTempFile("migration-test-v8-v20", ".sqlite").also { it.delete() }
         buildV8(file)
         val database = MatronDatabase.open(context, file)
         try {

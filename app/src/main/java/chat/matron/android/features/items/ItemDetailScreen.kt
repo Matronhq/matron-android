@@ -297,6 +297,7 @@ fun ItemDetailScreen(
                 }
             },
             makeRecorder = { file -> MediaRecorderAudioRecording(file) },
+            measureDuration = MediaRecorderAudioRecording::measuredDuration,
             tempDirectory = File(context.cacheDir, "voice").apply { mkdirs() },
             setKeepScreenAwake = { keepAwake ->
                 context.findActivity()?.window?.let { window ->
@@ -316,6 +317,7 @@ fun ItemDetailScreen(
     var voiceNoteSending by remember { mutableStateOf(false) }
     fun voice(): ItemCommentVoice = when {
         recorderState is VoiceRecorder.State.Recording -> ItemCommentVoice.RECORDING
+        recorderState is VoiceRecorder.State.Starting -> ItemCommentVoice.STARTING
         voiceNoteSending -> ItemCommentVoice.SENDING
         micStarting -> ItemCommentVoice.STARTING
         else -> ItemCommentVoice.IDLE
@@ -500,7 +502,12 @@ fun ItemDetailScreen(
                                                 try { viewModel.submitComment() } finally { draft = viewModel.draft }
                                             }
                                         }
-                                        ItemCommentSendRoute.WITH_VOICE_NOTE -> recorder.stop()?.let { note ->
+                                        ItemCommentSendRoute.WITH_VOICE_NOTE -> try {
+                                            recorder.stop()
+                                        } catch (e: VoiceRecorder.RecorderError) {
+                                            viewModel.reportError(e.userMessage)
+                                            null
+                                        }?.let { note ->
                                             draft = ""
                                             voiceNoteSending = true
                                             scope.launch {
@@ -532,13 +539,7 @@ fun ItemDetailScreen(
                                             try {
                                                 recorder.start()
                                             } catch (e: VoiceRecorder.RecorderError) {
-                                                viewModel.reportError(
-                                                    when (e) {
-                                                        VoiceRecorder.RecorderError.PermissionDenied -> "Microphone access is needed to record a voice note."
-                                                        VoiceRecorder.RecorderError.RecordFailed -> "Couldn't start recording."
-                                                        VoiceRecorder.RecorderError.AlreadyRecording -> "Already recording."
-                                                    },
-                                                )
+                                                viewModel.reportError(e.userMessage)
                                             } finally {
                                                 micStarting = false
                                             }

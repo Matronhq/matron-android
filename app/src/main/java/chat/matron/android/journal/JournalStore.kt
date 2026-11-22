@@ -4,6 +4,7 @@ import androidx.room.withTransaction
 import chat.matron.android.journal.db.AgentEntity
 import chat.matron.android.events.SpawnOutcome
 import chat.matron.android.journal.db.ConversationEntity
+import chat.matron.android.models.MissionRoom
 import chat.matron.android.journal.db.EventEntity
 import chat.matron.android.journal.db.ItemCommentEntity
 import chat.matron.android.journal.db.ItemEntity
@@ -122,6 +123,9 @@ class JournalStore(
             if (c.participants != null) {
                 updated = updated.copy(participants = ConversationEntity.encodeParticipants(c.participants))
             }
+            if (c.participantConvos != null) {
+                updated = updated.copy(participantConvos = ConversationEntity.encodeParticipantConvos(c.participantConvos))
+            }
             if (c.lastSeq > updated.lastSeq) {
                 updated = updated.copy(lastSeq = c.lastSeq, snippet = c.snippet)
                 // The wire snippet may now describe an event this mirror has
@@ -165,6 +169,7 @@ class JournalStore(
                     unreadCount = 0, parentConvoID = c.parentConvoID,
                     agentDeviceID = c.agentDeviceID,
                     participants = c.participants?.let(ConversationEntity::encodeParticipants),
+                    participantConvos = c.participantConvos?.let(ConversationEntity::encodeParticipantConvos),
                     // A new row takes the snapshot's word, so a fresh device
                     // never flashes an archived conversation in the list. An
                     // existing row's archive state is the archive feed's
@@ -267,6 +272,11 @@ class JournalStore(
                 // absent (a plain rename meta) leaves the stored set alone.
                 payload.longArrayOrNull("participants")?.let {
                     convo = convo.copy(participants = ConversationEntity.encodeParticipants(it))
+                }
+                // The room's participant conversations, learned the same
+                // way: present replaces, absent leaves the stored list.
+                payload.stringArrayOrNull("participant_convos")?.let {
+                    convo = convo.copy(participantConvos = ConversationEntity.encodeParticipantConvos(it))
                 }
             }
             event.type == JournalEventType.SESSION_STATUS -> {
@@ -1216,6 +1226,13 @@ class JournalStore(
 
     fun childrenFlow(parentConvoID: String): Flow<List<ConversationEntity>> =
         conversationDao.childrenFlow(parentConvoID)
+
+    /// Every room whose participant conversations this device knows, titles
+    /// clean (session short and room marker peeled off), deduplicated so an
+    /// unrelated conversation write does not re-emit. A chat keeps the ones
+    /// it takes part in ([chat.matron.android.models.ConversationRoomsRule]).
+    fun roomsFlow(): Flow<List<MissionRoom>> =
+        conversationDao.roomsFlow().map { rows -> MissionRoom.fromRows(rows) }.distinctUntilChanged()
 
     fun eventsFlow(convoID: String): Flow<List<JournalEvent>> =
         eventDao.forConversationFlow(convoID).map { list -> list.map { it.toJournalEvent() } }

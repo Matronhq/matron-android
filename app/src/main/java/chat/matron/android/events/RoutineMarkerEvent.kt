@@ -7,9 +7,9 @@ import kotlinx.serialization.json.JsonObject
 /// The `routine` journal event (protocol: "Coordinator routines → Marker
 /// event"), appended into the Coordinator conversation on every routine
 /// create / update / delete / fire. The journal means it as the apps' cue to
-/// refetch `GET /routines`; there is no Routines screen yet, so here it is
-/// only a one-line timeline row — which routine fired and whether it reached
-/// the Coordinator. An undelivered fire leaves no other trace in the
+/// refetch `GET /routines` (the Routines screen does, while it is open); in
+/// the transcript it is a one-line row — which routine fired and whether it
+/// reached the Coordinator. An undelivered fire leaves no other trace in the
 /// transcript, so its reason is always on the row. Ported from matron-apple's
 /// `Events/RoutineMarkerEvent.swift`.
 data class RoutineMarkerEvent(

@@ -7,7 +7,9 @@ import chat.matron.android.journal.objectOrNull
 import chat.matron.android.journal.objects
 import chat.matron.android.journal.stringOrNull
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -47,6 +49,13 @@ data class BoxCapacity(
     val liveSessions: Int?,
     val limitLines: List<LimitLine>,
     val accountEmail: String?,
+    /// The `disk` block; null when the bridge sent none.
+    val disk: BoxDisk? = null,
+    /// `limits.as_of` (epoch ms): when the usage numbers themselves were
+    /// read, which can be well before the report that carried them.
+    val limitsAsOfMs: Long? = null,
+    /// The `defaults` block; null for a bridge predating it.
+    val defaults: BoxResolvedDefaults? = null,
 ) {
     companion object {
         /// Reads whatever capacity blocks are present in a `recent_folders`
@@ -57,7 +66,8 @@ data class BoxCapacity(
             // A negative count is nonsense, not "zero" — treat it as absent.
             val live = obj.objectOrNull("activity")?.intOrNull("live_sessions")?.takeIf { it >= 0 }
 
-            val lines = obj.objectOrNull("limits")?.arrayOrNull("lines")?.objects().orEmpty()
+            val limits = obj.objectOrNull("limits")
+            val lines = limits?.arrayOrNull("lines")?.objects().orEmpty()
                 .mapNotNull { line ->
                     val id = line.stringOrNull("id")?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
                     val label = line.stringOrNull("label")?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
@@ -69,7 +79,36 @@ data class BoxCapacity(
                 }
 
             val email = obj.objectOrNull("account")?.stringOrNull("email")?.takeIf { it.isNotEmpty() }
-            return BoxCapacity(live, lines, email)
+            return BoxCapacity(
+                live, lines, email,
+                disk = BoxDisk.parse(obj.objectOrNull("disk")),
+                limitsAsOfMs = limits?.wholeLongOrNull("as_of"),
+                defaults = BoxResolvedDefaults.parse(obj.objectOrNull("defaults")),
+            )
+        }
+
+        /// How long until a reset more than six hours off: "in 30h", "in 3d
+        /// 4h", so which box's week ends first reads at a glance. Null for an
+        /// unknown or nearer reset (its clock time is close enough to read).
+        fun resetCountdown(resetsAt: Long?, nowMs: Long = System.currentTimeMillis()): String? {
+            if (resetsAt == null) return null
+            val interval = resetsAt - nowMs
+            if (interval < 6 * 3_600_000L) return null
+            val hours = interval / 3_600_000L
+            if (hours < 48) return "in ${hours}h"
+            val rest = hours % 24
+            return "in ${hours / 24}d" + if (rest == 0L) "" else " ${rest}h"
+        }
+
+        /// A limit line's whole reset caption: [resetText], then the
+        /// countdown when there is one: "resets Aug 15 · in 3d 4h".
+        fun resetCaption(
+            resetsAt: Long?,
+            nowMs: Long = System.currentTimeMillis(),
+            zone: ZoneId = ZoneId.systemDefault(),
+        ): String? {
+            val text = resetText(resetsAt, nowMs, zone) ?: return null
+            return resetCountdown(resetsAt, nowMs)?.let { "$text · $it" } ?: text
         }
 
         /// True when the line's reset moment is known and already behind
@@ -98,6 +137,62 @@ data class BoxCapacity(
             val now = Instant.ofEpochMilli(nowMs).atZone(zone)
             val pattern = if (date.toLocalDate() == now.toLocalDate()) "h:mm a" else "MMM d"
             return "resets " + date.format(DateTimeFormatter.ofPattern(pattern, Locale.US))
+        }
+    }
+}
+
+/// A JSON number that has to be whole: byte counts and epoch milliseconds.
+/// A fraction, a string or a boolean is a wire contract violation and reads
+/// as absent rather than as an invented number.
+internal fun JsonObject.wholeLongOrNull(key: String): Long? {
+    val p = this[key] as? JsonPrimitive ?: return null
+    if (p is JsonNull || p.isString) return null
+    return p.content.toLongOrNull()
+}
+
+/// A box's `disk` block: free and total bytes on its working volume.
+data class BoxDisk(val freeBytes: Long, val totalBytes: Long) {
+    companion object {
+        /// Null unless both sizes are whole, non-negative and consistent.
+        fun parse(obj: JsonObject?): BoxDisk? {
+            val free = obj?.wholeLongOrNull("free_bytes") ?: return null
+            val total = obj.wholeLongOrNull("total_bytes") ?: return null
+            if (free < 0 || total <= 0 || free > total) return null
+            return BoxDisk(free, total)
+        }
+
+        /// 1024-based and dense: "7.4G", "233G", "1.8T". One decimal under
+        /// ten, whole numbers above; the reader is judging "is this box full".
+        fun sizeText(bytes: Long): String {
+            val units = listOf("B", "K", "M", "G", "T", "P")
+            var value = bytes.toDouble()
+            var index = 0
+            while (value >= 1024 && index < units.size - 1) {
+                value /= 1024
+                index += 1
+            }
+            // The unit is picked before rounding, so 1023.9G must carry to 1.0T.
+            if (value >= 1023.5 && index < units.size - 1) {
+                value /= 1024
+                index += 1
+            }
+            val number = if (value >= 10 || value == Math.rint(value)) {
+                Math.round(value).toString()
+            } else {
+                String.format(Locale.US, "%.1f", value)
+            }
+            return number + units[index]
+        }
+    }
+}
+
+/// What a new session on the box starts as, resolved by the bridge (the
+/// journal's box defaults, else the box's own environment).
+data class BoxResolvedDefaults(val agent: String, val model: String?, val effort: String?) {
+    companion object {
+        fun parse(obj: JsonObject?): BoxResolvedDefaults? {
+            val agent = obj?.stringOrNull("agent")?.takeIf { it.isNotEmpty() } ?: return null
+            return BoxResolvedDefaults(agent, obj.stringOrNull("model"), obj.stringOrNull("effort"))
         }
     }
 }
