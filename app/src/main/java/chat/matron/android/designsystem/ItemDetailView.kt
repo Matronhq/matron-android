@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.sp
+import chat.matron.android.events.ItemSpawnConsent
 import chat.matron.android.models.InlineSegment
 import chat.matron.android.models.ItemAuthor
 import chat.matron.android.models.ItemAwaiting
@@ -69,6 +70,7 @@ import chat.matron.android.models.ItemKind
 import chat.matron.android.models.ItemResolution
 import chat.matron.android.models.ItemState
 import chat.matron.android.models.ItemWorkingIndicator
+import chat.matron.android.models.QueuedReplyState
 import chat.matron.android.models.StagedAttachment
 import chat.matron.android.models.TrackerAttachment
 import chat.matron.android.models.TrackerComment
@@ -186,6 +188,51 @@ data class ItemDetailModel(
     val working: ItemWorkingIndicator? = null,
     /// Conversation rows this device can open from a comment's caption.
     val openableConvoIDs: Set<String> = emptySet(),
+    /// The spawn ask a consent item mirrors (`ItemDetailViewModel.spawnConsent`),
+    /// drawn as its live card near the top of the thread.
+    val spawnConsent: ItemSpawnConsent? = null,
+    /// The user's replies the agent hasn't got yet, by comment id
+    /// (`ItemDetailViewModel.queuedReplies`): each draws a delivery line.
+    val queuedReplies: Map<String, QueuedReplyState> = emptyMap(),
+    /// Queued replies whose card can be edited from the thread.
+    val editableQueuedReplies: Set<String> = emptySet(),
+    /// The queued reply being edited in the reply box, if any.
+    val editingQueuedReplyID: String? = null,
+    /// Edit's hold is still on its way to the agent's session.
+    val editHoldPending: Boolean = false,
+    /// The cancelled reply the reply box holds an edit of, if any.
+    val replacingCommentID: String? = null,
+) {
+    /// The live spawn card is drawn: it carries the request in full, so the
+    /// item's body (the same request as plain text, written for places that
+    /// can't draw the card) and its own Approve / Decline would only repeat it.
+    val drawsSpawnCard: Boolean get() = spawnConsent?.request != null
+}
+
+/// Whether the item's body card is drawn: not while the live spawn card
+/// stands in for it.
+fun itemDrawsBody(model: ItemDetailModel): Boolean =
+    (model.item.body.isNotEmpty() || model.item.attachments.isNotEmpty()) && !model.drawsSpawnCard
+
+/// The placeholder's sentence while a spawn consent item's card has not
+/// reached this device. When the item carries its own Approve and Decline,
+/// those answer it exactly as the card would, and it says so. A closed item's
+/// request no longer waits for an answer, so nothing offers to approve it.
+fun itemSpawnCardMissingText(answersAbove: Boolean, isOpen: Boolean = true): String = when {
+    !isOpen -> "The request card isn't on this device. This request is no longer waiting for an answer."
+    answersAbove -> "The request card hasn't reached this device yet. Approve or Decline above answers it as the card would."
+    else -> "The request card hasn't reached this device yet. " +
+        "It can be approved once it arrives, or from the conversation it was asked in."
+}
+
+/// What a queued reply's buttons do, by comment id. A `null` handler draws no
+/// button (a view model with nothing to answer the card with).
+data class ItemReplyDeliveryActions(
+    val sendNow: ((String) -> Unit)? = null,
+    val cancel: ((String) -> Unit)? = null,
+    val edit: ((String) -> Unit)? = null,
+    val cancelEdit: (() -> Unit)? = null,
+    val editAndResend: ((String) -> Unit)? = null,
 )
 
 /// The state pill's four values: Needs you / Closed · resolution / With the
@@ -373,6 +420,7 @@ fun ItemDetailView(
     /// send is the one send and [onSubmit] must carry the note.
     voice: ItemCommentVoice = ItemCommentVoice.IDLE,
     onCancelRecording: () -> Unit = {},
+    microphoneMenu: (@Composable () -> Unit)? = null,
     /// A tap on one of a comment's one-tap answer buttons.
     onTapAction: (TrackerComment, String) -> Unit = { _, _ -> },
     /// A tap on one of the item's own buttons (a notice's Seen).
@@ -382,6 +430,13 @@ fun ItemDetailView(
     /// Retry / Discard under a reply the journal refused, by its local id.
     onRetryPending: (String) -> Unit = {},
     onDiscardPending: (String) -> Unit = {},
+    /// Approve (`true`) / Decline on a spawn consent item's card; `null`
+    /// draws the card's state without wiring its buttons to anything.
+    onAnswerSpawn: ((Boolean) -> Unit)? = null,
+    /// Opens the session a started spawn runs in.
+    onOpenSpawnedRoom: (String) -> Unit = onOpenConversation,
+    /// Send now / Cancel / Edit under a reply the agent hasn't got yet.
+    replyDelivery: ItemReplyDeliveryActions = ItemReplyDeliveryActions(),
     now: Instant = Instant.now(),
     /// Whether the reader had previously scrolled to the bottom of this
     /// item's thread (`ItemReadMemory.wasAtBottom`, read once by the host).
@@ -414,8 +469,9 @@ fun ItemDetailView(
     // optional body card, divider, comments, pending rows, the working
     // indicator, anchor.
     val hasMeta = item.labels.isNotEmpty() || item.links.isNotEmpty()
-    val hasBody = item.body.isNotEmpty() || item.attachments.isNotEmpty()
-    val lastIndex = 1 + (if (hasMeta) 1 else 0) + (if (hasBody) 1 else 0) + 1 + rowCount +
+    val hasBody = itemDrawsBody(model)
+    val hasSpawn = model.spawnConsent != null
+    val lastIndex = 1 + (if (hasMeta) 1 else 0) + (if (hasSpawn) 1 else 0) + (if (hasBody) 1 else 0) + 1 + rowCount +
         (if (model.working != null) 1 else 0)
 
     LaunchedEffect(item.id) {
@@ -453,6 +509,19 @@ fun ItemDetailView(
             ) {
                 item(key = "header") { Header(model, onOpenConversation, onOpenMission, onTapItemAction) }
                 if (hasMeta) item(key = "meta") { Meta(item, onOpenLink) }
+                model.spawnConsent?.let { consent ->
+                    // Between the meta row and the body, so the answer sits
+                    // near the top of the thread.
+                    item(key = "spawn") {
+                        SpawnConsentCard(
+                            consent,
+                            answersAbove = item.actions.isNotEmpty() && item.state == ItemState.OPEN,
+                            isOpen = item.state == ItemState.OPEN,
+                            onAnswer = onAnswerSpawn,
+                            onOpen = onOpenSpawnedRoom,
+                        )
+                    }
+                }
                 if (hasBody) {
                     item(key = "body") {
                         ItemCard(mine = item.createdBy == ItemAuthor.USER, copyText = itemCardCopyText(item.body, item.attachments)) {
@@ -471,6 +540,8 @@ fun ItemDetailView(
                         onTapAction = { label -> onTapAction(c, label) },
                         openableConvoIDs = model.openableConvoIDs,
                         onOpenConversation = onOpenConversation,
+                        delivery = model.queuedReplies[c.id]?.takeIf { c.author == ItemAuthor.USER && c.kind == TrackerComment.Kind.COMMENT }
+                            ?.let { state -> { DeliveryLine(state, c, model, replyDelivery) } },
                     )
                 }
                 items(model.pending.size, key = { "p-${model.pending[it].id}" }) { i ->
@@ -499,7 +570,7 @@ fun ItemDetailView(
                 draft = draft, onDraftChange = onDraftChange, isBusy = model.isBusy,
                 onSubmit = onSubmit, onAttach = onAttach, onVoiceNote = onVoiceNote,
                 attachments = attachments, onRemoveAttachment = onRemoveAttachment,
-                voice = voice, onCancelRecording = onCancelRecording,
+                voice = voice, onCancelRecording = onCancelRecording, microphoneMenu = microphoneMenu,
                 onPasteAttachments = onPasteAttachments,
             )
         }
@@ -540,10 +611,14 @@ private fun Header(
         SelectableMessageText(item.title, textStyle = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.SemiBold))
         // The item's own buttons sit under its title, the same buttons a
         // comment's question draws: a notice's Seen, an agent's Go.
-        ActionButtons(
-            item.actions, itemChosenAction(item, model.pendingItemTap),
-            enabled = item.state == ItemState.OPEN, onTap = onTapItemAction,
-        )
+        // A drawn spawn card answers on its own buttons; the item's Approve
+        // and Decline (the same answer on the journal) would only repeat them.
+        if (!model.drawsSpawnCard) {
+            ActionButtons(
+                item.actions, itemChosenAction(item, model.pendingItemTap),
+                enabled = item.state == ItemState.OPEN, onTap = onTapItemAction,
+            )
+        }
     }
 }
 
@@ -707,6 +782,7 @@ private fun CommentView(
     onTapAction: (String) -> Unit = {},
     openableConvoIDs: Set<String> = emptySet(),
     onOpenConversation: (String) -> Unit = {},
+    delivery: (@Composable () -> Unit)? = null,
 ) {
     if (c.kind == TrackerComment.Kind.STATUS) {
         val row = itemStatusRow(c)
@@ -732,8 +808,35 @@ private fun CommentView(
             AuthorCaption(c.attributionText ?: c.authorName, c.createdAt, now, c.authorConversation, openableConvoIDs, onOpenConversation)
             ItemContent(c.body, c.attachments, image, onOpen, onOpenLink)
             ActionButtons(c.actions, chosen, actionsEnabled, onTapAction)
+            delivery?.invoke()
         }
     }
+}
+
+/// The delivery line under one of the user's replies, with the buttons that
+/// apply to it. Edit and Edit and resend only on a text-only reply: the reply
+/// box can't take back an uploaded attachment, and resending half a reply
+/// would read as the whole of it. One edit at a time: the reply box holds one.
+@Composable
+private fun DeliveryLine(state: QueuedReplyState, c: TrackerComment, model: ItemDetailModel, actions: ItemReplyDeliveryActions) {
+    val textOnly = c.attachments.isEmpty() && c.body.isNotBlank()
+    val isEditing = model.editingQueuedReplyID == c.id
+    ItemReplyDeliveryLine(
+        state = state,
+        onSendNow = actions.sendNow?.let { send -> { send(c.id) } },
+        onCancel = actions.cancel?.let { cancel -> { cancel(c.id) } },
+        onEdit = actions.edit?.takeIf {
+            textOnly && c.id in model.editableQueuedReplies && model.editingQueuedReplyID == null && model.replacingCommentID == null
+        }?.let { edit -> { edit(c.id) } },
+        // Not while the box holds an edit of a queued reply.
+        onEditAndResend = actions.editAndResend?.takeIf { textOnly && model.editingQueuedReplyID == null }
+            ?.let { resend -> { resend(c.id) } },
+        isEditing = isEditing,
+        // Only once the hold has landed: a release sent first could be
+        // overtaken by it.
+        onCancelEdit = actions.cancelEdit?.takeIf { isEditing && !model.editHoldPending },
+        holdPending = isEditing && model.editHoldPending,
+    )
 }
 
 @Composable
@@ -840,6 +943,49 @@ private fun ItemCard(mine: Boolean, alpha: Float = 1f, copyText: String? = null,
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) { content() }
             copy.Menu()
+        }
+    }
+}
+
+/// The spawn consent card for a consent item: the live card when its own
+/// event is on this device, so what is approved is byte-for-byte what the
+/// conversation's card shows. Without it there is nothing to approve: the id
+/// in the item's link is agent-written and could name an ask the user has
+/// never seen, so the placeholder says the card hasn't arrived and offers no
+/// buttons.
+@Composable
+private fun SpawnConsentCard(
+    consent: ItemSpawnConsent,
+    answersAbove: Boolean,
+    isOpen: Boolean,
+    onAnswer: ((Boolean) -> Unit)?,
+    onOpen: (String) -> Unit,
+) {
+    val request = consent.request
+    if (request != null) {
+        AgentSpawnRequestCard(
+            request = request,
+            state = consent.state,
+            onApprove = { onAnswer?.invoke(true) },
+            onDeny = { onAnswer?.invoke(false) },
+            onOpen = onOpen,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        return
+    }
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MatronThemeColors.current.bubbleBot,
+        shadowElevation = 1.dp,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Agent spawn request", style = MaterialTheme.typography.titleSmall)
+            Text(
+                itemSpawnCardMissingText(answersAbove, isOpen),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

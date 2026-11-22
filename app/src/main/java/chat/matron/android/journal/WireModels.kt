@@ -355,13 +355,28 @@ sealed interface ServerFrame {
         val ref: String?,
         val requestID: String?,
         val detail: String?,
+        /// On an `account_locked` refusal: when the lock began (epoch ms),
+        /// and whether this device was frozen rather than signed out (it can
+        /// unlock the account with its approval key).
+        val since: Long? = null,
+        val unlock: Boolean = false,
     ) : ServerFrame
+
+    /// `{kind:"panic", on, since, unlock?}`: the whole account was locked
+    /// (sent just before the journal closes the socket). [unlock] says this
+    /// device was frozen, not signed out, and can unlock it.
+    data class Panic(val on: Boolean, val since: Long?, val unlock: Boolean) : ServerFrame
     data object SnapshotRequired : ServerFrame
     data class UnknownControl(val op: String) : ServerFrame
     /// The user changed a journal-held setting on some device
     /// (`PATCH /settings`). Transient: nothing to replay, since the next
     /// `hello_ok` carries the current settings.
     data class SettingsFrame(val settings: UserSettings) : ServerFrame
+
+    /// The user changed a notification setting on some device (`PUT
+    /// /notify`): the synced part only — each device keeps its own level.
+    /// Transient: a client that misses one reads `GET /notify` on reconnect.
+    data class NotifyFrame(val settings: NotifySettings) : ServerFrame
 
     /// A device was renamed (`POST /devices/:id/rename`). Transient — not a
     /// journal event, carries no seq. A client that misses it picks the name
@@ -383,6 +398,11 @@ sealed interface ServerFrame {
     /// like [DeviceMeta]: no seq, never replayed; a client that misses one
     /// reads the stored report off the next `GET /devices`.
     data class BoxStatusFrame(val deviceID: Long, val status: BoxStatus) : ServerFrame
+
+    /// The user's default model and effort for new chats changed (journal
+    /// `PUT /defaults` from any device or agent): the full new state.
+    /// Ephemeral, never replayed; a client re-reads `GET /defaults`.
+    data class DefaultsFrame(val defaults: NewChatDefaults) : ServerFrame
 
     /// One agent box's defaults for new sessions changed (journal "Box
     /// defaults", `PUT /devices/:id/defaults` from any device or agent) —
@@ -421,6 +441,7 @@ sealed interface ServerFrame {
                     // Key-presence, not value: only an explicit null clears a tag.
                     DeviceMeta(id, name, tagChar = obj.stringOrNull("tag_char"), tagCharKnown = obj.containsKey("tag_char"))
                 }
+                "defaults" -> NewChatDefaults.decode(obj)?.let { DefaultsFrame(it) }
                 "box_status" -> {
                     val id = obj.longOrNull("device_id") ?: return null
                     val status = BoxStatus.parse(obj) ?: return null
@@ -433,7 +454,13 @@ sealed interface ServerFrame {
                 }
                 "pins" -> Pins.parseList(obj["pins"])?.let { PinsFrame(it) }
                 "archive" -> ArchiveDelta.decode(obj)?.let { ArchiveFrame(it) }
+                "notify" -> NotifySettings.decode(obj.objectOrNull("settings"))?.let { NotifyFrame(it) }
                 "control" -> decodeControl(obj)
+                "panic" -> Panic(
+                    on = obj.boolOrNull("on") ?: true,
+                    since = obj.longOrNull("since"),
+                    unlock = obj.boolOrNull("unlock") ?: false,
+                )
                 else -> null
             }
         }
@@ -607,6 +634,8 @@ sealed interface ServerFrame {
                     ref = obj.stringOrNull("ref"),
                     requestID = obj.stringOrNull("request_id"),
                     detail = obj.stringOrNull("detail"),
+                    since = obj.longOrNull("since"),
+                    unlock = obj.boolOrNull("unlock") ?: false,
                 )
                 "snapshot_required" -> SnapshotRequired
                 else -> UnknownControl(op)
