@@ -24,6 +24,8 @@ import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.Row
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
@@ -122,6 +124,10 @@ fun ProjectFilesGridView(
     onOpenFile: (ProjectFile) -> Unit,
     onLoadMore: () -> Unit,
     modifier: Modifier = Modifier,
+    /// Bumped by each reload of the first page, so the end asks again.
+    version: Int = 0,
+    /// The last next-page read failed: the end offers Retry instead.
+    pagingFailed: Boolean = false,
 ) {
     BoxWithConstraints(modifier.fillMaxSize()) {
         val columns = if (maxWidth >= 700.dp) 3 else 2
@@ -140,9 +146,16 @@ fun ProjectFilesGridView(
             items(files, key = { it.id }) { file ->
                 ProjectFileTile(file, images[file.blobID], now, onOpen = { onOpenFile(file) })
             }
-            if (hasMore) {
-                item(key = "more:${files.size}", span = { GridItemSpan(maxLineSpan) }) {
-                    LaunchedEffect(files.size) { onLoadMore() }
+            if (hasMore && pagingFailed) {
+                item(key = "retry:${files.size}", span = { GridItemSpan(maxLineSpan) }) {
+                    Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                        Text(TimelineListCopy.MORE_FAILED, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        TextButton(onClick = onLoadMore, modifier = Modifier.testTag("projects.files.retry")) { Text(TimelineFormat.RETRY) }
+                    }
+                }
+            } else if (hasMore) {
+                item(key = "more:$version:${files.size}", span = { GridItemSpan(maxLineSpan) }) {
+                    LaunchedEffect(version, files.size) { onLoadMore() }
                     Spacer(Modifier.height(1.dp))
                 }
             }

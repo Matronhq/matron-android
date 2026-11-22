@@ -34,6 +34,11 @@ data class ProjectPageState(
     /// The project's files and pictures, newest first, as far as they have
     /// been paged; null until read.
     val files: ProjectFilesPage? = null,
+    /// Bumped each time the files' first page lands: the grid's end asks
+    /// for the next page again even when the new list is as long as the old.
+    val filesVersion: Int = 0,
+    /// The last next-page read of the files failed: the grid's end offers Retry.
+    val filesPagingFailed: Boolean = false,
     val error: String? = null,
 )
 
@@ -68,7 +73,10 @@ class ProjectPageViewModel(
     private var missionsGeneration = 0
     private var filesAsked = false
     private var filesGeneration = 0
-    private var isLoadingMoreFiles = false
+    private var isReloadingFiles = false
+    /// The files list a next-page read is in flight for: a read of a list
+    /// a reload has since replaced does not hold up the new list's paging.
+    private var loadingMoreFilesGeneration: Int? = null
 
     /// Reads the page: on arrival, on coming back, and for "Try again".
     suspend fun refreshPage() {
@@ -171,32 +179,39 @@ class ProjectPageViewModel(
     suspend fun loadFiles() {
         filesAsked = true
         val generation = ++filesGeneration
+        // A next-page read of the list this replaces is dropped, and paging
+        // waits for this first page.
+        isReloadingFiles = true
         try {
             val page = projects.projectFiles(projectID)
-            if (generation == filesGeneration) _state.update { it.copy(files = page) }
+            if (generation == filesGeneration) _state.update { it.copy(files = page, filesVersion = it.filesVersion + 1, filesPagingFailed = false) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
             if (generation == filesGeneration) _state.update { it.copy(error = error.message) }
+        } finally {
+            if (generation == filesGeneration) isReloadingFiles = false
         }
     }
 
-    /// Reads the next (older) page of files while there is one.
+    /// Reads the next (older) page of files while there is one. A failure
+    /// leaves Retry at the end of the grid.
     suspend fun loadMoreFiles() {
         val shown = _state.value.files ?: return
         val before = shown.nextBefore ?: return
-        if (isLoadingMoreFiles) return
-        isLoadingMoreFiles = true
+        if (isReloadingFiles || loadingMoreFilesGeneration == filesGeneration) return
         val generation = filesGeneration
+        loadingMoreFilesGeneration = generation
+        _state.update { it.copy(filesPagingFailed = false) }
         try {
             val page = projects.projectFiles(projectID, before = before)
             if (generation == filesGeneration) _state.update { it.copy(files = shown.appending(page)) }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            if (generation == filesGeneration) _state.update { it.copy(error = error.message) }
+            if (generation == filesGeneration) _state.update { it.copy(error = error.message, filesPagingFailed = true) }
         } finally {
-            isLoadingMoreFiles = false
+            if (loadingMoreFilesGeneration == generation) loadingMoreFilesGeneration = null
         }
     }
 

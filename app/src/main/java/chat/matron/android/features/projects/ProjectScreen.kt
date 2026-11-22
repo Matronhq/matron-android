@@ -184,6 +184,8 @@ fun ProjectSectionScreen(
                         }
                     },
                     onLoadMore = { scope.launch { viewModel.loadMoreFiles() } },
+                    version = state.filesVersion,
+                    pagingFailed = state.filesPagingFailed,
                 )
                 state.error != null -> ProjectPlaceholder(TimelineFormat.FAILED, TimelineFormat.FAILED_DETAIL) {
                     Button(onClick = { scope.launch { viewModel.refresh() } }) { Text(TimelineFormat.TRY_AGAIN) }
