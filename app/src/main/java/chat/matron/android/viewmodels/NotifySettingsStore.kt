@@ -88,10 +88,10 @@ class NotifySettingsStore(
     /// Writes in flight, oldest first, each with the ticket it was sent with.
     private val pending = mutableListOf<Pending>()
     private var nextWriteID = 0
-    /// For each thing a write sets ([NotifyChange.fields]), the ticket of
-    /// the newest save of it that has succeeded. An older write of the same
-    /// thing still in flight is not replayed: the user's later choice for it
-    /// has already landed. Writes of other things still are.
+    /// For each thing a write sets ([NotifyAtom.key]), the ticket of the
+    /// newest save of it that has succeeded. An older write's edit of the
+    /// same thing, still in flight, is not replayed: the user's later choice
+    /// for it has already landed. Its edits of other things still are.
     private val savedTicket = mutableMapOf<String, Long>()
     /// Successful saves so far; a `GET` sent while a save was in flight
     /// compares it to tell whether that save answered before it did.
@@ -206,7 +206,7 @@ class NotifySettingsStore(
             val answer = api.updateNotify(change)
             val superseded = synchronized(lock) {
                 val taken = acceptLocked(answer, ticket)
-                change.fields().forEach { savedTicket[it] = maxOf(savedTicket[it] ?: 0L, ticket) }
+                change.atoms().forEach { savedTicket[it.key] = maxOf(savedTicket[it.key] ?: 0L, ticket) }
                 savesDone++
                 _isSupported.value = true
                 _error.value = null
@@ -259,7 +259,9 @@ class NotifySettingsStore(
     private fun recomputeLocked() {
         val t = now()
         _clock.value = t
-        val shown = confirmedSettings?.let { NotifyView(it, confirmedLevel) }?.let { base -> pending.filter { p -> p.change.fields().all { p.ticket > (savedTicket[it] ?: 0L) } }.fold(base) { acc, p -> p.change.appliedTo(acc) } }
+        val shown = confirmedSettings?.let { NotifyView(it, confirmedLevel) }?.let { base -> pending.fold(base) { acc, p ->
+                p.change.atoms().filter { p.ticket > (savedTicket[it.key] ?: 0L) }.fold(acc) { v, atom -> atom.appliedTo(v) }
+            } }
         _view.value = shown
         scheduleExpiryLocked(shown, t)
     }

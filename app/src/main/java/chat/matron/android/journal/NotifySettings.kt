@@ -173,39 +173,30 @@ sealed interface NotifyChange {
         is ClearConvo -> convo(convoID, "level" to JsonNull, "mute_until" to JsonNull)
     }
 
-    /// What the change sets, as keys: a later save of any of them makes this
-    /// one's on-screen copy moot. Mode and the event switches are one thing,
-    /// since a switch moves the mode to custom.
-    fun fields(): Set<String> = when (this) {
-        is SetMode, is SetEvent -> setOf("prefs")
-        is SetDeviceLevel -> setOf("device_level")
-        is ConvoLevel -> setOf("convo:$convoID:level")
-        is ConvoMute -> setOf("convo:$convoID:mute")
-        is ClearConvo -> setOf("convo:$convoID:level", "convo:$convoID:mute")
+    /// The change as single-field edits, each naming the one thing it sets.
+    /// A switch is its own thing; choosing a preset sets the mode and every
+    /// switch; a switch moves the mode to custom; clearing a chat sets its
+    /// level and its mute. The store replays each edit only while no later
+    /// save of the same thing has succeeded.
+    fun atoms(): List<NotifyAtom> = when (this) {
+        is SetMode -> listOf(NotifyAtom.Mode(mode)) +
+            NotifySettings.preset(mode).orEmpty().map { (event, on) -> NotifyAtom.Event(event, on) }
+        is SetEvent -> listOf(
+            NotifyAtom.Mode(NotifySettings.Mode.CUSTOM),
+            NotifyAtom.Event(event, event == NotifySettings.Event.PROMPTS || on),
+        )
+        is SetDeviceLevel -> listOf(NotifyAtom.DeviceLevel(level))
+        is ConvoLevel -> listOf(NotifyAtom.ConvoLevel(convoID, level))
+        is ConvoMute -> listOf(NotifyAtom.ConvoMute(convoID, untilMs))
+        is ClearConvo -> listOf(NotifyAtom.ConvoLevel(convoID, null), NotifyAtom.ConvoMute(convoID, null))
     }
 
     /// The change as the journal will apply it, for the copy shown while
     /// the `PUT` is in flight.
-    fun appliedTo(view: NotifyView): NotifyView {
-        val s = view.settings
-        return when (this) {
-            // Custom keeps whatever switches were showing.
-            is SetMode -> view.copy(settings = s.copy(mode = mode, events = NotifySettings.preset(mode) ?: s.events))
-            is SetEvent -> view.copy(
-                settings = s.copy(
-                    mode = NotifySettings.Mode.CUSTOM,
-                    events = s.events + (event to (event == NotifySettings.Event.PROMPTS || on)),
-                ),
-            )
-            is SetDeviceLevel -> view.copy(deviceLevel = level)
-            is ConvoLevel -> view.copy(settings = s.copy(convos = updating(s.convos, convoID) { it.copy(level = level) }))
-            is ConvoMute -> view.copy(settings = s.copy(convos = updating(s.convos, convoID) { it.copy(muteUntil = untilMs) }))
-            is ClearConvo -> view.copy(settings = s.copy(convos = s.convos.filterNot { it.convoID == convoID }))
-        }
-    }
+    fun appliedTo(view: NotifyView): NotifyView = atoms().fold(view) { acc, atom -> atom.appliedTo(acc) }
 
-    private companion object {
-        fun convo(convoID: String, vararg fields: Pair<String, kotlinx.serialization.json.JsonElement>): JsonObject =
+    companion object {
+        private fun convo(convoID: String, vararg fields: Pair<String, kotlinx.serialization.json.JsonElement>): JsonObject =
             buildJsonObject {
                 put("convo", JsonObject(mapOf("convo_id" to JsonPrimitive(convoID)) + fields))
             }
@@ -213,7 +204,7 @@ sealed interface NotifyChange {
         /// Edits one conversation's row (a changed row goes first, as the
         /// journal lists the latest change first); a row left with neither a
         /// level nor a mute is dropped, as the journal deletes it.
-        fun updating(
+        internal fun updating(
             convos: List<NotifySettings.ConvoOverride>,
             convoID: String,
             edit: (NotifySettings.ConvoOverride) -> NotifySettings.ConvoOverride,
@@ -222,6 +213,43 @@ sealed interface NotifyChange {
             val rest = convos.filterNot { it.convoID == convoID }
             return if (row.level != null || row.muteUntil != null) listOf(row) + rest else rest
         }
+    }
+}
+
+/// One single-field edit of a [NotifyChange] ([NotifyChange.atoms]).
+sealed interface NotifyAtom {
+    /// The one thing this edit sets.
+    val key: String
+    fun appliedTo(view: NotifyView): NotifyView
+
+    data class Mode(val mode: NotifySettings.Mode) : NotifyAtom {
+        override val key get() = "mode"
+        override fun appliedTo(view: NotifyView) = view.copy(settings = view.settings.copy(mode = mode))
+    }
+
+    data class Event(val event: NotifySettings.Event, val on: Boolean) : NotifyAtom {
+        override val key get() = "event:${event.wire}"
+        override fun appliedTo(view: NotifyView) =
+            view.copy(settings = view.settings.copy(events = view.settings.events + (event to on)))
+    }
+
+    data class DeviceLevel(val level: NotifyDeviceLevel) : NotifyAtom {
+        override val key get() = "device_level"
+        override fun appliedTo(view: NotifyView) = view.copy(deviceLevel = level)
+    }
+
+    data class ConvoLevel(val convoID: String, val level: NotifySettings.ConvoLevel?) : NotifyAtom {
+        override val key get() = "convo:$convoID:level"
+        override fun appliedTo(view: NotifyView) = view.copy(
+            settings = view.settings.copy(convos = NotifyChange.updating(view.settings.convos, convoID) { it.copy(level = level) }),
+        )
+    }
+
+    data class ConvoMute(val convoID: String, val untilMs: Long?) : NotifyAtom {
+        override val key get() = "convo:$convoID:mute"
+        override fun appliedTo(view: NotifyView) = view.copy(
+            settings = view.settings.copy(convos = NotifyChange.updating(view.settings.convos, convoID) { it.copy(muteUntil = untilMs) }),
+        )
     }
 }
 

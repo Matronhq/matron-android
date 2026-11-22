@@ -405,3 +405,72 @@ class NotifySettingsStoreLaterChoiceTest {
         store.stop()
     }
 }
+
+class NotifySettingsStorePartialSupersedeTest {
+    private val base = NotifyView(
+        NotifySettings(
+            NotifySettings.Mode.CUSTOM, NotifySettings.preset(NotifySettings.Mode.COORDINATOR)!!, true,
+            listOf(NotifySettings.ConvoOverride("c-alice", NotifySettings.ConvoLevel.NONE, 9_000_000)),
+        ),
+        NotifyDeviceLevel.ALL,
+    )
+
+    private class GatedApi : NotifySettingsProviding {
+        val gets = mutableListOf<CompletableDeferred<NotifyView>>()
+        val puts = mutableListOf<CompletableDeferred<NotifyView>>()
+        override suspend fun notifySettings() = CompletableDeferred<NotifyView>().also { gets += it }.await()
+        override suspend fun updateNotify(change: NotifyChange) = CompletableDeferred<NotifyView>().also { puts += it }.await()
+    }
+
+    private suspend fun loaded(api: GatedApi, frames: MutableSharedFlow<NotifySettings>): NotifySettingsStore {
+        val store = NotifySettingsStore(api, { frames }, { emptyFlow<SyncConnectionState>() }, now = { 1_000L }, dispatcher = Dispatchers.Unconfined)
+        store.start()
+        kotlinx.coroutines.coroutineScope {
+            val first = launch { store.refresh() }
+            waitUntil { api.gets.size == 1 }
+            api.gets[0].complete(base); first.join()
+        }
+        return store
+    }
+
+    @Test
+    fun aLaterSwitchSaveKeepsAnOlderSwitchOfAnotherEventShowing() = runBlocking {
+        val api = GatedApi(); val frames = MutableSharedFlow<NotifySettings>()
+        val store = loaded(api, frames)
+        val older = launch { store.setEvent(NotifySettings.Event.ROOMS, true) }
+        waitUntil { api.puts.size == 1 }
+        val newer = launch { store.setEvent(NotifySettings.Event.STOPPED, true) }
+        waitUntil { api.puts.size == 2 }
+        // The journal applied the later one first; its answer lacks the earlier switch.
+        api.puts[1].complete(NotifyChange.SetEvent(NotifySettings.Event.STOPPED, true).appliedTo(base))
+        newer.join()
+        assertTrue(store.view.value!!.settings.isOn(NotifySettings.Event.STOPPED))
+        assertTrue("the other switch still shows", store.view.value!!.settings.isOn(NotifySettings.Event.ROOMS))
+        val both = NotifyChange.SetEvent(NotifySettings.Event.ROOMS, true).appliedTo(
+            NotifyChange.SetEvent(NotifySettings.Event.STOPPED, true).appliedTo(base),
+        )
+        api.puts[0].complete(both)
+        waitUntil { api.gets.forEach { if (!it.isCompleted) it.complete(both) }; older.isCompleted }
+        assertEquals(both, store.view.value)
+        store.stop()
+    }
+
+    @Test
+    fun aLaterLevelSaveKeepsAClearsMuteHalf() = runBlocking {
+        val api = GatedApi(); val frames = MutableSharedFlow<NotifySettings>()
+        val store = loaded(api, frames)
+        val clear = launch { store.clearOverride("c-alice") }
+        waitUntil { api.puts.size == 1 }
+        val level = launch { store.setLevel(NotifySettings.ConvoLevel.NEEDS_ME, "c-alice") }
+        waitUntil { api.puts.size == 2 }
+        api.puts[1].complete(NotifyChange.ConvoLevel("c-alice", NotifySettings.ConvoLevel.NEEDS_ME).appliedTo(base))
+        level.join()
+        assertEquals(ConvoNotifyState(level = NotifySettings.ConvoLevel.NEEDS_ME), store.state("c-alice"))
+        val settled = NotifyChange.ConvoLevel("c-alice", NotifySettings.ConvoLevel.NEEDS_ME)
+            .appliedTo(NotifyChange.ClearConvo("c-alice").appliedTo(base))
+        api.puts[0].complete(settled)
+        waitUntil { api.gets.forEach { if (!it.isCompleted) it.complete(settled) }; clear.isCompleted }
+        assertEquals(ConvoNotifyState(level = NotifySettings.ConvoLevel.NEEDS_ME), store.state("c-alice"))
+        store.stop()
+    }
+}
