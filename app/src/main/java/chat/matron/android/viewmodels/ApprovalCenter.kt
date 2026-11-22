@@ -147,6 +147,18 @@ class ApprovalCenter(
         runCatching { load() }.onFailure { if (it is CancellationException) throw it }
     }
 
+    /// A read that is the newest one: when another read started after it
+    /// (a refresh racing this signature), that one's answer is what counts,
+    /// so read again. Bounded: a list read forever overtaken is an error.
+    private suspend fun loadLatest(): ApprovalKeysState {
+        repeat(3) {
+            val before = loads.get()
+            val state = load()
+            if (loads.get() == before + 1) return state
+        }
+        throw JournalApiError.Transport("the approval keys kept changing; try again")
+    }
+
     private suspend fun load(): ApprovalKeysState {
         val mine = loads.incrementAndGet()
         try {
@@ -228,7 +240,7 @@ class ApprovalCenter(
     /// sign, and the read's own error when the keys cannot be read (never
     /// silently unsigned).
     suspend fun sign(request: ApprovalRequest): SignedApproval? {
-        val state = load()
+        val state = loadLatest()
         if (!state.hasActiveKey) return null
         val journal = state.journal
         if (!state.enabled || journal == null) throw ApprovalError.Disabled
@@ -502,6 +514,16 @@ class ApprovalCenter(
         /// What the system's biometric prompt says.
         fun reason(request: ApprovalRequest): String =
             request.button?.let { "$it: ${request.headline}" } ?: request.headline
+
+        /// What a device's key record is kept under: the journal's canonical
+        /// host and port (as [journalHost]) and the base path it is served
+        /// under, so two journals on one host never share a record.
+        fun journalScope(serverURL: String): String {
+            val url = serverURL.toHttpUrlOrNull() ?: return serverURL
+            val host = journalHost(serverURL) ?: return serverURL
+            val path = url.encodedPath.trimEnd('/')
+            return host + path
+        }
 
         /// The journal as a statement names it: the server's host,
         /// lowercased, with a port that is not the scheme's default.

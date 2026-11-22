@@ -191,14 +191,13 @@ class MainActivity : FragmentActivity() {
         // behaviour uniform so screens can rely on imePadding() for the IME.
         enableEdgeToEdge()
         val deps = (application as MatronApplication).dependencies
-        // Approval keys sign behind a biometric prompt, which needs this activity.
-        chat.matron.android.platform.BiometricPromptHost.attach(this)
         appLock = AppLockController(
             auth = AndroidBiometricAuthenticator(this),
             store = deps.preferences,
         )
-        // An approval key's biometric prompt is not the app going away.
-        chat.matron.android.platform.BiometricPromptHost.onPrompt = { showing -> appLock.noteSystemPrompt(showing) }
+        // Approval keys sign behind a biometric prompt, which needs this
+        // activity; the app lock is told when it ends.
+        chat.matron.android.platform.BiometricPromptHost.attach(this) { showing -> appLock.noteSystemPrompt(showing) }
         setContent {
             // Read lazily by dispose handlers that must tell the lock shield's
             // teardown from the user's (see LocalAppLockActive).
