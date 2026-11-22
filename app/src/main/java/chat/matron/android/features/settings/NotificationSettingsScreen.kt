@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -63,6 +64,8 @@ fun NotificationSettingsScreen(
     val view by store.view.collectAsStateWithLifecycle()
     val supported by store.isSupported.collectAsStateWithLifecycle()
     val error by store.error.collectAsStateWithLifecycle()
+    val loadFailed by store.loadFailed.collectAsStateWithLifecycle()
+    val retryScope = androidx.compose.runtime.rememberCoroutineScope()
     val now by store.clock.collectAsStateWithLifecycle()
     // On screen entry as well as on every connect: a frame missed while the
     // socket was down is caught here.
@@ -95,6 +98,18 @@ fun NotificationSettingsScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                current == null && loadFailed -> Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        "Couldn't load notification settings.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    TextButton(onClick = { retryScope.launch { store.refresh() } }) { Text("Try again") }
+                }
                 current == null -> CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
                 else -> {
                     ModeSection(current.settings) { store.post(NotifyChange.SetMode(it)) }

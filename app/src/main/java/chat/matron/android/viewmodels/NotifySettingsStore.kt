@@ -72,6 +72,11 @@ class NotifySettingsStore(
     /// success.
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    /// The last `GET /notify` failed with nothing yet to show: the screen
+    /// offers Try again instead of a spinner that never ends.
+    private val _loadFailed = MutableStateFlow(false)
+    val loadFailed: StateFlow<Boolean> = _loadFailed.asStateFlow()
+
     private val _clock = MutableStateFlow(now())
     /// Moved past each running mute's end when it lapses, so a menu's
     /// "muted until" goes away on time without anything else changing.
@@ -142,6 +147,7 @@ class NotifySettingsStore(
         }
         try {
             val answer = api.notifySettings()
+            _loadFailed.value = false
             val readAgain = synchronized(lock) {
                 _isSupported.value = true
                 // Sent while a save was in flight, and that save has answered
@@ -162,6 +168,8 @@ class NotifySettingsStore(
             _isSupported.value = false
         } catch (_: Throwable) {
             // Keep what is shown; the next reconnect or screen open re-reads.
+            // With nothing shown yet, say so.
+            if (_view.value == null) _loadFailed.value = true
         }
     }
 

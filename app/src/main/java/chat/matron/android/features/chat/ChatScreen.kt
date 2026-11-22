@@ -177,6 +177,15 @@ fun ChatScreen(
     var showSwitcher by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var notifyMenuOpen by remember { mutableStateOf(false) }
+    // The Notifications submenu opens a frame after the overflow menu closes,
+    // so the closing popup's outside-tap or focus loss can't dismiss it.
+    var notifyMenuRequested by remember { mutableStateOf(false) }
+    LaunchedEffect(notifyMenuRequested) {
+        if (!notifyMenuRequested) return@LaunchedEffect
+        androidx.compose.runtime.withFrameNanos { }
+        notifyMenuOpen = true
+        notifyMenuRequested = false
+    }
     var previewModel by remember { mutableStateOf<Any?>(null) }
     val compactScope = rememberCoroutineScope()
     // The gallery a timeline tap opens: every image in the conversation,
@@ -367,7 +376,7 @@ fun ChatScreen(
                                 leadingIcon = { Icon(convoNotifyIcon(notifyState), contentDescription = null) },
                                 onClick = {
                                     menuOpen = false
-                                    notifyMenuOpen = true
+                                    notifyMenuRequested = true
                                 },
                                 modifier = Modifier.testTag("chat-menu-notifications"),
                             )

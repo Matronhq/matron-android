@@ -65,6 +65,19 @@ class NotifySettingsStoreTest {
     }
 
     @Test
+    fun aFailedFirstLoadIsReportedAndARetryClearsIt() = runBlocking {
+        val api = Api(coordinator).apply { getError = JournalApiError.Transport("offline") }
+        val store = store(api)
+        store.refresh()
+        assertNull(store.view.value)
+        assertTrue(store.loadFailed.value)
+        api.getError = null
+        store.refresh()
+        assertFalse(store.loadFailed.value)
+        assertEquals(coordinator, store.view.value)
+    }
+
+    @Test
     fun aRefusedChangeIsTakenBack() = runBlocking {
         val api = Api(coordinator).apply { putError = JournalApiError.Transport("offline") }
         val store = store(api)
