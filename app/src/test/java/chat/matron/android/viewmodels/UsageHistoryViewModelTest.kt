@@ -31,11 +31,11 @@ class UsageHistoryViewModelTest {
     )
 
     @Test
-    fun load_readsTwelveWeeksAndKeepsAChoiceThatIsStillThere() = runBlocking {
+    fun load_readsAWeekMoreThanItShowsAndKeepsAChoiceThatIsStillThere() = runBlocking {
         val fake = Fake { history("Week (Example)") }
         val vm = UsageHistoryViewModel(fake)
         vm.load()
-        assertEquals(listOf(12), fake.weeksAsked)
+        assertEquals(listOf(13), fake.weeksAsked)
         assertTrue(vm.state.value.hasLoaded)
         vm.choose("Week (Example)")
         vm.load()

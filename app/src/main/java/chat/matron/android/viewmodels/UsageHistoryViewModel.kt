@@ -49,7 +49,11 @@ class UsageHistoryViewModel(private val api: UsageHistoryProviding) {
 
     suspend fun load() {
         try {
-            val history = api.usageHistory(UsageHistoryTable.DEFAULT_WEEKS)
+            // One more window than columns: the journal counts rolling
+            // windows back from now, and until this week's reset lands the
+            // newest finished one sits in last week's column, so the oldest
+            // column would otherwise be empty for most of every week.
+            val history = api.usageHistory(UsageHistoryTable.DEFAULT_WEEKS + 1)
             _state.update { held ->
                 val loaded = held.copy(history = history, hasLoaded = true, errorMessage = null)
                 // A meter that dropped out of the window leaves the picker on
