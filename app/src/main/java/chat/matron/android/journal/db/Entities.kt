@@ -335,6 +335,12 @@ data class ItemEntity(
     /// that needs a signature reads the item afresh before signing anyway.
     @ColumnInfo(name = "step_up") val stepUp: Boolean? = null,
     @ColumnInfo(name = "subject_json") val subjectJson: String? = null,
+    /// Whether the item's own buttons are a multi-select question (v19);
+    /// rows cached before v19 read `false` until their next refetch.
+    @ColumnInfo(name = "multi_select", defaultValue = "0") val multiSelect: Boolean = false,
+    /// Every label of the latest answer as a JSON list (v19), `null` when
+    /// there is none.
+    @ColumnInfo(name = "chosen_actions_json") val chosenActionsJson: String? = null,
 ) {
     fun toItem(): TrackerItem = TrackerItem(
         id = id, num = num, kind = ItemKind.fromWire(kind) ?: ItemKind.TASK,
@@ -352,6 +358,8 @@ data class ItemEntity(
         missionID = missionID, missionNum = missionNum,
         actions = actionsJson?.let { decodeList(it, ListSerializer(String.serializer())) } ?: emptyList(),
         chosenAction = chosenAction,
+        multiSelect = multiSelect,
+        chosenActions = chosenActionsJson?.let { decodeList(it, ListSerializer(String.serializer())) } ?: emptyList(),
         lastUserInputAt = lastUserInputAt?.let(Instant::ofEpochMilli),
         working = workingJson?.let(::storedItemWorking),
         handover = ItemHandover.fromJson(handoverJson?.let(::parseJsonObjectOrNull)),
@@ -375,6 +383,9 @@ data class ItemEntity(
             actionsJson = i.actions.takeIf { it.isNotEmpty() }
                 ?.let { MatronJson.encodeToString(ListSerializer(String.serializer()), it) },
             chosenAction = i.chosenAction,
+            multiSelect = i.multiSelect,
+            chosenActionsJson = i.chosenActions.takeIf { it.isNotEmpty() }
+                ?.let { MatronJson.encodeToString(ListSerializer(String.serializer()), it) },
             originConvoTitle = i.originConvoTitle,
             workingJson = i.working?.let(::storedItemWorkingJson),
             lastUserInputAt = i.lastUserInputAt?.toEpochMilli(),
@@ -388,7 +399,8 @@ data class ItemEntity(
 
 /// One row of an item's thread. `meta_json` holds the `{from, to}` status
 /// snapshots of a synthetic `status` row, and a comment's action buttons
-/// (`actions`, `chosen`) or the tap it records (`action`, `reply_to`) —
+/// (`actions`, `chosen`, `multi_select`, `chosen_all`) or the answer it
+/// records (`action`, `reply_to`, `selected`) —
 /// plus its author attribution (`device_name`, `convo_id`, `convo_title`)
 /// and the cancelled reply an edit stands in for (`replaces`).
 /// `null` for an ordinary comment with none of those. These ride in
@@ -416,8 +428,11 @@ data class ItemCommentEntity(
         val to: Snap? = null,
         val actions: List<String>? = null,
         val chosen: String? = null,
+        @SerialName("multi_select") val multiSelect: Boolean? = null,
+        @SerialName("chosen_all") val chosenAll: List<String>? = null,
         val action: String? = null,
         @SerialName("reply_to") val replyTo: String? = null,
+        val selected: List<String>? = null,
         @SerialName("device_name") val deviceName: String? = null,
         @SerialName("convo_id") val convoID: String? = null,
         @SerialName("convo_title") val convoTitle: String? = null,
@@ -443,7 +458,10 @@ data class ItemCommentEntity(
             attachments = decodeList(attachmentsJson, ListSerializer(TrackerAttachment.serializer())),
             statusFrom = snap(meta?.from), statusTo = snap(meta?.to), createdAt = Instant.ofEpochMilli(createdAt),
             actions = meta?.actions ?: emptyList(), chosenAction = meta?.chosen,
+            multiSelect = meta?.multiSelect == true,
+            chosenActions = meta?.chosenAll ?: emptyList(),
             action = meta?.action, replyTo = meta?.replyTo,
+            selected = meta?.selected ?: emptyList(),
             deviceName = meta?.deviceName, convoID = meta?.convoID, convoTitle = meta?.convoTitle,
             contributor = meta?.contributorName?.let {
                 Contributor(it, Contributor.Via.parse(meta.contributorVia) ?: Contributor.Via.USER)
@@ -459,7 +477,8 @@ data class ItemCommentEntity(
         fun from(c: TrackerComment): ItemCommentEntity {
             fun snap(s: TrackerItem.StatusSnapshot?): Snap? =
                 s?.let { Snap(it.state?.wire, it.resolution?.wire, it.awaiting?.wire) }
-            val hasButtons = c.actions.isNotEmpty() || c.chosenAction != null || c.action != null || c.replyTo != null
+            val hasButtons = c.actions.isNotEmpty() || c.chosenAction != null || c.action != null || c.replyTo != null ||
+                c.multiSelect || c.chosenActions.isNotEmpty() || c.selected.isNotEmpty()
             val hasAuthor = c.deviceName != null || c.convoID != null || c.convoTitle != null ||
                 c.contributor != null || c.attribution != null
             val meta = if (c.statusFrom != null || c.statusTo != null || hasButtons || hasAuthor || c.replaces != null ||
@@ -470,7 +489,10 @@ data class ItemCommentEntity(
                     Meta(
                         snap(c.statusFrom), snap(c.statusTo),
                         actions = c.actions.takeIf { it.isNotEmpty() }, chosen = c.chosenAction,
+                        multiSelect = c.multiSelect.takeIf { it },
+                        chosenAll = c.chosenActions.takeIf { it.isNotEmpty() },
                         action = c.action, replyTo = c.replyTo,
+                        selected = c.selected.takeIf { it.isNotEmpty() },
                         deviceName = c.deviceName, convoID = c.convoID, convoTitle = c.convoTitle,
                         contributorName = c.contributor?.name, contributorVia = c.contributor?.via?.wire,
                         attribution = c.attribution,
@@ -570,8 +592,8 @@ data class MissionEntity(
     /// cached before v17 read null until their next fetch.
     val status: String? = null,
     @ColumnInfo(name = "status_contributor") val statusContributor: String? = null,
-    /// The project the mission is filed in and its number (v21); rows cached
-    /// before v21 read null until their next fetch.
+    /// The project the mission is filed in and its number (v22); rows cached
+    /// before v22 read null until their next fetch.
     @ColumnInfo(name = "project_id") val projectID: String? = null,
     @ColumnInfo(name = "project_num") val projectNum: Int? = null,
 ) {

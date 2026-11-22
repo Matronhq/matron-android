@@ -110,10 +110,14 @@ internal open class FakeItemsSync : ItemsSyncing {
     val localIDs = mutableListOf<String>()
     /// The `replaces` of every queued comment, in order.
     val replacing = mutableListOf<String?>()
+    /// (item id, labels, asking-comment id) of every queued multi-select answer.
+    val selections = mutableListOf<Triple<String, List<String>, String?>>()
     override suspend fun enqueueComment(
         itemID: String, localID: String, body: String, attachments: List<TrackerAttachment>, action: String?, replyTo: String?, replaces: String?,
+        selected: List<String>?,
     ): Boolean {
         comments += Triple(itemID, body, attachments)
+        if (selected != null) selections += Triple(itemID, selected, replyTo)
         if (action != null) taps += Triple(itemID, action, replyTo)
         localIDs += localID
         replacing += replaces
@@ -141,6 +145,7 @@ internal open class FakeItemsApi : ItemsProviding {
     override suspend fun updateItem(id: String, patch: ItemPatch): TrackerItem = error("unused")
     override suspend fun commentItem(
         id: String, body: String, attachments: List<TrackerAttachment>, idempotencyKey: String?, action: String?, replyTo: String?, replaces: String?,
+        selected: List<String>?,
     ): ItemCommentResult = error("unused")
     override suspend fun closeItem(id: String, resolution: ItemResolution, comment: String?): TrackerItem = error("unused")
     override suspend fun reopenItem(id: String, comment: String?): TrackerItem = error("unused")

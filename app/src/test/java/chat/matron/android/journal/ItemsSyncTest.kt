@@ -137,15 +137,20 @@ private class FakeItems : ItemsProviding {
     private val _commentSends = mutableListOf<Triple<String, String, List<String>>>()
     val commentSends: List<Triple<String, String, List<String>>> get() = synchronized(lock) { _commentSends.toList() }
 
+    /// `selected` of every comment call, in order.
+    private val _commentSelections = mutableListOf<List<String>?>()
+    val commentSelections: List<List<String>?> get() = synchronized(lock) { _commentSelections.toList() }
+
     /// (action, replyTo) of every comment call, in order.
     private val _commentTaps = mutableListOf<Pair<String?, String?>>()
     val commentTaps: List<Pair<String?, String?>> get() = synchronized(lock) { _commentTaps.toList() }
 
     override suspend fun commentItem(
         id: String, body: String, attachments: List<TrackerAttachment>, idempotencyKey: String?, action: String?, replyTo: String?, replaces: String?,
+        selected: List<String>?,
     ): ItemCommentResult {
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
-        synchronized(lock) { _commentTaps.add(action to replyTo) }
+        synchronized(lock) { _commentTaps.add(action to replyTo); _commentSelections.add(selected) }
         val gate = synchronized(lock) {
             if (blockNextComment) { blockNextComment = false; CompletableDeferred<Unit>().also { _commentGate = it } } else null
         }
@@ -433,6 +438,27 @@ class ItemsSyncTest {
         rig.sync.enqueueComment("it_1", "L2", "hello", emptyList())
         waitUntil { api.commentTaps.size == 3 }
         assertEquals(null to null, api.commentTaps.last())
+        rig.sync.stop()
+    }
+
+    @Test
+    fun queuedMultiSelectAnswerSurvivesTheOutboxAndIsSentAsSelected() = runBlocking {
+        val api = FakeItems(); api.failComments = true
+        val rig = make(api)
+        rig.sync.start()
+        rig.sync.enqueueComment("it_1", "L1", "Docs, Search", emptyList(), replyTo = "ic_q", selected = listOf("Docs", "Search"))
+        waitUntil { rig.store.itemOutboxRows("it_1").firstOrNull()?.attempts == 1 }
+        val queued = MatronJson.decodeFromString(ItemsSync.CommentPayload.serializer(), rig.store.itemOutboxRows("it_1").first().payloadJson)
+        assertEquals(listOf("Docs", "Search"), queued.selected)
+        assertEquals("ic_q", queued.replyTo); assertNull(queued.action)
+        api.failComments = false
+        rig.states.value = SyncConnectionState.Running
+        waitUntil { rig.store.itemOutboxPending().isEmpty() }
+        assertEquals("the retry carries the answer too", listOf(listOf("Docs", "Search"), listOf("Docs", "Search")), api.commentSelections)
+        assertEquals(null to "ic_q", api.commentTaps.last())
+        // A row queued before multi-select existed decodes with none.
+        val old = MatronJson.decodeFromString(ItemsSync.CommentPayload.serializer(), """{"body":"Merge","action":"Merge","replyTo":"ic_q"}""")
+        assertNull(old.selected)
         rig.sync.stop()
     }
 

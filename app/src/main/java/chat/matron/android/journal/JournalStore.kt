@@ -921,12 +921,16 @@ class JournalStore(
                 // choice in the same write. The pending row that drew it as
                 // chosen goes below, and the refetch that would bring the
                 // journal's `chosen_action` down can fail.
+                // A multi-select answer marks every label it ticked.
                 val asked = comment.replyTo
-                val label = comment.action
-                if (asked != null && label != null) {
+                val labels = comment.answerLabels
+                if (asked != null && labels.isNotEmpty()) {
                     itemCommentDao.forItem(comment.itemID).firstOrNull { it.id == asked }?.toComment()
-                        ?.takeIf { label in it.actions }
-                        ?.let { itemCommentDao.upsertAll(listOf(ItemCommentEntity.from(it.copy(chosenAction = label)))) }
+                        ?.takeIf { it.actions.containsAll(labels) }
+                        ?.let {
+                            val marked = it.copy(chosenAction = labels.first(), chosenActions = labels)
+                            itemCommentDao.upsertAll(listOf(ItemCommentEntity.from(marked)))
+                        }
                 }
             }
             itemOutboxDao.delete(deletingLocalID)

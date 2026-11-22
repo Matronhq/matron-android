@@ -317,12 +317,19 @@ class VoiceRecorder(
         val requested = now()
         val initialBytes = fileSize(file)
         var checks = 0
+        // Set when the loop ends because the microphone delivered sound, so a
+        // mic that goes live on the check after the last allowed pause is not
+        // mistaken for a timeout.
+        var heardAudio = false
         try {
             while (true) {
                 val active = recorder ?: return
                 if (generation != cancelGeneration) return
                 if (warmUpRefused) break
-                if (!isInterrupted && active.isCapturingAudio()) break
+                if (!isInterrupted && active.isCapturingAudio()) {
+                    heardAudio = true
+                    break
+                }
                 if (checks >= MAX_LIVE_CHECKS) break
                 pause()
                 // cancel() during the warm-up already tore everything down.
@@ -343,7 +350,7 @@ class VoiceRecorder(
             cancel()
             throw RecorderError.RecordFailed
         }
-        val timedOut = checks >= MAX_LIVE_CHECKS
+        val timedOut = !heardAudio && checks >= MAX_LIVE_CHECKS
         if (timedOut && fileSize(file) <= initialBytes) {
             log("live: no audio reached the file after the warm-up ${routeDescription()}")
             cancel()
