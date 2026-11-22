@@ -40,6 +40,13 @@ class PushKeyStoreTest {
     }
 
     @Test
+    fun aRegistrationNoLongerAllowedMakesNoKey() {
+        val keys = PushKeyStore(InMemorySessionStore())
+        assertNull(keys.publicKeyForRegistration { false })
+        assertNull(keys.privateKey())
+    }
+
+    @Test
     fun aStoreThatCannotHoldTheKeyRegistersNone() {
         val broken = object : SessionStore {
             override fun set(value: String, key: String) = throw IllegalStateException("keystore unavailable")

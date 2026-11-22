@@ -27,8 +27,13 @@ class PushKeyStore(private val store: SessionStore) {
     /// fixed text. Synchronized: the sign-in registration and a token
     /// refresh can ask at the same moment, and two fresh keys would leave
     /// the journal sealing to one the phone no longer holds.
+    ///
+    /// [allowed] is checked under the same lock as [delete]: a registration
+    /// that began before a sign-out passes a check that fails once it has
+    /// happened, so it never makes a key after sign-out deleted the last.
     @Synchronized
-    fun publicKeyForRegistration(): String? {
+    fun publicKeyForRegistration(allowed: () -> Boolean = { true }): String? {
+        if (!allowed()) return null
         privateKey()?.let { return publicOf(it) }
         val fresh = X25519.generatePrivateKey()
         if (runCatching { store.set(PushBox.encodeBase64Url(fresh), ACCOUNT) }.isFailure) return null

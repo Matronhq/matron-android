@@ -415,17 +415,14 @@ class AppDependencies(
     /** Registers this phone for push with [session]'s journal (after sign-in, and at each launch). */
     suspend fun registerPush(session: UserSession): PushRegistration {
         val started = pushGeneration
-        return pushService(session).register().also { finishRegistration(started, it) }
+        return pushService(session, started).register().also { finishRegistration(started, it) }
     }
 
-    /// Records [result] unless a sign-out came in between, in which case a
-    /// key the registration made is removed again.
+    /// Records [result] unless a sign-out came in between. (No key can be
+    /// left behind: [PushKeyStore.publicKeyForRegistration] makes none once
+    /// the generation has moved, under the lock sign-out's delete takes.)
     private fun finishRegistration(started: Long, result: PushRegistration) {
-        if (pushGeneration != started) {
-            pushKeyStore?.delete()
-            return
-        }
-        notePushRegistration(result)
+        if (pushGeneration == started) notePushRegistration(result)
     }
 
     /**
@@ -439,7 +436,7 @@ class AppDependencies(
         val api = JournalApi(session.homeserverURL, sharedClient, session.accessToken)
         val result = JournalPushService(
             api,
-            pushKey = { if (pushGeneration == started) pushKeyStore?.publicKeyForRegistration() else null },
+            pushKey = { pushKeyStore?.publicKeyForRegistration { pushGeneration == started } },
             token = { token },
         ).register(token)
         finishRegistration(started, result)
@@ -1179,12 +1176,12 @@ class AppDependencies(
         )
     }
 
-    fun pushService(session: UserSession): PushService =
+    fun pushService(session: UserSession, generation: Long = pushGeneration): PushService =
         JournalPushService(
             api = core(session).api,
             // With this phone's key, so the journal can seal what each
-            // notification says for this phone alone.
-            pushKey = { pushKeyStore?.publicKeyForRegistration() },
+            // notification says for this phone alone; none once signed out.
+            pushKey = { pushKeyStore?.publicKeyForRegistration { pushGeneration == generation } },
             token = { FirebasePush.currentToken(context) },
         )
 
