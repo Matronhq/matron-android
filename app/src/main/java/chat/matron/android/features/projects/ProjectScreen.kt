@@ -189,10 +189,7 @@ fun ProjectSectionScreen(
             }
         }
     }
-<<<<<<< HEAD
     gallery?.let { AttachmentFullscreenViewer(gallery = it, onDismiss = { gallery = null }) }
-    ProjectErrorAlert(state, viewModel)
-=======
     ProjectErrorAlert(state, viewModel, shown = sectionLoaded(state, section))
 }
 
@@ -201,8 +198,7 @@ fun ProjectSectionScreen(
 fun sectionLoaded(state: ProjectPageState, section: ProjectSection): Boolean = when (section) {
     ProjectSection.HISTORY -> state.historyLoaded
     ProjectSection.MISSIONS -> state.openMissions != null
-    ProjectSection.FILES -> false
->>>>>>> feat/projects-lists
+    ProjectSection.FILES -> state.files != null
 }
 
 /// The project's pictures in the grid's order, opened on [tapped].
