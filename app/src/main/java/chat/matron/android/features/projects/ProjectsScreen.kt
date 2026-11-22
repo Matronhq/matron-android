@@ -76,9 +76,10 @@ fun projectsBarTitle(state: TimelineState): String =
 /// session's authenticated media service as bytes Coil decodes. Only the
 /// current page's stay. A failed load is left out, so the next pass retries.
 @Composable
-fun rememberTimelineImages(blobIDs: List<String>, media: MediaService, serverURL: HttpUrl): SnapshotStateMap<String, Any> {
+fun rememberTimelineImages(blobIDs: List<String>, media: MediaService, serverURL: HttpUrl, reload: Int = 0): SnapshotStateMap<String, Any> {
     val images = remember { mutableStateMapOf<String, Any>() }
-    LaunchedEffect(blobIDs) {
+    // [reload] asks again for any picture that failed (a refresh).
+    LaunchedEffect(blobIDs, reload) {
         val wanted = blobIDs.toSet()
         images.keys.filter { it !in wanted }.forEach { images.remove(it) }
         for (blobID in blobIDs) {
@@ -127,7 +128,7 @@ fun ProjectsScreen(
     }
     val scope = rememberCoroutineScope()
     var layout by remember { mutableStateOf(TimelineWeekLayout.fromWire(layoutStore.getString(TimelineWeekLayout.STORAGE_KEY))) }
-    val images = rememberTimelineImages(state.imageBlobIDs, media, serverURL)
+    val images = rememberTimelineImages(state.imageBlobIDs, media, serverURL, reload = state.weekLoads)
 
     Scaffold(
         topBar = {

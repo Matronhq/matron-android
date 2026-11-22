@@ -211,6 +211,25 @@ class TimelineViewModelTest {
     }
 
     @Test
+    fun overlappingRefreshesKeepTheIndicatorUntilTheLastEnds() = runBlocking {
+        val timeline = fake()
+        val vm = TimelineViewModel(timeline, scope)
+        vm.start()
+        val loads = vm.state.value.weekLoads
+        val hold = CompletableDeferred<Unit>()
+        timeline.holds["2026-11-16"] = hold
+        val first = scope.launch { vm.refresh() }
+        val second = scope.launch { vm.refresh() }
+        first.cancel()
+        assertTrue(vm.state.value.isRefreshing)
+        timeline.holds.clear()
+        hold.complete(Unit)
+        second.join()
+        assertFalse(vm.state.value.isRefreshing)
+        assertTrue(vm.state.value.weekLoads > loads)
+    }
+
+    @Test
     fun theWeeksOtherProjectsPageInOnceEach() = runBlocking {
         val timeline = fake().apply {
             weeks["2026-11-16"] = TimelineFixtures.week("2026-11-16", also = listOf(TimelineFixtures.promo, TimelineFixtures.app, TimelineFixtures.pricing))
