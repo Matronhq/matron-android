@@ -60,6 +60,7 @@ import chat.matron.android.search.SearchBackfillCoordinator
 import chat.matron.android.search.SearchDatabase
 import chat.matron.android.search.SearchService
 import chat.matron.android.search.SearchServiceLive
+import chat.matron.android.search.ServerFirstSearchService
 import chat.matron.android.storage.EncryptedPrefsSessionStore
 import chat.matron.android.storage.SessionStore
 import chat.matron.android.storage.LRUCache
@@ -632,6 +633,12 @@ class AppDependencies(
      * layer that sees the store, the API and both syncs. [missionsSupported]
      * is the shell's live answer, read at open time.
      */
+    /// The message search the search screen and find-in-chat query: the
+    /// journal server first, this device's index when the server can't be
+    /// reached. Works with no local index at all (the index failed to open).
+    fun messageSearch(session: UserSession): SearchService =
+        ServerFirstSearchService(remote = core(session).api, local = search)
+
     /// The Search tab's journal search: items, missions and memories. No
     /// projects, as this app has no project page to open one on.
     fun trackerSearch(session: UserSession): suspend (String) -> List<TrackerSearchHit> {

@@ -581,7 +581,7 @@ private fun SignedInApp(
     // results survive a trip to another tab and back.
     val tabSearchVM = remember(session.userID, goToResolver) {
         SearchViewModel(
-            deps.search,
+            deps.messageSearch(session),
             emptyList(),
             numberLookup = { num -> (goToResolver.find(num) as? GoToNumberResolver.Found.Hit)?.hit },
             trackerSearch = deps.trackerSearch(session),
@@ -1000,7 +1000,9 @@ private fun SignedInApp(
                             viewModel = chatListVM,
                             connectionState = connectionState,
                             hasEverConnected = hasEverConnected,
-                            searchAvailable = deps.search != null,
+                            // Message search asks the journal first, so it no
+                            // longer needs this device's index to work.
+                            searchAvailable = true,
                             chat = deps.chatService(session),
                             onOpenChat = { shell.openChat(it) },
                             onNewChat = { newChatTarget = NewChatTarget.CONVERSATIONS },
@@ -1026,55 +1028,50 @@ private fun SignedInApp(
                     chatDestinations(AppTab.CONVERSATIONS)
 
                     composable("search") {
-                        val searchService = deps.search
-                        if (searchService == null) {
-                            // Navigation is a side effect — never call it straight from
-                            // the composable body (bugbot "Search route pops during
-                            // composition").
-                            LaunchedEffect(Unit) { nav.popBackStack() }
-                        } else {
-                            val searchVM = remember {
-                                SearchViewModel(searchService, allChats, numberLookup = { num ->
-                                    (goToResolver.find(num) as? GoToNumberResolver.Found.Hit)?.hit
-                                })
-                            }
-                            SearchScreen(
-                                viewModel = searchVM,
-                                // A result REPLACES the Conversations path (the shell's
-                                // openChat pops search along with anything else over
-                                // the list).
-                                onSelectChat = { chat -> shell.openChat(chat.id) },
-                                onSelectMessage = { hit ->
-                                    // Arm the (cached) chat VM's in-conversation search
-                                    // with the query, then navigate: a cold VM parks the
-                                    // jump until its first snapshot lands (apple #172).
-                                    val query = searchVM.trimmedQuery
-                                    val (chatVM, _) = vmCache.viewModels(hit.roomID)
-                                    // sessionScope, not this route's composition scope:
-                                    // the navigation below cancels the latter before the
-                                    // query's first suspend (Bugbot, #56).
-                                    sessionScope.launch { chatVM.beginChatSearch(query) }
-                                    shell.openChat(hit.roomID)
-                                },
-                                // A number hit: the item is pushed over the
-                                // search (back returns to the results); a mission
-                                // or a milestone's mission opens on its own tab.
-                                onSelectNumber = { hit ->
-                                    when (val opened = goToResolver.open(hit)) {
-                                        is GoToNumberResolver.Opened.Message -> opened.text
-                                        is GoToNumberResolver.Opened.Target -> {
-                                            when (val target = opened.target) {
-                                                is GoToTarget.Item -> nav.pushItem(AppTab.CONVERSATIONS.routePrefix, target.itemID)
-                                                is GoToTarget.Mission -> shell.openMission(target.missionID)
-                                            }
-                                            null
-                                        }
-                                    }
-                                },
-                                onBack = { nav.popBackStack() },
-                                liveChats = allChats,
-                            )
+                        // Server first, so search works even when the local
+                        // index could not be opened.
+                        val searchService = remember(session.userID) { deps.messageSearch(session) }
+                        val searchVM = remember {
+                            SearchViewModel(searchService, allChats, numberLookup = { num ->
+                                (goToResolver.find(num) as? GoToNumberResolver.Found.Hit)?.hit
+                            })
                         }
+                        SearchScreen(
+                            viewModel = searchVM,
+                            // A result REPLACES the Conversations path (the shell's
+                            // openChat pops search along with anything else over
+                            // the list).
+                            onSelectChat = { chat -> shell.openChat(chat.id) },
+                            onSelectMessage = { hit ->
+                                // Arm the (cached) chat VM's in-conversation search
+                                // with the query, then navigate: a cold VM parks the
+                                // jump until its first snapshot lands (apple #172).
+                                val query = searchVM.trimmedQuery
+                                val (chatVM, _) = vmCache.viewModels(hit.roomID)
+                                // sessionScope, not this route's composition scope:
+                                // the navigation below cancels the latter before the
+                                // query's first suspend (Bugbot, #56).
+                                sessionScope.launch { chatVM.beginChatSearch(query) }
+                                shell.openChat(hit.roomID)
+                            },
+                            // A number hit: the item is pushed over the
+                            // search (back returns to the results); a mission
+                            // or a milestone's mission opens on its own tab.
+                            onSelectNumber = { hit ->
+                                when (val opened = goToResolver.open(hit)) {
+                                    is GoToNumberResolver.Opened.Message -> opened.text
+                                    is GoToNumberResolver.Opened.Target -> {
+                                        when (val target = opened.target) {
+                                            is GoToTarget.Item -> nav.pushItem(AppTab.CONVERSATIONS.routePrefix, target.itemID)
+                                            is GoToTarget.Mission -> shell.openMission(target.missionID)
+                                        }
+                                        null
+                                    }
+                                }
+                            },
+                            onBack = { nav.popBackStack() },
+                            liveChats = allChats,
+                        )
                     }
 
                     composable("settings") {
