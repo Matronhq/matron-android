@@ -74,6 +74,28 @@ class ItemMultiSelectViewTest {
     }
 
     @Test
+    fun selectAllTicksEveryLabelAndUnselectAllClearsThemWithoutSending() {
+        val sent = mutableListOf<List<String>>()
+        show(question(), onSend = { sent += it })
+        compose.onNodeWithText("Billing").performClick()
+        compose.onNodeWithText("Select all").performClick()
+        for (label in labels) compose.onNodeWithText(label).assertIsOn()
+        compose.onNodeWithText("Send").assertIsEnabled()
+        compose.onNodeWithText("Unselect all").performClick()
+        for (label in labels) compose.onNodeWithText(label).assertIsOff()
+        compose.onNodeWithText("Send").assertIsNotEnabled()
+        compose.onNodeWithText("Select all").assertExists()
+        compose.runOnIdle { assertTrue(sent.isEmpty()) }
+    }
+
+    @Test
+    fun theToggleReadsUnselectAllOnlyWhenEveryLabelIsTicked() {
+        assertFalse(multiSelectAllTicked(setOf("Docs", "Search"), labels))
+        assertTrue(multiSelectAllTicked(labels.toSet(), labels))
+        assertFalse(multiSelectAllTicked(emptySet(), emptyList()))
+    }
+
+    @Test
     fun theAnswerGivenIsTickedAndCanBeChanged() {
         val sent = mutableListOf<List<String>>()
         show(question(chosen = listOf("Billing")), onSend = { sent += it })

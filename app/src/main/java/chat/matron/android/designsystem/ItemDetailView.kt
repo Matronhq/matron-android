@@ -788,6 +788,11 @@ fun itemChosenActions(item: TrackerItem, pendingItemSelection: List<String>?): L
 fun multiSelectCanSend(ticked: Set<String>, chosen: List<String>): Boolean =
     ticked.isNotEmpty() && ticked != chosen.toSet()
 
+/// Whether every label is ticked: the Select all toggle then reads
+/// "Unselect all".
+fun multiSelectAllTicked(ticked: Set<String>, actions: List<String>): Boolean =
+    actions.isNotEmpty() && actions.all { it in ticked }
+
 /// The line an answer to a multi-select question shows in the thread:
 /// every label ticked. `null` on any other comment, a one-tap tap included
 /// (its body is its label, as before).
@@ -797,7 +802,9 @@ fun itemSelectionLine(comment: TrackerComment): String? =
 /// A multi-select question's answers: a tick box per label, and Send for
 /// the ticked ones as one answer. Starts from the answer already given
 /// ([chosen]), so the boxes show it; the user can change them and send
-/// again (the journal keeps the latest). On a closed item the rows are a
+/// again (the journal keeps the latest). Beside Send, one toggle ticks
+/// every label ("Select all") or, once all are ticked, none ("Unselect
+/// all"); like a tick, it sends nothing. On a closed item the rows are a
 /// record: nothing can be ticked and there is no Send.
 @Composable
 private fun MultiSelectAnswers(actions: List<String>, chosen: List<String>, enabled: Boolean, onSend: (List<String>) -> Unit) {
@@ -826,11 +833,16 @@ private fun MultiSelectAnswers(actions: List<String>, chosen: List<String>, enab
             }
         }
         if (enabled) {
-            Button(
-                onClick = { onSend(actions.filter { it in ticked }) },
-                enabled = multiSelectCanSend(ticked, chosen),
-                modifier = Modifier.padding(top = 4.dp),
-            ) { Text("Send") }
+            val allTicked = multiSelectAllTicked(ticked, actions)
+            Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { onSend(actions.filter { it in ticked }) },
+                    enabled = multiSelectCanSend(ticked, chosen),
+                ) { Text("Send") }
+                OutlinedButton(onClick = { ticked = if (allTicked) emptySet() else actions.toSet() }) {
+                    Text(if (allTicked) "Unselect all" else "Select all")
+                }
+            }
         }
     }
 }
